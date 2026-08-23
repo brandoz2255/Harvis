@@ -253,7 +253,7 @@
 									{#if onRemove}
 										<div>
 											<button
-												class=" rounded-full p-1 hover:bg-gray-100 dark:hover:bg-gray-850 transition disabled:opacity-50 disabled:cursor-not-allowed"
+												class=" rounded-lg p-1 hover:bg-gray-100 dark:hover:bg-gray-850 transition disabled:opacity-50 disabled:cursor-not-allowed"
 												type="button"
 												disabled={user.id === $_user?.id}
 												on:click={() => {

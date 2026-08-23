@@ -315,12 +315,12 @@
 <div class="w-full max-w-3xl mx-auto">
 	<!-- top bar: segmented tabs (left) · quick actions (right) -->
 	<div class="flex items-center justify-between gap-2 mb-5">
-		<div class="inline-flex items-center rounded-full bg-gray-100 dark:bg-gray-850 p-0.5">
+		<div class="inline-flex items-center rounded-lg bg-gray-100 dark:bg-gray-850 p-0.5">
 			{#each [{ id: 'plugins', label: $i18n.t('Plugins') }, { id: 'skills', label: $i18n.t('Skills') }] as t (t.id)}
 				<button
 					type="button"
 					on:click={() => { tab = t.id; closeDetail(); }}
-					class="px-3.5 py-1.5 rounded-full text-sm font-medium transition {tab === t.id
+					class="px-3.5 py-1.5 rounded-lg text-sm font-medium transition {tab === t.id
 						? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-50 shadow-sm'
 						: 'text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200'}"
 					>{t.label}</button
@@ -365,7 +365,7 @@
 		<input
 			bind:value={query}
 			placeholder={tab === 'plugins' ? $i18n.t('Search plugins…') : $i18n.t('Search skills…')}
-			class="w-full h-11 rounded-full border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-950 pl-10 pr-4 text-sm outline-none focus:border-gray-400 dark:focus:border-gray-600 transition"
+			class="w-full h-11 rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-950 pl-10 pr-4 text-sm outline-none focus:border-gray-400 dark:focus:border-gray-600 transition"
 		/>
 	</div>
 
@@ -401,12 +401,12 @@
 
 		<!-- Public / Personal + filter -->
 		<div class="flex items-center justify-between mb-4">
-			<div class="inline-flex items-center rounded-full bg-gray-100 dark:bg-gray-850 p-0.5 text-sm">
+			<div class="inline-flex items-center rounded-lg bg-gray-100 dark:bg-gray-850 p-0.5 text-sm">
 				{#each [{ id: 'public', label: $i18n.t('Public') }, { id: 'personal', label: $i18n.t('Personal') }] as s (s.id)}
 					<button
 						type="button"
 						on:click={() => (scope = s.id)}
-						class="px-3 py-1 rounded-full font-medium transition {scope === s.id
+						class="px-3 py-1 rounded-lg font-medium transition {scope === s.id
 							? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-50 shadow-sm'
 							: 'text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200'}"
 						>{s.label}</button
@@ -451,7 +451,7 @@
 								<button
 									type="button"
 									on:click={() => pluginAction(p)}
-									class="shrink-0 h-8 px-3 rounded-full text-xs font-medium border transition {p.state === 'needs_auth' || p.state === 'configure'
+									class="shrink-0 h-8 px-3 rounded-lg text-xs font-medium border transition {p.state === 'needs_auth' || p.state === 'configure'
 										? 'border-amber-300/70 dark:border-amber-800 text-amber-700 dark:text-amber-300 hover:bg-amber-50 dark:hover:bg-amber-950/40'
 										: 'border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-850'}"
 									>{p.state === 'disabled' ? $i18n.t('Enable') : p.state === 'error' ? $i18n.t('Retry') : meta.label}</button
@@ -532,7 +532,7 @@
 							<div class="text-sm font-medium text-gray-900 dark:text-gray-100 truncate">{w.name}</div>
 							<div class="text-xs text-gray-500 truncate">{w.desc}</div>
 						</div>
-						<button type="button" on:click={() => openNewSkill({ name: w.name, desc: w.desc, body: w.body })} class="shrink-0 h-8 px-3 rounded-full text-xs font-medium border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-850 transition">{$i18n.t('Add')}</button>
+						<button type="button" on:click={() => openNewSkill({ name: w.name, desc: w.desc, body: w.body })} class="shrink-0 h-8 px-3 rounded-lg text-xs font-medium border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-850 transition">{$i18n.t('Add')}</button>
 					</div>
 				{/each}
 			</div>
@@ -575,9 +575,9 @@
 					</span>
 					<div class="flex-1"></div>
 					{#if isLive(selected.state)}
-						<button type="button" on:click={() => togglePlugin(selected)} class="h-8 px-3 rounded-full text-xs font-medium border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-850 transition">{$i18n.t('Disable')}</button>
+						<button type="button" on:click={() => togglePlugin(selected)} class="h-8 px-3 rounded-lg text-xs font-medium border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-850 transition">{$i18n.t('Disable')}</button>
 					{:else}
-						<button type="button" on:click={() => pluginAction(selected)} class="h-8 px-4 rounded-full text-xs font-medium bg-gray-900 text-white hover:bg-gray-800 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white transition">{selected.state === 'disabled' ? $i18n.t('Enable') : selected.state === 'install' ? $i18n.t('Install') : selected.state === 'error' ? $i18n.t('Retry') : $i18n.t('Connect')}</button>
+						<button type="button" on:click={() => pluginAction(selected)} class="h-8 px-4 rounded-lg text-xs font-medium bg-gray-900 text-white hover:bg-gray-800 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white transition">{selected.state === 'disabled' ? $i18n.t('Enable') : selected.state === 'install' ? $i18n.t('Install') : selected.state === 'error' ? $i18n.t('Retry') : $i18n.t('Connect')}</button>
 					{/if}
 				</div>
 
@@ -586,7 +586,7 @@
 						<div class="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-1.5">{$i18n.t('Capabilities')}</div>
 						<div class="flex flex-wrap gap-1.5">
 							{#each selected.caps as c}
-								<span class="text-xs px-2 py-0.5 rounded-full bg-gray-100 dark:bg-gray-850 text-gray-600 dark:text-gray-300">{c}</span>
+								<span class="text-xs px-2 py-0.5 rounded-md bg-gray-100 dark:bg-gray-850 text-gray-600 dark:text-gray-300">{c}</span>
 							{/each}
 						</div>
 					</div>
@@ -632,7 +632,7 @@
 						{v ?? $i18n.t('unaudited')}
 					</span>
 					<div class="flex-1"></div>
-					<button type="button" on:click={() => toggleSkill(selected)} disabled={busyId === selected.id} class="h-8 px-3 rounded-full text-xs font-medium border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-850 disabled:opacity-40 transition">{selected.enabled ? $i18n.t('Disable') : $i18n.t('Enable')}</button>
+					<button type="button" on:click={() => toggleSkill(selected)} disabled={busyId === selected.id} class="h-8 px-3 rounded-lg text-xs font-medium border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-850 disabled:opacity-40 transition">{selected.enabled ? $i18n.t('Disable') : $i18n.t('Enable')}</button>
 				</div>
 
 				<div class="mt-5 space-y-4 text-sm">

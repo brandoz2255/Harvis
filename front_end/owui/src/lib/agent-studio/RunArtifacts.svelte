@@ -79,12 +79,30 @@
 		}
 	};
 
-	// Prefer the most "showable" output: html > image > pdf > svg > markdown > csv > largest text.
+	// Prefer the most "showable" output: video > html > image > pdf > svg > markdown > csv >
+	// largest text. Video leads because a run that produced a clip produced nothing else the
+	// person was waiting for.
 	type FileEntry = { id?: string; name: string; content: string; is_binary?: boolean };
 	const pickPrimary = (files: FileEntry[]) => {
 		const renderable = files.filter((f) => f.is_binary || (f.content && f.content.trim()));
 		if (!renderable.length) return null;
-		const order = ['html', 'htm', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'pdf', 'svg', 'md', 'markdown', 'csv'];
+		const order = [
+			'mp4',
+			'webm',
+			'mov',
+			'html',
+			'htm',
+			'png',
+			'jpg',
+			'jpeg',
+			'gif',
+			'webp',
+			'pdf',
+			'svg',
+			'md',
+			'markdown',
+			'csv'
+		];
 		for (const ext of order) {
 			const m = renderable.filter((f) => f.name.toLowerCase().endsWith('.' + ext));
 			if (m.length) return m.reduce((a, b) => ((b.content?.length || 0) > (a.content?.length || 0) ? b : a));

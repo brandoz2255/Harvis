@@ -47,9 +47,9 @@
 
 <div
 	role="listitem"
-	class="flex flex-col justify-between px-5 mb-3 w-full {($settings?.widescreenMode ?? null)
+	class="flex min-w-0 flex-col justify-between overflow-x-hidden px-3 sm:px-5 mb-3 w-full {($settings?.widescreenMode ?? null)
 		? 'max-w-full'
-		: 'max-w-6xl'} mx-auto rounded-lg group message-listitem"
+		: 'max-w-[780px]'} mx-auto rounded-lg group message-listitem"
 >
 	{#if history.messages[messageId]}
 		{#if history.messages[messageId].role === 'user'}

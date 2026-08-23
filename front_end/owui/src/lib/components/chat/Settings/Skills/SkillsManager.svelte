@@ -288,7 +288,7 @@ Write the step-by-step instructions the agent should follow when this skill is a
 						}}
 					/>
 					<button
-						class="rounded-full p-0.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition"
+						class="rounded-lg p-0.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition"
 						aria-label={$i18n.t('Close search')}
 						on:click={() => {
 							searchQuery = '';
@@ -310,13 +310,8 @@ Write the step-by-step instructions the agent should follow when this skill is a
 				</Tooltip>
 			{/if}
 
-			<button
-				class="rounded-lg border border-gray-200 dark:border-gray-800 px-3 py-1.5 text-xs font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-900 transition"
-				on:click={() => (view = 'browse')}
-			>
-				{$i18n.t('Browse')}
-			</button>
-
+			<!-- Browse lives as a row at the bottom of the list now (see below) —
+			     one action in the header, everything else in the list. -->
 			<Dropdown
 				bind:show={showAddMenu}
 				align="end"
@@ -413,7 +408,7 @@ Write the step-by-step instructions the agent should follow when this skill is a
 							<div class="min-w-0 flex-1">
 								<div class="flex items-center gap-2">
 									<Skeleton width={['42%', '30%', '52%', '36%', '46%'][i]} height="0.875rem" delay={i * 90} />
-									<Skeleton width="2.5rem" height="0.625rem" rounded="rounded-full" delay={i * 90} />
+									<Skeleton width="2.5rem" height="0.625rem" rounded="rounded-lg" delay={i * 90} />
 								</div>
 								<Skeleton width={['64%', '48%', '70%', '56%', '60%'][i]} height="0.625rem" className="mt-1.5" delay={i * 90} />
 							</div>
@@ -438,37 +433,30 @@ Write the step-by-step instructions the agent should follow when this skill is a
 				>
 			</div>
 		{:else if filtered.length}
-			<table class="w-full text-sm">
-				<thead>
-					<tr class="text-left text-xs text-gray-400">
-						<th class="py-2 pr-3 font-medium">{$i18n.t('Skill')}</th>
-						<th class="py-2 pr-3 font-medium whitespace-nowrap">{$i18n.t('Last updated')}</th>
-						<th class="py-2 font-medium">{$i18n.t('Author')}</th>
-					</tr>
-				</thead>
-				<tbody>
-					{#each filtered as s (s.id)}
-						<tr
-							class="cursor-pointer border-b border-gray-100 dark:border-gray-850 hover:bg-gray-50 dark:hover:bg-gray-900/60 transition"
-							role="button"
-							tabindex="0"
-							aria-label={`${$i18n.t('Open')} ${s.name}`}
-							on:click={() => openDetail(s)}
-							on:keydown={(e) => {
-								if (e.key === 'Enter' || e.key === ' ') {
-									e.preventDefault();
-									openDetail(s);
-								}
-							}}
+			<!-- Rows, not a table: icon tile · name + one-line description · chevron.
+			     The date/author columns moved into one muted line so the row stays
+			     readable at Settings width. -->
+			<div>
+				{#each filtered as s (s.id)}
+					<button
+						type="button"
+						class="w-full flex items-center gap-3 py-3 px-2 -mx-2 rounded-lg border-b border-gray-100 dark:border-gray-850 text-left hover:bg-gray-50 dark:hover:bg-gray-900/60 transition"
+						aria-label={`${$i18n.t('Open')} ${s.name}`}
+						on:click={() => openDetail(s)}
+					>
+						<div
+							class="shrink-0 size-9 grid place-items-center rounded-lg bg-gray-50 dark:bg-gray-800/70 border border-gray-200/70 dark:border-gray-700/60 text-base text-gray-500 dark:text-gray-300"
 						>
-							<td class="py-3 pr-3">
-								<div class="flex items-center gap-2 min-w-0">
-									<span class="truncate font-medium text-gray-800 dark:text-gray-100"
-										>{s.emoji ? `${s.emoji} ` : ''}{s.name}</span
-									>
-									<!-- Quiet governance state — same semantics as SkillsPanel:
-									     meta.audit.verdict; only 'supported' injects/publishes. -->
-									{#if !s.enabled}
+							{s.emoji ? s.emoji : (s.name ?? '·').trim().charAt(0).toUpperCase()}
+						</div>
+						<div class="min-w-0 flex-1">
+							<div class="flex items-center gap-2 min-w-0">
+								<span class="truncate text-sm font-medium text-gray-900 dark:text-gray-100"
+									>{s.name}</span
+								>
+								<!-- Quiet governance state — same semantics as SkillsPanel:
+								     meta.audit.verdict; only 'supported' injects/publishes. -->
+								{#if !s.enabled}
 										<Tooltip content={$i18n.t('Disabled — this skill is off')}>
 											<span
 												class="inline-flex shrink-0 items-center gap-1 text-[11px] text-gray-400"
@@ -514,20 +502,28 @@ Write the step-by-step instructions the agent should follow when this skill is a
 												{$i18n.t('Unaudited')}
 											</span>
 										</Tooltip>
-									{/if}
-								</div>
-								{#if s.description}
-									<div class="mt-0.5 line-clamp-1 text-xs text-gray-500">{s.description}</div>
-								{/if}
-							</td>
-							<td class="py-3 pr-3 whitespace-nowrap align-top text-gray-500"
-								>{fmtDate(s.updated_at)}</td
-							>
-							<td class="py-3 align-top text-gray-500">{authorOf(s)}</td>
-						</tr>
-					{/each}
-				</tbody>
-			</table>
+							{/if}
+						</div>
+						{#if s.description}
+							<div class="mt-0.5 truncate text-xs text-gray-500">{s.description}</div>
+						{/if}
+					</div>
+					<span class="hidden sm:block shrink-0 text-[11px] text-gray-400 whitespace-nowrap"
+						>{fmtDate(s.updated_at)} · {authorOf(s)}</span
+					>
+					<svg
+						class="size-4 shrink-0 text-gray-300 dark:text-gray-600"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="2.2"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg
+					>
+					</button>
+				{/each}
+			</div>
 		{:else if skills.length}
 			<div class="py-10 text-center text-sm text-gray-500">
 				{$i18n.t('No skills match')} “{searchQuery}”
@@ -542,5 +538,37 @@ Write the step-by-step instructions the agent should follow when this skill is a
 				</div>
 			</div>
 		{/if}
+
+		<!-- Always reachable, whether or not you have skills yet. Browsing is free
+		     and installs a SKILL.md as an unaudited draft — see SkillsBrowse. -->
+		<button
+			type="button"
+			class="w-full flex items-center gap-3 py-3 px-2 -mx-2 mt-1 rounded-lg text-left hover:bg-gray-50 dark:hover:bg-gray-900/60 transition"
+			on:click={() => (view = 'browse')}
+		>
+			<div
+				class="shrink-0 size-9 grid place-items-center rounded-lg bg-gray-50 dark:bg-gray-800/70 border border-gray-200/70 dark:border-gray-700/60 text-gray-400"
+			>
+				<Search className="size-4" />
+			</div>
+			<div class="min-w-0 flex-1">
+				<div class="text-sm font-medium text-gray-900 dark:text-gray-100">
+					{$i18n.t('Browse skill directory')}
+				</div>
+				<div class="truncate text-xs text-gray-500">
+					{$i18n.t('Install skills published by Anthropic and the community')}
+				</div>
+			</div>
+			<svg
+				class="size-4 shrink-0 text-gray-300 dark:text-gray-600"
+				viewBox="0 0 24 24"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="2.2"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+				aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg
+			>
+		</button>
 	</div>
 {/if}

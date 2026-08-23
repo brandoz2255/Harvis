@@ -2,6 +2,7 @@
 	import { onMount, getContext } from 'svelte';
 	import {
 		WEBUI_NAME,
+		config,
 		showSidebar,
 		functions,
 		user,
@@ -19,7 +20,23 @@
 
 	let loaded = false;
 
+	// Models and Prompts are unbacked in the Harvis facade (/api/v1/models/* and
+	// /api/v1/prompts/* both 404), so the tabs are flag-gated above and the routes
+	// bounce here — a hidden tab still leaves the URL typeable.
+	const GATED_TABS: [string, string][] = [
+		['/workspace/models', 'enable_workspace_models'],
+		['/workspace/prompts', 'enable_workspace_prompts']
+	];
+
 	onMount(async () => {
+		const gated = GATED_TABS.find(
+			([prefix, flag]) => $page.url.pathname.startsWith(prefix) && !$config?.features?.[flag]
+		);
+		if (gated) {
+			goto('/workspace/knowledge');
+			return;
+		}
+
 		if ($user?.role !== 'admin') {
 			if ($page.url.pathname.includes('/models') && !$user?.permissions?.workspace?.models) {
 				goto('/');
@@ -82,9 +99,9 @@
 
 				<div class="">
 					<div
-						class="flex gap-1 scrollbar-none overflow-x-auto w-fit text-center text-sm font-medium rounded-full bg-transparent py-1 touch-auto pointer-events-auto"
+						class="flex gap-1 scrollbar-none overflow-x-auto w-fit text-center text-sm font-medium rounded-lg bg-transparent py-1 touch-auto pointer-events-auto"
 					>
-						{#if $user?.role === 'admin' || $user?.permissions?.workspace?.models}
+						{#if ($config?.features?.enable_workspace_models ?? false) && ($user?.role === 'admin' || $user?.permissions?.workspace?.models)}
 							<a
 								draggable="false"
 								aria-current={$page.url.pathname.includes('/workspace/models') ? 'page' : null}
@@ -108,7 +125,7 @@
 							</a>
 						{/if}
 
-						{#if $user?.role === 'admin' || $user?.permissions?.workspace?.prompts}
+						{#if ($config?.features?.enable_workspace_prompts ?? false) && ($user?.role === 'admin' || $user?.permissions?.workspace?.prompts)}
 							<a
 								draggable="false"
 								aria-current={$page.url.pathname.includes('/workspace/prompts') ? 'page' : null}

@@ -5,7 +5,7 @@
 	// File-type router for an agent-produced artifact. Renders ONLY what the agent wrote.
 	//   html  → live sandboxed iframe        markdown → rendered
 	//   svg   → safe data-URL <img>          csv      → table        json → pretty-printed
-	//   image/pdf (binary) → served via `rawUrl` (Slice 2)          else → code view
+	//   image/video/pdf (binary) → served via `rawUrl` (Slice 2)    else → code view
 	export let name = '';
 	export let content = '';
 	// `rawUrl` points at the backend raw-bytes route for BINARY artifacts (images/pdf/office) —
@@ -25,6 +25,8 @@
 					? 'svg'
 					: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico'].includes(ext)
 						? 'image'
+						: ['mp4', 'm4v', 'webm', 'mov', 'mkv', 'ogv'].includes(ext)
+						? 'video'
 						: ext === 'pdf'
 							? 'pdf'
 							: ext === 'csv' || ext === 'tsv'
@@ -114,9 +116,37 @@
 			: 'max-h-96'}"
 	>
 		{#if rawUrl}
-			<img src={rawUrl} alt={name || 'image'} class="max-w-full max-h-full object-contain" />
+			<!-- The cap is in rem, not `max-h-full`: a percentage max-height resolves
+			     against a parent that has a definite HEIGHT, and this parent only has a
+			     max-height. `max-h-full` computed to none, so a 1024px render drew at
+			     full size and the box scrolled instead of fitting it. -->
+			<img
+				src={rawUrl}
+				alt={name || 'image'}
+				decoding="async"
+				class="max-w-full object-contain {fill ? 'max-h-full' : 'max-h-96'}"
+			/>
 		{:else}
 			<div class="text-xs text-gray-400 p-4">Image preview unavailable.</div>
+		{/if}
+	</div>
+{:else if kind === 'video'}
+	<div
+		class="flex items-center justify-center rounded-lg border border-gray-100 dark:border-gray-850 bg-black p-2 overflow-hidden {fill
+			? 'h-full'
+			: 'max-h-96'}"
+	>
+		{#if rawUrl}
+			<!-- svelte-ignore a11y-media-has-caption -->
+			<video
+				src={rawUrl}
+				controls
+				loop
+				playsinline
+				class="max-w-full object-contain {fill ? 'max-h-full' : 'max-h-96'}"
+			></video>
+		{:else}
+			<div class="text-xs text-gray-400 p-4">Video preview unavailable.</div>
 		{/if}
 	</div>
 {:else if kind === 'pdf'}

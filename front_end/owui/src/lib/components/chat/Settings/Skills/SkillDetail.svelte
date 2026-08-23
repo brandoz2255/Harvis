@@ -354,7 +354,7 @@
 				>
 					<div class="flex items-center gap-2 text-[11px]">
 						<span
-							class="rounded-full border px-1.5 py-0.5 {auditResult.runnable
+							class="rounded-md border px-1.5 py-0.5 {auditResult.runnable
 								? 'border-blue-200 dark:border-blue-900 text-blue-600 dark:text-blue-400'
 								: 'border-gray-200 dark:border-gray-800 text-gray-500'}"
 							>{auditResult.runnable

@@ -39,7 +39,7 @@
 				{$i18n.t(surface.label)}
 				{#if surface.underConstruction}
 					<span
-						class="text-[10px] px-1.5 py-0.5 rounded-full border border-amber-300 dark:border-amber-800 text-amber-700 dark:text-amber-400"
+						class="text-[10px] px-1.5 py-0.5 rounded-md border border-amber-300 dark:border-amber-800 text-amber-700 dark:text-amber-400"
 						>{$i18n.t('WIP')}</span
 					>
 				{/if}

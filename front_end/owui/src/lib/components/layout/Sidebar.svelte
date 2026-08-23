@@ -14,6 +14,7 @@
 		tags,
 		folders as _folders,
 		showSidebar,
+		hideNavRail,
 		showSearch,
 		mobile,
 		showArchivedChats,
@@ -51,6 +52,7 @@
 	import { createNewNote, getPinnedNoteList, toggleNotePinnedStatusById } from '$lib/apis/notes';
 	import { updateUserSettings } from '$lib/apis/users';
 	import { checkActiveChats } from '$lib/apis/tasks';
+	import { getCadCapability } from '$lib/apis/cad';
 	import { createNoteHandler } from '$lib/components/notes/utils';
 	import { WEBUI_API_BASE_URL, WEBUI_BASE_URL } from '$lib/constants';
 
@@ -121,18 +123,31 @@
 
 	$: pinnedItems = $settings?.pinnedMenuItems ?? DEFAULT_PINNED_ITEMS;
 
+	// CAD Studio nav. Probed once, not reactive: the lane is a server-side flag read
+	// at container create, so it cannot change under a running tab. A failed probe
+	// means no entry — an operator who switched CAD off must not be left with a link
+	// to a route whose every action 404s.
+	let showCadNav = false;
+	if (typeof window !== 'undefined') {
+		getCadCapability()
+			.then((c) => (showCadNav = !!c?.enabled))
+			.catch(() => (showCadNav = false));
+	}
+
 	// Claude-Desktop-style mode switcher (Chat / Notebook / Code). Route-based: the
 	// active mode is derived from the URL; the chat-specific sidebar sections show
 	// only in Chat mode. Gated by a feature flag (off ⇒ behaves exactly as before).
 	$: modeSwitcherEnabled = $config?.features?.enable_harvis_mode_switcher ?? true;
+	// Notebooks used to be a third segment in the switcher. It is a destination, not a mode —
+	// so it now sits under Projects and the notebooks route counts as chat mode, which keeps
+	// New Chat / Projects / Notebooks on screen while you are in there.
+	$: onNotebooksRoute = ($page?.url?.pathname ?? '/').startsWith('/harvis/notebooks');
 	$: activeMode = modeSwitcherEnabled
-		? (($page?.url?.pathname ?? '/').startsWith('/harvis/notebooks')
-				? 'notebook'
-				: ['/harvis/vibecode', '/harvis/build', '/harvis/agent-studio/run'].some((p) =>
-							($page?.url?.pathname ?? '/').startsWith(p)
-					  )
-					? 'code'
-					: 'chat')
+		? (['/harvis/vibecode', '/harvis/build', '/harvis/agent-studio/run'].some((p) =>
+				($page?.url?.pathname ?? '/').startsWith(p)
+			)
+				? 'code'
+				: 'chat')
 		: 'chat';
 
 	const isMenuItemVisible = (id) => {
@@ -833,7 +848,11 @@
 	}}
 />
 
-{#if !$mobile && !$showSidebar}
+<!-- The collapsed sidebar still draws a narrow icon strip, which is how it gets reopened.
+     A route that owns the whole viewport can ask for even that to go away by setting
+     `hideNavRail`; it then has to provide its own way out, which the CAD session's header
+     back button does. -->
+{#if !$mobile && !$showSidebar && !$hideNavRail}
 	<div
 		class=" pt-[7px] pb-2 px-2 flex flex-col justify-between text-black dark:text-white hover:bg-gray-50/30 dark:hover:bg-gray-950/30 h-full z-10 transition-all border-e-[0.5px] border-gray-50 dark:border-gray-850/30"
 		id="sidebar"
@@ -850,7 +869,7 @@
 					placement="right"
 				>
 					<button
-						class="flex rounded-xl hover:bg-gray-100 dark:hover:bg-gray-850 transition group {isWindows
+						class="flex rounded-xl hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition group {isWindows
 							? 'cursor-pointer'
 							: 'cursor-[e-resize]'}"
 						aria-label={$showSidebar ? $i18n.t('Close Sidebar') : $i18n.t('Open Sidebar')}
@@ -870,7 +889,7 @@
 				<div class="">
 					<Tooltip content={$i18n.t('New Chat')} placement="right">
 						<a
-							class=" cursor-pointer flex rounded-xl hover:bg-gray-100 dark:hover:bg-gray-850 transition group"
+							class=" cursor-pointer flex rounded-xl hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition group"
 							href="/"
 							draggable="false"
 							on:click={async (e) => {
@@ -892,7 +911,7 @@
 				<div>
 					<Tooltip content={$i18n.t('Search')} placement="right">
 						<button
-							class=" cursor-pointer flex rounded-xl hover:bg-gray-100 dark:hover:bg-gray-850 transition group"
+							class=" cursor-pointer flex rounded-xl hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition group"
 							on:click={(e) => {
 								e.stopImmediatePropagation();
 								e.preventDefault();
@@ -915,7 +934,7 @@
 						<div class="">
 							<Tooltip content={$i18n.t(meta.label)} placement="right">
 								<a
-									class=" cursor-pointer flex rounded-xl hover:bg-gray-100 dark:hover:bg-gray-850 transition group"
+									class=" cursor-pointer flex rounded-xl hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition group"
 									href={meta.href}
 									on:click={async (e) => {
 										e.stopImmediatePropagation();
@@ -1008,7 +1027,7 @@
 							}}
 						>
 							<div
-								class=" cursor-pointer flex rounded-xl hover:bg-gray-100 dark:hover:bg-gray-850 transition group"
+								class=" cursor-pointer flex rounded-xl hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition group"
 							>
 								<div class="self-center relative">
 									<img
@@ -1056,7 +1075,7 @@
 		data-state={$showSidebar}
 	>
 		<div
-			class=" my-auto flex flex-col justify-between h-screen max-h-[100dvh] w-[var(--sidebar-width)] overflow-x-hidden scrollbar-hidden z-50 {$showSidebar
+			class=" my-auto flex flex-col justify-between h-screen max-h-[100dvh] w-[var(--sidebar-width)] overflow-x-hidden scrollbar-hidden z-50 border-r border-gray-200/70 dark:border-gray-850 {$showSidebar
 				? ''
 				: 'invisible'}"
 		>
@@ -1064,7 +1083,7 @@
 				class="sidebar px-[0.5625rem] pt-2 pb-1.5 flex justify-between space-x-1 text-gray-600 dark:text-gray-400 sticky top-0 z-10 -mb-3"
 			>
 				<a
-					class="flex items-center rounded-xl size-8.5 h-full justify-center hover:bg-gray-100/50 dark:hover:bg-gray-850/50 transition no-drag-region"
+					class="flex items-center rounded-xl size-8.5 h-full justify-center hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition no-drag-region"
 					href="/"
 					draggable="false"
 					on:click={newChatHandler}
@@ -1085,7 +1104,7 @@
 					placement="bottom"
 				>
 					<button
-						class="flex rounded-xl size-8.5 justify-center items-center hover:bg-gray-100/50 dark:hover:bg-gray-850/50 transition {isWindows
+						class="flex rounded-xl size-8.5 justify-center items-center hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition {isWindows
 							? 'cursor-pointer'
 							: 'cursor-[w-resize]'}"
 						on:click={() => {
@@ -1150,7 +1169,7 @@
 						<a
 							id="sidebar-projects-button"
 							href="/harvis/projects"
-							class="group grow flex items-center gap-3 rounded-xl px-2.5 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-850 transition outline-none"
+							class="group grow flex items-center gap-3 rounded-xl px-2.5 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition outline-none"
 							draggable="false"
 							aria-label={$i18n.t('Projects')}
 						>
@@ -1164,7 +1183,7 @@
 						</a>
 						<button
 							id="sidebar-search-button"
-							class="shrink-0 rounded-xl p-2 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-850 transition outline-none"
+							class="shrink-0 rounded-xl p-2 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition outline-none"
 							on:click={() => {
 								showSearch.set(true);
 							}}
@@ -1175,14 +1194,53 @@
 						</button>
 					</div>
 
+					<div class="px-[0.4375rem] flex justify-center text-gray-800 dark:text-gray-200">
+						<a
+							id="sidebar-notebooks-button"
+							href="/harvis/notebooks"
+							class="group grow flex items-center gap-3 rounded-xl px-2.5 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition outline-none {onNotebooksRoute
+								? 'bg-gray-200 dark:bg-[oklch(0.29_0.024_258)]'
+								: ''}"
+							draggable="false"
+							aria-label={$i18n.t('Notebooks')}
+						>
+							<div class="self-center">
+								<Note strokeWidth="2" className="size-4.5" />
+							</div>
+
+							<div class="flex flex-1 self-center translate-y-[0.5px]">
+								<div class=" self-center text-sm font-primary">{$i18n.t('Notebooks')}</div>
+							</div>
+						</a>
+					</div>
+
 						{#if modeSwitcherEnabled}
-							<!-- Chat-mode tools: Schedules + Artifacts (Customize lives in the footer bottom-nav cluster) -->
+							<!-- Chat-mode tools, in the order the user asked for (2026-08-19):
+							     Cookbook, then Schedules → Artifacts → Connectors → Engines → CAD
+							     Studio. Cookbook, Customize and Settings used to live in the footer;
+							     Cookbook came up here and the other two moved into the user menu. -->
+							<div class="px-[0.4375rem]">
+							<!-- Cookbook moved up out of the footer (2026-08-19) — it sits at the
+							     head of the tools cluster now. -->
+							<a
+								id="sidebar-cookbook-button"
+								href="/harvis/agent-studio/cookbook"
+								class="group flex items-center gap-3 rounded-xl px-2.5 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition outline-none {($page.url.pathname ?? '').startsWith('/harvis/agent-studio/cookbook') ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 font-medium' : ''}"
+								draggable="false"
+								aria-label={$i18n.t('Cookbook')}
+							>
+								<div class="self-center">
+									<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="size-4.5"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20M4 19.5A2.5 2.5 0 0 0 6.5 22H20V2H6.5A2.5 2.5 0 0 0 4 4.5v15z" /></svg>
+								</div>
+								<div class="flex flex-1 self-center translate-y-[0.5px]">
+									<div class=" self-center text-sm font-primary">{$i18n.t('Cookbook')}</div>
+								</div>
+							</a>
 							<!-- Schedules — the chat lens over the cron store (VibeCodeNav's
 							     Routines button is the coding lens of the same store). -->
-							<div class="px-[0.4375rem]">
 							<a
 								href="/harvis/agent-studio/schedules"
-								class="group flex items-center gap-3 rounded-xl px-2.5 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-850 transition outline-none {($page.url.pathname ?? '').startsWith('/harvis/agent-studio/schedules') ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 font-medium' : ''}"
+								class="group flex items-center gap-3 rounded-xl px-2.5 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition outline-none {($page.url.pathname ?? '').startsWith('/harvis/agent-studio/schedules') ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 font-medium' : ''}"
 								draggable="false"
 								aria-label={$i18n.t('Schedules')}
 								title={$i18n.t(
@@ -1198,7 +1256,7 @@
 							</a>
 							<a
 								href="/harvis/agent-studio/activity"
-								class="group flex items-center gap-3 rounded-xl px-2.5 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-850 transition outline-none {($page.url.pathname ?? '').startsWith('/harvis/agent-studio/activity') ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 font-medium' : ''}"
+								class="group flex items-center gap-3 rounded-xl px-2.5 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition outline-none {($page.url.pathname ?? '').startsWith('/harvis/agent-studio/activity') ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 font-medium' : ''}"
 								draggable="false"
 								aria-label={$i18n.t('Artifacts')}
 							>
@@ -1209,16 +1267,60 @@
 									<div class=" self-center text-sm font-primary">{$i18n.t('Artifacts')}</div>
 								</div>
 							</a>
+							<a
+								id="sidebar-connectors-button"
+								href="/harvis/agent-studio/mcp-shop"
+								class="group flex items-center gap-3 rounded-xl px-2.5 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition outline-none {($page.url.pathname ?? '').startsWith('/harvis/agent-studio/mcp-shop') ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 font-medium' : ''}"
+								draggable="false"
+								aria-label={$i18n.t('Connectors')}
+							>
+								<div class="self-center">
+									<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="size-4.5"><path d="M9 2v6M15 2v6M6 8h12v2.5a6 6 0 0 1-12 0V8zM12 16.5V22" /></svg>
+								</div>
+								<div class="flex flex-1 self-center translate-y-[0.5px]">
+									<div class=" self-center text-sm font-primary">{$i18n.t('Connectors')}</div>
+								</div>
+							</a>
+							<a
+								id="sidebar-integrations-button"
+								href="/harvis/integrations"
+								class="group flex items-center gap-3 rounded-xl px-2.5 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition outline-none {($page.url.pathname ?? '').startsWith('/harvis/integrations') ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 font-medium' : ''}"
+								draggable="false"
+								aria-label={$i18n.t('Engines')}
+							>
+								<div class="self-center">
+									<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="size-4.5"><path d="m7 11 2-2-2-2M11 13h4M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z" /></svg>
+								</div>
+								<div class="flex flex-1 self-center translate-y-[0.5px]">
+									<div class=" self-center text-sm font-primary">{$i18n.t('Engines')}</div>
+								</div>
+							</a>
+							{#if showCadNav}
+								<!-- CAD Studio took over the slot Adaptive Space was holding
+								     (2026-08-03). It appears only when the server says the lane is
+								     on — `/api/cad/capability` reads the same flag every /api/cad
+								     route enforces, so a nav entry can never outlive the feature. -->
+								<a
+									id="sidebar-cad-button"
+									href="/harvis/cad"
+									class="group flex items-center gap-3 rounded-xl px-2.5 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition outline-none {($page.url.pathname ?? '').startsWith('/harvis/cad') ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 font-medium' : ''}"
+									draggable="false"
+									aria-label={$i18n.t('CAD Studio')}
+								>
+									<div class="self-center">
+										<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="size-4.5"><path d="M12 2.5 20.5 7v10L12 21.5 3.5 17V7L12 2.5zM3.5 7l8.5 4.6L20.5 7M12 11.6v9.9" /></svg>
+									</div>
+									<div class="flex flex-1 self-center translate-y-[0.5px]">
+										<div class=" self-center text-sm font-primary">{$i18n.t('CAD Studio')}</div>
+									</div>
+								</a>
+							{/if}
 							</div>
-							<!-- Adaptive Space hidden for the deployment cut (2026-07-12) — the
-							     feature isn't ready; the /harvis/adaptive route shows a "coming
-							     soon" placeholder. Re-add this nav link + restore the route's
-							     <AdaptiveSpaceShell/> mount to bring it back. -->
-							<!-- More (bold) moved to the footer bottom-nav cluster. -->
+							<!-- More (bold) stays in the footer bottom-nav cluster. -->
 						{/if}
 					{/if}
 
-					{#if modeSwitcherEnabled && activeMode === 'notebook'}
+					{#if modeSwitcherEnabled && onNotebooksRoute}
 						<NotebookNav activeOnb={$page?.url?.searchParams?.get('onb') ?? ''} />
 					{/if}
 
@@ -1238,7 +1340,7 @@
 								>
 									<a
 										id="sidebar-{itemId}-button"
-										class="grow flex items-center space-x-3 rounded-2xl px-2.5 py-2 hover:bg-gray-100 dark:hover:bg-gray-900 transition"
+										class="grow flex items-center space-x-3 rounded-2xl px-2.5 py-2 hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition"
 										href={meta.href}
 										on:click={itemClickHandler}
 										draggable="false"
@@ -1347,7 +1449,7 @@
 						<div class="mt-0.5 pb-1.5">
 							{#each $pinnedNotes as note (note.id)}
 								<a
-									class="w-full flex items-center gap-3 rounded-xl px-2.5 py-1.5 hover:bg-gray-100 dark:hover:bg-gray-850 transition group text-sm"
+									class="w-full flex items-center gap-3 rounded-xl px-2.5 py-1.5 hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition group text-sm"
 									href={`/notes/${note.id}`}
 									on:click={() => {
 										itemClickHandler();
@@ -1464,6 +1566,51 @@
 									}}
 								/>
 							{/each}
+						</div>
+					</Folder>
+				{/if}
+
+				<!-- Projects — sits above Recents and below Pinned, per the user's ask
+				     (2026-08-19). Each project is a real folder; opening it lists the chats
+				     attached to it, which is what Folders/RecursiveFolder already do. The
+				     component was imported here for months but never mounted, so projects were
+				     only reachable through the /harvis/projects page. -->
+				{#if ($config?.features?.enable_folders ?? true) !== false}
+					<Folder
+						id="sidebar-projects"
+						bind:open={showFolders}
+						className="px-2 mt-0.5"
+						name={$i18n.t('Projects')}
+						chevron={false}
+						dragAndDrop={false}
+						onAdd={async () => {
+							await tick();
+							setTimeout(() => {
+								showCreateFolderModal = true;
+							}, 0);
+						}}
+						onAddLabel={$i18n.t('New Project')}
+					>
+						<div class="flex flex-col mt-0.5">
+							<Folders
+								bind:folderRegistry
+								{folders}
+								{shiftKey}
+								onDelete={async () => {
+									await initFolders();
+									await initChatList();
+								}}
+								on:import={(e) => {
+									const { folderId, items } = e.detail ?? {};
+									importChatHandler(items, false, folderId);
+								}}
+								on:update={async () => {
+									await initFolders();
+								}}
+								on:change={async () => {
+									await initChatList();
+								}}
+							/>
 						</div>
 					</Folder>
 				{/if}
@@ -1599,97 +1746,12 @@
 					class=" sidebar-bg-gradient-to-t bg-linear-to-t from-gray-50 dark:from-gray-950 to-transparent from-50% pointer-events-none absolute inset-0 -z-10 -mt-6"
 				></div>
 				<div class="flex flex-col font-primary">
-					{#if modeSwitcherEnabled}
-						<!-- Footer: bottom-nav cluster (Cookbook · Providers · Customize · Settings · More). -->
+					{#if modeSwitcherEnabled && ($config?.features?.enable_sidebar_more ?? false)}
+						<!-- Footer: bottom-nav cluster (More only). Cookbook moved up into the
+						     chat-tools cluster, and Customize + Settings moved into the user menu
+						     (2026-08-19). Flag-gated off for deployment: the whole cluster goes,
+						     divider included, so no orphaned rule sits above the user menu. -->
 						<div class="px-[0.4375rem] pt-2 mt-1 border-t border-gray-100 dark:border-gray-850">
-							<a
-								href="/harvis/agent-studio/cookbook"
-								class="group flex items-center gap-3 rounded-xl px-2.5 py-2 text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-850 hover:text-gray-900 dark:hover:text-gray-100 transition outline-none {($page.url.pathname ?? '').startsWith('/harvis/agent-studio/cookbook')
-									? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 font-medium'
-									: ''}"
-								draggable="false"
-								aria-label={$i18n.t('Cookbook')}
-							>
-								<svg
-									xmlns="http://www.w3.org/2000/svg"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="currentColor"
-									stroke-width="1.8"
-									stroke-linecap="round"
-									stroke-linejoin="round"
-									class="size-4.5 shrink-0"
-								>
-									<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20M4 19.5A2.5 2.5 0 0 0 6.5 22H20V2H6.5A2.5 2.5 0 0 0 4 4.5v15z" />
-								</svg>
-								<span class="flex-1 self-center translate-y-[0.5px]">{$i18n.t('Cookbook')}</span>
-							</a>
-							<a
-								id="sidebar-integrations-button"
-								href="/harvis/integrations"
-								class="group flex items-center gap-3 rounded-xl px-2.5 py-2 text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-850 hover:text-gray-900 dark:hover:text-gray-100 transition outline-none {($page.url.pathname ?? '').startsWith('/harvis/integrations')
-									? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 font-medium'
-									: ''}"
-								draggable="false"
-								aria-label={$i18n.t('Providers')}
-							>
-								<svg
-									xmlns="http://www.w3.org/2000/svg"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="currentColor"
-									stroke-width="1.8"
-									stroke-linecap="round"
-									stroke-linejoin="round"
-									class="size-4.5 shrink-0"
-								>
-									<path d="m7 11 2-2-2-2M11 13h4M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z" />
-								</svg>
-								<span class="flex-1 self-center translate-y-[0.5px]">{$i18n.t('Providers')}</span>
-							</a>
-							<!-- Customize — opens the Settings modal's Customize group (Skills management
-							     lives there now); modal trigger, so no route-active state. -->
-							<button
-								type="button"
-								on:click={() => showSettings.set('skills')}
-								class="group w-full text-left flex items-center gap-3 rounded-xl px-2.5 py-2 text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-850 hover:text-gray-900 dark:hover:text-gray-100 transition outline-none"
-								aria-label={$i18n.t('Customize')}
-							>
-								<svg
-									xmlns="http://www.w3.org/2000/svg"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="currentColor"
-									stroke-width="1.8"
-									stroke-linecap="round"
-									stroke-linejoin="round"
-									class="size-4.5 shrink-0"
-								>
-									<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6" />
-								</svg>
-								<span class="flex-1 self-center translate-y-[0.5px]">{$i18n.t('Customize')}</span>
-							</button>
-							<button
-								type="button"
-								on:click={() => showSettings.set(true)}
-								class="group w-full text-left flex items-center gap-3 rounded-xl px-2.5 py-2 text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-850 hover:text-gray-900 dark:hover:text-gray-100 transition outline-none"
-								aria-label={$i18n.t('Settings')}
-							>
-								<svg
-									xmlns="http://www.w3.org/2000/svg"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="currentColor"
-									stroke-width="1.8"
-									stroke-linecap="round"
-									stroke-linejoin="round"
-									class="size-4.5 shrink-0"
-								>
-									<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
-									<circle cx="12" cy="12" r="3" />
-								</svg>
-								<span class="flex-1 self-center translate-y-[0.5px]">{$i18n.t('Settings')}</span>
-							</button>
 							<!-- More (bold) — tools, last item of the bottom cluster. -->
 							<div class="-mx-[0.4375rem]">
 								<SidebarMore activePath={$page.url.pathname} bold />
@@ -1709,7 +1771,7 @@
 							}}
 						>
 							<div
-								class=" flex items-center rounded-2xl py-2 px-1.5 w-full hover:bg-gray-100/50 dark:hover:bg-gray-900/50 transition"
+								class=" flex items-center rounded-2xl py-2 px-1.5 w-full hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition"
 							>
 								<div class=" self-center mr-3 relative">
 									<img

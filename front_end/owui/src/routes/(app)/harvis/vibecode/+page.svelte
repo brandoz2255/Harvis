@@ -33,7 +33,9 @@
 		type PendingAction
 	} from '$lib/apis/agent-runs';
 	import RunView from '$lib/agent-studio/RunView.svelte';
+	import RunArtifacts from '$lib/agent-studio/RunArtifacts.svelte';
 	import BrowserPanel from '$lib/agent-studio/build/BrowserPanel.svelte';
+	import { subscribeRun } from '$lib/apis/streaming/runStream';
 	import BuildActions from '$lib/agent-studio/BuildActions.svelte';
 	import WorkflowInspector from '$lib/agent-studio/WorkflowInspector.svelte';
 	import { humanizeRunTitle } from '$lib/agent-studio/runFormat';
@@ -283,6 +285,14 @@
 		dockTab = 'br';
 	};
 	let artifacts: any[] = [];
+	/** Live screenshot_preview frames for Browse & verify (not persisted). */
+	let verifyFrames: {
+		path?: string;
+		desktop_b64?: string;
+		mobile_b64?: string;
+		iteration?: number;
+	} | null = null;
+	let _verifyUnsub: (() => void) | null = null;
 	const loadArtifacts = async () => {
 		if (!latestTurnId) {
 			artifacts = [];
@@ -293,6 +303,93 @@
 		} catch {
 			artifacts = [];
 		}
+	}
+
+	// A run that wrote a file has something to show. That's what turns the dock's Preview
+	// tab on — the artifact renders there, big, instead of squeezed into the chat thread.
+	$: hasPreview = artifacts.some((a: any) => a?.artifact_type === 'file');
+	/** Preview blown up over the whole page (the ⤢ control in the Preview tab). */
+	let previewFullscreen = false;
+	// Rising edge only: surface the Preview the first time a run produces one, then leave
+	// the dock alone so switching tabs by hand isn't undone on the next poll.
+	let _prevHasPreview = false;
+	$: surfacePreview(hasPreview);
+	function surfacePreview(has: boolean) {
+		if (has && !_prevHasPreview && latestTurnId) {
+			if (!dockOpen) {
+				dockOpen = true;
+				try {
+					localStorage.setItem('harvis.vibecode.dock', '1');
+				} catch {
+					/* ignore */
+				}
+			}
+			if (!panelVisible.br) {
+				panelVisible = { ...panelVisible, br: true };
+				persistPanels();
+			}
+			dockTab = 'br';
+			mainTab = 'preview';
+		}
+		_prevHasPreview = has;
+	}
+
+	// Subscribe to the latest turn's stream for screenshot_preview → Browse & verify.
+	$: watchVerifyStream(latestTurnId);
+	let _settledRunId = '';
+	function watchVerifyStream(id: string) {
+		if (_verifyUnsub) {
+			_verifyUnsub();
+			_verifyUnsub = null;
+		}
+		verifyFrames = null;
+		if (!id) return;
+		const { store, unsubscribe } = subscribeRun(id);
+		_verifyUnsub = unsubscribe;
+		const unsubStore = store.subscribe((st) => {
+			// The stream's terminal phase is the authoritative "this run is over" signal and
+			// it flushes immediately. Status itself still comes from the server, so refresh
+			// once here instead of waiting for the next poll tick — that wait is why a
+			// finished turn kept rendering "Working…".
+			if (
+				(st.phase === 'done' || st.phase === 'error' || st.phase === 'cancelled') &&
+				_settledRunId !== id
+			) {
+				_settledRunId = id;
+				loadSession().then(schedule);
+			}
+			for (let i = st.events.length - 1; i >= 0; i--) {
+				const e: any = st.events[i];
+				if (e?.type === 'verify_preview') {
+					verifyFrames = {
+						path: e.path,
+						desktop_b64: e.desktop_b64,
+						mobile_b64: e.mobile_b64,
+						iteration: e.iteration
+					};
+					// Surface the Browse & verify dock when frames arrive.
+					if (!panelVisible.bw) {
+						panelVisible = { ...panelVisible, bw: true };
+						persistPanels();
+					}
+					if (dockTab !== 'bw') dockTab = 'bw';
+					if (!dockOpen) {
+						dockOpen = true;
+						try {
+							localStorage.setItem('harvis.vibecode.dock', '1');
+						} catch {
+							/* ignore */
+						}
+					}
+					break;
+				}
+			}
+		});
+		const prev = _verifyUnsub;
+		_verifyUnsub = () => {
+			unsubStore();
+			prev?.();
+		};
 	};
 	const onArtifactSelect = (_id: string) => {
 		mainTab = 'diff';
@@ -413,6 +510,35 @@
 		overlayInitialTab = 'overview';
 		overlayRunId = id;
 		showReviewMirror.set(null);
+	};
+	/**
+	 * ⤢ Full from a run inside the Build thread. On a finished run that's the inspector,
+	 * docked beside the chat. On a LIVE one the inspector is still gated (it pegs the main
+	 * thread — see headerOpenRunId), so instead of a toast that leaves the button looking
+	 * broken, put the run's live output in the workspace dock where it can be watched.
+	 */
+	const openRunSide = (id: string) => {
+		if (!id) return;
+		const t = turns.find((x) => x.id === id);
+		if (!t || t.status !== 'running') {
+			headerOpenRunId(id);
+			return;
+		}
+		if (!dockOpen) {
+			dockOpen = true;
+			try {
+				localStorage.setItem('harvis.vibecode.dock', '1');
+			} catch {
+				/* ignore */
+			}
+		}
+		if (!panelVisible.br) {
+			panelVisible = { ...panelVisible, br: true };
+			persistPanels();
+		}
+		logsRunId = id;
+		dockTab = 'br';
+		mainTab = 'logs';
 	};
 	const headerCreatePR = () => {
 		showPrDrawer = true;
@@ -870,6 +996,11 @@
 	const schedule = () => {
 		clearTimeout(pollTimer);
 		if (!sessionId) return;
+		// Read `turns` directly rather than the reactive `anyRunning`: right after
+		// loadSession() that derived value is still a frame behind, so a just-started
+		// turn scheduled its next poll 30s out and the thread kept saying "Working…"
+		// long after the run had finished.
+		const running = turns.some((t) => t.status === 'running');
 		pollTimer = setTimeout(
 			async () => {
 				try {
@@ -881,7 +1012,7 @@
 					schedule();
 				}
 			},
-			anyRunning ? 2000 : 30000
+			running ? 2000 : 30000
 		);
 	};
 
@@ -1731,10 +1862,21 @@
 		clearInterval(discordPollTimer);
 		clearInterval(modelsRefreshTimer);
 		if (typeof window !== 'undefined') window.removeEventListener('focus', onWindowFocus);
+		if (_verifyUnsub) {
+			_verifyUnsub();
+			_verifyUnsub = null;
+		}
 	});
 </script>
 
-<svelte:window on:keydown={(e) => e.key === 'Escape' && overlayRunId && (overlayRunId = '')} />
+<svelte:window
+	on:keydown={(e) => {
+		if (e.key !== 'Escape') return;
+		// Innermost surface first: the blown-up preview sits over the inspector.
+		if (previewFullscreen) previewFullscreen = false;
+		else if (overlayRunId) overlayRunId = '';
+	}}
+/>
 
 <svelte:head>
 	<title>{$i18n.t('Vibe Code')} • {$WEBUI_NAME}</title>
@@ -1844,7 +1986,7 @@
 							     hello.txt / Running: npm test …) that stays in the chat, not a blank
 							     canvas. Fixed height so the feed renders + scrolls; full run one click away. -->
 							<div class="h-80 rounded-xl border border-gray-200 dark:border-white/10 overflow-hidden bg-gray-50 dark:bg-gray-900">
-								{#key t.id}<RunView wsId={t.id} mode="stream" title={t.task_brief} onOpenFull={() => headerOpenRunId(t.id)} />{/key}
+								{#key t.id}<RunView wsId={t.id} mode="stream" title={t.task_brief} artifactsMode="changes" onOpenFull={() => openRunSide(t.id)} />{/key}
 							</div>
 						{:else}
 							<!-- assistant reply: "the AI's domain" — unbubbled, full-width (matches the main
@@ -1886,7 +2028,7 @@
 									<div
 										class="w-full rounded-xl border border-gray-200 dark:border-white/10 overflow-hidden bg-gray-50 dark:bg-gray-900"
 									>
-										{#key t.id}<RunView wsId={t.id} mode="dock" title={t.task_brief} onOpenFull={() => headerOpenRunId(t.id)} />{/key}
+										{#key t.id}<RunView wsId={t.id} mode="dock" title={t.task_brief} artifactsMode="changes" onOpenFull={() => openRunSide(t.id)} />{/key}
 									</div>
 								{/if}
 							</div>
@@ -2194,7 +2336,7 @@
 						<div class="relative">
 							<button
 								type="button"
-								class="inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-full border transition hover:opacity-90 {runMode ===
+								class="inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-lg border transition hover:opacity-90 {runMode ===
 								'plan'
 									? 'border-gray-200 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.05] text-gray-600 dark:text-gray-300'
 									: runMode === 'full-auto'
@@ -2275,7 +2417,7 @@
 						     the default so a swarm is never a surprise; Auto lets the AI ask. -->
 						<button
 							type="button"
-							class="inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-full border transition hover:opacity-90 {agentsMode === 'on'
+							class="inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-lg border transition hover:opacity-90 {agentsMode === 'on'
 								? 'border-violet-500/30 bg-violet-500/12 text-violet-300'
 								: agentsMode === 'auto'
 									? 'border-amber-500/30 bg-amber-500/12 text-amber-300'
@@ -2568,11 +2710,25 @@
 									</div>
 								{:else if dockTab === 'bw'}
 									<div class="flex-1 min-h-0">
-										<BrowserPanel />
+										<BrowserPanel {verifyFrames} />
 									</div>
 								{:else}
 									<div class="flex-1 min-h-0">
-										<WorkspaceMainPanel showChat={false} bind:tab={mainTab} {selectedFile} diffLines={selectedFileObj ? selectedFileObj.lines : []} {fileContent} {fileLoading} {fileBinary} {fileTruncated} {fileError} hasRepo={!!sessionId} hasChanges={changedFiles.length > 0} on:refresh={refreshFiles}>
+										<WorkspaceMainPanel showChat={false} bind:tab={mainTab} {selectedFile} diffLines={selectedFileObj ? selectedFileObj.lines : []} {fileContent} {fileLoading} {fileBinary} {fileTruncated} {fileError} hasRepo={!!sessionId} hasChanges={changedFiles.length > 0} {hasPreview} on:refresh={refreshFiles}>
+											<div slot="preview" class="h-full min-h-0 flex flex-col">
+												<div class="shrink-0 flex items-center justify-end px-2 py-1 border-b border-gray-200 dark:border-white/10">
+													<button
+														type="button"
+														class="text-[11px] text-gray-400 hover:text-blue-500 transition"
+														on:click={() => (previewFullscreen = true)}
+														title={$i18n.t('Expand the preview to the whole page')}
+														>⤢ {$i18n.t('Full')}</button
+													>
+												</div>
+												<div class="flex-1 min-h-0">
+													{#key latestTurnId}<RunArtifacts wsId={latestTurnId} done mode="preview" bare fill />{/key}
+												</div>
+											</div>
 											<div slot="logs" class="h-full overflow-auto">
 												{#if logsRunId || latestTurnId}
 													{#key logsRunId || latestTurnId}<RunView wsId={logsRunId || latestTurnId} mode="dock" onOpenFull={() => headerOpenRunId(logsRunId || latestTurnId)} />{/key}
@@ -2619,6 +2775,29 @@
 			</div>
 		{/if}
 	</div>
+
+	<!-- Preview, blown up over the page. Same artifact as the dock's Preview tab — this is
+	     the "take over the whole screen" half of ⤢ Full. Esc or ✕ returns to the dock. -->
+	{#if previewFullscreen}
+		<div class="fixed inset-0 z-50 flex flex-col bg-white dark:bg-gray-950">
+			<div
+				class="shrink-0 flex items-center gap-2 px-3 py-2 border-b border-gray-200 dark:border-white/10"
+			>
+				<span class="text-xs font-medium text-gray-700 dark:text-gray-200"
+					>{$i18n.t('Preview')}</span
+				>
+				<button
+					type="button"
+					class="ml-auto text-[11px] text-gray-400 hover:text-blue-500 transition"
+					on:click={() => (previewFullscreen = false)}
+					title={$i18n.t('Close')}>✕ {$i18n.t('Close')}</button
+				>
+			</div>
+			<div class="flex-1 min-h-0 px-3 py-2">
+				{#key latestTurnId}<RunArtifacts wsId={latestTurnId} done mode="preview" bare fill />{/key}
+			</div>
+		</div>
+	{/if}
 
 	<!-- click-away backdrop for the composer menus -->
 	{#if anyToolbarMenuOpen}

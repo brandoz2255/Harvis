@@ -31,6 +31,8 @@
 		socket,
 		audioQueue,
 		showControls,
+		cadFocus,
+		cadSelection,
 		dockedRunId,
 		workspaceControlsTab,
 		taskHeartbeats,
@@ -74,6 +76,11 @@
 		displayFileHandler
 	} from '$lib/utils';
 	import { AudioQueue } from '$lib/utils/audio';
+	import {
+		extractSandboxPaths,
+		ensureSandboxArtifacts,
+		sandboxArtifacts
+	} from '$lib/utils/sandbox';
 
 	import {
 		archiveChatById,
@@ -118,6 +125,7 @@
 	import Spinner from '../common/Spinner.svelte';
 	import Tooltip from '../common/Tooltip.svelte';
 	import Sidebar from '../icons/Sidebar.svelte';
+	import ChevronDown from '../icons/ChevronDown.svelte';
 	import Image from '../common/Image.svelte';
 	import { getBanners } from '$lib/apis/configs';
 
@@ -129,10 +137,64 @@
 	let controlPane: Pane | undefined;
 	let controlPaneComponent: ChatControls | undefined;
 
+	// CAD focus workspace. The viewport takes the page and this same chat is pinned to
+	// the right edge as a narrow strip — the pane is repositioned by CSS rather than
+	// remounted, so history, draft and scroll position survive entering and leaving.
+	// (paneforge registers a pane's size constraints once, in its own onMount, so
+	// reactively shrinking the pane would silently do nothing.)
+	let cadChatWidth = 420;
+	// CAD ships as an optional module tree, so this cannot be a static import: a
+	// checkout without $lib/cad would fail the build outright. import.meta.glob
+	// resolves to an empty object when nothing matches, and to a real lazy loader
+	// when the tree is present — the workspace still bundles and behaves exactly as
+	// a direct import would, one tick later.
+	const cadFocusModule = Object.values(
+		import.meta.glob('../../cad/CadFocusWorkspace.svelte')
+	)[0];
+	let CadFocusWorkspace = null;
+	let cadFocusLoading = false;
+	let cadChatCollapsed = false;
+	let cadFocusActive = false;
+	let cadRestore: { sidebar: boolean; controls: boolean } | null = null;
+
+	$: if ($cadFocus && !CadFocusWorkspace && !cadFocusLoading && cadFocusModule) {
+		cadFocusLoading = true;
+		cadFocusModule()
+			.then((m) => (CadFocusWorkspace = m.default))
+			.catch((e) => console.error('CAD workspace failed to load', e));
+	}
+
+	$: {
+		const active = !!$cadFocus;
+		if (active !== cadFocusActive) {
+			cadFocusActive = active;
+			// The global rail lives outside #chat-container, so it takes a body class to
+			// reach. It comes straight back when the workspace closes.
+			if (typeof document !== 'undefined') {
+				document.body.classList.toggle('cad-focus-active', active);
+			}
+			if (active) {
+				// Entering hides the global rail and the controls pane; leaving puts both
+				// back the way the user had them, not the way we'd default them.
+				cadRestore = { sidebar: $showSidebar, controls: $showControls };
+				showSidebar.set(false);
+				showControls.set(false);
+			} else if (cadRestore) {
+				showSidebar.set(cadRestore.sidebar);
+				showControls.set(cadRestore.controls);
+				cadRestore = null;
+			}
+		}
+	}
+
 	let messageInput: MessageInput | undefined;
 	let messagesRef: Messages | undefined;
 
 	let autoScroll = true;
+	let followObserver = null;
+	// The ResizeObserver alone cannot see the column grow (see attachFollowObserver);
+	// this one watches for the DOM actually changing.
+	let followMutationObserver = null;
 	let isNearTop = true;
 	let processing = '';
 	let messagesContainerElement: HTMLDivElement;
@@ -912,10 +974,24 @@
 				pageSubscribe();
 				showControlsSubscribe();
 				selectedFolderSubscribe();
+				// Leaving the chat page leaves the workspace too — it is a view of this
+				// page, and reviving it on the next mount would be a surprise. The body
+				// class is cleared here as well, because a destroyed component's reactive
+				// statements never run and the rail would stay hidden on the next page.
+				cadFocus.set(null);
+				document.body.classList.remove('cad-focus-active');
 				window.removeEventListener('message', onMessageHandler);
 				$socket?.off('events', chatEventHandler);
 				audioQueueInstance?.destroy();
 				audioQueue.set(null);
+				if (followObserver) {
+					followObserver.disconnect();
+					followObserver = null;
+				}
+				if (followMutationObserver) {
+					followMutationObserver.disconnect();
+					followMutationObserver = null;
+				}
 			} catch (e) {
 				console.error(e);
 			}
@@ -1114,11 +1190,51 @@
 				contentsRAF = null;
 			}, 0);
 		} else {
+			_baseContents = [];
 			artifactContents.set([]);
 		}
 	};
 
 	$: onHistoryChange(history);
+
+	// Sandbox scripts are artifacts too. They live in a container volume rather than in the
+	// message text, so they are fetched once and merged in below — without this they never
+	// reached the Artifacts list, and one opened by hand was wiped by the next token.
+	let _baseContents = [];
+
+	let _lastPublishedCount = 0;
+
+	const publishContents = () => {
+		const merged = [..._baseContents, ...($sandboxArtifacts ?? [])];
+		artifactContents.set(merged);
+
+		// Auto-open the artifact preview the moment the model produces a renderable
+		// artifact (HTML/SVG/script) in its response — so "make me an html" pops the preview
+		// with no click. Once per turn (armed when a prompt is submitted), so loading a
+		// chat never auto-pops and a manual close isn't fought. The trigger is GROWTH, not
+		// a non-empty list: sending a second message must not re-pop the previous answer's
+		// artifact.
+		const grew = merged.length > _lastPublishedCount;
+		_lastPublishedCount = merged.length;
+
+		if (grew && !_artifactPoppedThisTurn) {
+			_artifactPoppedThisTurn = true;
+			showControls.set(true);
+			showArtifacts.set(true);
+			// showControls may already be true with the pane still collapsed — Svelte stores
+			// don't notify on an unchanged value, so the subscriber that normally opens the
+			// pane would never fire. Open it directly.
+			tick().then(() => {
+				if (!$mobile) {
+					try {
+						controlPaneComponent?.openPane();
+					} catch (e) {}
+				}
+			});
+		}
+	};
+
+	$: $sandboxArtifacts, publishContents();
 
 	const getContents = () => {
 		const messages = history ? createMessagesList(history, history.currentId) : [];
@@ -1184,17 +1300,17 @@
 			}
 		});
 
-		artifactContents.set(contents);
+		_baseContents = contents;
 
-		// Auto-open the artifact preview the moment the model produces a renderable
-		// artifact (HTML/SVG) in its response — so "make me an html" pops the preview
-		// with no click. Once per turn (armed when generation starts), so loading a
-		// chat never auto-pops and a manual close isn't fought.
-		if (contents.length > 0 && !_artifactPoppedThisTurn) {
-			_artifactPoppedThisTurn = true;
-			showControls.set(true);
-			showArtifacts.set(true);
-		}
+		const sandboxPaths = [];
+		messages.forEach((message) => {
+			if (message?.role !== 'user' && typeof message?.content === 'string') {
+				for (const path of extractSandboxPaths(message.content)) sandboxPaths.push(path);
+			}
+		});
+		if (sandboxPaths.length) ensureSandboxArtifacts(sandboxPaths);
+
+		publishContents();
 	};
 
 	//////////////////////////
@@ -1241,15 +1357,24 @@
 
 	// Plain-chat progression — honest, non-specific reassurance while the model works toward its
 	// first token (esp. slow/thinking local models). No workspace/engine wording (there's none).
+	// The LAST stage adapts to the model id (same signal as _engineCheck): a provider-prefixed
+	// id ("anthropic/…", "openai/…", "kimi-code/…") is a cloud model that never cold-loads,
+	// so blaming "local models" there would be a lie — the wait is a long think or a busy
+	// provider. Bare ids (hermes3:3b) are local Ollama and keep the cold-load hint.
 	const _QA_STAGES = [
 		'Understanding the request…',
 		'Thinking it through…',
 		'Working through it…',
-		'Still working…',
-		'Still working — local models can take a moment…'
+		'Still working…'
 	];
-	const _qaStage = (stage: number, _m: string): string =>
-		_QA_STAGES[Math.min(Math.max(stage, 0), _QA_STAGES.length - 1)];
+	const _qaStage = (stage: number, m: string): string => {
+		if (stage >= _QA_STAGES.length) {
+			return (m || '').includes('/')
+				? 'Still working — the model is thinking; long answers can take a moment…'
+				: 'Still working — local models can take a moment…';
+		}
+		return _QA_STAGES[Math.min(Math.max(stage, 0), _QA_STAGES.length - 1)];
+	};
 	const _QA_AT = [0, 2000, 5000, 9000, 16000];
 
 	const _setHeartbeat = (messageId: string, text: string) => {
@@ -1746,8 +1871,44 @@
 		await messagesRef?.scrollToTop();
 	};
 
+	// Follow-the-stream state. `autoScroll` means "keep the newest text in view";
+	// it is turned off only by the user deliberately scrolling away (see the
+	// wheel/touch/key handlers on #messages-container) and back on when they
+	// return to the bottom.
+	let touchStartY = null;
 	let scrollRAF = null;
 	let contentsRAF = null;
+	let lastKnownScrollTop = 0;
+
+	// 64px, not the 5px this used to allow. Sub-pixel rounding, the composer
+	// resizing as the user types, and markdown re-layout all move the bottom by
+	// more than a few pixels, and anything inside a couple of lines of the end
+	// is still "reading the latest" as far as the reader is concerned.
+	const BOTTOM_SLACK = 64;
+
+	const isAtBottom = () => {
+		if (!messagesContainerElement) return true;
+		return (
+			messagesContainerElement.scrollHeight - messagesContainerElement.scrollTop <=
+			messagesContainerElement.clientHeight + BOTTOM_SLACK
+		);
+	};
+
+	const stopFollowing = () => {
+		if (!autoScroll) return;
+		autoScroll = false;
+		// A scroll we already queued would yank the user straight back down.
+		if (scrollRAF) {
+			cancelAnimationFrame(scrollRAF);
+			scrollRAF = null;
+		}
+	};
+
+	const resumeFollowing = () => {
+		autoScroll = true;
+		scheduleScrollToBottom();
+	};
+
 	const scheduleScrollToBottom = () => {
 		if (!scrollRAF) {
 			scrollRAF = requestAnimationFrame(async () => {
@@ -1756,6 +1917,63 @@
 			});
 		}
 	};
+
+	// Follow the growing message column while autoScroll is on.
+	//
+	// The ResizeObserver here used to be the whole mechanism, and it never fired once.
+	// It watches `#messages-container`'s first child, and that child is `h-full` — its
+	// border box is pinned to the scroll port's height while the content overflows it.
+	// Measured on a real chat: container scrollHeight 2280, observed child height 996,
+	// constant. Every lane that streams still scrolled, because the SSE loop calls
+	// scrollToBottom() on each chunk itself. A workspace run does not: its chat stream
+	// closes in a few seconds and the run card keeps growing for another minute, with
+	// nothing left to follow it.
+	//
+	// So watch the DOM instead of a box. Any node added or any text changed inside the
+	// column re-arms one rAF-gated scroll, which is exactly what "keep the newest line
+	// in view" means. The ResizeObserver stays for the height changes that arrive with
+	// no mutation at all — an image finishing, a font swapping, the window resizing.
+	const attachFollowObserver = (el) => {
+		if (followObserver) {
+			followObserver.disconnect();
+			followObserver = null;
+		}
+		if (followMutationObserver) {
+			followMutationObserver.disconnect();
+			followMutationObserver = null;
+		}
+		if (!el) return;
+		const follow = () => {
+			if (!autoScroll) return;
+			// Scroll directly, not only through the rAF-gated scheduler. A mutation
+			// callback already runs after the DOM is current, so `scrollHeight` is the
+			// real one and the assignment is correct as-is. It also survives a tab that
+			// gets no frames: there, one queued rAF never runs, `scrollRAF` stays
+			// non-null forever, and the scheduler silently becomes a no-op for the rest
+			// of the page's life. The scheduled call still runs on top of this to catch
+			// the content-visibility re-layout that lands a frame or two later.
+			if (messagesContainerElement) {
+				messagesContainerElement.scrollTop = messagesContainerElement.scrollHeight;
+			}
+			scheduleScrollToBottom();
+		};
+		if (typeof ResizeObserver !== 'undefined') {
+			followObserver = new ResizeObserver(follow);
+			followObserver.observe(el);
+			if (el.firstElementChild) followObserver.observe(el.firstElementChild);
+		}
+		if (typeof MutationObserver !== 'undefined') {
+			followMutationObserver = new MutationObserver(follow);
+			// childList + characterData only. Attributes change constantly during a
+			// stream (hover states, aria flags) and none of them move the bottom.
+			followMutationObserver.observe(el, {
+				childList: true,
+				subtree: true,
+				characterData: true
+			});
+		}
+	};
+	$: if (messagesContainerElement) attachFollowObserver(messagesContainerElement);
 
 	let processingQueueChats = new Set<string>();
 
@@ -1791,28 +2009,7 @@
 			// otherwise only the user turn (saved at chat-create) survives a reopen.
 			await saveChatHandler(_chatId, history);
 
-			// HARVIS (facade): the socket-less facade can't run OWUI's server-side
-			// background title task, so auto-name a brand-new chat client-side via
-			// the title endpoint (LLM-generated) instead of leaving the raw prompt.
-			try {
-				const _msgs = createMessagesList(history, history.currentId).map((m) => ({
-					role: m.role,
-					content: typeof m.content === 'string' ? m.content : (m.content ?? '')
-				}));
-				const _firstExchange = _msgs.filter((m) => m.role === 'user').length === 1;
-				if (_firstExchange && ($settings?.title?.auto ?? true)) {
-					const _gen = await generateTitle(localStorage.token, modelId, _msgs, _chatId).catch(
-						() => null
-					);
-					const _title = typeof _gen === 'string' ? _gen : _gen?.choices?.[0]?.message?.content;
-					if (_title && $chatId == _chatId) {
-						chatTitle.set(_title);
-						await updateChatById(localStorage.token, _chatId, { title: _title });
-					}
-				}
-			} catch (e) {
-				console.error('HARVIS auto-title failed', e);
-			}
+			// saveChatHandler above already kicked off auto-titling for this chat.
 
 			currentChatPage.set(1);
 			await chats.set(await getChatList(localStorage.token, $currentChatPage));
@@ -2047,8 +2244,37 @@
 		}
 	};
 
+	// Reasoning models (qwen3.5, DeepSeek R1, QwQ…) stream their thinking on
+	// `delta.reasoning` and send NOTHING on `delta.content` until it's finished — for
+	// a 9b model that's 20-40 seconds of a blank bubble, which reads as the UI being
+	// stuck and then dumping the whole answer at once. The renderer already knows how
+	// to show a live "Thinking..." block: it just needs the text folded into content
+	// as a reasoning <details>. Closing it stamps the duration, so the header settles
+	// on "Thought for N seconds".
+	const openReasoning = (message) => {
+		if (message.reasoningOpen) return;
+		message.reasoningOpen = true;
+		message.reasoningStartedAt = Date.now();
+		message.content += '<details type="reasoning" done="false">\n<summary>Thinking</summary>\n> ';
+	};
+
+	const closeReasoning = (message) => {
+		if (!message.reasoningOpen) return;
+		message.reasoningOpen = false;
+		const duration = Math.max(
+			0,
+			Math.round((Date.now() - (message.reasoningStartedAt ?? Date.now())) / 1000)
+		);
+		message.content =
+			message.content.replace(
+				'<details type="reasoning" done="false">',
+				`<details type="reasoning" done="true" duration="${duration}">`
+			) + '\n</details>\n';
+	};
+
 	const chatCompletionEventHandler = async (data, message, chatId) => {
-		const { id, done, choices, content, output, sources, selected_model_id, error, usage } = data;
+		const { id, done, choices, content, output, sources, selected_model_id, error, usage, harvis_metrics } =
+			data;
 
 		// Store raw OR-aligned output items from backend
 		if (output) {
@@ -2070,6 +2296,19 @@
 			} else {
 				// Stream response
 				let value = choices[0]?.delta?.content ?? '';
+				const reasoning =
+					choices[0]?.delta?.reasoning ?? choices[0]?.delta?.reasoning_content ?? '';
+				if (reasoning) {
+					openReasoning(message);
+					// Everything inside the block is a blockquote, so a newline in the
+					// model's thinking has to carry the marker with it.
+					message.content += String(reasoning).replace(/\n/g, '\n> ');
+					history.messages[message.id] = message;
+				}
+				if (value) {
+					// The first real token means thinking is over.
+					closeReasoning(message);
+				}
 				if (message.content == '' && value == '\n') {
 					console.log('Empty response');
 				} else {
@@ -2150,6 +2389,13 @@
 			message.usage = usage;
 		}
 
+		// Provenance for every number the footer shows. Kept separate from `usage` because
+		// it says HOW each value was obtained, which is what lets the meter print an em
+		// dash instead of inventing a plausible zero.
+		if (harvis_metrics) {
+			message.harvisMetrics = harvis_metrics;
+		}
+
 		history.messages[message.id] = message;
 
 		// Hand off the task heartbeat to the WorkspaceRunCard the moment its marker arrives.
@@ -2162,7 +2408,13 @@
 		}
 
 		if (done) {
+			// A turn that ended while still thinking (stopped, or a model that emits
+			// nothing else) must not leave an unclosed block behind.
+			closeReasoning(message);
 			message.done = true;
+			// Stamp when the turn actually ended. Without it, a reloaded chat computed
+			// elapsed as now-minus-start and showed how long ago the message was sent.
+			message.completedAt = Date.now();
 			// Resolve the heartbeat on completion (plain-chat answer, or post-handoff cleanup).
 			_clearHeartbeat(message.id);
 
@@ -2237,6 +2489,10 @@
 	//////////////////////////
 
 	const submitPrompt = async (inputContent, inputFiles) => {
+		// Arm the artifact auto-pop for this turn. Armed here rather than inside one
+		// streaming lane so every generation path (SSE, socket, MoA) gets it.
+		_artifactPoppedThisTurn = false;
+
 		const _files = structuredClone(inputFiles);
 
 		chatFiles.push(
@@ -2371,6 +2627,9 @@
 				return;
 			}
 		}
+
+		// Follow the new answer unless the user is reading older messages.
+		autoScroll = true;
 
 		// Clear input and submit
 		messageInput?.setText('');
@@ -2783,6 +3042,17 @@
 				filter_ids: selectedFilterIds.length > 0 ? selectedFilterIds : undefined,
 				tool_ids: toolIds.length > 0 ? toolIds : undefined,
 				skill_ids: allSkillIds.length > 0 ? allSkillIds : undefined,
+				// What the user has selected in the CAD workspace. IDS ONLY, deliberately:
+				// the backend re-reads the label, kind and status from that revision's own
+				// scene manifest (cad_store.resolve_selection) before a model is told
+				// anything, so this page can name a selection but never describe one.
+				harvis_cad_selection: $cadSelection
+					? {
+							project_id: $cadSelection.project_id,
+							revision_id: $cadSelection.revision_id,
+							node_id: $cadSelection.node_id
+						}
+					: undefined,
 				terminal_id: terminalEnabled ? (activeTerminalId ?? undefined) : undefined,
 				tool_servers: [
 					...($toolServers ?? []).filter(
@@ -2881,13 +3151,18 @@
 				);
 				for await (const update of textStream) {
 					if (!generating) break;
-					const { value, done, sources, selectedModelId, usage, error } = update;
+					const { value, done, sources, selectedModelId, usage, error, reasoning, metrics } =
+						update;
 					const data: Record<string, any> = {};
 					if (error) data.error = error;
 					if (sources) data.sources = sources;
 					if (selectedModelId) data.selected_model_id = selectedModelId;
 					if (usage) data.usage = usage;
-					if (value) data.choices = [{ delta: { content: value } }];
+					if (metrics) data.harvis_metrics = metrics;
+					// A thinking frame carries no content, so it has to be forwarded on its own
+					// or the handler's reasoning branch never runs.
+					if (value || reasoning)
+						data.choices = [{ delta: { content: value ?? '', reasoning } }];
 					if (done) data.done = true;
 					await chatCompletionEventHandler(data, responseMessage, _chatId);
 					if (done || error) break;
@@ -3195,6 +3470,58 @@
 		return _chatId;
 	};
 
+	// HARVIS (facade): the socket-less facade can't run OWUI's server-side background
+	// title task, so a brand-new chat is named client-side once its first exchange
+	// finishes. The chat already carries an immediate fallback — the backend derives a
+	// name from the first user message at create time — and this replaces it with the
+	// LLM-generated one.
+	//
+	// It lives here, called from saveChatHandler, because every lane that persists a
+	// chat goes through that one function. It used to hang off the streaming-done site
+	// alone, so a non-streaming reply, an injected card or a research run left the chat
+	// wearing the raw prompt forever.
+	let autoTitledChatIds = new Set();
+
+	const autoTitleHandler = async (_chatId) => {
+		if (!_chatId || $temporaryChatEnabled) return;
+		if (!($settings?.title?.auto ?? true)) return;
+		if (autoTitledChatIds.has(_chatId)) return;
+
+		const _msgs = createMessagesList(history, history.currentId).map((m) => ({
+			role: m.role,
+			content: typeof m.content === 'string' ? m.content : (m.content ?? '')
+		}));
+
+		// Only the first exchange, and only once the assistant has actually said
+		// something — naming a half-streamed reply produces a title about nothing.
+		if (_msgs.filter((m) => m.role === 'user').length !== 1) return;
+		const _last = _msgs.at(-1);
+		if (!_last || _last.role !== 'assistant' || `${_last.content ?? ''}`.trim() === '') return;
+
+		// Claim the chat before awaiting, so two lanes finishing together can't both
+		// spend a model call on the same title.
+		autoTitledChatIds.add(_chatId);
+
+		try {
+			// The backend pins task-gen to a small local model and ignores this one; it
+			// is sent only because the endpoint's schema requires it.
+			const _model = selectedModels?.[0] ?? $models?.[0]?.id ?? '';
+			const _gen = await generateTitle(localStorage.token, _model, _msgs, _chatId).catch(
+				() => null
+			);
+			const _title = typeof _gen === 'string' ? _gen : _gen?.choices?.[0]?.message?.content;
+			if (_title && $chatId == _chatId) {
+				chatTitle.set(_title);
+				await updateChatById(localStorage.token, _chatId, { title: _title });
+				currentChatPage.set(1);
+				await chats.set(await getChatList(localStorage.token, $currentChatPage));
+			}
+		} catch (e) {
+			console.error('HARVIS auto-title failed', e);
+			autoTitledChatIds.delete(_chatId);
+		}
+	};
+
 	const saveChatHandler = async (_chatId, history) => {
 		if ($chatId == _chatId) {
 			if (!$temporaryChatEnabled) {
@@ -3205,6 +3532,9 @@
 					params: params,
 					files: chatFiles
 				});
+
+				// Fire-and-forget: naming must never delay the save or block the UI.
+				autoTitleHandler(_chatId);
 			}
 		}
 	};
@@ -3353,6 +3683,9 @@
 	class="h-screen max-h-[100dvh] transition-width duration-200 ease-in-out {$showSidebar
 		? '  md:max-w-[calc(100%-var(--sidebar-width))]'
 		: ' '} w-full max-w-full flex flex-col"
+	class:cad-focus-on={cadFocusActive}
+	class:cad-chat-collapsed={cadChatCollapsed}
+	style="--cad-chat-w: {cadChatWidth}px"
 	id="chat-container"
 >
 	{#if !loading}
@@ -3379,7 +3712,11 @@
 			{/if}
 
 			<PaneGroup direction="horizontal" class="w-full h-full">
-				<Pane defaultSize={50} minSize={30} class="h-full flex relative max-w-full flex-col">
+				<Pane
+					defaultSize={50}
+					minSize={22}
+					class="chat-main-pane h-full flex relative max-w-full flex-col"
+				>
 					<FilesOverlay show={dragged} />
 					<Navbar
 						bind:this={navbarElement}
@@ -3442,17 +3779,38 @@
 						}}
 					/>
 
-					<div id="chat-pane" class="flex flex-col flex-auto z-10 w-full @container overflow-auto">
+					<div id="chat-pane" class="flex flex-col flex-auto z-10 w-full @container overflow-hidden">
 						{#if ($settings?.landingPageMode === 'chat' && !$selectedFolder) || createMessagesList(history, history.currentId).length > 0}
 							<div
-								class=" pb-2.5 flex flex-col justify-between w-full flex-auto overflow-auto h-0 max-w-full z-10 scrollbar-hidden"
+								class=" pb-2.5 flex flex-col justify-between w-full flex-auto overflow-auto h-0 max-w-full z-10 [scrollbar-gutter:stable]"
 								id="messages-container"
 								bind:this={messagesContainerElement}
-								on:scroll={(e) => {
-									autoScroll =
-										messagesContainerElement.scrollHeight - messagesContainerElement.scrollTop <=
-										messagesContainerElement.clientHeight + 5;
-									isNearTop = messagesContainerElement.scrollTop <= 100;
+								on:wheel={(e) => {
+									if (e.deltaY < 0) stopFollowing();
+								}}
+								on:touchstart={() => {
+									touchStartY = null;
+								}}
+								on:touchmove={(e) => {
+									const y = e.touches?.[0]?.clientY ?? null;
+									// Finger moving DOWN the screen drags content down = scrolling up.
+									if (touchStartY !== null && y !== null && y > touchStartY) stopFollowing();
+									touchStartY = y;
+								}}
+								on:keydown={(e) => {
+									if (['ArrowUp', 'PageUp', 'Home'].includes(e.key)) stopFollowing();
+								}}
+								on:scroll={() => {
+									const currentScrollTop = messagesContainerElement.scrollTop;
+									const movedUp = currentScrollTop < lastKnownScrollTop - 2;
+									const atBottom = isAtBottom();
+									// Scrollbar dragging does not emit wheel/touch events. A meaningful
+									// upward movement away from the bottom therefore suspends following,
+									// while programmatic scroll-to-bottom only moves downward.
+									if (movedUp && !atBottom) stopFollowing();
+									else if (atBottom) autoScroll = true;
+									lastKnownScrollTop = currentScrollTop;
+									isNearTop = currentScrollTop <= 100;
 								}}
 							>
 								<div class=" h-full w-full flex flex-col">
@@ -3481,6 +3839,19 @@
 									/>
 								</div>
 							</div>
+
+							{#if !autoScroll}
+								<div class="pointer-events-none relative z-20 -mt-14 mb-2 flex justify-center px-4">
+									<button
+										type="button"
+										class="pointer-events-auto inline-flex min-h-11 items-center gap-1.5 rounded-full border border-gray-200 bg-white/95 px-3.5 py-2 text-xs font-medium text-gray-700 shadow-lg shadow-black/10 backdrop-blur transition-colors hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:border-white/10 dark:bg-[#17191e]/95 dark:text-gray-200 dark:hover:bg-[#20232a]"
+										on:click={resumeFollowing}
+									>
+										<ChevronDown className="size-3.5" />
+										{$i18n.t('Jump to latest')}
+									</button>
+								</div>
+							{/if}
 
 							<div class=" pb-2 {dragged ? 'z-0' : 'z-10'}">
 								<MessageInput
@@ -3631,6 +4002,26 @@
 					{codeInterpreterEnabled}
 				/>
 			</PaneGroup>
+
+			{#if $cadFocus && CadFocusWorkspace}
+				<!-- One studio, whichever door was used. The CAD session room mounts this same
+					     overlay over the session's own conversation, so the exit has to be told where
+					     to go: dismissing the overlay there would leave a bare chat page and no way
+					     back to where the part was asked for. -->
+				<svelte:component
+					this={CadFocusWorkspace}
+					projectId={$cadFocus.projectId}
+					jobId={$cadFocus.jobId ?? ''}
+					closeLabel={$cadFocus.closeLabel ?? ''}
+					bind:chatWidth={cadChatWidth}
+					bind:chatCollapsed={cadChatCollapsed}
+					onClose={() => {
+						const to = $cadFocus?.closeTo;
+						cadFocus.set(null);
+						if (to) goto(to);
+					}}
+				/>
+			{/if}
 		</div>
 	{:else if loading}
 		<div class=" flex items-center justify-center h-full w-full">
@@ -3645,5 +4036,40 @@
 	::-webkit-scrollbar {
 		height: 0.5rem;
 		width: 0.5rem;
+	}
+
+	/* CAD focus workspace. paneforge writes `flex: X 1 0px` inline on every pane and
+	   registers its size constraints once at mount, so the strip width cannot be
+	   asked for through the component API. Pinning the pane with `!important` gets
+	   the exact width the spec calls for without remounting the chat — the whole
+	   point being that the conversation continues rather than restarts. */
+	:global(#chat-container.cad-focus-on) {
+		position: relative;
+	}
+
+	/* The spec asks for the global rail to go, so the viewport is the whole surface.
+	   Close (or Escape) is the way back; nothing else is needed while in here. */
+	:global(body.cad-focus-active #sidebar) {
+		display: none !important;
+	}
+
+	:global(#chat-container.cad-focus-on .chat-main-pane) {
+		position: absolute !important;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		width: var(--cad-chat-w, 420px) !important;
+		flex: 0 0 auto !important;
+		z-index: 30;
+		border-left: 1px solid rgb(0 0 0 / 0.08);
+	}
+
+	:global(.dark #chat-container.cad-focus-on .chat-main-pane) {
+		border-left-color: rgb(255 255 255 / 0.08);
+	}
+
+	/* Collapsed hides the strip; it does not unmount it, so the draft survives. */
+	:global(#chat-container.cad-focus-on.cad-chat-collapsed .chat-main-pane) {
+		display: none !important;
 	}
 </style>

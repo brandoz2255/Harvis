@@ -7,7 +7,7 @@
 	{#each steps as label, i}
 		<div
 			role="listitem"
-			class="px-2.5 py-1 rounded-full text-xs font-medium border transition
+			class="px-2.5 py-1 rounded-lg text-xs font-medium border transition
 				{i === current
 				? 'border-gray-900 dark:border-white bg-gray-900 text-white dark:bg-white dark:text-black'
 				: i < current

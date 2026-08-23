@@ -17,13 +17,18 @@
 
 	import {
 		audioQueue,
+		chats,
+		chatTitle,
 		config,
+		currentChatPage,
 		models,
+		pinnedChats,
 		settings,
 		taskHeartbeats,
 		temporaryChatEnabled,
 		TTSWorker,
-		user
+		user,
+		workspaceRunMetrics
 	} from '$lib/stores';
 	import { synthesizeOpenAISpeech } from '$lib/apis/audio';
 	import { imageGenerations } from '$lib/apis/images';
@@ -31,12 +36,13 @@
 		copyToClipboard as _copyToClipboard,
 		approximateToHumanReadable,
 		getMessageContentParts,
-		sanitizeResponseContent,
-		createMessagesList,
+			createMessagesList,
 		formatDate,
 		removeDetails,
-		removeAllDetails
+		removeAllDetails,
+		formatNumber
 	} from '$lib/utils';
+	import { splitChatArtifacts, messageTokenStats, formatElapsed } from '$lib/utils/splitChatArtifacts';
 	import { WEBUI_API_BASE_URL, WEBUI_BASE_URL } from '$lib/constants';
 	import equal from 'fast-deep-equal';
 
@@ -48,20 +54,22 @@
 	import RateComment from './RateComment.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import WebSearchResults from './ResponseMessage/WebSearchResults.svelte';
-	import Sparkles from '$lib/components/icons/Sparkles.svelte';
 
-	import DeleteConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
 
 	import Error from './Error.svelte';
 	import Citations from './Citations.svelte';
 	import CodeExecutions from './CodeExecutions.svelte';
 	import ContentRenderer from './ContentRenderer.svelte';
+	import ArtifactFileCard from './ArtifactFileCard.svelte';
 	import { KokoroWorker } from '$lib/workers/KokoroWorker';
 	import FileItem from '$lib/components/common/FileItem.svelte';
+	import { createNewChat, getChatList, getPinnedChatList } from '$lib/apis/chats';
+	import { goto } from '$app/navigation';
 	import FollowUps from './ResponseMessage/FollowUps.svelte';
 	import { fade } from 'svelte/transition';
 	import { flyAndScale } from '$lib/utils/transitions';
 	import RegenerateMenu from './ResponseMessage/RegenerateMenu.svelte';
+	import MoreActions from './ResponseMessage/MoreActions.svelte';
 	import StatusHistory from './ResponseMessage/StatusHistory.svelte';
 	import FullHeightIframe from '$lib/components/common/FullHeightIframe.svelte';
 	import OutputEditView from './OutputEditView.svelte';
@@ -166,10 +174,280 @@
 
 	let contentContainerElement: HTMLDivElement;
 	let buttonsContainerElement: HTMLDivElement;
-	let showDeleteConfirm = false;
 
 	let model = null;
 	$: model = $models.find((m) => m.id === message.model);
+
+	// Smooth streaming. The wire hands over tokens in bursts, and some lanes (the
+	// Claude subscription CLI, any non-streaming provider) return the whole reply in
+	// one piece — which reads as the answer being dumped on screen. `renderContent`
+	// trails `message.content` and catches up at a readable pace, so the reply types
+	// itself out. It always finishes: the tail keeps typing after `done`, and a
+	// message that arrives already-complete (history, a re-render) shows in full at
+	// once rather than replaying.
+	let renderContent = '';
+	let smoothId: string | null = null;
+	let smoothRAF: number | null = null;
+	let smoothLastMs = 0;
+
+	const smoothStep = (t: number) => {
+		smoothRAF = null;
+		const raw = message?.content ?? '';
+		const dt = smoothLastMs ? Math.min(0.2, (t - smoothLastMs) / 1000) : 1 / 60;
+		smoothLastMs = t;
+		const behind = raw.length - renderContent.length;
+		if (behind > 0) {
+			// The further behind, the faster it drains — a long burst never queues up
+			// into a visible backlog, it just types quickly.
+			const cps = Math.max(45, behind / 0.4);
+			let end = Math.min(raw.length, renderContent.length + Math.max(1, Math.ceil(cps * dt)));
+			// A tool card is one atomic element, not a run of characters. marked only
+			// tokenizes `<details>` once its `</details>` is present; reveal the opening
+			// tag on its own and the block falls through to the raw-HTML branch, which
+			// prints the tag and everything after it as literal text — the arguments JSON
+			// and the whole tool result dumped into the chat until the closing tag catches
+			// up. Reveal the card whole, or not at all.
+			const detailsOpen = raw.indexOf('<details', renderContent.length);
+			if (detailsOpen !== -1 && detailsOpen < end) {
+				// The backend never nests these, so the first `</details>` is this card's.
+				const detailsClose = raw.indexOf('</details>', detailsOpen);
+				end = detailsClose === -1 ? detailsOpen : detailsClose + '</details>'.length;
+			} else {
+				// Never stop inside a half-written tag either — a `<details type="reas`
+				// would show up as literal text for a frame or two. Emit a finished tag
+				// whole, and only hold while one is still arriving.
+				const openTag = raw.lastIndexOf('<', end - 1);
+				if (openTag >= renderContent.length && raw.indexOf('>', openTag) >= end) {
+					const closeTag = raw.indexOf('>', openTag);
+					end = closeTag === -1 ? openTag : closeTag + 1;
+				}
+			}
+			if (end <= renderContent.length) {
+				// The only thing left to show is a tag mid-flight. Wait for the rest of it,
+				// unless the turn is over and no more is coming — then a partial tag beats
+				// an empty bubble.
+				if (!message?.done) {
+					smoothRAF = requestAnimationFrame(smoothStep);
+					return;
+				}
+				end = raw.length;
+			}
+			renderContent = raw.slice(0, end);
+		} else if (message?.done) {
+			smoothLastMs = 0;
+			return;
+		}
+		smoothRAF = requestAnimationFrame(smoothStep);
+	};
+
+	const startSmooth = () => {
+		if (smoothRAF !== null) return;
+		smoothLastMs = 0;
+		smoothRAF = requestAnimationFrame(smoothStep);
+	};
+
+	const onStreamContent = (id: string, raw: string, done: boolean | undefined) => {
+		if (id !== smoothId || raw.length < renderContent.length) {
+			smoothId = id;
+			// Already finished when we first see it (history, an edit, a re-mount):
+			// show it whole. Only a live turn gets typed out.
+			renderContent = done ? raw : '';
+		}
+		if (renderContent.length < raw.length || !done) startSmooth();
+	};
+
+	$: onStreamContent(message?.id, message?.content ?? '', message?.done);
+
+	$: split = splitChatArtifacts(renderContent);
+	$: artifacts = split.artifacts;
+	$: proseContent = split.prose;
+
+	let nowMs = Date.now();
+	let statsTick: ReturnType<typeof setInterval> | null = null;
+	$: if (message && !message.done) {
+		if (!statsTick) statsTick = setInterval(() => (nowMs = Date.now()), 250);
+	} else if (statsTick) {
+		clearInterval(statsTick);
+		statsTick = null;
+	}
+	// A workspace run's message content is only the `<details type="workspace_run">`
+	// marker: the run's tokens and timing arrive on the card's own event stream, minutes
+	// after this message's chat stream closed. The card publishes them by workspace id;
+	// pick them up here so the footer reports the run instead of a row of dashes.
+	$: wsRunId = (message?.content ?? '').match(/workspaceid="([^"]+)"/i)?.[1] ?? '';
+	$: stats = messageTokenStats({
+		...message,
+		harvisMetrics: message?.harvisMetrics ?? (wsRunId ? $workspaceRunMetrics[wsRunId] : undefined),
+		_now: nowMs
+	});
+	$: modelLabel = model?.name ?? message.model ?? '';
+
+	// `qwen3.5 (9b) (Q4_K_M)` — the parameter count is what people actually compare models
+	// on, so it gets its own parenthetical instead of staying buried in the id's tag.
+	const prettySize = (s: string | undefined) => {
+		const raw = String(s ?? '').trim();
+		const m = raw.match(/^([\d.]+)\s*([bmk])$/i);
+		return m ? `${parseFloat(m[1])}${m[2].toLowerCase()}` : raw;
+	};
+	// The row carries five icons — copy, the two ratings, regenerate, ⋯. Everything
+	// else lives in the menu.
+	$: moreActions = readOnly
+		? []
+		: [
+				...(($user?.role === 'user' ? ($user?.permissions?.chat?.edit ?? true) : true)
+					? [
+							{
+								id: 'edit',
+								label: $i18n.t('Edit'),
+								icon: 'edit',
+								onClick: () => editMessageHandler()
+							}
+						]
+					: []),
+				...(chatId && !$temporaryChatEnabled
+					? [
+							{
+								id: 'branch',
+								label: $i18n.t('Branch'),
+								icon: 'branch',
+								onClick: () => branchChatHandler()
+							}
+						]
+					: []),
+				...(isLastMessage &&
+				($user?.role === 'admin' || ($user?.permissions?.chat?.continue_response ?? true))
+					? [
+							{
+								id: 'continue',
+								label: $i18n.t('Continue Response'),
+								icon: 'continue',
+								onClick: () => continueResponse()
+							}
+						]
+					: []),
+				...(model?.actions ?? []).map((action) => ({
+					id: `action-${action.id}`,
+					label: action.name,
+					iconUrl: action.icon,
+					onClick: () => actionMessage(action.id, message)
+				}))
+			];
+
+	// Which service actually answered. `owned_by` is the routing field, so it is the
+	// one fact we can trust; unknown values get no tag rather than a meaningless one.
+	const PROVIDER_TAGS: Record<string, string> = {
+		anthropic: 'Claude',
+		'kimi-code': 'Kimi Code',
+		moonshot: 'Kimi',
+		openai: 'OpenAI',
+		'hermes-agent': 'Hermes'
+	};
+
+	// The label is icon → model name → one pill. The name reads plainly; the qualifiers
+	// that actually distinguish it (Claude, subscription, 9b, Q4_K_M) collect into a
+	// single lighter chip nested inside the footer bubble, so they group by their own
+	// surface instead of by brackets. Anything a tag already says is stripped out of the
+	// name so it isn't said twice.
+	$: modelParts = ((raw: string) => {
+		let base = raw;
+		const tags: { label: string; dim?: boolean }[] = [];
+
+		// Qualifiers the backend already parenthesised in the display name —
+		// "Claude Sonnet 4.5 (subscription)".
+		base = base
+			.replace(/\(([^()]{1,24})\)/g, (_m, inner) => {
+				tags.push({ label: String(inner).trim() });
+				return '';
+			})
+			.trim();
+
+		const provider =
+			PROVIDER_TAGS[String(model?.owned_by ?? '').toLowerCase()] ??
+			PROVIDER_TAGS[String(model?.info?.meta?.cloud_provider ?? '').toLowerCase()];
+		if (provider) {
+			// "Claude Sonnet 4.5" → "Sonnet 4.5" with Claude as its own tag.
+			const lead = new RegExp(`^${provider.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s+`, 'i');
+			const stripped = base.replace(lead, '').trim();
+			if (stripped) base = stripped;
+			tags.unshift({ label: provider });
+		}
+
+		let size = prettySize(model?.ollama?.details?.parameter_size);
+		let quant = String(model?.ollama?.details?.quantization_level ?? '').trim();
+
+		// Models that didn't come from Ollama carry the same two facts in their tag —
+		// `qwen3.5:9b-instruct-q4_K_M` — which is the only source we have for them.
+		const colon = base.lastIndexOf(':');
+		if (colon > 0) {
+			const segs = base.slice(colon + 1).split('-');
+			const sizeSeg = segs.find((s) => /^\d+(\.\d+)?[bmk]$/i.test(s));
+			const quantSeg = segs.find((s) => /^(iq|q)\d/i.test(s) || /^f(p)?(16|32)$/i.test(s));
+			if (sizeSeg || quantSeg) base = base.slice(0, colon);
+			if (!size && sizeSeg) size = sizeSeg.toLowerCase();
+			if (!quant && quantSeg) quant = quantSeg;
+		}
+		// Ollama names arrive namespaced (`batiai/qwen3.5-9b`) and carry the size and
+		// quant as trailing segments rather than after a colon, so neither the vendor
+		// nor the specs were reaching the chip — the footer read the whole raw string.
+		if (base.includes('/')) base = base.slice(base.lastIndexOf('/') + 1);
+		if (!quant) {
+			const m = base.match(/[-_]((?:iq|q)\d[\w]*|f(?:p)?(?:16|32))$/i);
+			if (m) {
+				quant = m[1];
+				base = base.slice(0, m.index).trim();
+			}
+		}
+		if (!size) {
+			const m = base.match(/[-_](\d+(?:\.\d+)?[bmk])$/i);
+			if (m) {
+				size = m[1].toLowerCase();
+				base = base.slice(0, m.index).trim();
+			}
+		}
+
+		if (size) {
+			base = base.replace(new RegExp(`[-:\\s]${size.replace('.', '\\.')}$`, 'i'), '');
+			tags.push({ label: size });
+		}
+		if (quant) tags.push({ label: quant, dim: true });
+
+		// The backend writes its qualifiers lowercase ("(subscription)"); in a chip of
+		// its own that reads as a typo. Size and quant keep their own casing.
+		const titled = tags.map((t) =>
+			/^[a-z][a-z ]*$/.test(t.label) ? { ...t, label: t.label[0].toUpperCase() + t.label.slice(1) } : t
+		);
+
+		return { base: base.trim() || raw, tags: titled };
+	})(modelLabel);
+
+	$: elapsedLabel = stats.elapsedS === null ? '—' : formatElapsed(stats.elapsedS);
+	// Nothing at all to say — an old message with no recorded timing and no usage — so the
+	// bubble stays away rather than printing a row of dashes.
+	$: showStats = !!(stats.total || stats.tokPerSec || stats.elapsedS !== null);
+
+	// The tooltips carry the provenance, so a number never has to be read as more (or
+	// less) certain than it is. "Reported at completion" is the honest state for most of
+	// a turn: the provider simply has not sent a count yet.
+	$: tokensTip = !stats.total
+		? $i18n.t('Token count is reported at completion')
+		: stats.total.quality === 'estimated'
+			? $i18n.t('Tokens so far — estimated from the text, not yet reported')
+			: [
+					`${$i18n.t('Context')} ${stats.context ? formatNumber(stats.context.value) : '—'}`,
+					`${$i18n.t('Output')} ${stats.output ? formatNumber(stats.output.value) : '—'}`,
+					stats.billedInput
+						? `${$i18n.t('Billed input across the run')} ${formatNumber(stats.billedInput.value)}`
+						: '',
+					stats.modelCalls ? `${$i18n.t('Model calls')} ${stats.modelCalls.value}` : ''
+				]
+					.filter(Boolean)
+					.join(' · ');
+
+	$: speedTip = stats.tokPerSec
+		? $i18n.t('Output tokens per second of model generation ({{S}}s), excluding tools and queueing', {
+				S: (stats.generationS ?? 0).toFixed(1)
+			})
+		: $i18n.t('Generation speed is only shown when the runtime reports generation time');
 
 	$: statusEntries = message?.statusHistory ?? [...(message?.status ? [message?.status] : [])];
 	$: hasVisibleStatus =
@@ -202,6 +480,54 @@
 		const res = await _copyToClipboard(text, null, $settings?.copyFormatted ?? false);
 		if (res) {
 			toast.success($i18n.t('Copying to clipboard was successful!'));
+		}
+	};
+
+	const branchChatHandler = async () => {
+		if (!chatId || $temporaryChatEnabled) return;
+
+		// A branch forks the conversation AT this message. The old handler called
+		// cloneChatById, which copied every later turn as well — so Branch and Clone did
+		// the same thing, and neither one let you take the chat a second direction from
+		// here. Walk the parent chain instead and keep only that lineage.
+		const lineage = createMessagesList(history, message.id).map((m) =>
+			JSON.parse(JSON.stringify(m))
+		);
+		if (lineage.length === 0) {
+			toast.error($i18n.t('Failed to create branch'));
+			return;
+		}
+		lineage.forEach((m, i) => {
+			// The tip has no children yet — that empty slot is what the branch is for.
+			m.childrenIds = i === lineage.length - 1 ? [] : [lineage[i + 1].id];
+		});
+
+		// Carry the source chat's models, params, files and folder across so the branch
+		// continues under the same settings rather than the workspace defaults.
+		const source = await getChatById(localStorage.token, chatId).catch(() => null);
+
+		const res = await createNewChat(
+			localStorage.token,
+			{
+				...(source?.chat ?? {}),
+				title: $i18n.t('Branch of {{TITLE}}', { TITLE: $chatTitle || 'chat' }),
+				history: {
+					currentId: lineage[lineage.length - 1].id,
+					messages: Object.fromEntries(lineage.map((m) => [m.id, m]))
+				},
+				messages: lineage
+			},
+			source?.folder_id ?? null
+		).catch((error) => {
+			toast.error(`${error}`);
+			return null;
+		});
+
+		if (res?.id) {
+			currentChatPage.set(1);
+			await chats.set(await getChatList(localStorage.token, $currentChatPage));
+			await pinnedChats.set(await getPinnedChatList(localStorage.token));
+			await goto(`/c/${res.id}`);
 		}
 	};
 
@@ -576,10 +902,6 @@
 		feedbackLoading = false;
 	};
 
-	const deleteMessageHandler = async () => {
-		deleteMessage(message.id);
-	};
-
 	$: if (!edit) {
 		(async () => {
 			await tick();
@@ -644,6 +966,14 @@
 	});
 
 	onDestroy(() => {
+		if (smoothRAF !== null) {
+			cancelAnimationFrame(smoothRAF);
+			smoothRAF = null;
+		}
+		if (statsTick) {
+			clearInterval(statsTick);
+			statsTick = null;
+		}
 		if (buttonsContainerElement) {
 			buttonsContainerElement.removeEventListener('wheel', buttonsWheelHandler);
 		}
@@ -653,14 +983,6 @@
 		}
 	});
 </script>
-
-<DeleteConfirmDialog
-	bind:show={showDeleteConfirm}
-	title={$i18n.t('Delete message?')}
-	on:confirm={() => {
-		deleteMessageHandler();
-	}}
-/>
 
 {#key message.id}
 	<div
@@ -673,21 +995,15 @@
 		     spans the full centered conversation column. Only the USER's messages are bubbled. -->
 		<div class="flex-auto w-0 relative">
 			<Name>
-				<Tooltip content={model?.name ?? message.model} placement="top-start">
-					{#if selectedModels.length > 1}
-						<!-- Compare mode: the whole point is telling the columns apart, so the real
-						     model name wins over the HARVIS wordmark. -->
-						<span id="response-message-model-name" class="line-clamp-1 text-gray-800 dark:text-gray-100">
-							{model?.name ?? message.model}
-						</span>
-					{:else}
-						<span
-							id="response-message-model-name"
-							class="harvis-wordmark response-harvis-wordmark line-clamp-1 text-gray-800 dark:text-gray-100"
-						>
-							HARVIS
-						</span>
-					{/if}
+				<!-- The response is Harvis speaking, so the header carries the product wordmark,
+				     not the model id. Which model actually answered belongs with the cost of
+				     answering — both live in the stats footer below. -->
+				<Tooltip content={modelLabel || $i18n.t('Harvis')} placement="top-start">
+					<span
+						class="inline-flex items-center rounded-lg bg-gray-800 px-2 py-[3px] text-gray-100 harvis-wordmark response-harvis-wordmark"
+					>
+						Harvis
+					</span>
 				</Tooltip>
 
 				{#if message.timestamp}
@@ -695,7 +1011,7 @@
 						class="self-center text-xs font-medium first-letter:capitalize ml-0.5 translate-y-[1px] {($settings?.highContrastMode ??
 						false)
 							? 'dark:text-gray-100 text-gray-900'
-							: 'invisible group-hover:visible transition text-gray-400'}"
+							: 'visible transition text-gray-400'}"
 					>
 						<Tooltip content={dayjs(message.timestamp * 1000).format('LLLL')}>
 							<span class="line-clamp-1"
@@ -716,25 +1032,14 @@
 							<StatusHistory statusHistory={message?.statusHistory} />
 						{/if}
 
-						{#if message?.files && message.files?.filter( (f) => ['image', 'file'].includes(f.type) ).length > 0}
+						{#if message?.files && message.files?.filter( (f) => f.type === 'image' || (f?.content_type ?? '').startsWith('image/') ).length > 0}
 							<div
 								class="my-1 w-full flex overflow-x-auto gap-2 flex-wrap"
 								dir={$settings?.chatDirection ?? 'auto'}
 							>
-								{#each message.files.filter((f) => ['image', 'file'].includes(f.type)) as file}
+								{#each message.files.filter((f) => f.type === 'image' || (f?.content_type ?? '').startsWith('image/')) as file}
 									<div>
-										{#if file.type === 'image' || (file?.content_type ?? '').startsWith('image/')}
-											<Image src={file.url} alt={message.content} />
-										{:else}
-											<FileItem
-												item={file}
-												url={file.url}
-												name={file.name}
-												type={file.type}
-												size={file?.size}
-												small={true}
-											/>
-										{/if}
+										<Image src={file.url} alt={message.content} />
 									</div>
 								{/each}
 							</div>
@@ -760,7 +1065,7 @@
 						{/if}
 
 						{#if edit === true}
-							<div class="w-full bg-gray-50 dark:bg-gray-800 rounded-3xl px-3 py-3 my-2">
+							<div class="w-full bg-gray-50 dark:bg-gray-800 rounded-xl px-3 py-3 my-2">
 								{#if editedOutput}
 									<!-- Structured output editor (visual + JSON toggle) -->
 									<OutputEditView
@@ -804,7 +1109,7 @@
 									<div>
 										<button
 											id="save-new-message-button"
-											class="px-3.5 py-1.5 bg-gray-50 hover:bg-gray-100 dark:bg-gray-800 dark:hover:bg-gray-700 border border-gray-100 dark:border-gray-700 text-gray-700 dark:text-gray-200 transition rounded-3xl"
+											class="px-3.5 py-1.5 bg-gray-50 hover:bg-gray-100 dark:bg-gray-800 dark:hover:bg-gray-700 border border-gray-100 dark:border-gray-700 text-gray-700 dark:text-gray-200 transition rounded-xl"
 											on:click={() => {
 												saveAsCopyHandler();
 											}}
@@ -816,7 +1121,7 @@
 									<div class="flex space-x-1.5">
 										<button
 											id="close-edit-message-button"
-											class="px-3.5 py-1.5 bg-white dark:bg-gray-900 hover:bg-gray-100 text-gray-800 dark:text-gray-100 transition rounded-3xl"
+											class="px-3.5 py-1.5 bg-white dark:bg-gray-900 hover:bg-gray-100 text-gray-800 dark:text-gray-100 transition rounded-xl"
 											on:click={() => {
 												cancelEditMessage();
 											}}
@@ -826,7 +1131,7 @@
 
 										<button
 											id="confirm-edit-message-button"
-											class="px-3.5 py-1.5 bg-gray-900 dark:bg-white hover:bg-gray-850 text-gray-100 dark:text-gray-800 transition rounded-3xl"
+											class="px-3.5 py-1.5 bg-gray-900 dark:bg-white hover:bg-gray-850 text-gray-100 dark:text-gray-800 transition rounded-xl"
 											on:click={() => {
 												editMessageConfirmHandler();
 											}}
@@ -852,14 +1157,14 @@
 									<span>{$taskHeartbeats[message.id]}</span>
 								</div>
 							{/if}
-							{#if message.content === '' && !message.done && !message.error && !hasVisibleStatus && !$taskHeartbeats[message.id]}
+							{#if renderContent === '' && !message.done && !message.error && !hasVisibleStatus && !$taskHeartbeats[message.id]}
 								<Skeleton />
-							{:else if message.content && message.error !== true}
+							{:else if renderContent && message.error !== true}
 								<!-- always show message contents even if there's an error -->
 								<!-- unless message.error === true which is legacy error handling, where the error message is stored in message.content -->
 								<ContentRenderer
 									id={`${chatId}-${message.id}`}
-									content={message.content}
+									content={proseContent || (artifacts.length ? '' : renderContent)}
 									sources={message.sources}
 									floatingButtons={message?.done &&
 										!readOnly &&
@@ -895,6 +1200,46 @@
 								/>
 							{/if}
 
+							{#if message?.files && message.files?.filter( (f) => f.type === 'file' && !(f?.content_type ?? '').startsWith('image/') ).length > 0}
+								<div class="mt-3 flex flex-col gap-2">
+									{#each message.files.filter((f) => f.type === 'file' && !(f?.content_type ?? '').startsWith('image/')) as file}
+										<FileItem
+											className="w-full max-w-md"
+											colorClassName="bg-white dark:bg-[#1c1c1c] border border-gray-200/80 dark:border-white/10"
+											item={file}
+											url={file.url}
+											name={file.name}
+											type={file.type}
+											size={file?.size}
+										/>
+									{/each}
+								</div>
+							{/if}
+
+							{#if artifacts.length}
+								<div class="mt-3 space-y-2">
+									{#each artifacts as art, artIdx (art.filename + '-' + artIdx)}
+										<ArtifactFileCard
+											id={`${chatId}-${message.id}-art-${artIdx}`}
+											lang={art.lang}
+											filename={art.filename}
+											code={art.code}
+											streaming={art.open}
+											done={!art.open && (message?.done ?? false)}
+											save={!readOnly}
+											preview={!readOnly}
+											edit={editCodeBlock && !art.open && (message?.done ?? false)}
+											onSave={(value) => {
+												history.messages[message.id].content = (
+													history.messages[message.id].content || ''
+												).replace(art.code, value);
+												updateChat();
+											}}
+										/>
+									{/each}
+								</div>
+							{/if}
+
 							{#if message?.error}
 								<Error content={message?.error?.content ?? message.content} />
 							{/if}
@@ -918,10 +1263,137 @@
 
 				{#if !edit}
 					<div
-						bind:this={buttonsContainerElement}
-						class="flex justify-start overflow-x-auto buttons text-gray-600 dark:text-gray-500 mt-0.5"
+						class="mt-2 flex flex-col gap-1.5"
 					>
-						{#if message.done || siblings.length > 1}
+						<!-- Who answered on the left, what it cost on the right. Two bubbles rather
+						     than one strip so the model name stays findable when the numbers grow;
+						     the stats sit a shade darker so the eye lands on the name first. -->
+						<div class="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
+							<span
+								class="inline-flex max-w-full items-center gap-1.5 rounded-lg border border-gray-200 dark:border-gray-800 px-2.5 py-1 text-[11px] font-medium text-gray-500 dark:text-gray-400"
+							>
+								<svg
+									xmlns="http://www.w3.org/2000/svg"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="currentColor"
+									stroke-width="1.9"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+									class="size-3.5 shrink-0 opacity-80"
+									aria-hidden="true"
+								>
+									<rect x="7" y="7" width="10" height="10" rx="1.5" />
+									<path d="M10 2v3M14 2v3M10 19v3M14 19v3M2 10h3M2 14h3M19 10h3M19 14h3" />
+								</svg>
+								<span
+									id="response-message-model-name"
+									class="line-clamp-1 font-normal text-gray-900 dark:text-gray-100"
+									>{modelParts.base || $i18n.t('Unknown model')}</span
+								>
+								{#if modelParts.tags.length}
+									<!-- The qualifiers ride in their own chip a shade lighter than the
+									     bubble around them, so the name and what it is stay separable at
+									     11px without punctuation doing the work. -->
+									<span
+										class="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-gray-100 dark:bg-gray-800 px-1.5 py-0.5 font-bold tracking-wide text-gray-900 dark:text-gray-100"
+									>
+										{#each modelParts.tags as tag}
+											<span class:opacity-75={tag.dim}>{tag.label}</span>
+										{/each}
+									</span>
+								{/if}
+							</span>
+
+							{#if showStats}
+							<span
+								class="inline-flex items-center gap-3.5 rounded-lg border border-gray-200 dark:border-gray-800 px-2.5 py-1 text-[11px] font-bold tabular-nums text-gray-600 dark:text-gray-300"
+							>
+								<!-- Each figure says where it came from. Providers report token counts
+								     once, at the end of a turn, so mid-answer these are honestly unknown
+								     and print an em dash. A running character-based guess is allowed for
+								     the token count alone, marked `~`, and is never used to derive a rate. -->
+								<Tooltip content={tokensTip}>
+									<span class="inline-flex items-center gap-1.5" class:opacity-60={!stats.total}>
+										<svg
+											xmlns="http://www.w3.org/2000/svg"
+											viewBox="0 0 24 24"
+											fill="none"
+											stroke="currentColor"
+											stroke-width="1.9"
+											stroke-linecap="round"
+											stroke-linejoin="round"
+											class="size-3.5 shrink-0 opacity-70"
+											aria-hidden="true"
+										>
+											<path d="M3.5 17a8.5 8.5 0 1 1 17 0" />
+											<path d="M12 17 16 12.4" />
+											<circle cx="12" cy="17" r="1.1" fill="currentColor" stroke="none" />
+										</svg>
+										{#if stats.total}
+											{stats.total.quality === 'estimated' ? '~' : ''}{formatNumber(
+												stats.total.value
+											)}
+										{:else}
+											—
+										{/if}
+									</span>
+								</Tooltip>
+
+								<Tooltip content={message.done ? $i18n.t('Time elapsed') : $i18n.t('Working')}>
+									<span
+										class="inline-flex items-center gap-1.5"
+										class:opacity-60={stats.elapsedS === null}
+									>
+										<svg
+											xmlns="http://www.w3.org/2000/svg"
+											viewBox="0 0 24 24"
+											fill="none"
+											stroke="currentColor"
+											stroke-width="1.9"
+											stroke-linecap="round"
+											stroke-linejoin="round"
+											class="size-3.5 shrink-0 opacity-70"
+											aria-hidden="true"
+										>
+											<circle cx="12" cy="12" r="9" />
+											<path d="M12 7v5.2l3.2 2" />
+										</svg>
+										{elapsedLabel}
+									</span>
+								</Tooltip>
+
+								<Tooltip content={speedTip}>
+									<span class="inline-flex items-center gap-1.5" class:opacity-60={!stats.tokPerSec}>
+										<svg
+											xmlns="http://www.w3.org/2000/svg"
+											viewBox="0 0 24 24"
+											fill="none"
+											stroke="currentColor"
+											stroke-width="1.9"
+											stroke-linecap="round"
+											stroke-linejoin="round"
+											class="size-3.5 shrink-0 opacity-70"
+											aria-hidden="true"
+										>
+											<path d="M13 2 4.5 13.5H11l-1 8.5L19.5 10H13z" />
+										</svg>
+										{#if stats.tokPerSec}
+											{stats.tokPerSec.value >= 10
+												? Math.round(stats.tokPerSec.value)
+												: stats.tokPerSec.value.toFixed(1)} tok/s
+										{:else}
+											— tok/s
+										{/if}
+									</span>
+								</Tooltip>
+							</span>
+							{/if}
+						</div>
+					<div
+						bind:this={buttonsContainerElement}
+						class="flex justify-start overflow-x-auto buttons text-gray-600 dark:text-gray-500"
+					>
 							{#if siblings.length > 1}
 								<div class="flex self-center min-w-fit" dir="ltr">
 									<button
@@ -1019,45 +1491,12 @@
 								</div>
 							{/if}
 
-							{#if message.done}
-								{#if !readOnly}
-									{#if $user?.role === 'user' ? ($user?.permissions?.chat?.edit ?? true) : true}
-										<Tooltip content={$i18n.t('Edit')} placement="bottom">
-											<button
-												aria-label={$i18n.t('Edit')}
-												class="{isLastMessage || ($settings?.highContrastMode ?? false)
-													? 'visible'
-													: 'invisible group-hover:visible'} p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-white hover:text-black transition"
-												on:click={() => {
-													editMessageHandler();
-												}}
-											>
-												<svg
-													xmlns="http://www.w3.org/2000/svg"
-													fill="none"
-													viewBox="0 0 24 24"
-													stroke-width="2.3"
-													aria-hidden="true"
-													stroke="currentColor"
-													class="w-4 h-4"
-												>
-													<path
-														stroke-linecap="round"
-														stroke-linejoin="round"
-														d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L6.832 19.82a4.5 4.5 0 01-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 011.13-1.897L16.863 4.487zm0 0L19.5 7.125"
-													/>
-												</svg>
-											</button>
-										</Tooltip>
-									{/if}
-								{/if}
-
 								<Tooltip content={$i18n.t('Copy')} placement="bottom">
 									<button
 										aria-label={$i18n.t('Copy')}
 										class="{isLastMessage || ($settings?.highContrastMode ?? false)
 											? 'visible'
-											: 'invisible group-hover:visible'} p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-white hover:text-black transition copy-response-button"
+											: 'visible'} p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-white hover:text-black transition copy-response-button"
 										on:click={() => {
 											copyToClipboard(message.content);
 										}}
@@ -1080,146 +1519,19 @@
 									</button>
 								</Tooltip>
 
-								{#if !readOnly && ($user?.role === 'admin' || ($user?.permissions?.chat?.tts ?? true))}
-									<Tooltip content={$i18n.t('Read Aloud')} placement="bottom">
-										<button
-											aria-label={$i18n.t('Read Aloud')}
-											id="speak-button-{message.id}"
-											class="{isLastMessage || ($settings?.highContrastMode ?? false)
-												? 'visible'
-												: 'invisible group-hover:visible'} p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-white hover:text-black transition"
-											on:click={() => {
-												if (!loadingSpeech) {
-													if (speaking) {
-														stopAudio();
-													} else {
-														speak();
-													}
-												}
-											}}
-										>
-											{#if loadingSpeech}
-												<svg
-													class=" w-4 h-4"
-													fill="currentColor"
-													viewBox="0 0 24 24"
-													aria-hidden="true"
-													xmlns="http://www.w3.org/2000/svg"
-												>
-													<style>
-														.spinner_S1WN {
-															animation: spinner_MGfb 0.8s linear infinite;
-															animation-delay: -0.8s;
-														}
-
-														.spinner_Km9P {
-															animation-delay: -0.65s;
-														}
-
-														.spinner_JApP {
-															animation-delay: -0.5s;
-														}
-
-														@keyframes spinner_MGfb {
-															93.75%,
-															100% {
-																opacity: 0.2;
-															}
-														}
-													</style>
-													<circle class="spinner_S1WN" cx="4" cy="12" r="3" />
-													<circle class="spinner_S1WN spinner_Km9P" cx="12" cy="12" r="3" />
-													<circle class="spinner_S1WN spinner_JApP" cx="20" cy="12" r="3" />
-												</svg>
-											{:else if speaking}
-												<svg
-													xmlns="http://www.w3.org/2000/svg"
-													fill="none"
-													viewBox="0 0 24 24"
-													aria-hidden="true"
-													stroke-width="2.3"
-													stroke="currentColor"
-													class="w-4 h-4"
-												>
-													<path
-														stroke-linecap="round"
-														stroke-linejoin="round"
-														d="M17.25 9.75 19.5 12m0 0 2.25 2.25M19.5 12l2.25-2.25M19.5 12l-2.25 2.25m-10.5-6 4.72-4.72a.75.75 0 0 1 1.28.53v15.88a.75.75 0 0 1-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.009 9.009 0 0 1 2.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75Z"
-													/>
-												</svg>
-											{:else}
-												<svg
-													xmlns="http://www.w3.org/2000/svg"
-													fill="none"
-													viewBox="0 0 24 24"
-													aria-hidden="true"
-													stroke-width="2.3"
-													stroke="currentColor"
-													class="w-4 h-4"
-												>
-													<path
-														stroke-linecap="round"
-														stroke-linejoin="round"
-														d="M19.114 5.636a9 9 0 010 12.728M16.463 8.288a5.25 5.25 0 010 7.424M6.75 8.25l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z"
-													/>
-												</svg>
-											{/if}
-										</button>
-									</Tooltip>
-								{/if}
-
-								{#if message.usage}
-									<Tooltip
-										content={message.usage
-											? `<pre>${sanitizeResponseContent(
-													JSON.stringify(message.usage, null, 2)
-														.replace(/"([^(")"]+)":/g, '$1:')
-														.slice(1, -1)
-														.split('\n')
-														.map((line) => line.slice(2))
-														.map((line) => (line.endsWith(',') ? line.slice(0, -1) : line))
-														.join('\n')
-												)}</pre>`
-											: ''}
-										placement="bottom"
-									>
-										<button
-											aria-hidden="true"
-											class=" {isLastMessage || ($settings?.highContrastMode ?? false)
-												? 'visible'
-												: 'invisible group-hover:visible'} p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-white hover:text-black transition whitespace-pre-wrap"
-											on:click={() => {
-												console.log(message);
-											}}
-											id="info-{message.id}"
-										>
-											<svg
-												aria-hidden="true"
-												xmlns="http://www.w3.org/2000/svg"
-												fill="none"
-												viewBox="0 0 24 24"
-												stroke-width="2.3"
-												stroke="currentColor"
-												class="w-4 h-4"
-											>
-												<path
-													stroke-linecap="round"
-													stroke-linejoin="round"
-													d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z"
-												/>
-											</svg>
-										</button>
-									</Tooltip>
-								{/if}
-
 								{#if !readOnly}
 									{#if !$temporaryChatEnabled && ($config?.features.enable_message_rating ?? true) && ($user?.role === 'admin' || ($user?.permissions?.chat?.rate_response ?? true))}
+										<!-- Up and down are one control, not two loose icons: a single bordered
+										     pill with a hairline between the halves. -->
+										<div
+											class="flex items-center rounded-lg border border-gray-200 dark:border-white/15 dark:bg-white/[0.03] overflow-hidden"
+										>
 										<Tooltip content={$i18n.t('Good Response')} placement="bottom">
 											<button
 												aria-label={$i18n.t('Good Response')}
 												class="{isLastMessage || ($settings?.highContrastMode ?? false)
 													? 'visible'
-													: 'invisible group-hover:visible'} p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg {(
+													: 'visible'} p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-none {(
 													message?.annotation?.rating ?? ''
 												).toString() === '1'
 													? 'bg-gray-100 dark:bg-gray-800'
@@ -1252,12 +1564,14 @@
 											</button>
 										</Tooltip>
 
+										<div class="w-px self-stretch my-1 bg-gray-200 dark:bg-white/15"></div>
+
 										<Tooltip content={$i18n.t('Bad Response')} placement="bottom">
 											<button
 												aria-label={$i18n.t('Bad Response')}
 												class="{isLastMessage || ($settings?.highContrastMode ?? false)
 													? 'visible'
-													: 'invisible group-hover:visible'} p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg {(
+													: 'visible'} p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-none {(
 													message?.annotation?.rating ?? ''
 												).toString() === '-1'
 													? 'bg-gray-100 dark:bg-gray-800'
@@ -1289,43 +1603,7 @@
 												</svg>
 											</button>
 										</Tooltip>
-									{/if}
-
-									{#if isLastMessage && ($user?.role === 'admin' || ($user?.permissions?.chat?.continue_response ?? true))}
-										<Tooltip content={$i18n.t('Continue Response')} placement="bottom">
-											<button
-												aria-label={$i18n.t('Continue Response')}
-												type="button"
-												id="continue-response-button"
-												class="{isLastMessage || ($settings?.highContrastMode ?? false)
-													? 'visible'
-													: 'invisible group-hover:visible'} p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-white hover:text-black transition"
-												on:click={() => {
-													continueResponse();
-												}}
-											>
-												<svg
-													aria-hidden="true"
-													xmlns="http://www.w3.org/2000/svg"
-													fill="none"
-													viewBox="0 0 24 24"
-													stroke-width="2.3"
-													stroke="currentColor"
-													class="w-4 h-4"
-												>
-													<path
-														stroke-linecap="round"
-														stroke-linejoin="round"
-														d="M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"
-													/>
-													<path
-														stroke-linecap="round"
-														stroke-linejoin="round"
-														d="M15.91 11.672a.375.375 0 0 1 0 .656l-5.603 3.113a.375.375 0 0 1-.557-.328V8.887c0-.286.307-.466.557-.327l5.603 3.112Z"
-													/>
-												</svg>
-											</button>
-										</Tooltip>
+										</div>
 									{/if}
 
 									{#if $user?.role === 'admin' || ($user?.permissions?.chat?.regenerate_response ?? true)}
@@ -1374,7 +1652,7 @@
 														aria-label={$i18n.t('Regenerate')}
 														class="{isLastMessage
 															? 'visible'
-															: 'invisible group-hover:visible'} p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-white hover:text-black transition"
+															: 'visible'} p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-white hover:text-black transition"
 													>
 														<svg
 															xmlns="http://www.w3.org/2000/svg"
@@ -1401,7 +1679,7 @@
 													aria-label={$i18n.t('Regenerate')}
 													class="{isLastMessage
 														? 'visible'
-														: 'invisible group-hover:visible'} p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-white hover:text-black transition regenerate-response-button"
+														: 'visible'} p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-white hover:text-black transition regenerate-response-button"
 													on:click={() => {
 														showRateComment = false;
 														regenerateResponse(message);
@@ -1438,30 +1716,51 @@
 											</Tooltip>
 										{/if}
 									{/if}
+									<!-- Copy · rate · regenerate · read aloud are the row; Edit and Branch
+									     live in the ⋯ menu. Read Aloud stays out here because replaying an
+									     answer is a one-click action, not a buried one. -->
 
-									{#if $user?.role === 'admin' || ($user?.permissions?.chat?.delete_message ?? true)}
-										{#if siblings.length > 1}
-											<Tooltip content={$i18n.t('Delete')} placement="bottom">
-												<button
-													type="button"
-													aria-label={$i18n.t('Delete')}
-													id="delete-response-button"
-													class="{isLastMessage || ($settings?.highContrastMode ?? false)
-														? 'visible'
-														: 'invisible group-hover:visible'} p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-white hover:text-black transition"
-													on:click={(e) => {
-														if (e.shiftKey) {
-															deleteMessageHandler();
-														} else {
-															showDeleteConfirm = true;
-														}
-													}}
-												>
+									<!-- Auto-playback clicks this id from Chat.svelte; it is now the same
+									     button the user sees, so autoplay and the manual control share state. -->
+									{#if $user?.role === 'admin' || ($user?.permissions?.chat?.tts ?? true)}
+										<Tooltip
+											content={speaking ? $i18n.t('Stop') : $i18n.t('Read Aloud')}
+											placement="bottom"
+										>
+											<button
+												type="button"
+												id="speak-button-{message.id}"
+												aria-label={speaking ? $i18n.t('Stop') : $i18n.t('Read Aloud')}
+												class="visible p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg {speaking
+													? 'bg-gray-100 dark:bg-gray-800'
+													: ''} dark:hover:text-white hover:text-black transition"
+												on:click={() => {
+													if (loadingSpeech) return;
+													if (speaking) {
+														stopAudio();
+													} else {
+														speak();
+													}
+												}}
+											>
+												{#if loadingSpeech}
+													<Spinner className="size-4" />
+												{:else if speaking}
+													<svg
+														xmlns="http://www.w3.org/2000/svg"
+														viewBox="0 0 24 24"
+														fill="currentColor"
+														aria-hidden="true"
+														class="w-4 h-4"
+													>
+														<rect x="6" y="6" width="12" height="12" rx="1.5" />
+													</svg>
+												{:else}
 													<svg
 														xmlns="http://www.w3.org/2000/svg"
 														fill="none"
 														viewBox="0 0 24 24"
-														stroke-width="2"
+														stroke-width="2.3"
 														stroke="currentColor"
 														aria-hidden="true"
 														class="w-4 h-4"
@@ -1469,47 +1768,36 @@
 														<path
 															stroke-linecap="round"
 															stroke-linejoin="round"
-															d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0"
+															d="M19.114 5.636a9 9 0 0 1 0 12.728M16.463 8.288a5.25 5.25 0 0 1 0 7.424M6.75 8.25l4.72-4.72a.75.75 0 0 1 1.28.53v15.88a.75.75 0 0 1-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.009 9.009 0 0 1 2.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75Z"
 														/>
 													</svg>
-												</button>
-											</Tooltip>
-										{/if}
-									{/if}
-
-									{#each model?.actions ?? [] as action}
-										<Tooltip content={action.name} placement="bottom">
-											<button
-												type="button"
-												aria-label={action.name}
-												class="{isLastMessage || ($settings?.highContrastMode ?? false)
-													? 'visible'
-													: 'invisible group-hover:visible'} p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-white hover:text-black transition"
-												on:click={() => {
-													actionMessage(action.id, message);
-												}}
-											>
-												{#if action?.icon}
-													<div class="size-4">
-														<img
-															src={action.icon}
-															class="w-4 h-4 {action.icon.includes('data:image/svg')
-																? 'dark:invert-[80%]'
-																: ''}"
-															style="fill: currentColor;"
-															alt={action.name}
-															draggable="false"
-														/>
-													</div>
-												{:else}
-													<Sparkles strokeWidth="2.1" className="size-4" />
 												{/if}
 											</button>
 										</Tooltip>
-									{/each}
+									{/if}
+
+									<MoreActions items={moreActions}>
+										<Tooltip content={$i18n.t('More')} placement="bottom">
+											<div
+												aria-label={$i18n.t('More')}
+												class="visible p-1.5 hover:bg-black/5 dark:hover:bg-white/5 rounded-lg dark:hover:text-white hover:text-black transition cursor-pointer"
+											>
+												<svg
+													xmlns="http://www.w3.org/2000/svg"
+													viewBox="0 0 24 24"
+													fill="currentColor"
+													aria-hidden="true"
+													class="w-4 h-4"
+												>
+													<path
+														d="M6 12a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Zm7.5 0a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Zm7.5 0a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Z"
+													/>
+												</svg>
+											</div>
+										</Tooltip>
+									</MoreActions>
 								{/if}
-							{/if}
-						{/if}
+					</div>
 					</div>
 
 					{#if message.done && showRateComment}

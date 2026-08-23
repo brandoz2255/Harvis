@@ -180,7 +180,7 @@
 		<div class=" absolute -top-1 -right-1">
 			<button
 				aria-label={$i18n.t('Remove File')}
-				class=" bg-white text-black border border-gray-50 rounded-full {($settings?.highContrastMode ??
+				class=" bg-white text-black border border-gray-50 rounded-lg {($settings?.highContrastMode ??
 				false)
 					? ''
 					: 'outline-hidden focus:outline-hidden group-hover:visible invisible transition'}"
@@ -193,7 +193,7 @@
 			</button>
 
 			<!-- <button
-				class=" p-1 dark:text-gray-300 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 rounded-full group-hover:visible invisible transition"
+				class=" p-1 dark:text-gray-300 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 rounded-lg group-hover:visible invisible transition"
 				type="button"
 				on:click={() => {
 				}}

@@ -460,7 +460,7 @@
 	bind:clientWidth={containerWidth}
 	class="{loading
 		? ' bg-gray-100/50 dark:bg-gray-850/50'
-		: 'bg-indigo-300/10 dark:bg-indigo-500/10 '} rounded-full flex justify-between {className}"
+		: 'bg-indigo-300/10 dark:bg-indigo-500/10 '} rounded-lg flex justify-between {className}"
 >
 	<div class="flex items-center mr-1">
 		<button
@@ -472,7 +472,7 @@
 				: 'bg-indigo-400/20 text-indigo-600 dark:text-indigo-300 '} 
 
 
-             rounded-full"
+             rounded-lg"
 			on:click={async () => {
 				stopRecording();
 				onCancel();
@@ -521,7 +521,7 @@
 
 		<div class="flex items-center">
 			{#if loading}
-				<div class=" text-gray-500 rounded-full cursor-not-allowed">
+				<div class=" text-gray-500 rounded-lg cursor-not-allowed">
 					<svg
 						width="24"
 						height="24"
@@ -615,7 +615,7 @@
 				<button
 					id="confirm-recording-button"
 					type="button"
-					class="p-1.5 bg-indigo-500 text-white dark:bg-indigo-500 dark:text-blue-950 rounded-full"
+					class="p-1.5 bg-indigo-500 text-white dark:bg-indigo-500 dark:text-blue-950 rounded-lg"
 					on:click={async () => {
 						await confirmRecording();
 					}}

@@ -12,9 +12,28 @@
 
 	let loaded = false;
 
+	// Sub-routes whose backing endpoints the facade does not implement. Hiding the
+	// tab is not enough — a bookmark or a typed URL still lands on a dead page —
+	// so a gated route bounces to Evaluations, the one pane that is fully backed.
+	const GATED_ROUTES: [string, string][] = [
+		['/admin/users', 'enable_admin_users'],
+		['/admin/analytics', 'enable_admin_analytics'],
+		['/admin/functions', 'enable_admin_functions'],
+		['/admin/settings', 'enable_admin_settings']
+	];
+
 	onMount(async () => {
 		if ($user?.role !== 'admin') {
 			await goto('/');
+			return;
+		}
+		const path = $page.url.pathname;
+		const gated = GATED_ROUTES.find(
+			([prefix, flag]) => path.startsWith(prefix) && !$config?.features?.[flag]
+		);
+		if (gated) {
+			await goto('/admin/evaluations');
+			return;
 		}
 		loaded = true;
 	});
@@ -57,17 +76,19 @@
 
 				<div class=" flex w-full">
 					<div
-						class="flex gap-1 scrollbar-none overflow-x-auto w-fit text-center text-sm font-medium rounded-full bg-transparent pt-1"
+						class="flex gap-1 scrollbar-none overflow-x-auto w-fit text-center text-sm font-medium rounded-lg bg-transparent pt-1"
 					>
-						<a
-							draggable="false"
-							class="min-w-fit p-1.5 {$page.url.pathname.includes('/admin/users')
-								? ''
-								: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition select-none"
-							href="/admin">{$i18n.t('Users')}</a
-						>
+						{#if $config?.features?.enable_admin_users}
+							<a
+								draggable="false"
+								class="min-w-fit p-1.5 {$page.url.pathname.includes('/admin/users')
+									? ''
+									: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition select-none"
+								href="/admin">{$i18n.t('Users')}</a
+							>
+						{/if}
 
-						{#if $config?.features.enable_admin_analytics ?? true}
+						{#if $config?.features?.enable_admin_analytics}
 							<a
 								draggable="false"
 								class="min-w-fit p-1.5 {$page.url.pathname.includes('/admin/analytics')
@@ -85,21 +106,25 @@
 							href="/admin/evaluations">{$i18n.t('Evaluations')}</a
 						>
 
-						<a
-							draggable="false"
-							class="min-w-fit p-1.5 {$page.url.pathname.includes('/admin/functions')
-								? ''
-								: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition select-none"
-							href="/admin/functions">{$i18n.t('Functions')}</a
-						>
+						{#if $config?.features?.enable_admin_functions}
+							<a
+								draggable="false"
+								class="min-w-fit p-1.5 {$page.url.pathname.includes('/admin/functions')
+									? ''
+									: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition select-none"
+								href="/admin/functions">{$i18n.t('Functions')}</a
+							>
+						{/if}
 
-						<a
-							draggable="false"
-							class="min-w-fit p-1.5 {$page.url.pathname.includes('/admin/settings')
-								? ''
-								: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition select-none"
-							href="/admin/settings">{$i18n.t('Settings')}</a
-						>
+						{#if $config?.features?.enable_admin_settings}
+							<a
+								draggable="false"
+								class="min-w-fit p-1.5 {$page.url.pathname.includes('/admin/settings')
+									? ''
+									: 'text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'} transition select-none"
+								href="/admin/settings">{$i18n.t('Settings')}</a
+							>
+						{/if}
 					</div>
 				</div>
 			</div>

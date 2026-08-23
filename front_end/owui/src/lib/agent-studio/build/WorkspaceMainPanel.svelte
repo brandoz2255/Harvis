@@ -27,24 +27,21 @@
 	// column, and this panel is just File / Diff / Preview / Logs.
 	export let showChat = true;
 
-	// Editor + Preview tabs only surface when a file is selected / preview is available.
+	// The Preview tab renders whatever the parent puts in the `preview` slot — the run's
+	// primary artifact, rendered big. It stays hidden until the parent says one exists, so
+	// the tab is never a permanent empty promise. Editor still follows file selection.
+	export let hasPreview = false;
 	$: hasFile = !!selectedFile;
-	// Preview tab stays hidden until a real preview URL exists (honesty: no permanent "soon" pane).
-	const BUILD_FILE_PREVIEW = false;
 	$: tabs = [
 		...(showChat ? [{ id: 'chat', label: $i18n.t('Chat') }] : []),
+		...(hasPreview ? [{ id: 'preview', label: $i18n.t('Preview') }] : []),
 		{ id: 'diff', label: $i18n.t('Diff') },
 		{ id: 'logs', label: $i18n.t('Logs') },
-		...(hasFile
-			? [
-					{ id: 'editor', label: $i18n.t('Editor') },
-					...(BUILD_FILE_PREVIEW ? [{ id: 'preview', label: $i18n.t('Preview') }] : [])
-				]
-			: [])
+		...(hasFile ? [{ id: 'editor', label: $i18n.t('Editor') }] : [])
 	];
 	// In dock mode never sit on the (now-absent) Chat tab.
 	$: if (!showChat && tab === 'chat') tab = 'diff';
-	$: if (!BUILD_FILE_PREVIEW && tab === 'preview') tab = hasFile ? 'editor' : 'diff';
+	$: if (!hasPreview && tab === 'preview') tab = hasFile ? 'editor' : 'diff';
 
 	const selectTab = (id: 'chat' | 'diff' | 'logs' | 'editor' | 'preview') => {
 		tab = id;
@@ -237,8 +234,12 @@
 				</div>
 			{/if}
 		{:else if tab === 'preview'}
-			<div class="h-full flex flex-col items-center justify-center text-center px-6 py-10">
-				<div class="text-sm text-gray-400">{$i18n.t('No preview available yet.')}</div>
+			<div class="h-full min-h-0">
+				<slot name="preview">
+					<div class="h-full flex flex-col items-center justify-center text-center px-6 py-10">
+						<div class="text-sm text-gray-400">{$i18n.t('No preview available yet.')}</div>
+					</div>
+				</slot>
 			</div>
 		{/if}
 	</div>

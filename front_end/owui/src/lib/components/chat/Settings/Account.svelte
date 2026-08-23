@@ -400,7 +400,7 @@
 			</div>
 		{/if}
 		<button
-			class="px-3.5 py-1.5 text-sm font-medium bg-black text-white dark:bg-white dark:text-black transition rounded-full {PROFILE_UPDATE_AVAILABLE
+			class="px-3.5 py-1.5 text-sm font-medium bg-black text-white dark:bg-white dark:text-black transition rounded-lg {PROFILE_UPDATE_AVAILABLE
 				? 'hover:bg-gray-900 dark:hover:bg-gray-100'
 				: 'opacity-50 cursor-not-allowed'}"
 			disabled={!PROFILE_UPDATE_AVAILABLE}

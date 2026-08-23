@@ -17,6 +17,8 @@
 	import Image from './Image.svelte';
 	import FullHeightIframe from './FullHeightIframe.svelte';
 	import { settings } from '$lib/stores';
+	import type { TerminalRun } from '$lib/agent-studio/runEventProjection';
+	import TerminalRunCard from '$lib/components/chat/Messages/TerminalRunCard.svelte';
 
 	export let id: string = '';
 	export let attributes: {
@@ -39,7 +41,7 @@
 
 	$: if (!open) expandedResult = false;
 	export let buttonClassName =
-		'w-fit text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition';
+		'w-full min-w-0 text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition';
 
 	const componentId = id || uuidv4();
 
@@ -87,10 +89,80 @@
 
 	$: parsedArgs = parseArguments(args);
 	$: parsedResult = parseJSONString(result);
+	$: isTerminalCall =
+		/^(?:exec|run_code|run_tests|bash|shell|terminal|terminal\.exec|harvis-terminal)$/i.test(
+			attributes?.name ?? ''
+		);
+	$: terminalResult =
+		parsedResult && typeof parsedResult === 'object' && !Array.isArray(parsedResult)
+			? (parsedResult as Record<string, unknown>)
+			: {};
+	$: terminalExitCode =
+		terminalResult.exit_code === null || terminalResult.exit_code === undefined
+			? null
+			: Number.isFinite(Number(terminalResult.exit_code))
+				? Number(terminalResult.exit_code)
+				: null;
+	$: terminalStdout =
+		typeof terminalResult.stdout === 'string'
+			? terminalResult.stdout
+			: typeof terminalResult.stdout_preview === 'string'
+				? terminalResult.stdout_preview
+				: isDone && typeof parsedResult === 'string'
+					? parsedResult
+					: '';
+	$: terminalStderr =
+		typeof terminalResult.stderr === 'string'
+			? terminalResult.stderr
+			: typeof terminalResult.stderr_preview === 'string'
+				? terminalResult.stderr_preview
+				: '';
+	$: terminalRun = {
+		id: componentId,
+		laneId: '',
+		correlationIds: [],
+		tool: attributes?.name ?? 'terminal',
+		command:
+			typeof parsedArgs?.command === 'string'
+				? parsedArgs.command
+				: typeof parsedArgs?.cmd === 'string'
+					? parsedArgs.cmd
+					: args,
+		cwd:
+			typeof parsedArgs?.cwd === 'string'
+				? parsedArgs.cwd
+				: typeof parsedArgs?.working_directory === 'string'
+					? parsedArgs.working_directory
+					: '',
+		status: isExecuting
+			? 'running'
+			: isDone
+				? terminalResult.success === false ||
+					(terminalExitCode !== null && terminalExitCode !== 0)
+					? 'failed'
+					: 'succeeded'
+				: 'queued',
+		stdout: terminalStdout,
+		stderr: terminalStderr,
+		chunks: [
+			...(terminalStdout ? [{ stream: 'stdout' as const, text: terminalStdout }] : []),
+			...(terminalStderr ? [{ stream: 'stderr' as const, text: terminalStderr }] : [])
+		],
+		exitCode: terminalExitCode,
+		durationMs:
+			terminalResult.duration_ms === null || terminalResult.duration_ms === undefined
+				? null
+				: Number.isFinite(Number(terminalResult.duration_ms))
+					? Number(terminalResult.duration_ms)
+					: null,
+		truncated: terminalResult.truncated === true
+	} satisfies TerminalRun;
 </script>
 
 <div {id} class={className}>
-	{#if !grouped && embeds && Array.isArray(embeds) && embeds.length > 0}
+	{#if isTerminalCall && !(embeds && Array.isArray(embeds) && embeds.length > 0)}
+		<TerminalRunCard run={terminalRun} />
+	{:else if !grouped && embeds && Array.isArray(embeds) && embeds.length > 0}
 		<!-- Embed Mode: Show iframes without collapsible behavior -->
 		<div class="py-1 w-full cursor-pointer">
 			<div class="w-full text-xs text-gray-500">
@@ -111,11 +183,19 @@
 		</div>
 	{:else}
 		<!-- Tool call display -->
-		<!-- svelte-ignore a11y-no-static-element-interactions -->
 		<div
-			class="{buttonClassName} cursor-pointer"
+			class="{buttonClassName} cursor-pointer rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+			role="button"
+			tabindex="0"
+			aria-expanded={open}
 			on:pointerup={() => {
 				open = !open;
+			}}
+			on:keydown={(event) => {
+				if (event.key === 'Enter' || event.key === ' ') {
+					event.preventDefault();
+					open = !open;
+				}
 			}}
 		>
 			<div
@@ -175,7 +255,7 @@
 
 		{#if open}
 			<div transition:slide={{ duration: 300, easing: quintOut, axis: 'y' }}>
-				<div class="border border-gray-50 dark:border-gray-850/30 rounded-2xl my-1.5 p-3 space-y-3">
+				<div class="w-full min-w-0 max-w-full overflow-hidden border border-gray-50 dark:border-gray-850/30 rounded-2xl my-1.5 p-3 space-y-3">
 					<!-- Input -->
 					{#if args}
 						<div>

@@ -140,7 +140,7 @@
 						{#if query}
 							<div class="self-center pl-1.5 pr-1 translate-y-[0.5px] rounded-l-xl bg-transparent">
 								<button
-									class="p-0.5 rounded-full hover:bg-gray-100 dark:hover:bg-gray-900 transition"
+									class="p-0.5 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-900 transition"
 									on:click={() => {
 										query = '';
 										selectedIdx = 0;

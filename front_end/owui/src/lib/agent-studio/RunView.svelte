@@ -30,6 +30,9 @@
 	// Host override for the dock's '⤢ Full' button — lets embedding pages open their
 	// own in-place inspector instead of navigating away (goto stays as the fallback).
 	export let onOpenFull: (() => void) | null = null;
+	// Which artifact cards this view renders. The Build thread passes 'changes' so the
+	// preview isn't duplicated inline — it belongs in the workspace dock, big.
+	export let artifactsMode: 'all' | 'preview' | 'changes' = 'all';
 
 	let events: WorkspaceEvent[] = [];
 	let phase: 'connecting' | 'running' | 'done' | 'error' | 'cancelled' = 'connecting';
@@ -49,7 +52,13 @@
 	let runCompletionTokens = 0;
 	let runContextWindow = 0;
 
-	$: running = phase === 'connecting' || phase === 'running';
+	// The run record's status is authoritative — the stream is only a live hint. A view
+	// mounted on an ALREADY-FINISHED run starts at phase 'connecting' and, if the replay
+	// closes without a terminal event, never leaves it: that's what kept a pulsing dot and
+	// "Working…" pinned over a task that had finished minutes earlier.
+	const TERMINAL_STATUS = ['done', 'completed', 'error', 'failed', 'cancelled', 'canceled'];
+	$: finishedOnServer = TERMINAL_STATUS.includes((status || '').toLowerCase());
+	$: running = !finishedOnServer && (phase === 'connecting' || phase === 'running');
 
 	// Live token estimate (chars/4) over EVERYTHING the agent streams — token
 	// deltas, tool-call args, tool outputs, logs, summaries — so the gauge moves
@@ -359,7 +368,7 @@
 		</div>
 		<!-- Artifacts auto-pop when they exist (invisible while there are none). -->
 		<div class="shrink-0 max-h-[45%] overflow-y-auto px-3">
-			<RunArtifacts {wsId} done={!running} />
+			<RunArtifacts {wsId} done={!running} mode={artifactsMode} />
 		</div>
 		<div class="flex-1 min-h-0 overflow-y-auto px-3 py-2">
 			<ThoughtStream {events} {running} onRetry={retryStream} />
@@ -390,7 +399,7 @@
 		<!-- Artifact preview + diffs — auto-popped when an orchestrated run finishes.
 		     Renders nothing until artifacts exist, so it's invisible while running. -->
 		<div class="shrink-0 max-h-[55%] overflow-y-auto px-3">
-			<RunArtifacts {wsId} done={!running} />
+			<RunArtifacts {wsId} done={!running} mode={artifactsMode} />
 		</div>
 		<!-- Resizable split: drag the handle to push the thought stream up/down. -->
 		<PaneGroup direction="vertical" class="flex-1 min-h-0">

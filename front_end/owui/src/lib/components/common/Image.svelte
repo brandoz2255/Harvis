@@ -43,7 +43,7 @@
 		<div class=" absolute -top-1 -right-1">
 			<button
 				aria-label={$i18n.t('Remove image')}
-				class=" bg-white text-black border border-white rounded-full group-hover:visible invisible transition"
+				class=" bg-white text-black border border-white rounded-lg group-hover:visible invisible transition"
 				type="button"
 				on:click={() => {
 					onDismiss();

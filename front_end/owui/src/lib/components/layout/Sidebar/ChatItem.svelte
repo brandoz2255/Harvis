@@ -413,19 +413,18 @@
 	{#if confirmEdit}
 		<div
 			id="sidebar-chat-item"
-			class=" w-full flex justify-between rounded-xl px-[11px] py-[6px] {id === $chatId ||
-			confirmEdit
-				? 'bg-gray-100 dark:bg-gray-900 selected'
-				: selected
-					? 'bg-gray-100 dark:bg-gray-950 selected'
-					: 'group-hover:bg-gray-100 dark:group-hover:bg-gray-950'}  whitespace-nowrap relative {generating
+			class=" w-full flex justify-between px-[11px] py-[6px] {id === $chatId ||
+			confirmEdit ||
+			selected
+				? 'rounded-xl bg-gray-200 dark:bg-[oklch(0.29_0.024_258)] selected'
+				: 'rounded-xl group-hover:bg-gray-200 dark:group-hover:bg-[oklch(0.29_0.024_258)]'}  whitespace-nowrap relative {generating
 				? 'cursor-not-allowed'
 				: ''}"
 		>
 			<input
 				id="chat-title-input-{id}"
 				bind:value={chatTitle}
-				class=" bg-transparent w-full outline-hidden mr-10"
+				class=" bg-transparent w-full outline-hidden mr-10 text-gray-900 dark:text-gray-100 placeholder:text-gray-500 dark:placeholder:text-gray-400"
 				placeholder={generating ? $i18n.t('Generating...') : ''}
 				disabled={generating}
 				on:keydown={chatTitleInputKeydownHandler}
@@ -449,12 +448,11 @@
 	{:else}
 		<a
 			id="sidebar-chat-item"
-			class=" w-full flex justify-between rounded-xl px-[11px] py-[6px] {id === $chatId ||
-			confirmEdit
-				? 'bg-gray-100 dark:bg-gray-900 selected'
-				: selected
-					? 'bg-gray-100 dark:bg-gray-950 selected'
-					: ' group-hover:bg-gray-100 dark:group-hover:bg-gray-950'}  whitespace-nowrap"
+			class=" w-full flex justify-between px-[11px] py-[6px] {id === $chatId ||
+			confirmEdit ||
+			selected
+				? 'rounded-xl bg-gray-200 dark:bg-[oklch(0.29_0.024_258)] selected'
+				: 'rounded-xl group-hover:bg-gray-200 dark:group-hover:bg-[oklch(0.29_0.024_258)]'}  whitespace-nowrap"
 			href="/c/{id}"
 			on:click={() => {
 				dispatch('select');
@@ -497,9 +495,11 @@
 			<div class="flex self-center flex-1 w-full min-w-0">
 				<div
 					dir="auto"
-					class="text-left self-center overflow-hidden whitespace-nowrap name-fade w-full h-[20px] text-[13px] font-normal {unread
-						? 'text-gray-700 dark:text-gray-200'
-						: 'text-gray-500 dark:text-gray-400'}"
+					class="text-left self-center overflow-hidden whitespace-nowrap name-fade w-full h-[20px] text-[13px] font-normal {id === $chatId
+						? 'text-gray-900 dark:text-gray-100'
+						: unread
+							? 'text-gray-700 dark:text-gray-200'
+							: 'text-gray-500 dark:text-gray-400'}"
 				>
 					{title}
 				</div>
@@ -511,11 +511,9 @@
 	<div
 		id="sidebar-chat-item-menu"
 		class="
-        {id === $chatId || confirmEdit
-			? 'from-gray-100 dark:from-gray-900 selected'
-			: selected
-				? 'from-gray-100 dark:from-gray-950 selected'
-				: 'invisible group-hover:visible from-gray-100 dark:from-gray-950'}
+        {id === $chatId || confirmEdit || selected
+			? 'from-gray-200 dark:from-[oklch(0.29_0.024_258)] selected'
+			: 'invisible group-hover:visible from-gray-200 dark:from-[oklch(0.29_0.024_258)]'}
             absolute {className === 'pr-2'
 			? 'right-[8px]'
 			: 'right-1'} top-[4px] py-1 pr-0.5 mr-1.5 pl-5 bg-linear-to-l from-80%

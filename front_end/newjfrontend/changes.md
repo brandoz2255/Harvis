@@ -1,3 +1,110 @@
+## 2026-08-18 23:10 PDT: Served OWUI build was stale — rebuilt + Bionic file cards
+
+### Problem
+User could not see the Bionic/LM Studio chat look. Nginx serves `front_end/owui/build`, and that bundle was from 20:31 while source landed ~22:22.
+
+### Root cause
+`owui-builder` skips the copy when `build/index.html` already exists, so a host-side source change never reached nginx until a rebuild.
+
+### Solution
+- Rebuilt with host `npm run build` in `front_end/owui` (node_modules present; intended dev path). Restarted `nginx-proxy`.
+- Artifact files now render as compact cards (filename + type badge + ⋮ copy/download/expand), not only a CodeBlock. Assistant `message.files` attachments use the same large card under the answer.
+- Branch action clones the chat (same API as sidebar Clone).
+
+### Files
+- `front_end/owui/src/lib/components/chat/Messages/ArtifactFileCard.svelte` (new)
+- `front_end/owui/src/lib/components/chat/Messages/ResponseMessage.svelte`
+- `front_end/owui/build` (regenerated)
+
+Hard-refresh the app at `http://localhost:9000` (Ctrl+Shift+R). Remaining vs screenshot: composer still says Harvis not “Ask Bionic”; context/token meter under the input; Mac traffic-light chrome; “Worked for” sits in the answer footer not between the user bubble and the prose.
+
+---
+
+## 2026-08-18 22:17 PDT: Bionic chat look — artifacts, stats footer, blue active session
+
+### Problem
+Main chat still looked like OWUI defaults: HARVIS wordmark instead of the model name, hover-only actions, usage buried in a JSON tooltip, fenced scripts dumped inline, weak gray selected-chat highlight, and delete only when a branch existed.
+
+### Solution
+- Assistant header shows the real model name. Fenced scripts/files are lifted into LM Studio-style cards under the prose (mermaid/vega/canvas/`<details>` stay inline) with a live caret while the fence is still open.
+- Footer is always visible: copy, edit, regenerate, sibling pager, trash (any assistant turn), plus model · tokens · elapsed (“Worked for Xs”) · tok/s.
+- User bubbles are full-width dark-gray (`#2c2c2c`). Active sidebar chat is a rounded blue pill with white text.
+
+### Files
+- `front_end/owui/src/lib/utils/splitChatArtifacts.ts` (new)
+- `front_end/owui/src/lib/components/chat/Messages/ResponseMessage.svelte`
+- `front_end/owui/src/lib/components/chat/Messages/UserMessage.svelte`
+- `front_end/owui/src/lib/components/chat/Messages/CodeBlock.svelte`
+- `front_end/owui/src/lib/components/layout/Sidebar/ChatItem.svelte`
+
+Nginx serves `front_end/owui/build` — rebuild the OWUI frontend to see this.
+
+---
+
+## 2026-08-18: LM Studio look + live typing, Claude sandbox that can actually run
+
+### Problem
+Chat did not follow the stream (trackpad ticks + nested overflow + 50px autoScroll flip). Code blocks looked like a dump, not an editor. Claude subscription chat printed the whole answer at once (`--output-format text`), had no Python, withheld Bash, and wrote into a per-run `/tmp` dir — so it could not keep notes, run what it wrote, or show a script being typed. The auto-lane prompt also told Claude `Write` was refused even on user-initiated runs.
+
+### Solution
+- **UI:** denser LM Studio-like code chrome (charcoal header, caret while streaming, Run for Python *and* JS). Chat follows the growing column (`overflow-hidden` on the pane, ResizeObserver, ignore tiny wheel deltas, re-enable follow on send). Workspace cards show a live file pane on Write/Edit and render thoughts as Markdown.
+- **Claude sidecar:** `python3` (+ pip/venv) in the image; seed `SANDBOX.md` / `README.md` / `notes.md` / `harvis-check.sh`. Persistent per-user workdir on the artifact volume. Chat CLI streams `stream-json` as SSE deltas and allows Bash/Glob/Grep (still no web). User-mode workspace no longer claims Write is refused.
+
+### Files
+- `front_end/owui/src/lib/components/chat/{Chat,Messages}.svelte`
+- `front_end/owui/src/lib/components/chat/Messages/{CodeBlock,WorkspaceRunCard}.svelte`
+- `front_end/owui/src/lib/components/chat/Messages/Markdown/MarkdownTokens.svelte`
+- `front_end/owui/src/app.css`
+- `claude-code/Dockerfile`, `claude-code/sandbox/*`
+- `python_back_end/owui_compat/{chat_files,cloud_chat}.py`
+- `python_back_end/workspace/orchestration/engine_adapter.py`
+- `python_back_end/tests/test_chat_sandbox.py`
+
+Rebuild the `claude-code` image for Python + seeded sandbox files to land.
+
+---
+
+
+
+### Problem
+"A lid on a jar" built a valid solid that would not assemble: fused disk, no skirt, no clearance. Zoo's Zookeeper looks up practice, plans a mating pair, executes, snapshots, and iterates. Harvis taught CadIR grammar and one-piece few-shots, and did not treat "lid on a jar" as two bodies unless the user said "removable".
+
+### Solution
+Offline catalog `cad_patterns.py` + tool `cad_lookup_pattern` (no internet). Prompt injects the matching shop pattern. v2 spec infers two bodies + coaxial for "lid on a jar" / "jar with a lid". Default 0.3 mm slip clearance is assumed in the brief, not graded unless stated. Jar+lid few-shot added. CadIR still cannot cut threads — said in assumptions.
+
+### Files
+- `python_back_end/owui_compat/cad_patterns.py` (new)
+- `cad_tools.py`, `cad_generate.py`, `cad_agent.py`, `cad_designspec_v2.py`
+- `python_back_end/tests/test_cad_patterns.py`, `test_cad_designspec_v2.py`, `test_cad_tools.py`
+- `docs/design/2026-08-18-cad-pattern-lookup.md`
+
+---
+
+## 2026-08-01: Feature placement map — screenshot-to-code Build, default skill, Agent Reach, SentrySearch scaffold, SkillOpt offline
+
+
+### Problem
+Placement plan for four integrations needed implementation without forking Build, without installing Agent Reach into egress-denied OpenClaw, and without shipping video search / SkillOpt trainer by default.
+
+### Solution
+1. **Screenshot-to-code (Build session shape)** — method pack + `screenshot_preview` + `verify_preview` → Browse & verify dock (`BrowserPanel.verifyFrames`). Flag `HARVIS_VISION_SELF_CHECK_ENABLED` (default OFF). CDN policy documented as needs-internet for Phase 1.
+2. **Default skill** — `skills/Harvis/harvis-build/SKILL.md`; seeded into `owui_skills` with server-side `supported` on skills list; injected into vibecode system prompt from filesystem.
+3. **Agent Reach** — lane-5 tools `agent_reach.{web_read,yt_transcript,gh_view,rss_read}` in backend (`agent_reach/`); compose profile `agent-reach` sandbox placeholder; **never** OpenClaw install. Flag `HARVIS_AGENT_REACH_ENABLED`.
+4. **SentrySearch** — optional compose profile `sentrysearch` + stub MCP image + Plugins directory card `sentrysearch-video` (not Sentry.io). Default OFF.
+5. **SkillOpt** — offline scaffold `python_back_end/skills_training/` + `scripts/skillopt-offline.sh`; flag `HARVIS_SKILLOPT_ENABLED`; not on chat hot path.
+
+### Files (high level)
+- `python_back_end/vision_to_code/*`, `workspace/orchestration/{tools,runner,authz,session_turn}.py`, `browser_runner/*`
+- `front_end/owui/.../vibecode/+page.svelte`, `BrowserPanel.svelte`, `runStream.ts`
+- `skills/Harvis/harvis-build/`, `harvis-agent-reach/`, `owui_compat/skills.py`
+- `agent_reach/`, `mcp-servers/sentrysearch/`, `skills_training/`, `docker-compose.yaml` profiles
+- Design docs under `docs/design/2026-07-31-*` and `2026-08-01-*`
+
+### Result
+All five placement todos implemented as scaffolds/Phase-1 where specified; trainers and video MCP remain opt-in.
+
+---
+
 ## 2026-06-28: Claude Code dual-auth (API key OR Claude subscription) + Phase E4B Hermes Agent
 
 ### Claude Code = dual per-user auth (E4B)

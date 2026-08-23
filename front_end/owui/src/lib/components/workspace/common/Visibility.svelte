@@ -13,7 +13,7 @@
 
 		<div class="flex gap-2.5 items-center mb-1">
 			<div>
-				<div class=" p-2 bg-black/5 dark:bg-white/5 rounded-full">
+				<div class=" p-2 bg-black/5 dark:bg-white/5 rounded-lg">
 					{#if state === 'private'}
 						<svg
 							xmlns="http://www.w3.org/2000/svg"

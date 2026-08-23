@@ -97,7 +97,7 @@
 					{:else}
 						<Tooltip content={$i18n.t('Voice Input')}>
 							<button
-								class=" p-2 bg-gray-50 text-gray-700 dark:bg-gray-700 dark:text-white transition rounded-full"
+								class=" p-2 bg-gray-50 text-gray-700 dark:bg-gray-700 dark:text-white transition rounded-lg"
 								type="button"
 								on:click={async () => {
 									const unavailable = micUnavailableReason();
@@ -129,7 +129,7 @@
 				<div class=" shrink-0">
 					<Tooltip content={$i18n.t('Save')}>
 						<button
-							class=" px-3.5 py-2 bg-black text-white dark:bg-white dark:text-black transition rounded-full"
+							class=" px-3.5 py-2 bg-black text-white dark:bg-white dark:text-black transition rounded-lg"
 							type="submit"
 						>
 							{$i18n.t('Save')}

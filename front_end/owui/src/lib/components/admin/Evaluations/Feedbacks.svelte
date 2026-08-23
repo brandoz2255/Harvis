@@ -267,7 +267,7 @@
 	</div>
 
 	<div
-		class="py-2 bg-white dark:bg-gray-900 rounded-3xl border border-gray-100/30 dark:border-gray-850/30"
+		class="py-2 bg-white dark:bg-gray-900 rounded-xl border border-gray-100/30 dark:border-gray-850/30"
 	>
 		{#if modelIds.length > 0}
 			<div
@@ -280,7 +280,7 @@
 				}}
 			>
 				<div
-					class="flex gap-0.5 w-fit text-center text-sm rounded-full bg-transparent whitespace-nowrap"
+					class="flex gap-0.5 w-fit text-center text-sm rounded-lg bg-transparent whitespace-nowrap"
 				>
 					<Select
 						bind:value={selectedModelId}

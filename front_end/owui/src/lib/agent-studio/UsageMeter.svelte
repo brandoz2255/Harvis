@@ -17,6 +17,13 @@
 	export let lastOut = 0; // last-turn output tokens
 	export let atApiRates = false; // subscription → "at API rates"
 	export let align: 'left' | 'right' = 'right';
+	// Which way the popup opens. The default keeps every existing call site unchanged; the
+	// chat composer sits at the bottom of the viewport, where a downward panel is off-screen.
+	export let placement: 'top' | 'bottom' = 'bottom';
+	// What "free" reads as in the popup. Defaults to the local-model wording this meter was
+	// built for; a connected free-tier vendor key is free but not local, so that caller
+	// overrides it rather than having the meter claim something untrue about where it ran.
+	export let freeLabel = '';
 
 	let open = false;
 	$: ctxPct = ctxWindow ? Math.min(100, Math.round((ctxUsed / ctxWindow) * 100)) : 0;
@@ -61,9 +68,9 @@
 			aria-label="Close usage panel"
 		></button>
 		<div
-			class="absolute {align === 'right'
-				? 'right-0'
-				: 'left-0'} top-full mt-2 z-50 w-64 rounded-xl border border-gray-100 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-xl p-3 text-xs space-y-2"
+			class="absolute {align === 'right' ? 'right-0' : 'left-0'} {placement === 'top'
+				? 'bottom-full mb-2'
+				: 'top-full mt-2'} z-50 w-64 rounded-xl border border-gray-100 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-xl p-3 text-xs space-y-2"
 		>
 			<div class="flex justify-between text-gray-700 dark:text-gray-200 font-medium">
 				<span>{$i18n.t('Context window')}</span>
@@ -95,7 +102,7 @@
 			<div class="flex justify-between text-gray-700 dark:text-gray-200 font-medium pt-1 border-t border-gray-100 dark:border-gray-850">
 				<span>{$i18n.t('Est. cost')}</span>
 				<span class="tabular-nums">
-					{#if isFree}{$i18n.t('Free · local')}{:else}{fmtCost(costUsd)}{#if atApiRates}
+					{#if isFree}{freeLabel || $i18n.t('Free · local')}{:else}{fmtCost(costUsd)}{#if atApiRates}
 							<span class="text-gray-400 font-normal">· {$i18n.t('at API rates')}</span>{/if}{/if}
 				</span>
 			</div>

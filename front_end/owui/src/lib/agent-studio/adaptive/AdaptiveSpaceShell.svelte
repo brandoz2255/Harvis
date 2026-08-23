@@ -407,7 +407,7 @@
 						<span class="shaping-dots" aria-hidden="true"><i></i><i></i><i></i></span>
 					</div>
 					{#if shapingLabel}
-						<div class="mt-2 inline-flex items-center gap-1.5 text-[9px] uppercase tracking-widest text-cyan-300/80 px-2 py-0.5 rounded-full border border-cyan-400/20 bg-cyan-400/5" in:fade={{ duration: 200 }}>
+						<div class="mt-2 inline-flex items-center gap-1.5 text-[9px] uppercase tracking-widest text-cyan-300/80 px-2 py-0.5 rounded-md border border-cyan-400/20 bg-cyan-400/5" in:fade={{ duration: 200 }}>
 							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="size-2.5"><path d="M20 6 9 17l-5-5" stroke-linecap="round" stroke-linejoin="round" /></svg>
 							{$i18n.t('Detected')}: {shapingLabel}
 						</div>
@@ -434,7 +434,7 @@
 						{#each ['Clone and run a GitHub repo', 'Test this helmet hanger', 'Turn this image into a printable 3D model', 'Build a new Harvis integration'] as ex}
 							<button
 								type="button"
-								class="text-[11px] px-2.5 py-1 rounded-full border border-white/8 text-gray-400 hover:text-cyan-200 hover:border-cyan-400/30 transition"
+								class="text-[11px] px-2.5 py-1 rounded-lg border border-white/8 text-gray-400 hover:text-cyan-200 hover:border-cyan-400/30 transition"
 								on:click={() => (intent = ex)}>{ex}</button
 							>
 						{/each}
@@ -450,7 +450,7 @@
 						<div class="relative shrink-0">
 							<button
 								type="button"
-								class="block rounded-full transition hover:opacity-90 focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/50"
+								class="block rounded-lg transition hover:opacity-90 focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/50"
 								aria-label="{$i18n.t('Adaptive core')}: {$i18n.t('status')}"
 								aria-expanded={statusOpen}
 								on:click={() => (statusOpen = !statusOpen)}
@@ -478,7 +478,7 @@
 							{/if}
 						</div>
 						<div class="min-w-0 flex-1 pt-1.5">
-							<div class="inline-flex items-center gap-1.5 text-[9px] uppercase tracking-widest text-cyan-300/80 px-2 py-0.5 rounded-full border border-cyan-400/20 bg-cyan-400/5">
+							<div class="inline-flex items-center gap-1.5 text-[9px] uppercase tracking-widest text-cyan-300/80 px-2 py-0.5 rounded-md border border-cyan-400/20 bg-cyan-400/5">
 								<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" class="size-2.5"><path d={method?.icon} /></svg>
 								{$i18n.t('Detected')}: {method?.label}{#if method?.mock}&nbsp;· {$i18n.t('Mock Mode')}{/if}
 							</div>
@@ -487,7 +487,7 @@
 								{#if space?.status === 'active'}
 									<button class="shrink-0 text-[10px] px-2 py-0.5 rounded-lg border border-white/10 text-gray-500 hover:text-gray-200 transition" on:click={() => setSpaceStatus('done')}>{$i18n.t('Mark done')}</button>
 								{:else}
-									<span class="shrink-0 text-[9px] uppercase px-1.5 py-0.5 rounded-full {space?.status === 'done' ? 'bg-emerald-500/15 text-emerald-400' : 'bg-white/8 text-gray-400'}">{space?.status}</span>
+									<span class="shrink-0 text-[9px] uppercase px-1.5 py-0.5 rounded-md {space?.status === 'done' ? 'bg-emerald-500/15 text-emerald-400' : 'bg-white/8 text-gray-400'}">{space?.status}</span>
 									<button class="shrink-0 text-[10px] px-2 py-0.5 rounded-lg border border-white/10 text-gray-500 hover:text-gray-200 transition" on:click={() => setSpaceStatus('active')}>{$i18n.t('Reopen')}</button>
 								{/if}
 							</div>
@@ -673,7 +673,7 @@
 				{#each templates as t (t.key)}
 					<button
 						type="button"
-						class="inline-flex items-center gap-1.5 text-[11px] px-2.5 py-1.5 rounded-full border border-white/10 text-gray-300 hover:text-cyan-200 hover:border-cyan-400/30 transition disabled:opacity-50"
+						class="inline-flex items-center gap-1.5 text-[11px] px-2.5 py-1.5 rounded-lg border border-white/10 text-gray-300 hover:text-cyan-200 hover:border-cyan-400/30 transition disabled:opacity-50"
 						disabled={creating}
 						on:click={() => createWith(t.key, askShape?.text ?? '')}
 					>

@@ -2,9 +2,13 @@
 	// Guided MCP connection wizard (Phase 5): template → config → credentials →
 	// permission preview → connection test → save. Saves through the EXISTING
 	// /api/owui/mcp/connections endpoint (mcp_servers table) — no new storage.
-	// Credential hard gate: fields flagged secret are never collected; the step
-	// shows "credential storage pending review" instead. No secrets touch
-	// localStorage and none are echoed back by any GET.
+	// Secrets are collected on the Credentials step and posted once under
+	// `credentials`; the backend seals them with the house Fernet cipher before
+	// they reach the mcp_servers row and unseals them only when the sandbox
+	// container is spawned. Nothing here touches localStorage, and a GET returns
+	// a fixed mask rather than the value. Any server can be given extra
+	// environment variables by hand, so a vendor the catalog has never heard of
+	// works the same way as GitHub or Slack.
 	import { createEventDispatcher, getContext, onMount } from 'svelte';
 	import { toast } from 'svelte-sonner';
 
@@ -21,6 +25,11 @@
 	let name = '';
 	let transport = 'stdio';
 	let fieldValues: Record<string, string> = {};
+	// Secret values, held in component state until save and never read back.
+	let credValues: Record<string, string> = {};
+	// Free-form environment for a server the catalog does not describe — this is
+	// what keeps the wizard vendor-agnostic instead of a fixed list.
+	let extraVars: { key: string; value: string; secret: boolean }[] = [];
 
 	let testing = false;
 	let testResult: any = null;
@@ -40,6 +49,8 @@
 		transport = t.transport ?? 'stdio';
 		name = name || t.name;
 		fieldValues = {};
+		credValues = {};
+		extraVars = [];
 		testResult = null;
 		step = 1;
 	};
@@ -55,7 +66,12 @@
 	$: configValid =
 		!!name.trim() &&
 		(template?.fields ?? []).every((f: any) => !f.required || (fieldValues[f.key] ?? '').trim());
-	$: pendingCreds = (template?.credentials ?? []).filter((c: any) => c.secret);
+	$: creds = template?.credentials ?? [];
+	$: missingCreds = creds.filter((c: any) => !(credValues[c.key] ?? '').trim());
+	$: storedSecretKeys = [
+		...creds.filter((c: any) => (credValues[c.key] ?? '').trim()).map((c: any) => c.key),
+		...extraVars.filter((r) => r.secret && r.key.trim() && r.value.trim()).map((r) => r.key.trim())
+	];
 
 	const runTest = async () => {
 		testing = true;
@@ -80,6 +96,23 @@
 		const body: any = { name: name.trim(), transport };
 		if (transport === 'stdio') body.command = command;
 		else body.url = url;
+		// Secret values go in `credentials` (sealed server-side); anything the user
+		// marked non-secret is plain configuration and goes in `env`.
+		const credentials: Record<string, string> = {};
+		const env: Record<string, string> = {};
+		for (const c of creds) {
+			const v = (credValues[c.key] ?? '').trim();
+			if (v) credentials[c.key] = v;
+		}
+		for (const row of extraVars) {
+			const k = row.key.trim();
+			const v = row.value.trim();
+			if (!k || !v) continue;
+			if (row.secret) credentials[k] = v;
+			else env[k] = v;
+		}
+		if (Object.keys(env).length) body.env = env;
+		if (Object.keys(credentials).length) body.credentials = credentials;
 		const res = await fetch('/api/owui/mcp/connections', {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json', authorization: `Bearer ${token}` },
@@ -110,7 +143,7 @@
 					on:click={() => {
 						if (i < step) step = i;
 					}}
-					class="shrink-0 flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium transition {i === step
+					class="shrink-0 flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium transition {i === step
 						? 'bg-gray-900 text-white dark:bg-gray-100 dark:text-gray-900'
 						: i < step
 							? 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-850'
@@ -185,26 +218,70 @@
 			{/if}
 		</div>
 	{:else if step === 2}
-		<!-- 3 · credentials (hard gate: no new secret storage) -->
-		{#if pendingCreds.length}
-			<div class="space-y-2">
-				{#each pendingCreds as c (c.key)}
-					<div class="rounded-lg border border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/40 px-3 py-2.5">
-						<div class="flex items-center gap-2">
-							<svg class="size-4 text-amber-500 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" /></svg>
-							<span class="text-sm font-medium text-amber-700 dark:text-amber-300">{c.label} <code class="text-[11px] font-mono">({c.key})</code></span>
-						</div>
-						<p class="text-xs text-amber-700/80 dark:text-amber-300/80 mt-1">
-							{$i18n.t(
-								'Credential storage for this template is pending review — Harvis will not store this secret yet. The connection is saved without it and the tool will be limited until credential support lands.'
-							)}
-						</p>
-					</div>
-				{/each}
-			</div>
-		{:else}
-			<div class="text-sm text-gray-500 py-2">{$i18n.t('This template needs no credentials.')}</div>
-		{/if}
+		<!-- 3 · credentials -->
+		<div class="space-y-2">
+			{#each creds as c (c.key)}
+				<label class="block">
+					<span class="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">
+						{c.label} <code class="text-[11px] font-mono text-gray-400">{c.key}</code>
+					</span>
+					<input
+						type="password"
+						autocomplete="new-password"
+						spellcheck="false"
+						bind:value={credValues[c.key]}
+						placeholder={$i18n.t('Paste the value')}
+						class="w-full rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 px-3 py-1.5 text-sm font-mono outline-none focus:border-gray-400 dark:focus:border-gray-600"
+					/>
+				</label>
+			{/each}
+
+			{#each extraVars as row, i}
+				<div class="flex items-center gap-2">
+					<input
+						bind:value={row.key}
+						placeholder="ENV_NAME"
+						spellcheck="false"
+						class="w-2/5 rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 px-3 py-1.5 text-sm font-mono outline-none focus:border-gray-400 dark:focus:border-gray-600"
+					/>
+					<input
+						type={row.secret ? 'password' : 'text'}
+						autocomplete="new-password"
+						spellcheck="false"
+						bind:value={row.value}
+						placeholder={$i18n.t('Value')}
+						class="flex-1 rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 px-3 py-1.5 text-sm font-mono outline-none focus:border-gray-400 dark:focus:border-gray-600"
+					/>
+					<label class="flex items-center gap-1 text-[11px] text-gray-500 shrink-0" title={$i18n.t('Encrypt this value at rest')}>
+						<input type="checkbox" bind:checked={row.secret} class="accent-gray-700" />
+						{$i18n.t('Secret')}
+					</label>
+					<button
+						on:click={() => (extraVars = extraVars.filter((_, j) => j !== i))}
+						title={$i18n.t('Remove')}
+						class="shrink-0 text-gray-400 hover:text-red-500 transition"
+					>
+						<svg class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18" /></svg>
+					</button>
+				</div>
+			{/each}
+
+			<button
+				on:click={() => (extraVars = [...extraVars, { key: '', value: '', secret: true }])}
+				class="rounded-lg border border-dashed border-gray-300 dark:border-gray-700 px-3 py-1.5 text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 hover:border-gray-400 dark:hover:border-gray-600 transition"
+				>+ {$i18n.t('Add environment variable')}</button
+			>
+
+			<p class="text-[11px] text-gray-400">
+				{creds.length || extraVars.length
+					? $i18n.t(
+							'Values marked secret are encrypted before storage and only decrypted when the server starts. They are never shown again — editing this connection later keeps the stored value unless you type a new one.'
+						)
+					: $i18n.t(
+							'This template needs no credentials. Add environment variables here if your server expects any.'
+						)}
+			</p>
+		</div>
 	{:else if step === 3}
 		<!-- 4 · permission preview -->
 		{#if (template?.tools ?? []).length}
@@ -261,8 +338,18 @@
 			{:else}
 				<div><span class="text-gray-400 text-xs">URL:</span> <code class="text-xs font-mono break-all">{url}</code></div>
 			{/if}
-			{#if pendingCreds.length}
-				<div class="text-xs text-amber-600 dark:text-amber-400">{$i18n.t('Saved without credentials (pending review).')}</div>
+			{#if storedSecretKeys.length}
+				<div>
+					<span class="text-gray-400 text-xs">{$i18n.t('Secrets stored')}:</span>
+					<code class="text-xs font-mono">{storedSecretKeys.join(', ')}</code>
+				</div>
+			{/if}
+			{#if missingCreds.length}
+				<div class="text-xs text-amber-600 dark:text-amber-400">
+					{$i18n.t('Saving without')}
+					<code class="text-[11px] font-mono">{missingCreds.map((c) => c.key).join(', ')}</code>
+					— {$i18n.t('the server may refuse to start.')}
+				</div>
 			{/if}
 		</div>
 		<p class="text-[11px] text-gray-400 mt-2">

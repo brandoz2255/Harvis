@@ -378,7 +378,7 @@
 				<div class="flex items-center gap-2 mt-1">
 					<!-- Deep research (active mode) -->
 					<span
-						class="inline-flex items-center gap-1.5 rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-400 pl-2 pr-2.5 py-1 text-xs font-medium"
+						class="inline-flex items-center gap-1.5 rounded-lg bg-blue-500/10 text-blue-600 dark:text-blue-400 pl-2 pr-2.5 py-1 text-xs font-medium"
 					>
 						<svg
 							class="size-3.5"
@@ -397,7 +397,7 @@
 					<div class="relative">
 						<button
 							on:click|stopPropagation={() => (showDepth = !showDepth)}
-							class="inline-flex items-center gap-1 rounded-full border border-gray-200 dark:border-gray-800 hover:bg-gray-100 dark:hover:bg-gray-850 px-2.5 py-1 text-xs text-gray-600 dark:text-gray-300 transition"
+							class="inline-flex items-center gap-1 rounded-lg border border-gray-200 dark:border-gray-800 hover:bg-gray-100 dark:hover:bg-gray-850 px-2.5 py-1 text-xs text-gray-600 dark:text-gray-300 transition"
 						>
 							<svg
 								class="size-3.5"
@@ -624,7 +624,7 @@
 						showAddRepo = !showAddRepo;
 						addError = '';
 					}}
-					class="inline-flex items-center gap-1.5 rounded-full bg-blue-600 text-white px-3 py-1.5 text-xs font-medium hover:bg-blue-700 transition shrink-0"
+					class="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 text-white px-3 py-1.5 text-xs font-medium hover:bg-blue-700 transition shrink-0"
 				>
 					<svg
 						class="size-3.5"

@@ -30,12 +30,12 @@
 	<Handle type="source" position={Position.Bottom} style={handleStyle} />
 
 	<div
-		class="absolute inset-0 rounded-full {color} {kind === 'session'
+		class="absolute inset-0 rounded-lg {color} {kind === 'session'
 			? 'ring-2 ring-gray-300/50 dark:ring-gray-600/50'
 			: ''} transition-transform duration-150 group-hover:scale-125"
 	></div>
 	{#if running}
-		<div class="absolute inset-0 rounded-full bg-blue-500 animate-ping opacity-60"></div>
+		<div class="absolute inset-0 rounded-lg bg-blue-500 animate-ping opacity-60"></div>
 	{/if}
 
 	<!-- truncated label under the dot; swaps for the full pill on hover -->

@@ -2,7 +2,23 @@
 	// Brand / semantic logo for a connector, keyed by catalog id. Branded marks are
 	// simple-icons paths (fill); generic ones are lucide-style (stroke). Colors are
 	// theme-safe so near-black brands (github/notion/slack) stay visible in dark mode.
+	//
+	// Resolution order (first hit wins): the hand-tuned LOGOS below → the generated
+	// BRAND_MARKS table → a lettermark. LOGOS comes first on purpose: it holds marks
+	// the generated table can't express (Slack's eight brand colors) or no longer
+	// ships at all, and a hand fix must never be silently overridden by a regen.
+	import { BRAND_MARKS } from './brandMarks';
+
 	export let id: string = '';
+	// Vendor key from the catalog (`brand`), for the shared marks table. Several ids
+	// front the same vendor, so this is deliberately not the id.
+	export let brand: string = '';
+	// Display name — used for the lettermark, and as a last resort to find a mark.
+	export let name: string = '';
+	// The connector's endpoint, when it has one. A connection you added yourself has
+	// no catalog entry and therefore no `brand`, but its host usually names the
+	// vendor better than anything else we hold: https://mcp.linear.app/sse → linear.
+	export let url: string = '';
 	export let size: string = 'size-6';
 
 	// `fills` (optional, parallel to `d`) gives a fill logo per-path brand colors —
@@ -39,10 +55,76 @@
 	};
 	// Fallback = a neutral "plug"/box for unknown connectors (BYO custom entries etc.).
 	const FALLBACK = { d: ['M6 3v4M18 3v4M4 7h16v4a8 8 0 0 1-16 0Z M12 15v6'], mode: 'stroke' as const, color: 'text-gray-400' };
-	$: logo = LOGOS[id] ?? FALLBACK;
+
+	// Lettermark tile colors for brands with no mark anywhere. Mid-saturation so white
+	// text clears 4.5:1 on the tile and the tile itself reads on either theme. These are
+	// assigned by key hash — they are decoration, NOT a claim about the vendor's color.
+	const TILE = ['#3B6FD4', '#0E9488', '#B4532C', '#6D4AAE', '#B8863B', '#39705A', '#A63D62', '#3A6E86'];
+	const tileOf = (k: string) => {
+		let h = 0;
+		for (let i = 0; i < k.length; i++) h = (h * 31 + k.charCodeAt(i)) | 0;
+		return TILE[Math.abs(h) % TILE.length];
+	};
+	// First alphanumeric run's initial — "microsoftteams"/"Microsoft Teams" both give M.
+	const initialOf = (s: string) => (s.match(/[A-Za-z0-9]/)?.[0] ?? '?').toUpperCase();
+
+	// Everything this connector could plausibly be called, best evidence first. A
+	// catalog entry hits on its first candidate; a BYO connection falls through to
+	// its host or its name, which is what makes an uncatalogued vendor find its own
+	// logo instead of always drawing a letter.
+	const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+	// Vendor-neutral prefixes and public suffixes carry no brand: mcp.linear.app and
+	// api.linear.app are both Linear. Take the label to the left of the suffix.
+	const hostKeys = (u: string): string[] => {
+		let host = '';
+		try {
+			host = new URL(u).hostname;
+		} catch {
+			return [];
+		}
+		const parts = host.split('.').filter((p) => !['www', 'mcp', 'api', 'server', 'app'].includes(p));
+		if (parts.length < 2) return parts.map(slug).filter(Boolean);
+		// Handle both linear.app and mcp.atlassian.com/v1 style two- and three-label hosts.
+		return [slug(parts[parts.length - 2]), slug(parts[0])].filter(Boolean);
+	};
+	// Name tokens come last and match a mark key exactly — 'Slack workspace' finds
+	// slack, while the whole-string slug 'slackworkspace' would not.
+	$: candidates = [brand, id, ...hostKeys(url), slug(name), ...name.split(/[^A-Za-z0-9]+/).map(slug)]
+		.map((c) => (c ?? '').trim())
+		.filter(Boolean);
+	$: hand = candidates.map((c) => LOGOS[c]).find(Boolean);
+	$: mark = hand ? undefined : candidates.map((c) => BRAND_MARKS[c]).find(Boolean);
+	// Lettermark only when we have something to letter; otherwise the neutral plug.
+	$: letter = !hand && !mark && (name || brand) ? initialOf(name || brand) : '';
+	$: logo = hand ?? FALLBACK;
 </script>
 
-{#if logo.mode === 'fill'}
+{#if mark}
+	<!-- Generated vendor mark. A near-black logo (`dim`) follows the theme instead of
+	     using its own hex, which would disappear against a dark background. -->
+	<svg
+		class="{size} {mark.dim ? 'text-gray-800 dark:text-gray-100' : ''}"
+		viewBox="0 0 24 24"
+		fill={mark.dim ? 'currentColor' : mark.hex}
+		aria-hidden="true"
+	>
+		{#each mark.d as p}<path d={p} />{/each}
+	</svg>
+{:else if letter}
+	<svg class={size} viewBox="0 0 24 24" aria-hidden="true">
+		<rect width="24" height="24" rx="6" fill={tileOf(brand || id || name)} />
+		<text
+			x="12"
+			y="12"
+			text-anchor="middle"
+			dominant-baseline="central"
+			fill="#fff"
+			font-size="13"
+			font-weight="600"
+			font-family="inherit">{letter}</text
+		>
+	</svg>
+{:else if logo.mode === 'fill'}
 	<svg class="{size} {logo.color}" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
 		{#each logo.d as p, i}<path d={p} fill={logo.fills?.[i] ?? 'currentColor'} />{/each}
 	</svg>

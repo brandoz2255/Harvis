@@ -441,7 +441,7 @@
 				</div>
 				<div class="flex items-center gap-1 mb-2">
 					{#each Array.from({ length: 3 }) as _, i}
-						<Skeleton width={['7rem', '5rem', '4rem'][i]} height="1.125rem" rounded="rounded-full" delay={i * 90} />
+						<Skeleton width={['7rem', '5rem', '4rem'][i]} height="1.125rem" rounded="rounded-lg" delay={i * 90} />
 					{/each}
 				</div>
 			</div>
@@ -488,7 +488,7 @@
 		{#if system}
 			<div class="flex items-center gap-1 flex-wrap mb-2 shrink-0 text-[11px]">
 				{#each [system.gpu_name, system.gpu_vram_gb ? `VRAM ${system.gpu_vram_gb} GB` : null, system.backend, system.total_ram_gb ? `RAM ${system.total_ram_gb} GB` : null, system.cpu_cores ? `${system.cpu_cores} cores` : null].filter(Boolean) as chip}
-					<span class="px-2 py-0.5 rounded-full bg-gray-100 dark:bg-gray-850 text-gray-600 dark:text-gray-300 truncate max-w-[180px]">{chip}</span>
+					<span class="px-2 py-0.5 rounded-md bg-gray-100 dark:bg-gray-850 text-gray-600 dark:text-gray-300 truncate max-w-[180px]">{chip}</span>
 				{/each}
 			</div>
 		{/if}
@@ -578,9 +578,9 @@
 								<td class="py-1 pr-2 max-w-[280px]">
 									<div class="flex items-center gap-1 min-w-0">
 										<span class="text-gray-800 dark:text-gray-100 truncate" title={m.name}>{m.name}</span>
-										{#if m.is_moe}<span class="px-1.5 py-0.5 rounded-full text-[9px] leading-none bg-purple-500/10 text-purple-400 shrink-0">MoE</span>{/if}
+										{#if m.is_moe}<span class="px-1.5 py-0.5 rounded-md text-[9px] leading-none bg-purple-500/10 text-purple-400 shrink-0">MoE</span>{/if}
 										{#each m.capabilities ?? [] as cap}
-											<span class="px-1.5 py-0.5 rounded-full text-[9px] leading-none {capColor(cap)} shrink-0">{capLabel(cap)}</span>
+											<span class="px-1.5 py-0.5 rounded-md text-[9px] leading-none {capColor(cap)} shrink-0">{capLabel(cap)}</span>
 										{/each}
 									</div>
 								</td>
@@ -641,7 +641,7 @@
 						{#each PULL_SUGGESTIONS as s}
 							<button
 								on:click={() => (pullTag = s)}
-								class="text-[10px] px-1.5 py-0.5 rounded-full bg-gray-100 dark:bg-gray-850 text-gray-500 hover:text-blue-500 transition"
+								class="text-[10px] px-1.5 py-0.5 rounded-md bg-gray-100 dark:bg-gray-850 text-gray-500 hover:text-blue-500 transition"
 							>{s}</button>
 						{/each}
 					</div>
@@ -699,7 +699,7 @@
 									</div>
 								</div>
 								{#if m.name === activeModelId}
-									<span class="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-300">{$i18n.t('active')}</span>
+									<span class="shrink-0 text-[10px] px-1.5 py-0.5 rounded-md bg-blue-500/10 text-blue-600 dark:text-blue-300">{$i18n.t('active')}</span>
 								{:else}
 									<button class="shrink-0 text-[11px] px-2 py-1 rounded-lg border border-blue-500/40 text-blue-600 dark:text-blue-300 hover:bg-blue-500/10 transition" on:click={() => useModel(m.name)}>{$i18n.t('Use')}</button>
 								{/if}

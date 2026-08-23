@@ -519,7 +519,7 @@
 									<div class="absolute bottom-0 right-0 z-10">
 										<div class="m-1.5">
 											<div
-												class="shadow-xl p-1 rounded-full border-2 border-white bg-gray-800 text-white group-hover:bg-gray-600 transition dark:border-black dark:bg-white dark:group-hover:bg-gray-200 dark:text-black"
+												class="shadow-xl p-1 rounded-lg border-2 border-white bg-gray-800 text-white group-hover:bg-gray-600 transition dark:border-black dark:bg-white dark:group-hover:bg-gray-200 dark:text-black"
 											>
 												<svg
 													xmlns="http://www.w3.org/2000/svg"
@@ -583,7 +583,7 @@
 
 								<div class="shrink-0">
 									<button
-										class="bg-gray-50 shrink-0 hover:bg-gray-100 text-black dark:bg-gray-850 dark:hover:bg-gray-800 dark:text-white transition px-2 py-1 rounded-full flex gap-1 items-center"
+										class="bg-gray-50 shrink-0 hover:bg-gray-100 text-black dark:bg-gray-850 dark:hover:bg-gray-800 dark:text-white transition px-2 py-1 rounded-lg flex gap-1 items-center"
 										type="button"
 										on:click={() => {
 											showAccessControlModal = true;

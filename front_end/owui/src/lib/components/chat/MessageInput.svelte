@@ -215,6 +215,16 @@
 		($models ?? []).find((m) => m.id === (selectedModels?.[0] ?? ''))?.name ??
 		(selectedModels?.[0] || 'Auto');
 
+	// Context window, shown beside each model id in the picker. Several vendor catalogues
+	// carry families that differ only in the tail of the id (gemini-2.5-flash-lite vs
+	// -flash-lite-preview-09-2025), and the window is often the thing that actually
+	// separates them. Blank when the provider never reported one.
+	const modelContext = (m: any) => {
+		const n = Number(m?.info?.meta?.context_length || 0);
+		if (!n) return '';
+		return n >= 1_000_000 ? `${Math.round(n / 1_000_000)}M ctx` : `${Math.round(n / 1024)}K ctx`;
+	};
+
 	// Cap the composer model menu; a footer links to the full list. Phase F: connected cloud
 	// models (Claude/GPT) float to the TOP — when you've connected a cloud provider it becomes
 	// the primary set, with local Ollama models below (still reachable, never stranded).
@@ -711,9 +721,19 @@
 	);
 
 	let toggleFilters = [];
-	$: toggleFilters = (atSelectedModel?.id ? [atSelectedModel.id] : selectedModels)
-		.map((id) => ($models.find((model) => model.id === id) || {})?.filters ?? [])
-		.reduce((acc, filters) => acc.filter((f1) => filters.some((f2) => f2.id === f1.id)));
+	// The intersection of every selected model's filters — and `[]` when nothing is
+	// selected. Without the guard this threw "Reduce of empty array with no initial
+	// value" and took the whole chat down with it: a conversation created with no model
+	// on record (the CAD session's own conversation is one) rendered as a permanent
+	// spinner, with the real cause only visible in the console.
+	$: toggleFilters = ((lists) =>
+		lists.length
+			? lists.reduce((acc, filters) => acc.filter((f1) => filters.some((f2) => f2.id === f1.id)))
+			: [])(
+		(atSelectedModel?.id ? [atSelectedModel.id] : selectedModels).map(
+			(id) => ($models.find((model) => model.id === id) || {})?.filters ?? []
+		)
+	);
 
 	let showToolsButton = false;
 	$: showToolsButton = ($tools ?? []).length > 0 || ($toolServers ?? []).length > 0;
@@ -1385,7 +1405,7 @@
 			<div
 				class="flex flex-col px-3 {($settings?.widescreenMode ?? null)
 					? 'max-w-full'
-					: 'max-w-6xl'} w-full"
+					: 'max-w-[780px]'} w-full"
 			>
 				<div class="relative">
 					{#if autoScroll === false && history?.currentId}
@@ -1393,7 +1413,7 @@
 							class=" absolute -top-12 left-0 right-0 flex justify-center z-30 pointer-events-none"
 						>
 							<button
-								class=" bg-white border border-gray-100 dark:border-none dark:bg-white/20 p-1.5 rounded-full pointer-events-auto"
+								class=" bg-white border border-gray-100 dark:border-none dark:bg-white/20 p-1.5 rounded-lg pointer-events-auto"
 								on:click={() => {
 									autoScroll = true;
 									scrollToBottom();
@@ -1422,7 +1442,7 @@
 			<div
 				class="{($settings?.widescreenMode ?? null)
 					? 'max-w-full'
-					: 'max-w-6xl'} px-2.5 mx-auto inset-x-0"
+					: 'max-w-[780px]'} px-2.5 mx-auto inset-x-0"
 			>
 				<div class="">
 					<input
@@ -1509,7 +1529,7 @@
 
 						<div
 							id="message-input-container"
-							class="flex-1 flex flex-col relative w-full shadow-lg rounded-3xl border {$temporaryChatEnabled
+							class="flex-1 flex flex-col relative w-full shadow-lg rounded-xl border {$temporaryChatEnabled
 								? 'border-dashed border-gray-100 dark:border-gray-800 hover:border-gray-200 focus-within:border-gray-200 hover:dark:border-gray-700 focus-within:dark:border-gray-700'
 								: ' border-gray-100/30 dark:border-gray-850/30 hover:border-gray-200 focus-within:border-gray-100 hover:dark:border-gray-800 focus-within:dark:border-gray-800'}  transition px-1 bg-white/5 dark:bg-gray-500/5 backdrop-blur-sm dark:text-gray-100"
 							dir={$settings?.chatDirection ?? 'auto'}
@@ -1588,7 +1608,7 @@
 												</div>
 												<div class=" absolute -top-1 -right-1">
 													<button
-														class=" bg-white text-black border border-white rounded-full {($settings?.highContrastMode ??
+														class=" bg-white text-black border border-white rounded-lg {($settings?.highContrastMode ??
 														false)
 															? ''
 															: 'outline-hidden focus:outline-hidden group-hover:visible invisible transition'}"
@@ -1922,7 +1942,7 @@
 												<Tooltip content={$i18n.t('Microphone')}>
 													<button
 														type="button"
-														class="flex items-center gap-0.5 text-gray-600 dark:text-gray-300 hover:text-gray-700 dark:hover:text-gray-200 transition rounded-full px-2 py-1.5 self-center"
+														class="flex items-center gap-0.5 text-gray-600 dark:text-gray-300 hover:text-gray-700 dark:hover:text-gray-200 transition rounded-lg px-2 py-1.5 self-center"
 														aria-label="Microphone"
 														on:click={loadMicDevices}
 													>
@@ -1976,7 +1996,7 @@
 											>
 												<button
 													type="button"
-													class="ml-0.5 flex items-center gap-1 max-w-[10rem] pl-1.5 pr-2 py-1 rounded-full text-xs text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-900/40 transition"
+													class="ml-0.5 flex items-center gap-1 max-w-[10rem] pl-1.5 pr-2 py-1 rounded-lg text-xs text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-900/40 transition"
 													on:click={() => selectedFolder.set(null)}
 													aria-label={$i18n.t('Project')}
 												>
@@ -2105,7 +2125,7 @@
 															}
 														}}
 														type="button"
-														class="group p-[7px] flex gap-1.5 items-center text-sm rounded-full transition-colors duration-300 focus:outline-hidden max-w-full overflow-hidden {selectedFilterIds.includes(
+														class="group p-[7px] flex gap-1.5 items-center text-sm rounded-lg transition-colors duration-300 focus:outline-hidden max-w-full overflow-hidden {selectedFilterIds.includes(
 															filterId
 														)
 															? 'text-sky-500 dark:text-sky-300 bg-sky-50 hover:bg-sky-100 dark:bg-sky-400/10 dark:hover:bg-sky-600/10 border border-sky-200/40 dark:border-sky-500/20'
@@ -2149,7 +2169,7 @@
 												<button
 													on:click|preventDefault={() => (webSearchEnabled = !webSearchEnabled)}
 													type="button"
-													class="group p-[7px] flex gap-1.5 items-center text-sm rounded-full transition-colors duration-300 focus:outline-hidden max-w-full overflow-hidden {webSearchEnabled ||
+													class="group p-[7px] flex gap-1.5 items-center text-sm rounded-lg transition-colors duration-300 focus:outline-hidden max-w-full overflow-hidden {webSearchEnabled ||
 													($settings?.webSearch ?? false) === 'always'
 														? ' text-sky-500 dark:text-sky-300 bg-sky-50 hover:bg-sky-100 dark:bg-sky-400/10 dark:hover:bg-sky-600/10 border border-sky-200/40 dark:border-sky-500/20'
 														: 'bg-transparent text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 '}"
@@ -2168,7 +2188,7 @@
 													on:click|preventDefault={() =>
 														(imageGenerationEnabled = !imageGenerationEnabled)}
 													type="button"
-													class="group p-[7px] flex gap-1.5 items-center text-sm rounded-full transition-colors duration-300 focus:outline-hidden max-w-full overflow-hidden {imageGenerationEnabled
+													class="group p-[7px] flex gap-1.5 items-center text-sm rounded-lg transition-colors duration-300 focus:outline-hidden max-w-full overflow-hidden {imageGenerationEnabled
 														? ' text-sky-500 dark:text-sky-300 bg-sky-50 hover:bg-sky-100 dark:bg-sky-400/10 dark:hover:bg-sky-700/10 border border-sky-200/40 dark:border-sky-500/20'
 														: 'bg-transparent text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 '}"
 												>
@@ -2218,7 +2238,7 @@
 														window.open(authUrl, '_self', 'noopener');
 													}}
 													type="button"
-													class="group px-2 py-[5px] flex gap-1.5 items-center text-xs rounded-full transition-colors duration-300 focus:outline-hidden max-w-full overflow-hidden
+													class="group px-2 py-[5px] flex gap-1.5 items-center text-xs rounded-lg transition-colors duration-300 focus:outline-hidden max-w-full overflow-hidden
 														text-amber-600 dark:text-amber-400 bg-amber-50 hover:bg-amber-100 dark:bg-amber-400/10 dark:hover:bg-amber-600/10 border border-amber-200/40 dark:border-amber-500/20"
 												>
 													<Wrench className="size-3.5" strokeWidth="1.75" />
@@ -2240,11 +2260,16 @@
 											modelId={atSelectedModel?.id ?? selectedModels?.[0] ?? ''}
 										/>
 									</div>
+									<!-- While a model or a workspace run is going, the voice button's slot
+									     becomes Stop — same shape, same weight, so cancelling is one click
+									     where the user's hand already is. -->
 									{#if isActive && prompt === '' && files.length === 0}
 										<div class=" flex items-center">
 											<Tooltip content={$i18n.t('Stop')}>
 												<button
-													class="bg-white hover:bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-white dark:hover:bg-gray-800 transition rounded-full p-1.5"
+													class="bg-black text-white hover:bg-gray-900 dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-lg p-1.5 self-center"
+													type="button"
+													aria-label={$i18n.t('Stop')}
 													on:click={() => {
 														stopResponse();
 													}}
@@ -2255,22 +2280,42 @@
 														fill="currentColor"
 														class="size-5"
 													>
-														<path
-															fill-rule="evenodd"
-															d="M2.25 12c0-5.385 4.365-9.75 9.75-9.75s9.75 4.365 9.75 9.75-4.365 9.75-9.75 9.75S2.25 17.385 2.25 12zm6-2.438c0-.724.588-1.312 1.313-1.312h4.874c.725 0 1.313.588 1.313 1.313v4.874c0 .725-.588 1.313-1.313 1.313H9.564a1.312 1.312 0 01-1.313-1.313V9.564z"
-															clip-rule="evenodd"
-														/>
+														<rect x="6.5" y="6.5" width="11" height="11" rx="2.5" />
 													</svg>
 												</button>
 											</Tooltip>
 										</div>
 									{:else}
+										{#if isActive}
+											<!-- Typing the next message mid-run used to hide Stop entirely. -->
+											<div class=" flex items-center">
+											<Tooltip content={$i18n.t('Stop')}>
+												<button
+													class="bg-black text-white hover:bg-gray-900 dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-lg p-1.5 self-center"
+													type="button"
+													aria-label={$i18n.t('Stop')}
+													on:click={() => {
+														stopResponse();
+													}}
+												>
+													<svg
+														xmlns="http://www.w3.org/2000/svg"
+														viewBox="0 0 24 24"
+														fill="currentColor"
+														class="size-5"
+													>
+														<rect x="6.5" y="6.5" width="11" height="11" rx="2.5" />
+													</svg>
+												</button>
+											</Tooltip>
+										</div>
+										{/if}
 										{#if prompt !== '' && !history?.currentId && !$selectedTerminalId && ($config?.features?.enable_notes ?? false) && ($_user?.role === 'admin' || ($_user?.permissions?.features?.notes ?? true))}
 											<!-- {$i18n.t('Create Note')}  -->
 											<Tooltip content={$i18n.t('Create note')} className=" flex items-center">
 												<button
 													id="create-note-button"
-													class=" text-gray-500 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 transition rounded-full p-1.5 -mr-1 self-center"
+													class=" text-gray-500 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 transition rounded-lg p-1.5 -mr-1 self-center"
 													type="button"
 													disabled={prompt === '' && files.length === 0}
 													on:click={() => {
@@ -2300,16 +2345,18 @@
 												bind:show={showModeMenu}
 												side="bottom"
 												align="start"
-												contentClass="rounded-xl border border-gray-100 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-lg p-1 w-56 text-sm"
+												contentClass="rounded-xl border border-gray-100 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-lg p-1 w-[30rem] max-w-[calc(100vw-2rem)] text-sm"
 											>
 												<button
 													type="button"
-													class="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium transition {CHAT_MODE_META[$chatMode]?.cls}"
+													class="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition {CHAT_MODE_META[$chatMode]?.cls}"
 													tabindex="-1"
 													aria-label="Chat mode"
 												>
 													<span class="size-1.5 rounded-full {CHAT_MODE_DOT[$chatMode]}"></span>
-													<span class="max-w-[11rem] truncate"
+													<span
+														class="max-w-[16rem] truncate"
+														title={$chatMode === 'auto' ? composerModel : CHAT_MODE_META[$chatMode]?.label}
 														>{$chatMode === 'auto' ? composerModel : CHAT_MODE_META[$chatMode]?.label}</span
 													>
 													<svg class="size-3 opacity-70" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6" /></svg>
@@ -2322,9 +2369,17 @@
 													</div>
 													<div class="max-h-72 overflow-y-auto">
 														{#each modelMenuList as m}
-															<div class="w-full flex items-center gap-1 group/mrow rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800 transition">
-																<button type="button" class="flex-1 min-w-0 flex items-center gap-2 px-2.5 py-1.5 text-left" on:click={() => { selectedModels = [m.id]; showModeMenu = false; }}>
-																	<span class="flex-1 truncate text-gray-800 dark:text-gray-100">{m.name}</span>
+															<div class="w-full flex items-start gap-1 group/mrow rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800 transition">
+																<button type="button" class="flex-1 min-w-0 flex flex-col gap-0.5 px-2.5 py-1.5 text-left" on:click={() => { selectedModels = [m.id]; showModeMenu = false; }}>
+																	<span class="text-gray-800 dark:text-gray-100 break-words leading-snug">{m.name}</span>
+																	<span class="flex items-center gap-1.5 text-[11px] leading-none text-gray-400 dark:text-gray-500">
+																		{#if m.id !== m.name}
+																			<span class="font-mono break-all">{m.id}</span>
+																		{/if}
+																		{#if modelContext(m)}
+																			<span class="shrink-0">· {modelContext(m)}</span>
+																		{/if}
+																	</span>
 																</button>
 																{#if isCloudModel(m)}
 																	<button type="button" class="shrink-0 text-xs text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 px-1.5 py-1.5 opacity-0 group-hover/mrow:opacity-100 transition" aria-label={$i18n.t("Edit model profile")} on:click|stopPropagation={() => { editorModel = m; showModelEditor = true; }}>{$i18n.t('Edit')}</button>
@@ -2364,7 +2419,7 @@
 													align="end"
 													contentClass="rounded-xl border border-gray-100 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-lg w-64"
 												>
-													<button type="button" class="flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-gray-850 hover:bg-gray-200 dark:hover:bg-gray-800 transition" tabindex="-1" aria-label={$i18n.t("Reasoning effort")}>
+													<button type="button" class="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-gray-850 hover:bg-gray-200 dark:hover:bg-gray-800 transition" tabindex="-1" aria-label={$i18n.t("Reasoning effort")}>
 														<span class="max-w-[7rem] truncate">{composerEffortLabel}</span>
 														<svg class="size-3 opacity-70" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6" /></svg>
 													</button>
@@ -2380,7 +2435,7 @@
 												<!-- {$i18n.t('Call')} -->
 												<Tooltip content={$i18n.t('Voice mode')}>
 													<button
-														class=" bg-black text-white hover:bg-gray-900 dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-full p-1.5 self-center"
+														class=" bg-black text-white hover:bg-gray-900 dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-lg p-1.5 self-center"
 														type="button"
 														on:click={async () => {
 															if (selectedModels.length > 1) {
@@ -2455,7 +2510,7 @@
 														id="send-message-button"
 														class="{!(prompt === '' && files.length === 0) || uploadPending
 															? 'bg-blue-600 text-white hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-400 '
-															: 'text-white bg-gray-200 dark:text-gray-900 dark:bg-gray-700 disabled'} transition rounded-full p-1.5 self-center"
+															: 'text-white bg-gray-200 dark:text-gray-900 dark:bg-gray-700 disabled'} transition rounded-lg p-1.5 self-center"
 														type="submit"
 														disabled={(prompt === '' && files.length === 0) || uploadPending}
 													>

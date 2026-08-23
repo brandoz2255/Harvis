@@ -335,7 +335,7 @@
 				{#each LOADS as o (o.lb)}
 					<button
 						type="button"
-						class="text-[11px] px-2.5 py-1.5 rounded-full border border-white/10 text-gray-300 hover:text-cyan-200 hover:border-cyan-400/30 transition"
+						class="text-[11px] px-2.5 py-1.5 rounded-lg border border-white/10 text-gray-300 hover:text-cyan-200 hover:border-cyan-400/30 transition"
 						on:click={() => answerLoad(o.lb)}>{$i18n.t(o.label)}</button
 					>
 				{/each}

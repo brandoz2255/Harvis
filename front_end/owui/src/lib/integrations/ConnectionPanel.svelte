@@ -26,6 +26,10 @@
 
 	const i18n: any = getContext('i18n');
 	export let def: IntegrationDefinition;
+	// Set by the caller when the def is a VARIANT of a multi-mode tile (see IntegrationVariant):
+	// the variant, not the tile id, decides which engine-auth row the credential lands in. Empty
+	// = fall back to the id→engine map below.
+	export let engineAuthKey = '';
 	const dispatch = createEventDispatcher();
 	const changed = () => dispatch('changed'); // tell the page to refetch (instant real-time)
 
@@ -186,12 +190,15 @@
 	// it instead of mis-routing a credential.
 	const ENGINE_AUTH_OF: Record<string, string> = {
 		'claude-code': 'claude-code',
-		'codex-app': 'codex',
-		// Kimi Code MEMBERSHIP gets its OWN engine-auth row — NOT the same credential as the
-		// 'kimi-api' tile, which is a Moonshot pay-as-you-go key in the plain api-key store.
-		'kimi-code': 'kimi-code'
+		'codex-app': 'codex'
+		// Kimi is NOT here: it's a multi-variant tile, so its membership variant passes
+		// engineAuthKey='kimi-code' explicitly. That row is a DIFFERENT credential from the
+		// Moonshot pay-as-you-go key its platform variant writes to the plain api-key store.
 	};
-	$: authEngine = ENGINE_AUTH_OF[def.id] ?? '';
+	// Precedence: a VARIANT's key is the most specific (it's the mode the user just picked), then
+	// the card's own authored `authEngine`, then the legacy map for cards that predate the field.
+	// The guard below still catches anything with none of the three.
+	$: authEngine = engineAuthKey || def.authEngine || ENGINE_AUTH_OF[def.id] || '';
 	$: if (def.connect === 'engine_api_key' && !authEngine) {
 		console.error(
 			`ConnectionPanel: integration '${def.id}' uses connect:'engine_api_key' but has no engine-auth mapping. ` +
@@ -586,10 +593,29 @@
 				{/if}
 			</div>
 
+			{#if def.keyConsoleUrl}
+				<!-- The one thing a new user is actually missing: where the key comes from. A link,
+				     never an auto-open — the user decides when to leave the page. -->
+				<p class="text-[11px]">
+					<a
+						href={def.keyConsoleUrl}
+						target="_blank"
+						rel="noopener noreferrer"
+						class="text-blue-600 dark:text-blue-300 hover:underline"
+					>
+						{def.freeTier
+							? $i18n.t('Get a free API key from {{provider}} →', { provider: def.provider ?? def.name })
+							: $i18n.t('Get an API key from {{provider}} →', { provider: def.provider ?? def.name })}
+					</a>
+				</p>
+			{/if}
+
 			<p class="text-[11px] text-gray-400">
-				{#if def.id === 'codex-app'}
+				{#if def.keyHelp}
+					{$i18n.t(def.keyHelp)}
+				{:else if def.id === 'codex-app'}
 					{$i18n.t('Your OpenAI API key — used only to run Codex in Build, stored encrypted, never shown. OpenCode needs no key (local).')}
-				{:else if def.id === 'kimi-code'}
+				{:else if authEngine === 'kimi-code'}
 					{$i18n.t('Use the API key created in the Kimi Code Console (kimi.com/coding). Uses your Kimi membership quota — a Moonshot developer-platform key (platform.moonshot.ai) is a different product and will not work here. Stored encrypted, never shown.')}
 				{:else if authMode === 'oauth_token'}
 					{$i18n.t('Run `claude setup-token` in your terminal (needs Claude Pro/Max/Team/Enterprise), then paste the token here. No API credits required — stored encrypted, never shown.')}

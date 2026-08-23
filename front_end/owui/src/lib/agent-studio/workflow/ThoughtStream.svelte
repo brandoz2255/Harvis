@@ -225,7 +225,7 @@
 					>
 					{#if l.verdict}
 						<span
-							class="text-[9px] uppercase tracking-wide font-bold px-1.5 py-0.5 rounded-full {l.verdict ===
+							class="text-[9px] uppercase tracking-wide font-bold px-1.5 py-0.5 rounded-md {l.verdict ===
 							'approved'
 								? 'bg-emerald-500/15 text-emerald-500 dark:text-emerald-400'
 								: l.verdict === 'comment'

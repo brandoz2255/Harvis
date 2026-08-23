@@ -135,7 +135,7 @@
 
 	<!-- core glow — breathing = readiness (ambient) · quick blink = request in flight -->
 	<div
-		class="glow absolute rounded-full {busy ? 'shaping' : ambient ? 'breathe' : ''}"
+		class="glow absolute rounded-lg {busy ? 'shaping' : ambient ? 'breathe' : ''}"
 		style="inset:{size * (compact ? 0.24 : 0.31)}px;background:rgba({glowRgb},{state === 'idle' ? 0.06 : 0.1});box-shadow:0 0 {compact ? 14 : 40}px {compact ? 3 : 8}px rgba({glowRgb},{state === 'idle' ? 0.18 : 0.32}), inset 0 0 {compact ? 10 : 24}px rgba({glowRgb},0.3);"
 	></div>
 

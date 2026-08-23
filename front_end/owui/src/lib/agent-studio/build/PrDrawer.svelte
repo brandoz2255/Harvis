@@ -308,7 +308,7 @@
 								{#each reviewerAgents as a (a.id)}
 									<button
 										type="button"
-										class="px-2 py-0.5 rounded-full border text-[10px] transition {selectedReviewerIds.includes(
+										class="px-2 py-0.5 rounded-md border text-[10px] transition {selectedReviewerIds.includes(
 											a.id
 										)
 											? 'border-amber-500 bg-amber-500/15 text-amber-800 dark:text-amber-200'

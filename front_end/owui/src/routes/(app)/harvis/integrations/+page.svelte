@@ -47,6 +47,7 @@
 	import ControlCard from '$lib/integrations/ControlCard.svelte';
 	import IntegrationDetailModal from '$lib/integrations/IntegrationDetailModal.svelte';
 	import IntegrationLogs from '$lib/integrations/IntegrationLogs.svelte';
+	import FreeKeysGuide from '$lib/integrations/FreeKeysGuide.svelte';
 
 	const i18n: any = getContext('i18n');
 	const backToChat = () => goto($chatId ? `/c/${$chatId}` : '/');
@@ -87,6 +88,13 @@
 	// P6: the "all" layout renders the five named dashboard sections.
 	$: cardsInSection = (s: SectionKey) => searched.filter((d) => sectionOf(d) === s);
 
+	// Collapsible sections (2026-07-29 directory layout — the chevron on each heading).
+	// Everything starts open. A live search query forces every section open, so a match can
+	// never hide inside a collapsed group.
+	let collapsed: Record<string, boolean> = {};
+	const toggleSection = (s: SectionKey) => (collapsed = { ...collapsed, [s]: !collapsed[s] });
+	$: sectionOpen = (s: SectionKey) => (q.trim() ? true : !collapsed[s]);
+
 	// P6: per-integration logs drawer.
 	let showLogs = false;
 	let logsDef: IntegrationDefinition | null = null;
@@ -99,6 +107,24 @@
 		: isStatusFilter(filter)
 			? searched.filter((d) => !isPack(d) && normalizeStatus(d, engineReadiness) === filter)
 			: [];
+
+	// ── free-key onboarding ─────────────────────────────────────────────────────────────
+	// The one thing a fresh install is missing is a model. The guide names the vendors with a
+	// real free tier and hands off to the normal connect flow; the callout below only appears
+	// when the user genuinely has nowhere to send a message yet.
+	let showFreeKeys = false;
+	$: freeProviderCards = merged.filter((d) => d.freeTier && d.keyConsoleUrl);
+	$: anyFreeConnected = freeProviderCards.some(
+		(d) => normalizeStatus(d, engineReadiness) === 'connected'
+	);
+	// Local Ollama counts as "has a model" — someone running models on their own box doesn't
+	// need to be told about cloud free tiers.
+	$: localModelsReady = merged.some(
+		(d) => d.id === 'ollama' && (d.status === 'ready' || d.status === 'running')
+	);
+	// `live` gates it so the callout can't flash during the first fetch, when everything still
+	// reads as unconnected.
+	$: showNoModelCallout = !!live && !anyFreeConnected && !localModelsReady;
 
 	// ── details drawer ──────────────────────────────────────────────────────────────────
 	let showDetail = false;
@@ -218,7 +244,7 @@
 </script>
 
 <svelte:head>
-	<title>{$i18n.t('Integrations')} • {$WEBUI_NAME}</title>
+	<title>{$i18n.t('Engines')} • {$WEBUI_NAME}</title>
 </svelte:head>
 
 <div
@@ -234,7 +260,7 @@
 			</button>
 			<div class="flex items-end justify-between gap-3 mt-2 flex-wrap">
 				<div>
-					<h1 class="text-2xl font-semibold text-gray-800 dark:text-gray-100">{$i18n.t('Integrations')}</h1>
+					<h1 class="text-2xl font-semibold text-gray-800 dark:text-gray-100">{$i18n.t('Engines')}</h1>
 					<p class="text-sm text-gray-500 mt-0.5">
 						{$i18n.t('What Harvis can use — and what it uses by default.')}
 					</p>
@@ -254,7 +280,44 @@
 					>
 						{$i18n.t('Refresh')}
 					</button>
+					<button
+						class="text-xs px-2.5 py-1 rounded-lg border border-blue-500/30 text-blue-600 dark:text-blue-300 hover:bg-blue-500/10 transition"
+						on:click={() => (showFreeKeys = true)}
+					>
+						{$i18n.t('Get free API keys')}
+					</button>
 				</div>
+			</div>
+
+			<!-- page-level search: the primary way to find something in a long directory -->
+			<div class="relative mt-4">
+				<svg
+					class="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-gray-400 pointer-events-none"
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="2"
+					stroke-linecap="round"
+					stroke-linejoin="round"
+					aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" /></svg
+				>
+				<input
+					bind:value={q}
+					type="text"
+					placeholder={$i18n.t('Search engines and connectors')}
+					aria-label={$i18n.t('Search engines and connectors')}
+					class="w-full text-sm rounded-xl border border-gray-200 dark:border-white/10 bg-gray-50 dark:bg-[#0c111d] pl-9 pr-9 py-2.5 text-gray-700 dark:text-gray-200 placeholder:text-gray-400 outline-none focus:border-blue-500/40"
+				/>
+				{#if q}
+					<button
+						class="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 rounded-lg text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 transition"
+						title={$i18n.t('Clear')}
+						aria-label={$i18n.t('Clear')}
+						on:click={() => (q = '')}
+					>
+						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="size-4"><path d="M18 6 6 18M6 6l12 12" /></svg>
+					</button>
+				{/if}
 			</div>
 		</header>
 
@@ -282,39 +345,79 @@
 			{/each}
 		</div>
 
-		<!-- group filter tabs + search -->
-		<div class="flex flex-col sm:flex-row sm:items-center gap-3">
-			<div class="flex flex-wrap gap-1.5">
-				{#each GROUP_TABS as g}
-					<button
-						class="text-xs px-3 py-1.5 rounded-full transition {filter === g
-							? 'bg-blue-600 text-white'
-							: 'text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-white/5'}"
-						on:click={() => (filter = filter === g ? 'all' : g)}>{$i18n.t(GROUP_LABEL[g])}</button
-					>
-				{/each}
-			</div>
-			<input
-				bind:value={q}
-				type="text"
-				placeholder={$i18n.t('Search…')}
-				class="w-full sm:max-w-[14rem] sm:ml-auto text-sm rounded-lg border border-gray-200 dark:border-white/10 bg-gray-50 dark:bg-[#0c111d] px-3 py-1.5 text-gray-700 dark:text-gray-200 outline-none focus:border-blue-500/40"
-			/>
+		<!-- group filter tabs (search lives in the header now) -->
+		<div class="flex flex-wrap gap-1.5">
+			{#each GROUP_TABS as g}
+				<button
+					class="text-xs px-3 py-1.5 rounded-lg transition {filter === g
+						? 'bg-blue-600 text-white'
+						: 'text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-white/5'}"
+					on:click={() => (filter = filter === g ? 'all' : g)}>{$i18n.t(GROUP_LABEL[g])}</button
+				>
+			{/each}
 		</div>
 
-		<!-- body — P6: five named dashboard sections (status contract unchanged) -->
+		<!-- No model anywhere: the one state where a new user is genuinely stuck. Says what's
+		     missing and offers the shortest path out of it. Disappears the moment anything
+		     connects, so it can never nag someone who already has a working setup. -->
+		{#if showNoModelCallout}
+			<div
+				class="rounded-xl border border-blue-500/25 bg-blue-500/5 px-4 py-3.5 flex flex-col sm:flex-row sm:items-center gap-3"
+			>
+				<div class="min-w-0 flex-1">
+					<p class="text-sm font-medium text-gray-800 dark:text-gray-100">
+						{$i18n.t('No model provider connected yet')}
+					</p>
+					<p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+						{$i18n.t(
+							'Harvis needs somewhere to send a message. Several providers publish a free tier — one API key is enough to start chatting, with no GPU and no card.'
+						)}
+					</p>
+				</div>
+				<button
+					class="shrink-0 text-xs px-3 py-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition"
+					on:click={() => (showFreeKeys = true)}
+				>
+					{$i18n.t('Get free API keys')}
+				</button>
+			</div>
+		{/if}
+
+		<!-- body — P6 sections, 2026-07-29 directory layout: collapsible heading + two columns -->
 		{#if filter === 'all'}
 			{#each SECTION_ORDER as s (s)}
 				{#if cardsInSection(s).length || s === 'ssh_remote'}
-					<section class="space-y-2">
-						<div>
-							<h2 class="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-gray-500">
-								{$i18n.t(SECTION_LABEL[s])}
-							</h2>
-							<p class="text-[11px] text-gray-400/80 dark:text-gray-500/80">{$i18n.t(SECTION_HINT[s])}</p>
-						</div>
+					<section>
+						<button
+							type="button"
+							class="group w-full flex items-center gap-2 text-left py-1.5 outline-none"
+							aria-expanded={sectionOpen(s)}
+							on:click={() => toggleSection(s)}
+						>
+							<div class="min-w-0">
+								<h2 class="text-base font-semibold text-gray-800 dark:text-gray-100">
+									{$i18n.t(SECTION_LABEL[s])}
+								</h2>
+								<p class="text-xs text-gray-400 dark:text-gray-500">{$i18n.t(SECTION_HINT[s])}</p>
+							</div>
+							<svg
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="2"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+								class="size-4 shrink-0 text-gray-400 group-hover:text-gray-600 dark:group-hover:text-gray-300 transition-transform {sectionOpen(
+									s
+								)
+									? 'rotate-0'
+									: '-rotate-90'}"
+								aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg
+							>
+						</button>
+						{#if sectionOpen(s)}
 						{#if cardsInSection(s).length}
-							<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+							<div class="grid grid-cols-1 md:grid-cols-2 gap-x-4 mt-0.5">
 								{#each cardsInSection(s) as def (def.id)}
 									<ControlCard {def} {engineReadiness} {prefs} on:open={(e) => openModal(e.detail)} on:setDefault={(e) => setAsDefault(e.detail)} on:logs={(e) => openLogs(e.detail)} />
 								{/each}
@@ -329,11 +432,12 @@
 								</div>
 							</div>
 						{/if}
+						{/if}
 					</section>
 				{/if}
 			{/each}
 		{:else}
-			<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+			<div class="grid grid-cols-1 md:grid-cols-2 gap-x-4">
 				{#each flatCards as def (def.id)}
 					<ControlCard {def} {engineReadiness} {prefs} on:open={(e) => openModal(e.detail)} on:setDefault={(e) => setAsDefault(e.detail)} on:logs={(e) => openLogs(e.detail)} />
 				{/each}
@@ -354,3 +458,12 @@
 
 <!-- P6: read-only recent-activity drawer -->
 <IntegrationLogs bind:show={showLogs} integrationId={logsDef?.id ?? ''} name={logsDef?.name ?? ''} />
+
+<!-- Free-key onboarding. Hands off to the SAME detail modal as every other connect, so the
+     credential is only ever typed into ConnectionPanel — the guide never touches a key. -->
+<FreeKeysGuide
+	bind:show={showFreeKeys}
+	{merged}
+	{engineReadiness}
+	on:connect={(e) => openModal(e.detail)}
+/>

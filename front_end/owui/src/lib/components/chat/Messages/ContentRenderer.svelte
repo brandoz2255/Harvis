@@ -3,6 +3,7 @@
 	const i18n = getContext('i18n');
 
 	import Markdown from './Markdown.svelte';
+	import { SANDBOX_PATH_RE, openSandboxFile } from '$lib/utils/sandbox';
 	import SandboxPreview from './SandboxPreview.svelte';
 	import {
 		artifactCode,
@@ -229,16 +230,16 @@
 	// (/tmp/harvis-chat/u<id>/…) become clickable → open a live preview fetched from the container.
 	let sandboxPreviewPath = '';
 	let showSandboxPreview = false;
-	const SANDBOX_RE = /\/tmp\/harvis-chat\/u\d+\/[^\s`<>"')]+\.[a-z0-9]+/gi;
+	const SANDBOX_RE = SANDBOX_PATH_RE;
 
 	const linkifySandboxPaths = (container) => {
 		if (!container) return;
-		if (!(container.textContent || '').includes('/tmp/harvis-chat/')) return; // fast path
+		if (!(container.textContent || '').includes('/harvis-chat/')) return; // fast path
 		try {
 			container.querySelectorAll('code:not([data-hp])').forEach((c) => {
 				const t = (c.textContent || '').trim();
 				SANDBOX_RE.lastIndex = 0;
-				if (/^\/tmp\/harvis-chat\/u\d+\//.test(t) && SANDBOX_RE.test(t)) {
+				if (SANDBOX_RE.test(t)) {
 					c.setAttribute('data-hp', '1');
 					c.setAttribute('data-path', t);
 					c.classList.add('harvis-sandbox-path');
@@ -275,27 +276,6 @@
 		}
 	};
 
-	const buildSandboxArtifact = (data) => {
-		const name = String(data?.name || '');
-		const isSvg = /\.svg$/i.test(name) || String(data?.mime).includes('svg');
-		const isHtml = /\.html?$/i.test(name) || String(data?.mime).includes('html');
-		if (data?.is_binary) {
-			return {
-				type: 'iframe',
-				content: `<!doctype html><html><body style="margin:0;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#fff"><img src="${data.data_url}" alt="preview" style="max-width:100%;height:auto"/></body></html>`
-			};
-		}
-		if (isSvg) return { type: 'svg', content: data.content };
-		if (isHtml) return { type: 'iframe', content: data.content };
-		const esc = String(data?.content ?? '')
-			.replaceAll('&', '&amp;')
-			.replaceAll('<', '&lt;')
-			.replaceAll('>', '&gt;');
-		return {
-			type: 'iframe',
-			content: `<!doctype html><html><body style="margin:0;padding:12px;font:13px/1.6 ui-monospace,Menlo,monospace;white-space:pre-wrap;word-break:break-word;background:#fff;color:#111">${esc}</body></html>`
-		};
-	};
 
 	// Click a sandbox path → open its live preview in the RIGHT-SIDE Artifacts rail (same panel as
 	// inline HTML previews). Falls back to the centered modal on mobile (no rail) or on error.
@@ -310,17 +290,7 @@
 			showSandboxPreview = true;
 			return;
 		}
-		try {
-			const res = await fetch(`/api/owui/chat-file?path=${encodeURIComponent(p)}`, {
-				headers: { Authorization: `Bearer ${localStorage.token}` }
-			});
-			if (!res.ok) throw new Error(`HTTP ${res.status}`);
-			const data = await res.json();
-			artifactContents.set([buildSandboxArtifact(data)]);
-			showControls.set(true);
-			showArtifacts.set(true);
-			showEmbeds.set(false);
-		} catch (_) {
+		if (!(await openSandboxFile(p))) {
 			sandboxPreviewPath = p;
 			showSandboxPreview = true;
 		}
@@ -415,22 +385,6 @@
 {/if}
 
 <style>
-	:global(.harvis-sandbox-path) {
-		cursor: pointer;
-		color: rgb(37 99 235);
-		text-decoration: underline;
-		text-underline-offset: 2px;
-		word-break: break-all;
-		background: none;
-		border: none;
-		padding: 0;
-		margin: 0;
-		font: inherit;
-	}
-	:global(.dark .harvis-sandbox-path) {
-		color: rgb(96 165 250);
-	}
-	:global(.harvis-sandbox-path:hover) {
-		opacity: 0.8;
-	}
+	/* The chip's look lives in app.css, so the card and the prose share one definition.
+	   These paths are injected as raw DOM nodes, so the rule has to be global either way. */
 </style>

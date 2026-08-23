@@ -26,7 +26,7 @@
 					on:click={backToChat}>← {$i18n.t('Back to chat')}</button
 				>
 				<button
-					class="text-xs px-3 py-1.5 rounded-full bg-blue-600 hover:bg-blue-500 text-white transition"
+					class="text-xs px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white transition"
 					on:click={() => goto('/')}>{$i18n.t('Run task')}</button
 				>
 			</div>

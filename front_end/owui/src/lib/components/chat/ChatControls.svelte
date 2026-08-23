@@ -10,12 +10,14 @@
 		| 'brain'
 		| 'run'
 		| 'cad'
-		| 'research' = 'overview';
+		| 'research'
+		| 'cookbook' = 'overview';
 </script>
 
 <script lang="ts">
 	import { SvelteFlowProvider } from '@xyflow/svelte';
-	import { slide } from 'svelte/transition';
+	import { slide, fly } from 'svelte/transition';
+	import { cubicOut } from 'svelte/easing';
 	import { Pane, PaneResizer } from 'paneforge';
 	import { v4 as uuidv4 } from 'uuid';
 
@@ -86,6 +88,12 @@
 	let largeScreen = false;
 	let dragged = false;
 	let minSize = 0;
+	// The narrowest the panel may be dragged, and how wide it opens on its own. The floor
+	// used to be 460 because code lines did not reflow, so anything narrower cropped them.
+	// They wrap now, so the panel can be squeezed down to a genuinely narrow column and
+	// still show whole lines.
+	const PANE_MIN_PX = 320;
+	const PANE_DEFAULT_PCT = 46;
 	let paneReady = false;
 
 	// Tab state for Controls+Files panel
@@ -104,12 +112,14 @@
 				$user?.role === 'admin' ||
 				($user?.permissions?.features?.direct_tool_servers ?? true))) ||
 		(codeInterpreterEnabled && $config?.code?.interpreter_engine !== 'jupyter');
-	$: showOverviewTab = hasMessages;
 	$: showActivityTab = $user?.role === 'admin' || ($user?.permissions?.chat?.controls ?? true);
 	// Harvis Agent Studio surfaces available in the right-rail dock (same gate as Activity).
+	// Overview · Artifacts · Sources are one family: they either all belong to this user or
+	// none do. They used to be gated three different ways, so Overview could be the active
+	// tab on a chat where it was not offered.
 	$: showStudioTabs = showActivityTab;
-	$: if (!showActivityTab && activeTab === 'activity') activeTab = 'overview';
-	// The dock is now Overview · Artifacts · Sources only. Map / Brain / Global-Map /
+	$: showOverviewTab = showStudioTabs;
+	// The dock is now Files · Overview · Artifacts · Sources · CAD. Map / Brain / Global-Map /
 	// Controls / Run are no longer tabs — redirect any straggler (module-level savedTab or
 	// the dock bridge) to Overview.
 	$: if (
@@ -120,8 +130,29 @@
 		activeTab === 'run'
 	)
 		activeTab = 'overview';
-	// Sources rides the same gate as Artifacts.
-	$: if (!showStudioTabs && activeTab === 'sources') activeTab = 'overview';
+
+	// The tabs that actually have a button, in the order they are drawn. One list, read by
+	// both the guard below and by nothing else — the buttons stay literal so they keep their
+	// own labels and tooltips.
+	$: visibleTabs = [
+		...(showFilesTab ? ['files'] : []),
+		...(showStudioTabs ? ['overview', 'activity', 'sources'] : []),
+		...(showCadTab ? ['cad'] : [])
+	];
+
+	// Tabs opened by something other than a button (the in-chat research card docks one).
+	// They have no button, so the guard must not bounce them.
+	const BRIDGE_TABS = ['research'];
+
+	// The one redirect. `savedTab` is module-level, so a tab chosen in a chat where it was
+	// offered used to survive into a chat where it is not — landing the panel on a tab with
+	// no button and, at the bottom of the router, an unrelated fallback panel.
+	$: if (
+		visibleTabs.length > 0 &&
+		!visibleTabs.includes(activeTab) &&
+		!BRIDGE_TABS.includes(activeTab)
+	)
+		activeTab = visibleTabs[0] as typeof activeTab;
 
 	// CAD Studio. The tab appears only when the server says the lane is on — a
 	// capability the operator switched off must not leave a tab that 404s on every
@@ -154,9 +185,6 @@
 		activeTab = $workspaceControlsTab as typeof activeTab;
 		workspaceControlsTab.set(null);
 	}
-
-	// Tab fallback: if the Files tab becomes hidden, fall back to Overview.
-	$: if (!showFilesTab && activeTab === 'files') activeTab = 'overview';
 
 	// Auto-close only if there's genuinely nothing to show.
 	$: if (!showOverviewTab && !showFilesTab && !showStudioTabs && !showCadTab) {
@@ -228,15 +256,71 @@
 		}
 	};
 
+	// The panel used to appear at full width in a single frame, which reads as a glitch
+	// rather than as something opening. This slides it out instead. While it slides, the
+	// onResize handler below stands down — otherwise its minimum-width clamp fights every
+	// intermediate frame on the way up from zero, and its localStorage write runs 15 times.
+	let paneAnimating = false;
+	let paneAnimFrame: number | null = null;
+
+	const animatePaneTo = (target: number) => {
+		if (!pane) return;
+		const start = pane.getSize();
+		const reduced =
+			typeof window !== 'undefined' &&
+			window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
+
+		if (paneAnimFrame !== null) {
+			cancelAnimationFrame(paneAnimFrame);
+			paneAnimFrame = null;
+		}
+		if (reduced || Math.abs(target - start) < 0.75) {
+			paneAnimating = false;
+			pane.resize(target);
+			return;
+		}
+
+		paneAnimating = true;
+		const startedAt = performance.now();
+		const duration = 260;
+		// ease-out cubic: quick off the mark, settles rather than stops.
+		const ease = (t: number) => 1 - Math.pow(1 - t, 3);
+
+		// Opening from zero, the very first frame is a hair above zero — small enough that
+		// paneforge would read it as still collapsed and slam the panel shut again.
+		const floor = target > start ? Math.min(target, 3) : 0;
+
+		const step = (now: number) => {
+			const t = Math.min(1, (now - startedAt) / duration);
+			pane?.resize(Math.max(floor, start + (target - start) * ease(t)));
+			if (t < 1) {
+				paneAnimFrame = requestAnimationFrame(step);
+			} else {
+				paneAnimFrame = null;
+				paneAnimating = false;
+			}
+		};
+		paneAnimFrame = requestAnimationFrame(step);
+	};
+
 	export const openPane = () => {
-		if (parseInt(localStorage?.chatControlsSize)) {
-			const container = document.getElementById('chat-container');
-			let size = Math.floor(
-				(parseInt(localStorage?.chatControlsSize) / container.clientWidth) * 100
-			);
-			pane.resize(size);
+		if (!pane) return;
+		const container = document.getElementById('chat-container');
+		let saved = parseInt(localStorage?.chatControlsSize);
+		// A width saved back when the floor was 350px reopens the panel too narrow to read
+		// code in. Treat anything under the current floor as stale and fall through to the
+		// default; the next drag saves a fresh value.
+		if (saved && saved < PANE_MIN_PX) {
+			delete localStorage.chatControlsSize;
+			saved = NaN;
+		}
+		if (saved && container) {
+			animatePaneTo(Math.floor((saved / container.clientWidth) * 100));
 		} else {
-			pane.resize(minSize);
+			// The floor is the narrowest the panel may get, not a sensible width to read a
+			// script at. Open at just under half the window so code arrives legible and the
+			// handle sits where it can be dragged either way.
+			animatePaneTo(Math.min(64, Math.max(minSize, PANE_DEFAULT_PCT)));
 		}
 	};
 
@@ -292,11 +376,11 @@
 			const container = document.getElementById('chat-container') as HTMLElement;
 			if (!container) return;
 
-			minSize = Math.floor((350 / container.clientWidth) * 100);
+			minSize = Math.floor((PANE_MIN_PX / container.clientWidth) * 100);
 			resizeObserver = new ResizeObserver((entries) => {
 				for (let entry of entries) {
 					const width = entry.contentRect.width;
-					minSize = Math.floor((350 / width) * 100);
+					minSize = Math.floor((PANE_MIN_PX / width) * 100);
 					if ($showControls) {
 						if (pane && pane.isExpanded() && pane.getSize() < minSize) {
 							pane.resize(minSize);
@@ -339,6 +423,28 @@
 	};
 
 	$: if (paneReady && !chatId) closeHandler();
+
+	// The dock was only ever collapsed by a subscription over in Chat.svelte, and a Svelte
+	// store skips its subscribers when the value hasn't actually changed — so `set(false)` on
+	// an already-false store (starting a new chat while an artifact is open) collapsed
+	// nothing and left an expanded, empty pane behind. Own the collapse here, where `pane`
+	// lives, so the width always follows the flag no matter who set it or how.
+	const collapsePane = () => {
+		if (!pane) return;
+		// An open animation still stepping would resize the pane straight back open.
+		if (paneAnimFrame !== null) {
+			cancelAnimationFrame(paneAnimFrame);
+			paneAnimFrame = null;
+		}
+		paneAnimating = false;
+		try {
+			pane.collapse();
+		} catch (e) {
+			// paneforge throws if the group is mid-teardown; nothing left to close then.
+		}
+	};
+
+	$: if (paneReady && !$showControls && pane?.isExpanded?.()) collapsePane();
 
 	// Helper: is a "special" full-screen panel active?
 	$: specialPanel = $showCallOverlay || $showArtifacts || $showEmbeds;
@@ -493,8 +599,10 @@
 								<PyodideFileNav />
 							{:else if activeTab === 'controls'}
 								<Controls embed={true} {models} bind:chatFiles bind:params />
-							{:else}
+							{:else if activeTab === 'cookbook'}
 								<Cookbook mode="dock" />
+							{:else}
+								<OverviewPanel />
 							{/if}
 						</div>
 					</div>
@@ -505,19 +613,27 @@
 {:else}
 	{#if $showControls}
 		<PaneResizer
-			class="relative w-2.5 shrink-0 flex items-center justify-center group border-l border-gray-100 dark:border-gray-850 hover:border-gray-200 dark:hover:border-gray-800 transition z-20"
+			class="relative w-2.5 shrink-0 flex items-center justify-center group cursor-col-resize border-l border-gray-100 dark:border-gray-850 hover:border-gray-200 dark:hover:border-gray-800 transition z-20"
 			id="controls-resizer"
 		>
 			<div
 				class="absolute -left-1.5 -right-1.5 -top-0 -bottom-0 z-20 cursor-col-resize bg-transparent"
 			/>
+			<!-- A drag handle nobody can see is a drag handle nobody uses. -->
+			<div
+				class="pointer-events-none h-8 w-[3px] rounded-full bg-gray-300/70 dark:bg-gray-700 opacity-0 group-hover:opacity-100 transition-opacity"
+			/>
 		</PaneResizer>
 	{/if}
 
+	<!-- The Pane element renders whether or not the dock is open, so a background painted
+	     unconditionally turns any width the pane is left holding into a solid black bar in
+	     dark mode. Its `class` below paints only when there is content inside to paint behind. -->
 	<Pane
 		bind:pane
 		defaultSize={0}
 		onResize={(size) => {
+			if (paneAnimating) return;
 			if ($showControls && pane.isExpanded()) {
 				if (size < minSize) pane.resize(minSize);
 				if (size < minSize) {
@@ -529,13 +645,17 @@
 			}
 		}}
 		onCollapse={() => {
+			if (paneAnimating) return;
 			if (paneReady) showControls.set(false);
 		}}
 		collapsible={true}
-		class="z-10 bg-white dark:bg-gray-850"
+		class="z-10 {$showControls ? 'bg-white dark:bg-gray-850' : ''}"
 	>
 		{#if $showControls}
-			<div class="flex max-h-full min-h-full">
+			<div
+				class="flex max-h-full min-h-full"
+				in:fly|global={{ x: 28, duration: 300, easing: cubicOut, opacity: 0 }}
+			>
 				<div
 					class="w-full {specialPanel && !$showCallOverlay
 						? ' '
@@ -687,8 +807,10 @@
 									<PyodideFileNav overlay={dragged} />
 								{:else if activeTab === 'controls'}
 									<Controls embed={true} {models} bind:chatFiles bind:params />
-								{:else}
+								{:else if activeTab === 'cookbook'}
 									<Cookbook mode="dock" />
+								{:else}
+									<OverviewPanel />
 								{/if}
 							</div>
 						</div>

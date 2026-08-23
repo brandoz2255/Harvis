@@ -42,16 +42,25 @@
 	};
 
 	let showMenu = false;
+
+	// A model whose inference host isn't answering. The backend sends these instead of
+	// dropping them, so a model that lives only on the desktop rig reads as "the rig is
+	// asleep" rather than vanishing — which looks like Harvis lost it. Still selectable:
+	// the probe is a 4-second guess about another machine, and refusing the click would
+	// strand the user on a false negative.
+	$: unreachableHost = item?.model?.harvis?.status === 'unreachable';
+	$: unreachableReason = item?.model?.harvis?.reason ?? '';
 </script>
 
 <button
 	role="option"
 	aria-selected={value === item.value}
 	aria-label={$i18n.t('Select {{modelName}} model', { modelName: item.label })}
-	class="flex group/item w-full text-left font-medium line-clamp-1 select-none items-center rounded-button py-2 pl-3 pr-1.5 text-sm text-gray-700 dark:text-gray-100 outline-hidden transition-all duration-75 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-xl cursor-pointer data-highlighted:bg-muted {index ===
+	class="flex group/item w-full text-left font-medium select-none items-center rounded-button py-2 pl-3 pr-1.5 text-sm text-gray-700 dark:text-gray-100 outline-hidden transition-all duration-75 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-xl cursor-pointer data-highlighted:bg-muted {index ===
 	selectedModelIdx
 		? 'bg-gray-100 dark:bg-gray-800 group-hover:bg-transparent'
 		: ''}"
+	class:opacity-60={unreachableHost}
 	data-arrow-selected={index === selectedModelIdx}
 	data-value={item.value}
 	on:click={() => {
@@ -90,15 +99,30 @@
 				</Tooltip>
 			</div>
 
-			<div class="flex items-center">
+			<!-- min-w-0 so the name can shrink inside the flex row rather than pushing the
+			     badges off, and two lines because the id is the part that says WHICH model
+			     this is: "gemini-3.1-pro-preview-customtools (Google Gemini)" is 50
+			     characters and clamping to one line cut it exactly where it stopped being
+			     distinguishable from its four near-namesakes. -->
+			<div class="flex items-center min-w-0">
 				<Tooltip content={`${item.label} (${item.value})`} placement="top-start">
-					<div class="line-clamp-1">
+					<div class="line-clamp-2 break-words">
 						{item.label}
 					</div>
 				</Tooltip>
 			</div>
 
 			<div class=" shrink-0 flex items-center gap-2">
+				{#if unreachableHost}
+					<Tooltip content={unreachableReason} className="self-end">
+						<span
+							class="text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded-md bg-amber-500/15 text-amber-700 dark:text-amber-400"
+						>
+							{$i18n.t('Offline')}
+						</span>
+					</Tooltip>
+				{/if}
+
 				{#if item.model.owned_by === 'ollama'}
 					{#if (item.model.ollama?.details?.parameter_size ?? '') !== ''}
 						<div class="flex items-center translate-y-[0.5px]">

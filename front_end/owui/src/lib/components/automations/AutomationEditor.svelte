@@ -245,7 +245,7 @@
 			<div class="flex items-center gap-2 shrink-0">
 				<Tooltip content={$i18n.t('Delete')}>
 					<button
-						class="p-2 rounded-full bg-transparent hover:bg-gray-50 dark:hover:bg-gray-850 text-gray-500 hover:text-black dark:hover:text-white transition"
+						class="p-2 rounded-lg bg-transparent hover:bg-gray-50 dark:hover:bg-gray-850 text-gray-500 hover:text-black dark:hover:text-white transition"
 						on:click={() => (showDeleteConfirm = true)}
 						type="button"
 					>
@@ -255,7 +255,7 @@
 
 				{#if isDirty}
 					<button
-						class="px-3 py-1 text-sm bg-black text-white dark:bg-white dark:text-black rounded-full hover:opacity-90 transition flex items-center gap-1.5"
+						class="px-3 py-1 text-sm bg-black text-white dark:bg-white dark:text-black rounded-lg hover:opacity-90 transition flex items-center gap-1.5"
 						on:click={saveHandler}
 						disabled={saving}
 						type="button"
@@ -268,7 +268,7 @@
 				{/if}
 
 				<button
-					class="px-2.5 py-1 text-sm border border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-850 transition rounded-full flex items-center gap-1.5"
+					class="px-2.5 py-1 text-sm border border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-850 transition rounded-lg flex items-center gap-1.5"
 					on:click={runNowHandler}
 					type="button"
 					disabled={loading}

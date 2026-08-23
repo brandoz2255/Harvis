@@ -33,6 +33,7 @@ const IMMEDIATE_TYPES = new Set([
 	'token',
 	'tool_call',
 	'tool_result',
+	'verify_preview',
 	'done',
 	'error',
 	'cancelled',
