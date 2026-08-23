@@ -148,6 +148,7 @@ docker-compose.local.yml
 .env.local
 .env.personal
 .env.secret
+.env.omniroute-trial
 
 # IDE and editor files
 .vscode/settings.json
@@ -244,3 +245,6 @@ k8s-manifests/overlays/prod/openclaw-secrets.yaml
 python_back_end/test_segment_*.wav
 # research BM25/fetch cache — runtime state, rebuilt on demand
 python_back_end/research_cache/
+# SkillOpt corpus + candidates — mined from real user runs (task briefs are user content).
+# Regenerate with ./scripts/skillopt-offline.sh; never commit.
+/data/skillopt/

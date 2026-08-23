@@ -363,6 +363,13 @@ services:
       # Set HARVIS_ADAPTIVE_CAD_ENABLED=true and bring up the cad-engine sidecar to activate.
       HARVIS_ADAPTIVE_CAD_ENABLED: "${HARVIS_ADAPTIVE_CAD_ENABLED:-}"
       HARVIS_ADAPTIVE_CAD_URL: "${HARVIS_ADAPTIVE_CAD_URL:-http://harvis-cad:8000}"
+      # HE-0…HE-10 evidence tranche: semantic face-role targets, targeted
+      # measurements, and conformance graded on those numbers. Default OFF —
+      # off means the pre-HE path runs unchanged (regex/v1 checks, no
+      # measurements requested or stored). The backend process is what reads
+      # this: the CAD tools run HERE, over MCP, not inside the model sidecar,
+      # so setting it anywhere else has no effect on an authored part.
+      HARVIS_CAD_EVIDENCE_V2: "${HARVIS_CAD_EVIDENCE_V2:-false}"
       # Adaptive Workspace Repo Runner — clone + run an untrusted repo in an isolated,
       # cap-dropped sandbox on the repo-sandbox network. Flag default OFF (untrusted code).
       # Build the polyglot image: docker build -t harvis-repo-sandbox:local ./repo-sandbox-engine
@@ -372,6 +379,36 @@ services:
       HARVIS_ADAPTIVE_REPO_SANDBOX_CPUS: "${HARVIS_ADAPTIVE_REPO_SANDBOX_CPUS:-1.5}"
       HARVIS_ADAPTIVE_REPO_SANDBOX_MEM: "${HARVIS_ADAPTIVE_REPO_SANDBOX_MEM:-1500m}"
       HARVIS_ADAPTIVE_REPO_DEV_PORT: "${HARVIS_ADAPTIVE_REPO_DEV_PORT:-3000}"
+      # MCP connector runtime — runs a user's MCP servers as sibling containers
+      # (stdio via npx/uvx) on the SAME isolated network and the SAME polyglot
+      # image as the Repo Runner, because the backend image has no Node/uv and
+      # an MCP server is third-party code. Flag default OFF; connector tools sit
+      # in permission lane 5 and are gated on THIS flag, not HARVIS_SSH_ENABLED.
+      HARVIS_MCP_RUNTIME_ENABLED: "${HARVIS_MCP_RUNTIME_ENABLED:-false}"
+      HARVIS_MCP_SANDBOX_IMAGE: "${HARVIS_MCP_SANDBOX_IMAGE:-harvis-repo-sandbox:local}"
+      HARVIS_MCP_SANDBOX_NETWORK: "${HARVIS_MCP_SANDBOX_NETWORK:-harvis_repo-sandbox}"
+      HARVIS_MCP_SANDBOX_CPUS: "${HARVIS_MCP_SANDBOX_CPUS:-1.0}"
+      HARVIS_MCP_SANDBOX_MEM: "${HARVIS_MCP_SANDBOX_MEM:-768m}"
+      HARVIS_MCP_IDLE_TIMEOUT_S: "${HARVIS_MCP_IDLE_TIMEOUT_S:-900}"
+      HARVIS_MCP_MAX_SESSIONS: "${HARVIS_MCP_MAX_SESSIONS:-8}"
+      # Agent Reach — lane-5 public-web research (web_read / yt_transcript /
+      # gh_view / rss_read). Flag default OFF: every tool reaches the public
+      # internet from the backend, so it is opt-in per deploy. NEVER enable this
+      # inside the egress-denied OpenClaw pod.
+      HARVIS_AGENT_REACH_ENABLED: "${HARVIS_AGENT_REACH_ENABLED:-false}"
+      # Screenshot-to-code self-check — renders the model's own HTML in the
+      # locked-down preview container and feeds the PNG back for comparison.
+      # Flag default OFF; costs one browser render + one vision call per loop.
+      HARVIS_VISION_SELF_CHECK_ENABLED: "${HARVIS_VISION_SELF_CHECK_ENABLED:-false}"
+      HARVIS_VISION_MAX_PREVIEWS: "${HARVIS_VISION_MAX_PREVIEWS:-2}"
+      # Where the bundled SKILL.md files are mounted (repo-root ./skills is
+      # outside the backend build context, so this can only come from a mount).
+      HARVIS_SKILLS_DIR: "${HARVIS_SKILLS_DIR:-/app/skills/Harvis}"
+      # HTML→PNG renderer for previews (Discord + Build screenshot_preview).
+      # Points at preview-runner, NOT browser-runner: the HTML being rendered is
+      # model-authored and untrusted, and preview-runner is the container that
+      # forces safe mode and sits on an internal-only network.
+      HARVIS_BROWSER_RUNNER_URL: "${HARVIS_BROWSER_RUNNER_URL:-http://preview-runner:8765}"
       HARVIS_OPENCODE_CONTAINER: "${HARVIS_OPENCODE_CONTAINER:-harvis-opencode}"
       HARVIS_OPENCODE_DEFAULT_MODEL: "${HARVIS_OPENCODE_DEFAULT_MODEL:-qwen3:4b}"
       HARVIS_OPENCODE_TIMEOUT_S: "${HARVIS_OPENCODE_TIMEOUT_S:-900}"
@@ -476,6 +513,17 @@ services:
       - ./openclaw/config:/app/openclaw_config
       - ./python_back_end/notebooks:/app/notebooks:ro
       - ./python_back_end/vibecoding:/app/vibecoding:ro
+      # Agent Reach (lane-5 public research), screenshot-to-code, and the skillopt
+      # offline job. All three are imported LAZILY by workspace/orchestration, so a
+      # missing mount fails silently at runtime instead of crashing at boot — which
+      # is exactly how they shipped invisible to this container.
+      - ./python_back_end/agent_reach:/app/agent_reach:ro
+      - ./python_back_end/vision_to_code:/app/vision_to_code:ro
+      - ./python_back_end/skills_training:/app/skills_training:ro
+      # Bundled SKILL.md files live at the REPO ROOT, outside the ./python_back_end
+      # build context — no image rebuild can ever bake them in. Read-only: the seeder
+      # reads these into Postgres, it never writes back.
+      - ./skills:/app/skills:ro
       # SSH scaffold (marathon P7) — main.py imports remote.ssh_manager; without
       # this mount the backend crashes on boot with ModuleNotFoundError. The
       # module is inert (HARVIS_SSH_ENABLED off → every route 403s).
@@ -529,6 +577,9 @@ services:
       - openclaw-internal
       - cad-internal
       - repo-sandbox
+      # Reaches preview-runner, which renders untrusted model-authored HTML.
+      # preview-net is internal:true, so nothing on it can reach the internet.
+      - preview-net
     extra_hosts:
       # Allow backend container to reach host-installed openclaw gateway on :18790
       - "host.docker.internal:host-gateway"
@@ -556,6 +607,10 @@ services:
 
   # Tier 3 Browser Runner (Firefox sandbox) - internal only
   browser-runner:
+    # Shared image name with preview-runner: same context, same Dockerfile, so
+    # they must not land on disk twice (the fresh-install size budget counts
+    # every image).
+    image: harvis-browser-runner:latest
     build:
       context: ./browser_runner
       dockerfile: Dockerfile
@@ -573,6 +628,40 @@ services:
       - "8765"
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8765/health || curl -sf http://localhost:8765/docs || exit 0"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # Preview Runner — renders UNTRUSTED, model-authored HTML (screenshot-to-code,
+  # Discord previews). Same image as browser-runner, so it costs no extra disk;
+  # what differs is the containment:
+  #   - HARVIS_PREVIEW_SAFE_MODE_FORCED=1 means a caller CANNOT ask for
+  #     JavaScript or network, whatever it sends in the request body;
+  #   - preview-net is internal:true, so even a browser bug can't reach the
+  #     internet, and the container is on no other network, so it can't reach
+  #     pgsql, ollama, or openclaw either;
+  #   - no ports: — not reachable from the host.
+  # browser-runner stays as-is for the trusted browsing lane, which needs both.
+  preview-runner:
+    image: harvis-browser-runner:latest
+    build:
+      context: ./browser_runner
+      dockerfile: Dockerfile
+      args:
+        VCS_REF: ${HARVIS_VCS_REF:-unknown}
+    container_name: harvis-preview-runner
+    restart: unless-stopped
+    environment:
+      HARVIS_PREVIEW_SAFE_MODE: "1"
+      HARVIS_PREVIEW_SAFE_MODE_FORCED: "1"
+      HARVIS_BROWSER_MAX_SESSIONS: "${HARVIS_PREVIEW_MAX_SESSIONS:-4}"
+    networks:
+      - preview-net
+    expose:
+      - "8765"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8765/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -1504,6 +1593,42 @@ services:
     cpus: 2.0
     stop_grace_period: 10s
 
+  # Agent Reach (optional) — Phase 1 tools run IN the Harvis backend
+  # (agent_reach package) when HARVIS_AGENT_REACH_ENABLED=1.
+  # This profile is a placeholder for a future exec sandbox with controlled egress.
+  # NEVER attach this to the OpenClaw pod / never widen OpenClaw NetworkPolicy.
+  agent-reach-sandbox:
+    image: curlimages/curl:8.5.0
+    container_name: harvis-agent-reach-sandbox
+    profiles: ["agent-reach"]
+    restart: "no"
+    command: ["sleep", "infinity"]
+    networks:
+      - ollama-n8n-network
+    # No ports. Backend talks to public APIs itself; this sandbox is for later
+    # CLI experiments under operator control only.
+
+  # SentrySearch (optional video MCP) — local video search over a user volume.
+  # Profile-gated (~450–600 MB). Default OFF. Not security/CVE search.
+  # Do NOT use the upstream OpenClaw skill path (needs Gemini + egress).
+  sentrysearch-mcp:
+    build:
+      context: ./mcp-servers/sentrysearch
+      dockerfile: Dockerfile
+    image: harvis-sentrysearch:local
+    pull_policy: build
+    container_name: harvis-sentrysearch
+    profiles: ["sentrysearch"]
+    restart: unless-stopped
+    environment:
+      SENTRYSEARCH_VIDEO_DIR: /data/videos
+      SENTRYSEARCH_EMBED_BACKEND: "${SENTRYSEARCH_EMBED_BACKEND:-local}"
+    volumes:
+      - sentrysearch_videos:/data/videos
+    networks:
+      - ollama-n8n-network
+    # No host ports — MCP stdio/runtime only when explicitly enabled.
+
 networks:
   ollama-n8n-network:
     external: true
@@ -1519,6 +1644,12 @@ networks:
   # probe. The live preview is a docker-published 127.0.0.1 host port hit directly.
   repo-sandbox:
     driver: bridge
+  # Preview rendering network. internal:true is load-bearing, not decoration:
+  # preview-runner opens untrusted HTML, and this is the outer fence behind the
+  # browser's own no-JS/no-network profile. Only the backend is attached.
+  preview-net:
+    driver: bridge
+    internal: true
 
 volumes:
   pgsql_data:
@@ -1539,3 +1670,4 @@ volumes:
   ssh_state:             # Phase 4: per-user SSH known_hosts + ephemeral key temp files (0700)
   hermes_gateway_home:   # Phase E4B: Hermes Agent gateway (Chat) profile/config/memory
   hermes_homes:          # Phase E4B: per-user Hermes Build profiles (HERMES_HOME per run)
+  sentrysearch_videos:   # Optional SentrySearch profile — local user video volume only
