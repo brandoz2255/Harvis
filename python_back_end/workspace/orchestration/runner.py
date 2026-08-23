@@ -922,7 +922,14 @@ class SubAgentRunner:
                         from plugins.mcp.tool_bridge import dispatch_mcp_tool
 
                         result, ok = await dispatch_mcp_tool(
-                            mcp_registry_obj, int(user_id), name, args
+                            mcp_registry_obj, int(user_id), name, args,
+                            # Lets an image a connector produced land in the
+                            # artifacts instead of behind a Docker-only URL.
+                            # Against the PARENT run: the Artifacts rail is per
+                            # launched run, so an image filed under a sub-agent's
+                            # own id would exist but never appear beside the
+                            # answer that produced it.
+                            pool=pool, workspace_id=(parent_run_id or run_id or ""),
                         )
                         if ok and call_key:
                             seen_calls[call_key] = steps

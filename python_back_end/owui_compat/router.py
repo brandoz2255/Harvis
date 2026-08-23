@@ -266,12 +266,18 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
         owui_body = await request.json()
         # CAD first — it is the narrowest detector of the three (an explicit
         # "🧊 create cad <recipe>" marker, never natural language), so it can only
-        # ever claim a turn that was unambiguously meant for it.
-        from .cad_bridge import maybe_handle_cad_build
+        # ever claim a turn that was unambiguously meant for it. CAD is an optional
+        # module tree (see the registration block below), so a deployment without it
+        # simply never claims the turn.
+        try:
+            from .cad_bridge import maybe_handle_cad_build
+        except ImportError:
+            maybe_handle_cad_build = None
 
-        cad = await maybe_handle_cad_build(request, owui_body, user)
-        if cad is not None:
-            return cad
+        if maybe_handle_cad_build is not None:
+            cad = await maybe_handle_cad_build(request, owui_body, user)
+            if cad is not None:
+                return cad
         # Image generation next ("+ → Create Image" flag, or "generate an image
         # of X" NL): launches a gated txt2img workspace run + returns the same
         # run-card marker. Falls through when it's not an image request.
@@ -760,11 +766,28 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
     register_integrations_status_routes(router, get_current_user)
     register_integration_logs_routes(router, get_current_user)
     register_adaptive_space_routes(router, get_current_user)
-    # Gate 3. Registered unconditionally; every route inside is gated on
-    # HARVIS_ADAPTIVE_CAD_ENABLED at request time, so flipping the flag does not need
-    # a code path that only exists at import.
-    from .cad_router import register_cad_routes
-    register_cad_routes(router, get_current_user)
+    # Gate 3 and Gate 7C-3: the CAD REST routes, and the same tools over MCP for
+    # Claude Code and Kimi Code. Same gate, same auth, same dispatcher.
+    #
+    # CAD is an optional module tree. Where it is present these register
+    # unconditionally and every route inside is gated on HARVIS_ADAPTIVE_CAD_ENABLED
+    # at request time, so flipping the flag needs no code path that only exists at
+    # import. Where the tree is absent the app serves everything else rather than
+    # failing to start.
+    try:
+        from .cad_router import register_cad_routes
+        from .cad_mcp import register_cad_mcp_routes
+    except ImportError as exc:
+        logger.info("CAD routes not registered — module tree absent (%s)", exc)
+    else:
+        register_cad_routes(router, get_current_user)
+        register_cad_mcp_routes(router, get_current_user)
+
+    # The same door, for whatever the user has connected themselves. Registered
+    # unconditionally: unlike CAD this has no feature flag of its own, and a
+    # deployment with no connectors simply serves an empty tool list.
+    from plugins.mcp.sidecar_bridge import register_connector_mcp_routes
+    register_connector_mcp_routes(router, get_current_user)
     register_capabilities_routes(router, get_current_user)
     register_engine_auth_routes(router, get_current_user)
     from .hermes_connect import register_hermes_connect_routes
@@ -780,6 +803,8 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
     register_subagent_routes(router, get_current_user)
     from .evaluations import register_evaluation_routes
     register_evaluation_routes(router, get_current_user)
+    from .account import register_account_routes
+    register_account_routes(router, get_current_user, deps.verify_password)
 
     @router.get("/api/v1/chats/{chat_id}")
     async def owui_chat_get(chat_id: str, request: Request, user=Depends(get_current_user)):

@@ -149,6 +149,7 @@ async def run_vibecode_turn(
     permission_mode: str = "ask",      # in-place permission ladder: plan|ask|auto-accept|full-auto
     persona_engine: str = "",          # Phase E4: "hermes" → SOUL persona + Hermes model; "" → plain native
     launch_mode: str = "user",         # "auto" (auto-detected launch) → heavy tools withheld from the offered schema
+    attachments: list[dict] | None = None,  # user's raw attachment refs; images become multimodal parts
 ) -> AsyncGenerator[OpenClawEvent, None]:
     # Lazy import (avoid circular import at module load) — the FUNCTIONS, not the
     # re-exported APIRouter in workspace/__init__.py.
@@ -236,13 +237,97 @@ async def run_vibecode_turn(
         })
         return
 
+    # ── Multimodal attachments ────────────────────────────────────────────────
+    # An image attachment used to reach the model as a LINE OF TEXT naming the
+    # file. Screenshot-to-code on a model that can't see the screenshot produces
+    # a confident page invented from the filename, which is worse than refusing.
+    # So: resolve the bytes into real image parts, and refuse when the selected
+    # model is known not to accept them.
+    task_images: list[dict] = []
+    if attachments:
+        try:
+            from vision_to_code.attachments import build_image_parts
+
+            # `user_id or None`: 0 is this signature's "nobody" default, and an
+            # unauthenticated turn must not be able to read a stored upload.
+            task_images, skipped = await build_image_parts(
+                attachments, owner_id=user_id or None
+            )
+        except Exception as exc:
+            logger.exception("vibecode: attachment image build failed")
+            task_images, skipped = [], [f"attachments could not be read ({exc})"]
+
+        for note in skipped:
+            yield root_ev("log", {"message": f"Image not sent to the model — {note}"})
+
+        if task_images:
+            from vision_to_code.vision_gate import build_refusal, model_can_see
+
+            can_see, reason = await model_can_see(model_name)
+            if can_see is False:
+                yield root_ev("error", await build_refusal(model_name, reason, len(task_images)))
+                return
+            if can_see is None:
+                logger.info("vibecode: vision capability unknown for %r — %s", model_name, reason)
+            yield root_ev("log", {
+                "message": (
+                    f"Sent {len(task_images)} image"
+                    f"{'' if len(task_images) == 1 else 's'} to {model_name}"
+                ),
+            })
+
+    # ── Non-image attachments ─────────────────────────────────────────────────
+    # A PDF, a CSV, a source file can't become an image part, and naming it in the
+    # brief tells this agent about a file it has no way to open. Write it into the
+    # working tree instead, where read_file actually reaches it.
+    if attachments:
+        try:
+            from vision_to_code.attachments import (
+                is_image_attachment,
+                materialize_attachments,
+                staged_attachment_brief,
+            )
+
+            non_images = [
+                a for a in attachments
+                if isinstance(a, dict) and not is_image_attachment(a)
+            ]
+            if non_images:
+                staged, not_staged = await materialize_attachments(
+                    non_images, workspace_path, owner_id=user_id or None
+                )
+                if staged or not_staged:
+                    task_brief = staged_attachment_brief(staged, not_staged) + task_brief
+                if staged:
+                    yield root_ev("log", {
+                        "message": "Staged in the workspace: "
+                        + ", ".join(s["name"] for s in staged),
+                    })
+                for note in not_staged:
+                    yield root_ev("log", {"message": f"Attachment not staged — {note}"})
+        except Exception:
+            logger.exception("vibecode: non-image attachment staging failed")
+
     # The permission pyramid is honored in BOTH clone and in-place (the web lane is
     # clone-only, so every rung must work there). plan = read-only; ask/auto-accept =
     # the per-action approval gate; full-auto (or unset) = run freely with no gate.
     gate_mode = permission_mode if permission_mode in ("plan", "ask", "auto-accept") else None
     sys_prompt = _VIBECODE_SYSTEM
+    # Seed default Build skill discipline into every vibecode turn (filesystem).
+    try:
+        from owui_compat.skills import load_bundled_skill_body
+
+        _build_skill = load_bundled_skill_body("harvis-build")
+        if _build_skill:
+            sys_prompt = (
+                _VIBECODE_SYSTEM
+                + "\n\n## Bundled skill: harvis-build\n\n"
+                + _build_skill
+            )
+    except Exception:
+        logger.debug("vibecode: harvis-build skill load skipped", exc_info=True)
     if gate_mode == "plan":
-        sys_prompt = _VIBECODE_SYSTEM + (
+        sys_prompt = sys_prompt + (
             "\n\nPLAN MODE: this turn is READ-ONLY — file edits and shell commands are "
             "BLOCKED and will fail, so do NOT attempt them. First explore with read_file "
             "/ dir_list to ground yourself in the actual code, then call finish with "
@@ -300,6 +385,7 @@ async def run_vibecode_turn(
             parent_run_id=run_id,
             label=label,
             task=task_brief,
+            task_images=task_images,
             model_name=model_name,
             workspace_path=workspace_path,
             system_prompt=sys_prompt,

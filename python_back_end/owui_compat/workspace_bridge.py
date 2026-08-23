@@ -110,6 +110,7 @@ def _marker_content(
 # itself rather than silently reading "OpenClaw".
 _ENGINE_LABELS = {
     "main": "OpenClaw",
+    "agent-native": "Harvis Agent",
     "orchestrated": "Orchestrator",
     "claude": "Claude",
     "kimi": "Kimi",
@@ -143,7 +144,12 @@ def _resolve_engine(mode: str, model_id: str) -> tuple[str, str]:
     elif model_id.startswith("moonshot/"):
         agent_id = "kimi"  # → stream_kimi_workspace (the original Harvis workspace engine)
     else:
-        agent_id = os.getenv("HARVIS_OWUI_WORKSPACE_AGENT", "main")
+        # Everything else — local Ollama tags and the per-user cloud providers (groq,
+        # cerebras, gemini, nvidia, mistral, OpenAI) — runs on Harvis's OWN tool-loop.
+        # That is the only lane offering Agent Reach, so "Agent" means the same thing
+        # here as it does on a CLI engine. This used to default to "main" (OpenClaw),
+        # which has no reach tools; HARVIS_OWUI_WORKSPACE_AGENT=main restores that.
+        agent_id = os.getenv("HARVIS_OWUI_WORKSPACE_AGENT", "agent-native")
     return agent_id, _ENGINE_LABELS.get(agent_id, agent_id)
 
 
@@ -185,6 +191,91 @@ def _needs_live_tools(suggestion, message: str) -> bool:
     if (getattr(suggestion, "task_type", "") or "") in ("research", "multi_step"):
         return True
     return bool(_LIVE_TOOL_RE.search(message or ""))
+
+
+# ── Reach intent: information the model CANNOT have ──────────────────────────
+# `_LIVE_TOOL_RE` above is deliberately loose because it only ever *suppresses* a
+# launch on a paid cloud model — a false positive there costs nothing. It is far
+# too loose to *cause* a launch: "write a web scraper" and "parse this price
+# column" would both send a code question to the slow tool lane.
+#
+# These two patterns are the tight version, and each one names a request the
+# model provably cannot answer from training data:
+#   1. an explicit fetch/search imperative ("search the web for…", "read this page"),
+#   2. a question about right-now (latest / today / current price).
+# Anything else stays in plain chat, where it was already being answered fine.
+#
+# A bare pasted URL is deliberately NOT a trigger. chat_completion._inject_media
+# already fetches http(s) links through the research extractor and injects the
+# page as context, inline and immediately — diverting those to a workspace run
+# would trade a fast inline answer for a slow one behind a run card, to reach the
+# same page.
+_REACH_IMPERATIVE_RE = re.compile(
+    r"(search\s+(the\s+)?(web|internet|online)|web\s?search|google\s+(it|for|this)|"
+    r"look\s+(it|this|that)?\s*up\s+(online|on\s+the\s+web)|browse\s+to\b|"
+    r"(read|open|check|visit|fetch|pull\s+up)\s+(this|that|the)\s+"
+    r"(page|url|link|site|article|repo|readme|feed|video|transcript)|"
+    r"summari[sz]e\s+(this|that|the)\s+"
+    r"(page|url|link|site|article|repo|readme|feed|video|transcript))",
+    re.IGNORECASE,
+)
+_URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+_FRESHNESS_RE = re.compile(
+    r"\b(latest|current(ly)?|today'?s?|right\s+now|as\s+of\s+(today|now)|"
+    r"this\s+(week|month|year)|newest|up[-\s]to[-\s]date|breaking\s+news)\b",
+    re.IGNORECASE,
+)
+# An information request does not have to be shaped like a question. "give me current
+# details on gpt oss 20b" scored 0 here while asking for exactly the thing the weights
+# cannot supply — it went to a sandbox run, which answered from memory and named the
+# wrong model. The imperative openers below are the same ask in the imperative mood;
+# the freshness word is still required, so "give me a function that sorts a list"
+# stays out.
+_QUESTION_RE = re.compile(
+    r"(\?|^\s*(what|who|when|where|which|how\s+(many|much)|is|are|does|did|has|have)\b"
+    r"|\b(give|tell|show|get|find|fetch)\s+me\b"
+    r"|^\s*(list|find|look\s+up)\b)",
+    re.IGNORECASE,
+)
+
+
+# Verbs that ask for something to EXIST when the turn is done — a file, a report, a
+# patch, a running command. Those belong in a workspace even when the same turn also
+# needs live information, because chat_reach can only read and answer.
+_ARTIFACT_VERB_RE = re.compile(
+    r"\b(build|write|create|make|generate|implement|code|refactor|fix|patch|edit|"
+    r"install|deploy|run|execute|test|compile|scaffold|migrate|rename|delete|"
+    r"add\s+(a|an|the)\b|save|export|draft)\b",
+    re.IGNORECASE,
+)
+
+
+def _answer_only_reach(message: str, suggestion) -> bool:
+    """True when the turn is a live-information *question* with nothing to produce.
+
+    The detector scores "is this a multi-step build task" and it rated
+    "give me current details on gpt oss 20b" at 0.90 — high enough to auto-launch a
+    sandbox run, which then answered from stale weights and named the wrong model.
+    A question with no artifact verb has nothing for a sandbox to do: chat_reach
+    reaches the same pages in a couple of seconds with no run card. Deliberately
+    narrow — anything that asks for a file, a patch, or a command stays on the
+    workspace path, as does a forced agent/orchestrate turn (handled by the caller).
+    """
+    if (getattr(suggestion, "task_type", None) or "") != "research":
+        return False
+    if not _needs_reach(message):
+        return False
+    return not _ARTIFACT_VERB_RE.search(message or "")
+
+
+def _needs_reach(message: str) -> bool:
+    """True when the turn asks for information only a live fetch can supply."""
+    m = (message or "").strip()
+    if not m:
+        return False
+    if _REACH_IMPERATIVE_RE.search(m):
+        return True
+    return bool(_FRESHNESS_RE.search(m) and _QUESTION_RE.search(m))
 
 
 async def _sync_workspace_model(pool, model_name: str) -> None:
@@ -260,17 +351,13 @@ async def maybe_handle_workspace(
     # keeps new K-versions routing correctly without touching this file.
     _is_moonshot = _model_id.startswith("moonshot/")
 
-    # FIX 5: OpenAI/GPT cloud models have no workspace tool lane. If the user FORCES
-    # agent/orchestrate on one, launching the native/OpenClaw loop would run on a model
-    # it can't drive — fall back to plain chat honestly (the auto path already returns
-    # None for _is_openai below). Cloud Claude keeps the lane (it has a workspace bridge).
-    if mode in ("agent", "orchestrate") and _is_openai:
-        logger.info(
-            "owui workspace_bridge: %s mode requested on an OpenAI model (no workspace lane) → plain chat",
-            mode,
-        )
-        return None
-
+    # OpenAI/GPT used to be forced back to plain chat here, because the only lane the
+    # else-branch could reach was OpenClaw (an Ollama-backed loop a cloud model can't
+    # drive). The "agent-native" lane changed that: it POSTs OpenAI Chat Completions
+    # with Harvis's tool schema, using this user's OWN key (see
+    # orchestration/provider_route.py), so GPT now runs the same tool-loop as every
+    # other API-key provider. A missing key fails the run by name instead of silently
+    # answering as a local model.
     # Lazy imports — keep the package free of import-time coupling to workspace/.
     try:
         from workspace.task_detector import detect_workspace_task, WorkspaceSuggestion
@@ -301,12 +388,51 @@ async def maybe_handle_workspace(
             logger.exception("owui workspace_bridge: detect_workspace_task failed")
             return None
         if not (suggestion.should_suggest and suggestion.confidence >= _AUTO_LAUNCH_CONFIDENCE):
-            return None
-        # Cloud models: GPT has no workspace lane yet → plain chat. Cloud Claude takes the
-        # (slower, tool-driving) workspace lane ONLY for genuine tool tasks (web search,
-        # current info, code execution); simple generation stays in fast plain chat where
-        # the artifact preview auto-opens. Forced agent/orchestrate (above) always runs it.
-        if _is_openai:
+            # The detector scores "is this a multi-step BUILD task", so it rates a plain
+            # question low no matter how un-answerable that question is from training
+            # data. "What's the latest release of X?" scored 0.2 and got answered from
+            # a stale weight file, with the tools that could have fetched it sitting
+            # right there. Needing information the model cannot have is its own launch
+            # reason — see _needs_reach for the (deliberately narrow) definition.
+            if not _needs_reach(message):
+                return None
+            # …but plain chat can now answer these itself: chat_reach runs the same
+            # two read-only tools inline, in a couple of seconds, with no run card
+            # and no sandbox. When it is on it owns the turn, because launching a
+            # workspace to answer "what's the latest X?" is the slower way to reach
+            # the identical page. This branch is the fallback for HARVIS_CHAT_REACH=0.
+            from .chat_reach import chat_reach_enabled
+
+            if chat_reach_enabled():
+                logger.info("owui workspace_bridge: reach intent → chat_reach owns it")
+                return None
+            suggestion = WorkspaceSuggestion({
+                "should_suggest": True,
+                "confidence": 1.0,
+                "task_type": "research",
+                "task_brief": message[:500],
+                "reason": "Needs live information the model cannot have.",
+            })
+            logger.info("owui workspace_bridge: reach intent → auto workspace launch")
+        # A high detector score is not a reason to run a sandbox for a question. The
+        # detector rates research tasks highly and has no opinion about whether the
+        # answer needs anything built, so a pure "give me current details on X" was
+        # taking the slow lane and answering from memory anyway.
+        elif _answer_only_reach(message, suggestion):
+            from .chat_reach import chat_reach_enabled
+
+            if chat_reach_enabled():
+                logger.info(
+                    "owui workspace_bridge: answer-only research (conf=%.2f) → chat_reach owns it",
+                    suggestion.confidence,
+                )
+                return None
+        # Cloud models are paid per token and slower on the tool lane, so they take it
+        # ONLY for genuine tool tasks (web search, current info, code execution); simple
+        # generation stays in fast plain chat where the artifact preview auto-opens.
+        # Forced agent/orchestrate (above) always runs it.
+        if _is_openai and not _needs_live_tools(suggestion, message):
+            logger.info("owui workspace_bridge: OpenAI simple task → plain chat")
             return None
         # Kimi/Moonshot is a paid cloud engine like Claude — same rule, so simple generation
         # doesn't burn Moonshot tokens on the slow tool lane when fast chat would do.
@@ -371,10 +497,9 @@ async def maybe_handle_workspace(
         session_id=session_id,
         task_brief=resolved_brief,
         chat_history=history,
-        # Resolved above from the picked model. Default "main" → agent_id NOT in
-        # {local,kimi,nvidia-kimi,cloud-ollama,gpt-oss} → the `else` branch in
-        # workspace_router → client.stream (which actually has tools). Override the
-        # non-cloud default per-deploy via HARVIS_OWUI_WORKSPACE_AGENT (e.g. "local").
+        # Resolved above from the picked model. Default "agent-native" → the native
+        # SubAgentRunner, the only lane that offers Agent Reach. Override per-deploy
+        # via HARVIS_OWUI_WORKSPACE_AGENT ("main" = the old OpenClaw loop, "local" …).
         agent_id=_agent_id,
         user_id=user_id,
         model_name=model_name,

@@ -32,11 +32,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shlex
 import time
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .protocol import McpError, McpSession
+from .auth import resolve_auth_headers
+from .credentials import unseal_env
+from .protocol import McpError, McpSession, McpTransportError
 from .types import McpServerConfig, Transport
 
 logger = logging.getLogger(__name__)
@@ -116,9 +119,35 @@ asyncio.run(main())
 
 
 def runtime_enabled() -> bool:
-    """Off by default. Running third-party MCP servers is code execution, and
-    every other exec surface in this repo ships behind a flag."""
+    """Whether Harvis may RUN a stdio MCP server.
+
+    Off by default: launching a third-party npm package is code execution, and
+    every other exec surface in this repo ships behind a flag.
+    """
     return os.getenv("HARVIS_MCP_RUNTIME_ENABLED", "").strip().lower() not in _FALSY
+
+
+def remote_enabled() -> bool:
+    """Whether Harvis may TALK to a hosted MCP server.
+
+    On by default, and deliberately a different question from the one above.
+    Connecting to a URL the user configured runs no code here — no container,
+    no npm package, no sandbox — so the exec flag's reasoning simply does not
+    apply to it, and gating remote connectors behind it only meant that adding
+    a connector through the UI silently did nothing.
+
+    What does apply is where that URL points, which ``http_transport.guard_url``
+    enforces. Set HARVIS_MCP_REMOTE_ENABLED=0 to turn remote connectors off.
+    """
+    return os.getenv("HARVIS_MCP_REMOTE_ENABLED", "1").strip().lower() not in _FALSY
+
+
+def transport_enabled(transport: Transport) -> bool:
+    return runtime_enabled() if transport == Transport.STDIO else remote_enabled()
+
+
+def any_transport_enabled() -> bool:
+    return runtime_enabled() or remote_enabled()
 
 
 def _sandbox_image() -> str:
@@ -166,6 +195,13 @@ class McpRuntime:
     def __init__(self) -> None:
         self._sessions: dict[str, _Session] = {}
         self._spawn_lock = asyncio.Lock()
+        # Remote servers with OAuth need to read their token at connect time.
+        # Whoever holds a pool hands it over once; stdio never needs it.
+        self._pool = None
+
+    def bind_pool(self, pool) -> None:
+        if pool is not None:
+            self._pool = pool
 
     # -- public ------------------------------------------------------------
 
@@ -177,6 +213,26 @@ class McpRuntime:
     async def call_tool(
         self, cfg: McpServerConfig, tool_name: str, arguments: dict
     ) -> dict:
+        sess = await self._acquire(cfg)
+        try:
+            async with sess.lock:
+                sess.last_used = time.monotonic()
+                return await sess.session.call_tool(tool_name, arguments)
+        except McpTransportError:
+            # Two very different things land here: the pipe died, or the tool
+            # genuinely outran the call timeout. A ping separates them — any
+            # answer at all proves the pipe carries traffic — so a slow render
+            # is reported as slow instead of being silently run a second time.
+            if await sess.session.ping():
+                raise
+
+        # `docker rm` on a sandbox leaves the socket half-open: nothing ever
+        # closes, the read loop never returns, and every later call burns its
+        # full timeout against a corpse. Bury it and try once on a fresh one.
+        logger.warning(
+            "mcp: %s transport is dead — reconnecting", cfg.server_name
+        )
+        await self.disconnect(cfg.user_id, cfg.server_name)
         sess = await self._acquire(cfg)
         async with sess.lock:
             sess.last_used = time.monotonic()
@@ -207,22 +263,25 @@ class McpRuntime:
     # -- internals ---------------------------------------------------------
 
     async def _acquire(self, cfg: McpServerConfig) -> _Session:
-        if not runtime_enabled():
+        if not transport_enabled(cfg.transport):
+            flag = (
+                "HARVIS_MCP_RUNTIME_ENABLED"
+                if cfg.transport == Transport.STDIO
+                else "HARVIS_MCP_REMOTE_ENABLED"
+            )
             raise McpError(
-                "the MCP runtime is disabled on this deployment "
-                "(set HARVIS_MCP_RUNTIME_ENABLED=1 to enable it)"
+                f"{cfg.transport.value} MCP servers are disabled on this "
+                f"deployment (set {flag}=1 to enable them)"
             )
         key = f"{cfg.user_id}:{cfg.server_name}"
-        existing = self._sessions.get(key)
+        existing = await self._live(key)
         if existing is not None:
-            existing.last_used = time.monotonic()
             return existing
 
         async with self._spawn_lock:
             # Re-check: another caller may have connected while we waited.
-            existing = self._sessions.get(key)
+            existing = await self._live(key)
             if existing is not None:
-                existing.last_used = time.monotonic()
                 return existing
 
             await self.reap_idle()
@@ -236,24 +295,57 @@ class McpRuntime:
             self._sessions[key] = sess
             return sess
 
+    async def _live(self, key: str) -> Optional[_Session]:
+        """The cached session for `key`, or None once it has stopped working.
+
+        A session that has lost its transport is worse than no session: it is
+        handed out, fails, and gets handed out again. Drop it here so the
+        caller reconnects instead.
+        """
+        sess = self._sessions.get(key)
+        if sess is None:
+            return None
+        if not sess.session.is_alive:
+            self._sessions.pop(key, None)
+            logger.info("mcp: dropping dead session %s", key)
+            await self._teardown(sess)
+            return None
+        sess.last_used = time.monotonic()
+        return sess
+
     async def _connect(self, cfg: McpServerConfig) -> _Session:
-        if cfg.transport != Transport.STDIO:
-            raise McpError(
-                f"transport '{cfg.transport.value}' is not supported yet — "
-                "only stdio servers can be run by this deployment"
-            )
-        return await self._connect_stdio(cfg)
+        if cfg.transport == Transport.STDIO:
+            return await self._connect_stdio(cfg)
+        return await self._connect_http(cfg)
+
+    async def _connect_http(self, cfg: McpServerConfig) -> _Session:
+        """A hosted server: no container, no sandbox — just an authorized URL."""
+        from .http_transport import open_http_session
+
+        headers = await resolve_auth_headers(cfg, self._pool)
+        session, tools = await open_http_session(
+            cfg.url or "",
+            headers=headers,
+            label=cfg.server_name,
+            prefer=cfg.transport.value,
+        )
+        logger.info(
+            "mcp: connected %s (%s) over %s — %d tools",
+            cfg.server_name,
+            (session.server_info or {}).get("name") or "unknown server",
+            session.mode,
+            len(tools),
+        )
+        return _Session(
+            key=f"{cfg.user_id}:{cfg.server_name}",
+            config=cfg,
+            session=session,
+            container_id=None,
+            tools=tools,
+        )
 
     async def _connect_stdio(self, cfg: McpServerConfig) -> _Session:
-        command = (cfg.command or "").strip()
-        if not command:
-            raise McpError(f"server '{cfg.server_name}' has no command configured")
-        if command not in _ALLOWED_COMMANDS:
-            raise McpError(
-                f"command '{command}' is not an allowed MCP launcher "
-                f"(allowed: {', '.join(sorted(_ALLOWED_COMMANDS))})"
-            )
-        argv = [command] + [str(a) for a in (cfg.args or [])]
+        argv = _stdio_argv(cfg)
 
         container_id, host = await asyncio.to_thread(self._spawn_container, cfg, argv)
         try:
@@ -297,7 +389,9 @@ class McpRuntime:
         import docker  # imported lazily: the API path must import with no docker present
 
         client = docker.from_env()
-        env = {str(k): str(v) for k, v in (cfg.env or {}).items()}
+        # The ONE place a stored credential becomes plaintext: the container's
+        # environment. Everywhere else — registry, API, logs — it stays sealed.
+        env = {str(k): str(v) for k, v in unseal_env(cfg.env or {}).items()}
         env["HARVIS_MCP_BRIDGE_PORT"] = str(BRIDGE_PORT)
         # npx/uvx write caches; give them a writable HOME inside the container.
         env.setdefault("HOME", "/tmp")
@@ -353,6 +447,38 @@ class McpRuntime:
         except Exception:
             pass
         await asyncio.to_thread(self._kill_container, sess.container_id)
+
+
+def _stdio_argv(cfg: McpServerConfig) -> list[str]:
+    """Full argv for a stdio server, with the launcher allowlist enforced.
+
+    Every published MCP server is documented as one command line
+    ("npx -y @modelcontextprotocol/server-filesystem /tmp"), and both the
+    connections form and the plugin catalog store it that way — whole line in
+    `command`, `args` empty. Allowlist-checking that string against bare
+    launcher names rejected every real server. Split it instead and check the
+    executable, which is the thing the allowlist is actually about.
+
+    Splitting is safe: argv goes to create_subprocess_exec as a list, so no
+    shell ever sees it and quoting/metacharacters carry no execution meaning.
+    """
+    raw = (cfg.command or "").strip()
+    if not raw:
+        raise McpError(f"server '{cfg.server_name}' has no command configured")
+    try:
+        parts = shlex.split(raw)
+    except ValueError as exc:  # unbalanced quotes
+        raise McpError(f"server '{cfg.server_name}' has an unparsable command: {exc}") from exc
+    if not parts:
+        raise McpError(f"server '{cfg.server_name}' has no command configured")
+
+    launcher, inline_args = parts[0], parts[1:]
+    if launcher not in _ALLOWED_COMMANDS:
+        raise McpError(
+            f"command '{launcher}' is not an allowed MCP launcher "
+            f"(allowed: {', '.join(sorted(_ALLOWED_COMMANDS))})"
+        )
+    return [launcher] + inline_args + [str(a) for a in (cfg.args or [])]
 
 
 def _safe_name(name: str) -> str:

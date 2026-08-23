@@ -26,10 +26,12 @@ Three additive route groups, all owner-scoped via ``get_current_user``:
      ``$HARVIS_OPENCLAW_SKILLS_DIR`` (unset by default — skill writes are
      skipped with an explicit reason until that mount exists).
 
-Credential policy (hard gate): this module stores NO new secrets. Template
-credential entries flagged ``secret: true`` carry ``status: pending_review``;
-the wizard renders "credential storage for this template pending review" and
-never collects or persists them. Nothing secret is echoed back by any GET.
+Credential policy: template entries flagged ``secret: true`` are collected by
+the wizard and posted to ``/api/owui/mcp/connections`` under ``credentials``,
+where ``plugins.mcp.credentials`` seals them with the same Fernet cipher every
+other Harvis credential uses. They are unsealed at exactly one point — building
+the sandbox container's environment. Nothing secret is echoed back by any GET
+in this module or that one; reads are masked.
 """
 
 from __future__ import annotations

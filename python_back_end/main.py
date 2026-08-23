@@ -1319,39 +1319,71 @@ async def list_models(
 
     formatted_models = []
 
-    # Fetch from the configured provider's native Ollama API
+    # ── Ollama hosts (laptop + RTX 5080 rig), probed live and reported honestly ────
+    # One probe per host through owui_compat.ollama_hosts, which is also what the CAD
+    # lane and model routing use — so a model cannot be "installed" for one lane and
+    # missing for another. Two things this deliberately does that the old per-host
+    # blocks did not:
+    #
+    #   • a model carries the host that serves it, so the picker can say where it runs
+    #     rather than implying every tag is on this machine;
+    #   • a host that is down does not make its models vanish. They come back marked
+    #     `unreachable` with the reason, because a model silently disappearing from the
+    #     picker reads to a user as Harvis losing it, and they go looking in the wrong
+    #     place. Only tags that host previously served and no live host has are listed.
     try:
-        ollama_base = LOCAL_OLLAMA_BASE_URL
-        if "/v1" in ollama_base:
-            ollama_tags_url = ollama_base.replace("/v1", "") + "/api/tags"
-        else:
-            ollama_tags_url = f"{ollama_base}/api/tags"
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(ollama_tags_url, timeout=5.0)
+        from owui_compat import ollama_hosts as _oh
 
-        if resp.status_code == 200:
-            data = resp.json()
-            for m in data.get("models", []):
-                model_name = m.get("name", "unknown")
-                raw_size = m.get("size", 0)
-                size_str = _parse_model_size(raw_size) if raw_size else ""
-                if not any(
-                    existing["name"] == model_name for existing in formatted_models
-                ):
+        _snap = await _oh.snapshot()
+        for _st in _snap.values():
+            if not _st.reachable:
+                logger.warning(
+                    "Ollama host %s (%s) unreachable: %s", _st.name, _st.base_url, _st.error
+                )
+                continue
+            for model_name in sorted(_st.tags):
+                if not any(e["name"] == model_name for e in formatted_models):
                     formatted_models.append(
                         {
                             "name": model_name,
-                            "displayName": f"{_pretty_ollama_name(model_name)} (Ollama)",
-                            "size": size_str,
+                            "displayName": f"{_pretty_ollama_name(model_name)} ({_st.label})",
+                            "size": (
+                                _parse_model_size(_st.sizes[model_name])
+                                if model_name in _st.sizes else ""
+                            ),
                             "status": "available",
-                            "provider": "ollama",
+                            "provider": "ollama" if _st.name == "laptop" else "ollama-desktop",
+                            "host": _st.name,
+                            # How much conversation this model can actually hold on this
+                            # host — trained window capped by what the daemon serves. The
+                            # chat's usage meter and the model-swap fit test both read it;
+                            # absent when the host could not be asked.
+                            "contextLength": _st.ctx.get(model_name),
                         }
                     )
-                # Track this model for chat routing back to Ollama
-                LOCAL_OLLAMA_MODELS_CACHE.add(model_name)
-            logger.info(f"Added {len(data.get('models', []))} Ollama models from {ollama_tags_url}")
+                if _st.name == "laptop":
+                    # Chat routing reads this to decide a request goes back to Ollama.
+                    # Only the laptop's tags belong in it — it names what this box can
+                    # serve directly, not what exists somewhere on the network.
+                    LOCAL_OLLAMA_MODELS_CACHE.add(model_name)
+            logger.info("Added %d Ollama models from %s (%s)",
+                        len(_st.tags), _st.base_url, _st.name)
+
+        for model_name, _st in await _oh.unreachable_models():
+            if not any(e["name"] == model_name for e in formatted_models):
+                formatted_models.append(
+                    {
+                        "name": model_name,
+                        "displayName": f"{_pretty_ollama_name(model_name)} ({_st.label})",
+                        "size": "",
+                        "status": "unreachable",
+                        "provider": "ollama" if _st.name == "laptop" else "ollama-desktop",
+                        "host": _st.name,
+                        "description": f"{_st.label} is not answering ({_st.error})",
+                    }
+                )
     except Exception as e:
-        logger.warning(f"Could not connect to local Ollama: {e}")
+        logger.warning(f"Could not enumerate Ollama hosts: {e}")
 
     # Fetch from llama-server (local GPU via llama.cpp)
     try:
@@ -1405,33 +1437,10 @@ async def list_models(
     except Exception as e:
         logger.warning(f"Could not connect to vLLM: {e}")
 
-    # Fetch from desktop Ollama (RTX 5080 box) — listed alongside laptop models
-    # so the picker exposes models that only exist on the GPU host. Workspace
-    # tasks routed through OpenClaw will use whichever Ollama instance has the
-    # selected model; fast-path Discord chat needs the model on the laptop too.
-    desktop_ollama_url = os.getenv("DESKTOP_OLLAMA_URL", "")
-    if desktop_ollama_url:
-        try:
-            desk_url = f"{desktop_ollama_url.rstrip('/')}/api/tags"
-            async with httpx.AsyncClient() as client:
-                desk_resp = await client.get(desk_url, timeout=5.0)
-            if desk_resp.status_code == 200:
-                desk_data = desk_resp.json()
-                added = 0
-                for m in desk_data.get("models", []):
-                    model_name = m.get("name", "unknown")
-                    if not any(existing["name"] == model_name for existing in formatted_models):
-                        formatted_models.append({
-                            "name": model_name,
-                            "displayName": f"{_pretty_ollama_name(model_name)} (Desktop 5080)",
-                            "size": _parse_model_size(m.get("size")),
-                            "status": "available",
-                            "provider": "ollama-desktop",
-                        })
-                        added += 1
-                logger.info(f"Added {added} desktop-Ollama models from {desk_url}")
-        except Exception as e:
-            logger.warning(f"Could not connect to desktop Ollama at {desktop_ollama_url}: {e}")
+    # (The RTX 5080 rig used to be probed here with its own copy of the block above.
+    # It is one of the hosts `ollama_hosts.snapshot()` returns now, so a model that
+    # only exists on the rig is reported the same way as a laptop one — and, unlike
+    # before, still reported when the rig is asleep.)
 
     # Fetch from external Ollama (if configured) - runs in parallel with above
     if EXTERNAL_OLLAMA_URL and EXTERNAL_OLLAMA_API_KEY:

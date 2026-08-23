@@ -8,9 +8,9 @@ so existing wizard callers keep working, extended with shop metadata:
 - ``category``     — 'files' | 'dev' | 'search' | 'productivity' | 'data' | 'custom'
 - ``blurb``        — one-line card copy for the shop grid
 - ``needs_secret`` — True when the server only becomes fully useful with an API
-  key/token. The shop attaches these as 'limited': the mcp_servers row is
-  written WITHOUT any secret (the pending_review credential hard gate from
-  mcp_wizard.py stands — we never collect or store the key here).
+  key/token. The wizard collects those keys and they are sealed by
+  ``plugins.mcp.credentials`` before storage, so a needs_secret server connects
+  fully — not 'limited'. Nothing secret is ever echoed back by a GET.
 
 Commands are the real reference servers: the TypeScript ones ship as
 ``@modelcontextprotocol/server-*`` npm packages (npx), the Python ones as
@@ -94,7 +94,7 @@ MCP_CATALOG: list[dict] = [
                 "key": "GITHUB_PERSONAL_ACCESS_TOKEN",
                 "label": "Personal access token",
                 "secret": True,
-                "status": "pending_review",
+                "status": "supported",
             }
         ],
         "tools": [
@@ -234,13 +234,13 @@ MCP_CATALOG: list[dict] = [
                 "key": "SLACK_BOT_TOKEN",
                 "label": "Bot token",
                 "secret": True,
-                "status": "pending_review",
+                "status": "supported",
             },
             {
                 "key": "SLACK_TEAM_ID",
                 "label": "Team ID",
                 "secret": True,
-                "status": "pending_review",
+                "status": "supported",
             },
         ],
         "tools": [
@@ -267,7 +267,7 @@ MCP_CATALOG: list[dict] = [
                 "key": "NOTION_TOKEN",
                 "label": "Internal integration token",
                 "secret": True,
-                "status": "pending_review",
+                "status": "supported",
             }
         ],
         "tools": [
@@ -357,21 +357,22 @@ MCP_CATEGORIES: list[dict] = [
 # look for. Both render in the same UI, distinguished by `connect`:
 #
 #   'install'      — Harvis runs the server itself (stdio via npx/uvx). Connecting
-#                    writes an mcp_servers row; API-key servers connect 'limited'
-#                    under the existing pending_review credential gate.
-#   'remote_oauth' — the VENDOR hosts a real MCP endpoint, but reaching it needs an
-#                    OAuth 2.1 + PKCE sign-in Harvis cannot perform yet: only token
-#                    STORAGE exists (plugins/mcp/token_storage.py) — no authorize
-#                    call, no callback route, no client registration. So these are
-#                    NOT connectable here. The card shows the published endpoint and
-#                    sends the user to the vendor's own page to connect it.
+#                    writes an mcp_servers row; an API key, when the server needs
+#                    one, is sealed into that row's env by plugins.mcp.credentials.
+#   'remote_oauth' — the VENDOR hosts the MCP endpoint and signing in is an
+#                    OAuth 2.1 + PKCE round trip. These ARE connectable: connecting
+#                    writes a remote mcp_servers row, and the card's Authorize
+#                    button runs discovery, dynamic client registration and the
+#                    PKCE exchange (plugins/mcp/oauth.py), storing the token in
+#                    mcp_oauth_tokens. Harvis runs no code for these — it holds a
+#                    token and talks to a URL.
 #   'external'     — no MCP server we can point at. A directory entry: the card
 #                    links to the official page and nothing else.
 #
 # Why the split is stated so bluntly: a storefront that renders a Connect button
-# it cannot honour is worse than one that says where to go. Every entry below is
-# link-out honest. When an OAuth client lands, 'remote_oauth' rows become
-# connectable WITHOUT touching this data — only the flow changes.
+# it cannot honour is worse than one that says where to go. That is also why the
+# promise made here when the OAuth client was still missing was kept literally —
+# the rows below did not change when it landed, only the flow did.
 #
 # `homepage` is deliberately a root or near-root URL: deep documentation paths
 # rot, and a 404 from our own storefront is the exact failure this section is
@@ -650,6 +651,17 @@ for _e in MCP_CATALOG:
     _e.setdefault("mcp_url", None)
     # Harvis runs these itself — that IS the connect story, so it is not optional.
     _e["connect"] = "install"
+
+# A hosted endpoint's transport is a hint, not a fact: the client negotiates and
+# falls back if the label is wrong (plugins/mcp/http_transport.open_http_session).
+# The /sse suffix is the one convention worth honouring, because trying legacy
+# first against a legacy server saves a round trip.
+for _e in MCP_DIRECTORY:
+    if _e.get("connect") != "remote_oauth":
+        continue
+    _url = _e.get("mcp_url") or ""
+    _e["transport"] = "sse" if _url.rstrip("/").endswith("/sse") else "streamable-http"
+    _e["auth_method"] = "oauth"
 
 # Every storefront card, installable and directory alike, in one list. Order is
 # section order then declaration order; the UI groups by `section`.

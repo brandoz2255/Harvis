@@ -1,19 +1,17 @@
 """Sandboxed preview of files the assistant creates in the Claude subscription chat.
 
 The subscription chat runs ``claude -p`` inside the ``harvis-claude-code`` sidecar. When the model
-creates a file (an HTML page, an SVG, a doc…) it lands in a PER-USER / PER-RUN directory inside that
-container — by design it is NOT on the user's machine and NOT reachable by a browser. This module:
+creates a file (an HTML page, an SVG, a doc…) it lands in a PER-USER directory on the shared
+artifact volume — not on the user's laptop, not reachable by a browser except through Harvis.
 
-  * ``chat_workdir`` / ``mkdir_workdir`` — the per-user, per-run sandbox path the chat runs in.
-  * ``list_new_files`` — the renderable files a run produced (for the clickable "preview" footer).
+  * ``chat_workdir`` / ``mkdir_workdir`` — persistent per-user sandbox (notes survive turns).
+  * ``seed_sandbox`` — copy SANDBOX.md / README / notes.md / harvis-check.sh if missing.
+  * ``list_new_files`` — renderable files THIS run produced (for the clickable preview footer).
   * ``GET /api/owui/chat-file?path=…`` — reads one such file back OUT of the sidecar so Harvis can
     render a live preview when the user clicks the path.
 
-Isolation: a user can only read under their OWN workroot (``/tmp/harvis-chat/u<their-id>/``); the
-path is normalized server-side and re-checked against that prefix (``..`` collapses out, so a
-cross-user or escaping path fails the prefix test). Size- and type-capped; text/renderable only
-(images returned as a data URL). The sidecar has no host mount, so a read is bounded to the sidecar
-FS regardless.
+Isolation: a user can only read under their OWN workroot (``/data/artifacts/harvis-chat/u<id>/``);
+the path is normalized server-side and re-checked against that prefix.
 """
 
 from __future__ import annotations
@@ -30,8 +28,30 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 logger = logging.getLogger(__name__)
 
 _CONTAINER = os.getenv("HARVIS_CLAUDE_CODE_CONTAINER", "harvis-claude-code")
-_WORKROOT = "/tmp/harvis-chat"
+# Shared artifact volume (compose mounts artifact_data → /data/artifacts). /tmp died with
+# the container and was per-run, so the model could not keep notes across turns.
+_WORKROOT = os.getenv("HARVIS_CHAT_SANDBOX_ROOT", "/data/artifacts/harvis-chat")
+_SANDBOX_SRC = "/home/claude/harvis-sandbox"
 _MAX_BYTES = 2_000_000
+# Scaffolding Harvis itself puts in the sandbox, plus the doc names a model habitually
+# writes next to it. None of it is the user's work, and all of it used to show up in the
+# preview footer and the Artifacts list as if it were. Compared lowercased.
+_BOILERPLATE = {
+    "sandbox.md",
+    "readme.md",
+    "readme",
+    "notes.md",
+    "harvis-check.sh",
+    ".harvis-run-start",
+    "about",
+    "about.md",
+    "about.txt",
+    "index",
+    "index.md",
+    "index.txt",
+}
+# Directories that only ever hold machine output.
+_SKIP_DIRS = {"__pycache__", ".git", "node_modules", ".ipynb_checkpoints", ".pytest_cache"}
 
 _TEXT_EXT = {
     ".html", ".htm", ".svg", ".css", ".js", ".mjs", ".ts", ".jsx", ".tsx", ".json", ".md",
@@ -48,9 +68,13 @@ def _uid(user) -> int:
 
 
 def chat_workdir(user_id, run_id: Optional[str] = None) -> str:
-    """The per-user (optionally per-run) sandbox dir inside the sidecar."""
-    base = f"{_WORKROOT}/u{int(user_id)}"
-    return f"{base}/{run_id}" if run_id else base
+    """Persistent per-user sandbox inside the sidecar.
+
+    ``run_id`` is ignored for the path (kept so callers do not change). Notes, scripts,
+    and SANDBOX.md live here across turns. A marker file timestamps each run so the
+    preview footer only lists files this turn created.
+    """
+    return f"{_WORKROOT}/u{int(user_id)}"
 
 
 async def _dexec(*args: str, timeout: float = 8.0) -> tuple[int, bytes, bytes]:
@@ -73,21 +97,55 @@ async def _dexec(*args: str, timeout: float = 8.0) -> tuple[int, bytes, bytes]:
     return proc.returncode or 0, out or b"", err or b""
 
 
-async def mkdir_workdir(user_id, run_id: str) -> Optional[str]:
-    """Create + return the per-run sandbox dir. None on failure (caller falls back to /tmp)."""
+async def seed_sandbox(workdir: str) -> None:
+    """Copy SANDBOX.md / README / notes.md / harvis-check.sh if they are not already there.
+
+    ``cp -n`` (no-clobber) so the model's notes.md is never overwritten. Best-effort.
+    """
+    if not workdir or ".." in workdir or "\x00" in workdir:
+        return
+    cmd = (
+        f'cp -n {_SANDBOX_SRC}/* "{workdir}/" 2>/dev/null; '
+        f'chmod +x "{workdir}/harvis-check.sh" 2>/dev/null; '
+        f'touch "{workdir}/.harvis-run-start"; true'
+    )
+    await _dexec("sh", "-c", cmd, timeout=12.0)
+
+
+async def mkdir_workdir(user_id, run_id: str = "") -> Optional[str]:
+    """Create the persistent per-user sandbox, seed docs if missing, stamp this run."""
     wd = chat_workdir(user_id, run_id)
     rc, _out, _err = await _dexec("mkdir", "-p", wd)
-    return wd if rc == 0 else None
+    if rc != 0:
+        return None
+    await seed_sandbox(wd)
+    return wd
 
 
-async def list_new_files(user_id, run_id: str) -> list[str]:
+async def list_new_files(user_id, run_id: str = "") -> list[str]:
     """Renderable files this run produced (full container paths) — for the preview footer."""
     wd = chat_workdir(user_id, run_id)
-    rc, out, _err = await _dexec("find", wd, "-maxdepth", "4", "-type", "f")
+    marker = f"{wd}/.harvis-run-start"
+    rc, out, _err = await _dexec(
+        "find", wd, "-maxdepth", "4", "-type", "f", "-newer", marker, timeout=12.0
+    )
     if rc != 0:
-        return []
-    files = [line for line in out.decode("utf-8", "replace").splitlines() if line.strip()]
-    return [f for f in files if os.path.splitext(f)[1].lower() in _ALLOWED_EXT][:12]
+        rc, out, _err = await _dexec("find", wd, "-maxdepth", "4", "-type", "f")
+        if rc != 0:
+            return []
+    files = [line.strip() for line in out.decode("utf-8", "replace").splitlines() if line.strip()]
+    out_paths: list[str] = []
+    for f in files:
+        name = os.path.basename(f)
+        if name.lower() in _BOILERPLATE or name.startswith("."):
+            continue
+        if any(part in _SKIP_DIRS for part in f.split("/")):
+            continue
+        if os.path.splitext(f)[1].lower() in _ALLOWED_EXT:
+            out_paths.append(f)
+        if len(out_paths) >= 12:
+            break
+    return out_paths
 
 
 def register_chat_file_routes(router: APIRouter, get_current_user: Callable) -> None:

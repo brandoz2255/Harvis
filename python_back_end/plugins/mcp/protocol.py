@@ -30,6 +30,8 @@ _INIT_TIMEOUT = 60.0
 # tools/list is cheap; tools/call can legitimately be slow (network, LLM calls).
 _LIST_TIMEOUT = 30.0
 _CALL_TIMEOUT = 120.0
+# Short on purpose: a ping only has to prove the pipe carries traffic.
+_PING_TIMEOUT = 5.0
 
 # One JSON-RPC line can carry a whole tool result. 8 MB is far above any
 # reasonable payload and far below anything that would exhaust the backend.
@@ -40,40 +42,81 @@ class McpError(RuntimeError):
     """A server-reported JSON-RPC error, or a protocol-level failure."""
 
 
-class McpSession:
-    """One live MCP session over a duplex stream pair.
+class McpTransportError(McpError):
+    """The pipe failed — timed out, closed, or died under us.
 
-    Not thread-safe and not re-entrant across event loops — the runtime owns
-    exactly one session per (user, server) and serialises calls through it.
+    Distinct from a plain McpError, which means the server answered and the
+    answer was an error. Only a transport failure justifies throwing the
+    session away and reconnecting.
     """
 
-    def __init__(
-        self,
-        reader: asyncio.StreamReader,
-        writer: asyncio.StreamWriter,
-        *,
-        label: str = "mcp",
-    ) -> None:
-        self._reader = reader
-        self._writer = writer
-        self._label = label
-        self._next_id = 0
-        self._pending: dict[int, asyncio.Future] = {}
-        self._pump: Optional[asyncio.Task] = None
-        self._closed = False
+
+class McpAuthRequired(McpError):
+    """The server will not talk to us until the user authorizes.
+
+    It lives here rather than with the HTTP transport because it is raised from
+    two places that must look identical to a caller: the transport, when a
+    server answers 401, and the auth layer, when we can see up front that no
+    token has been stored. Both mean the same thing to the user — click
+    Authorize — so both must be catchable in one place.
+    """
+
+    def __init__(self, message: str, *, www_authenticate: str = "", url: str = ""):
+        super().__init__(message)
+        self.www_authenticate = www_authenticate
+        self.url = url
+
+
+class _McpMethods:
+    """The MCP calls Harvis makes, over whatever transport the subclass provides.
+
+    Subclasses supply ``_request`` / ``_notify`` (and optionally ``_open``);
+    everything protocol-shaped — the handshake, ``tools/list`` pagination,
+    ``tools/call`` — lives here exactly once, so a stdio session and an HTTP
+    session can never drift apart in how they speak MCP.
+    """
+
+    def __init__(self) -> None:
         self.server_info: dict = {}
         self.capabilities: dict = {}
+        # The version the server agreed to. Streamable HTTP has to echo it back
+        # in a header on every later request, so it is not merely cosmetic.
+        self.protocol_version: str = PROTOCOL_VERSION
 
-    # -- lifecycle ---------------------------------------------------------
+    async def _open(self) -> None:
+        """Transport-level setup before the handshake. No-op by default."""
 
-    async def start(self) -> None:
-        """Begin reading. Must be called before any request."""
-        if self._pump is None:
-            self._pump = asyncio.create_task(self._read_loop())
+    async def _request(self, method: str, params: dict, *, timeout: float):
+        raise NotImplementedError
+
+    async def _notify(self, method: str, params: dict) -> None:
+        raise NotImplementedError
+
+    @property
+    def is_alive(self) -> bool:
+        """False once the transport has been closed or has failed."""
+        return not getattr(self, "_closed", False)
+
+    async def ping(self, *, timeout: float = _PING_TIMEOUT) -> bool:
+        """Is the other end still there?
+
+        Any answer proves it — including "method not found", since a server
+        that never implemented ping still had to receive the request to refuse
+        it. Only a transport failure counts as dead.
+        """
+        if not self.is_alive:
+            return False
+        try:
+            await self._request("ping", {}, timeout=timeout)
+        except McpTransportError:
+            return False
+        except McpError:
+            return True
+        return True
 
     async def initialize(self) -> dict:
         """MCP handshake. Returns the server's ``initialize`` result."""
-        await self.start()
+        await self._open()
         result = await self._request(
             "initialize",
             {
@@ -117,6 +160,40 @@ class McpSession:
             timeout=timeout,
         ) or {}
 
+
+class McpSession(_McpMethods):
+    """One live MCP session over a duplex stream pair.
+
+    Not thread-safe and not re-entrant across event loops — the runtime owns
+    exactly one session per (user, server) and serialises calls through it.
+    """
+
+    def __init__(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        *,
+        label: str = "mcp",
+    ) -> None:
+        self._reader = reader
+        self._writer = writer
+        self._label = label
+        self._next_id = 0
+        self._pending: dict[int, asyncio.Future] = {}
+        self._pump: Optional[asyncio.Task] = None
+        self._closed = False
+        super().__init__()
+
+    # -- lifecycle ---------------------------------------------------------
+
+    async def start(self) -> None:
+        """Begin reading. Must be called before any request."""
+        if self._pump is None:
+            self._pump = asyncio.create_task(self._read_loop())
+
+    async def _open(self) -> None:
+        await self.start()
+
     async def close(self) -> None:
         self._closed = True
         if self._pump is not None:
@@ -128,7 +205,7 @@ class McpSession:
             self._pump = None
         for fut in self._pending.values():
             if not fut.done():
-                fut.set_exception(McpError("session closed"))
+                fut.set_exception(McpTransportError("session closed"))
         self._pending.clear()
         try:
             self._writer.close()
@@ -140,7 +217,7 @@ class McpSession:
 
     async def _request(self, method: str, params: dict, *, timeout: float) -> Any:
         if self._closed:
-            raise McpError("session closed")
+            raise McpTransportError("session closed")
         self._next_id += 1
         req_id = self._next_id
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
@@ -151,7 +228,9 @@ class McpSession:
         try:
             return await asyncio.wait_for(fut, timeout=timeout)
         except asyncio.TimeoutError as exc:
-            raise McpError(f"{method} timed out after {timeout:.0f}s") from exc
+            raise McpTransportError(
+                f"{method} timed out after {timeout:.0f}s"
+            ) from exc
         finally:
             self._pending.pop(req_id, None)
 
@@ -193,9 +272,16 @@ class McpSession:
         except Exception:
             logger.exception("mcp[%s]: read loop failed", self._label)
         finally:
+            # The reader is the session's heartbeat. Once it stops, nothing will
+            # ever answer again, so the session must stop claiming it is usable —
+            # otherwise every later request writes into the void and waits out
+            # its full timeout.
+            self._closed = True
             for fut in self._pending.values():
                 if not fut.done():
-                    fut.set_exception(McpError("server closed the connection"))
+                    fut.set_exception(
+                        McpTransportError("server closed the connection")
+                    )
             self._pending.clear()
 
     def _handle(self, msg: Any) -> None:

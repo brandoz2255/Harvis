@@ -82,12 +82,47 @@ def _build_context_message(task_message: str, chat_history: list[dict], cap: int
     return f"[YOUR TASK]\n{task_message}\n\nBegin executing the task now. Be specific and thorough."
 
 
+async def _user_message(
+    task_message: str,
+    chat_history: list[dict],
+    attachments: list[dict] | None,
+    user_id: int = 0,
+) -> tuple[dict, list[str]]:
+    """The first user message, carrying real image parts when the turn has images.
+
+    These lanes talk to OpenAI-compatible endpoints (Moonshot, Ollama), so an
+    attached screenshot can travel as a genuine ``image_url`` part instead of a
+    line of text naming a file the model cannot open. Returns the message plus one
+    plain-English line per image that could NOT be delivered — an image the model
+    never received must not read as one it chose to ignore.
+
+    ``user_id`` is whose uploads may be read. A file id comes from the client and
+    proves nothing, so without an owner every stored attachment is reported as
+    skipped rather than resolved.
+    """
+    text = _build_context_message(task_message, chat_history)
+    if not attachments:
+        return {"role": "user", "content": text}, []
+    try:
+        from vision_to_code.attachments import build_image_parts
+
+        parts, skipped = await build_image_parts(attachments, owner_id=user_id or None)
+    except Exception as exc:
+        logger.exception("workspace lane: attachment image build failed")
+        return {"role": "user", "content": text}, [f"attachments could not be read ({exc})"]
+    if not parts:
+        return {"role": "user", "content": text}, skipped
+    return {"role": "user", "content": [{"type": "text", "text": text}, *parts]}, skipped
+
+
 async def stream_kimi_workspace(
     task_message: str,
     chat_history: list[dict],
     api_key: str,
     api_url: str = "",
     model: str = "",
+    attachments: list[dict] | None = None,
+    user_id: int = 0,
 ) -> AsyncGenerator[OpenClawEvent, None]:
     """
     Run a workspace task using a Kimi model directly (bypasses OpenClaw).
@@ -107,9 +142,12 @@ async def stream_kimi_workspace(
 
     base_url = api_url or MOONSHOT_BASE_URL
     client = MoonshotClient(api_key=api_key, base_url=base_url)
+    user_msg, skipped = await _user_message(task_message, chat_history, attachments, user_id)
+    for _line in skipped:
+        yield OpenClawEvent("log", {"message": f"Attachment not sent — {_line}"})
     messages = [
         {"role": "system", "content": _KIMI_SYSTEM_PROMPT},
-        {"role": "user", "content": _build_context_message(task_message, chat_history)},
+        user_msg,
     ]
 
     full_text_parts: list[str] = []
@@ -127,7 +165,15 @@ async def stream_kimi_workspace(
         logger.error("kimi_workspace: stream error: %s", exc)
         yield OpenClawEvent("error", {
             "message": f"Kimi K2.5 error: {exc}",
-            "fix_hint": "Check your API key is valid and Moonshot's API is reachable. See https://platform.moonshot.cn for status.",
+            # With an image in the request the likeliest cause is a text-only model,
+            # not a bad key — say so rather than sending the user to check billing.
+            "fix_hint": (
+                f"'{real_model}' may not accept images. Pick a vision-capable Kimi model, "
+                "or remove the attachment."
+                if not isinstance(user_msg.get("content"), str) else
+                "Check your API key is valid and Moonshot's API is reachable. "
+                "See https://platform.moonshot.cn for status."
+            ),
         })
 
 
@@ -135,6 +181,8 @@ async def stream_ollama_cloud_workspace(
     task_message: str,
     chat_history: list[dict],
     model: str = "gpt-oss:120b",
+    attachments: list[dict] | None = None,
+    user_id: int = 0,
 ) -> AsyncGenerator[OpenClawEvent, None]:
     """
     Run a workspace task using the cloud/external Ollama instance.
@@ -156,9 +204,12 @@ async def stream_ollama_cloud_workspace(
     if _EXTERNAL_OLLAMA_API_KEY:
         headers["Authorization"] = f"Bearer {_EXTERNAL_OLLAMA_API_KEY}"
 
+    user_msg, skipped = await _user_message(task_message, chat_history, attachments, user_id)
+    for _line in skipped:
+        yield OpenClawEvent("log", {"message": f"Attachment not sent — {_line}"})
     messages = [
         {"role": "system", "content": _OLLAMA_SYSTEM_PROMPT},
-        {"role": "user", "content": _build_context_message(task_message, chat_history)},
+        user_msg,
     ]
     payload = {"model": model, "messages": messages, "stream": True}
 
@@ -209,6 +260,8 @@ async def stream_local_ollama_workspace(
     task_message: str,
     chat_history: list[dict],
     model: str = "",
+    attachments: list[dict] | None = None,
+    user_id: int = 0,
 ) -> AsyncGenerator[OpenClawEvent, None]:
     """
     Run a workspace task using a local Ollama instance.
@@ -296,9 +349,12 @@ async def stream_local_ollama_workspace(
             "message": f"Routing to desktop Ollama (5080) — model {model} not on laptop",
         })
 
+    user_msg, skipped = await _user_message(task_message, chat_history, attachments, user_id)
+    for _line in skipped:
+        yield OpenClawEvent("log", {"message": f"Attachment not sent — {_line}"})
     messages = [
         {"role": "system", "content": _LOCAL_OLLAMA_SYSTEM_PROMPT},
-        {"role": "user", "content": _build_context_message(task_message, chat_history)},
+        user_msg,
     ]
 
     yield OpenClawEvent("log", {"message": f"Starting task on local model: {model}"})
@@ -333,7 +389,14 @@ async def stream_local_ollama_workspace(
                     body = await response.aread()
                     yield OpenClawEvent("error", {
                         "message": f"Ollama returned HTTP {response.status_code}: {body.decode(errors='replace')[:500]}",
-                        "fix_hint": f"Check that model '{model}' is pulled and Ollama has enough memory.",
+                        # An image in the request makes "this model has no vision" far more
+                        # likely than "not pulled" — name that first when one was sent.
+                        "fix_hint": (
+                            f"'{model}' may not support images. Pick a vision-capable model "
+                            "(e.g. a gemma4 or llava tag), or remove the attachment."
+                            if not isinstance(user_msg.get("content"), str) else
+                            f"Check that model '{model}' is pulled and Ollama has enough memory."
+                        ),
                     })
                     return
 
@@ -521,6 +584,7 @@ async def _run_subagent_stream(
     api_url: str = "",
     model: str = "",
     provider: str = "local",
+    attachments: list[dict] | None = None,
 ) -> str:
     """
     Run a single sub-agent and push events to the shared queue.
@@ -536,12 +600,18 @@ async def _run_subagent_stream(
 
     full_text_parts: list[str] = []
     try:
+        # Every sub-agent gets the same attachments: they each work on the user's
+        # original material, and a sub-agent that can't see the screenshot writes
+        # about a screenshot it imagined.
         if provider == "kimi":
-            stream = stream_kimi_workspace(task, chat_history, api_key=api_key, api_url=api_url, model=model)
+            stream = stream_kimi_workspace(task, chat_history, api_key=api_key, api_url=api_url,
+                                           model=model, attachments=attachments, user_id=user_id)
         elif provider == "cloud-ollama":
-            stream = stream_ollama_cloud_workspace(task, chat_history, model=model)
+            stream = stream_ollama_cloud_workspace(task, chat_history, model=model,
+                                                   attachments=attachments, user_id=user_id)
         else:
-            stream = stream_local_ollama_workspace(task, chat_history, model=model)
+            stream = stream_local_ollama_workspace(task, chat_history, model=model,
+                                                   attachments=attachments, user_id=user_id)
 
         async for event in stream:
             # Tag events with sub-agent info
@@ -580,6 +650,8 @@ async def stream_parallel_workspace(
     api_url: str = "",
     model: str = "",
     provider: str = "local",
+    attachments: list[dict] | None = None,
+    user_id: int = 0,
 ) -> AsyncGenerator[OpenClawEvent, None]:
     """
     Multi-agent workspace: plans subtasks, runs them in parallel, yields events.
@@ -616,11 +688,14 @@ async def stream_parallel_workspace(
         })
         # Stream the single agent's output directly
         if provider == "kimi":
-            stream = stream_kimi_workspace(task_message, chat_history, api_key=api_key, api_url=api_url, model=model)
+            stream = stream_kimi_workspace(task_message, chat_history, api_key=api_key, api_url=api_url,
+                                           model=model, attachments=attachments, user_id=user_id)
         elif provider == "cloud-ollama":
-            stream = stream_ollama_cloud_workspace(task_message, chat_history, model=model)
+            stream = stream_ollama_cloud_workspace(task_message, chat_history, model=model,
+                                                   attachments=attachments, user_id=user_id)
         else:
-            stream = stream_local_ollama_workspace(task_message, chat_history, model=model)
+            stream = stream_local_ollama_workspace(task_message, chat_history, model=model,
+                                                   attachments=attachments, user_id=user_id)
 
         async for event in stream:
             event.data["agent_label"] = "Agent"
@@ -652,6 +727,7 @@ async def stream_parallel_workspace(
             api_url=api_url,
             model=model,
             provider=provider,
+            attachments=attachments,
         )
         tasks.append(asyncio.create_task(task_coro))
 

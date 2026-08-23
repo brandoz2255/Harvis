@@ -1272,35 +1272,13 @@ def _looks_base64(s: str) -> bool:
 
 
 async def _browser_render_html_to_png(html: str, out_path: str) -> bool:
-    """Render an HTML/SVG string to a PNG via the headless browser-runner service
-    (using a data: URL, since browser-runner can't read the artifact volume).
-    Returns True on success."""
-    import base64 as _b64
+    """Render an HTML/SVG string to a PNG via the shared vision_to_code helper
+    (browser-runner data: URL). Returns True on success."""
     try:
-        b64 = _b64.b64encode((html or "").encode("utf-8")).decode()
-        data_url = f"data:text/html;charset=utf-8;base64,{b64}"
-        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
-            s = await client.post(f"{_BROWSER_RUNNER_URL}/session", json={"headless": True})
-            if s.status_code != 200:
-                return False
-            sid = (s.json() or {}).get("sessionId") or (s.json() or {}).get("id")
-            if not sid:
-                return False
-            try:
-                await client.post(f"{_BROWSER_RUNNER_URL}/navigate", json={"sessionId": sid, "url": data_url})
-                await asyncio.sleep(0.7)  # let it paint
-                shot = await client.post(f"{_BROWSER_RUNNER_URL}/screenshot", json={"sessionId": sid})
-                png_b64 = (shot.json() or {}).get("pngBase64") or ""
-                if not png_b64:
-                    return False
-                with open(out_path, "wb") as f:
-                    f.write(_b64.b64decode(png_b64))
-                return True
-            finally:
-                try:
-                    await client.post(f"{_BROWSER_RUNNER_URL}/close", json={"sessionId": sid})
-                except Exception:
-                    pass
+        from vision_to_code.preview import render_html_to_png
+
+        png = await render_html_to_png(html, out_path=out_path, full_page=False)
+        return png is not None
     except Exception as exc:
         logger.warning("browser-runner render failed: %s", exc)
         return False

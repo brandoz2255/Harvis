@@ -67,6 +67,12 @@ class FreeProvider:
     # context they hold — which is why 39 entries reached the picker, 17 of them unable
     # to hold a conversation at all, every one of them with context_length null.
     native_models_url: str = ""
+    # Does this vendor sell paid models from the SAME catalogue as its free ones? An
+    # aggregator does: OpenRouter's /models lists 422 entries of which 22 cost nothing
+    # (probed 2026-08-22). Listing all of them would fill the picker with models a
+    # free-tier key answers 402 to. When True, discovery keeps only zero-priced models.
+    # Flip to False for a user who has funded the account and wants the paid catalogue.
+    free_only: bool = False
 
 
 # Ordered by how useful the free tier actually is for coding/chat work.
@@ -108,6 +114,23 @@ FREE_PROVIDERS: tuple[FreeProvider, ...] = (
         console_url="https://build.nvidia.com/",
         free_note="Free tier: inference credits across 70+ hosted open models.",
         models_endpoint_public=True,
+    ),
+    FreeProvider(
+        id="openrouter",
+        name="OpenRouter",
+        engine="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        console_url="https://openrouter.ai/keys",
+        free_note="Free tier: ~20 zero-cost models from many vendors on one key, including "
+                  "large-context Nemotron, Gemma 4 and GLM. Rate-limited per day.",
+        # Probed 2026-08-22: GET /models answers 200 with NO Authorization header and returns
+        # the full 422-model catalogue, so the cheap list-models check proves nothing here —
+        # exactly the NVIDIA trap. POST /chat/completions answers 401, so that is the real proof.
+        models_endpoint_public=True,
+        free_only=True,
+        # OpenRouter attributes requests to an app via these two headers. Purely cosmetic
+        # (it drives their public leaderboard); no key material, and omitting them is legal.
+        extra_headers={"HTTP-Referer": "https://github.com/brandoz2255/Harvis", "X-Title": "Harvis"},
     ),
     FreeProvider(
         id="mistral",
@@ -192,7 +215,27 @@ _NON_CHAT_MARKERS = (
     # Interactions API". They are agent product surfaces, not chat models, and
     # nothing in the listing distinguishes them — only the name does.
     "antigravity", "deep-research",
+    # Probed 2026-08-22 in OpenRouter's free catalogue: nemotron-3.5-content-safety is a
+    # classifier. It speaks the chat wire format, so only the name separates it.
+    "content-safety",
 )
+
+
+def _is_free_model(m: dict) -> bool:
+    """True when the vendor prices this model at zero for both prompt and completion.
+
+    OpenRouter reports pricing as decimal STRINGS ("0", "0.0000004"). A model missing the
+    field is treated as paid: an unknown price must not become a free listing that bills
+    the user on first use. Matches 22 of 422 entries as of 2026-08-22 — four more than the
+    ``:free`` id suffix finds, so read the price, not the name.
+    """
+    pricing = m.get("pricing")
+    if not isinstance(pricing, dict):
+        return False
+    try:
+        return all(float(pricing.get(k) or 0) == 0.0 for k in ("prompt", "completion"))
+    except (TypeError, ValueError):
+        return False
 
 
 def _is_chat_model(model_id: str) -> bool:
@@ -308,6 +351,8 @@ async def list_provider_models(provider_id: str, api_key: str) -> list[dict]:
         if vendor_id.startswith("models/"):
             vendor_id = vendor_id[len("models/"):]
         if not _is_chat_model(vendor_id):
+            continue
+        if prov.free_only and not _is_free_model(m):
             continue
         out.append({
             "id": f"{prov.id}/{vendor_id}",

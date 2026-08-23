@@ -284,6 +284,21 @@ def _sidecar_mcp_args(user_id, *, artifact_run_id=None, **context) -> list[str]:
         # refused to start, so this never raises into the launch path.
         logger.debug("cad mcp config unavailable for this run", exc_info=True)
 
+    try:
+        # Whatever this user connected themselves — Higgsfield, GitHub, an MCP
+        # server they added by URL. Without this a sidecar sees only the two
+        # servers Harvis authors, and a model asked to use a connector correctly
+        # reports that it has no such tool.
+        from plugins.mcp.sidecar_bridge import sidecar_bridge_config
+        # The run id rides along so a connector's image can be saved against
+        # THIS run — without it the bridge can fetch the bytes but has nowhere
+        # to put them, and the model gets back a Docker-only URL.
+        cfg = sidecar_bridge_config(user_id, run_id=artifact_run_id or "")
+        if cfg:
+            servers.update(cfg)
+    except Exception:
+        logger.debug("connector mcp config unavailable for this run", exc_info=True)
+
     if artifact_run_id:
         try:
             from .artifact_mcp import sidecar_artifact_mcp_server
@@ -554,7 +569,10 @@ def _map_claude_line(obj, root_ev):
         if obj.get("is_error"):
             yield root_ev("log", {"message": "Claude: " + str(obj.get("result") or obj.get("subtype") or "error")[:300]})
         elif obj.get("subtype") == "success" and obj.get("result"):
-            yield root_ev("token", {"content": str(obj["result"])})
+            # `final` marks this as the CLI's own answer, not one more streamed chunk. The
+            # assistant blocks above already carried this exact text, so a caller that
+            # appends it prints the answer twice with the between-tool narration in front.
+            yield root_ev("token", {"content": str(obj["result"]), "final": True})
     # system/init → drop
 
 
@@ -776,6 +794,7 @@ async def run_external_engine_adapter(
     usage_p = 0  # captured input tokens (cloud engines: the result line's `usage`) — for the meter
     usage_c = 0  # captured output tokens
     final_text_parts: list[str] = []
+    streamed_text = False
     is_text_engine = engine in _TEXT_ENGINES   # plain-text stdout (Hermes) → log lines + tail summary
     text_tail: list[str] = []
     timed_out = False
@@ -847,7 +866,14 @@ async def run_external_engine_adapter(
                     if ev.type == "tool_call":
                         tool_calls += 1
                     elif ev.type == "token":
-                        final_text_parts.append(str((ev.data or {}).get("content") or ""))
+                        text = str((ev.data or {}).get("content") or "")
+                        if (ev.data or {}).get("final"):
+                            final_text_parts = [text]
+                            if streamed_text:
+                                continue  # already shown live; don't render it a second time
+                        else:
+                            streamed_text = True
+                            final_text_parts.append(text)
                     yield ev
             except Exception:
                 yield root_ev("log", {"message": line[:300]})
@@ -942,6 +968,16 @@ async def run_external_engine_adapter(
         wrap = "\n".join(text_tail[-8:]).strip()
     summary = (wrap[:1500] if wrap else "") or f"{label} finished — {n} file(s) changed."
     yield root_ev("done", {"summary": summary, "changed_files": files})
+
+
+# Baseline marker for the per-run artifact sweep. Hidden so it stays out of the model's way,
+# and a fixed name so it never accumulates: each run re-touches it, and `find -newer` on a file
+# never matches that file itself.
+_RUN_MARK = ".harvis-runmark"
+
+
+class _NoBaseline(Exception):
+    """No artifact baseline for this run — capture nothing instead of guessing."""
 
 
 async def run_claude_chat_workspace(
@@ -1039,6 +1075,28 @@ async def run_claude_chat_workspace(
     if _stage_status:
         yield root_ev("log", {"message": _stage_status})
 
+    # Baseline for the end-of-run artifact sweep. The workdir is PERSISTENT per user, so a
+    # bare `find` there returns every file the sandbox has ever held — and the narrator then
+    # tells the user this run "created" eleven files it never touched. Touching a marker now
+    # gives the sweep something to compare against; `find -newer` on it returns only what
+    # this run actually wrote. It goes AFTER attachment staging on purpose: a file the user
+    # attached is an input, not something the run produced.
+    _mark_ok = False
+    try:
+        _mk2 = await asyncio.create_subprocess_exec(
+            "docker", "exec", "-u", "1001", container, "touch", f"{workdir}/{_RUN_MARK}",
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+        _mark_ok = (await asyncio.wait_for(_mk2.wait(), timeout=10)) == 0
+    except Exception:
+        _mark_ok = False
+    if not _mark_ok:
+        logger.warning(
+            "claude chat workspace: could not set the artifact baseline in %s — "
+            "skipping file capture rather than reporting stale sandbox files as new",
+            workdir,
+        )
+
     # The prompt carries the recent conversation, not just this turn's ask. Staging runs
     # first so an attachment note stays attached to the task, not buried in the transcript.
     task_brief = _conversation_prefix(task_brief, chat_history)
@@ -1109,6 +1167,7 @@ async def run_claude_chat_workspace(
 
     proc: asyncio.subprocess.Process | None = None
     final_text_parts: list[str] = []
+    streamed_text = False
     tool_calls = 0
     timed_out = False
     stderr_buf: list[str] = []
@@ -1174,7 +1233,14 @@ async def run_claude_chat_workspace(
                     if ev.type == "tool_call":
                         tool_calls += 1
                     elif ev.type == "token":
-                        final_text_parts.append(str((ev.data or {}).get("content") or ""))
+                        text = str((ev.data or {}).get("content") or "")
+                        if (ev.data or {}).get("final"):
+                            final_text_parts = [text]
+                            if streamed_text:
+                                continue  # already shown live; don't render it a second time
+                        else:
+                            streamed_text = True
+                            final_text_parts.append(text)
                     yield ev
             except Exception:
                 yield root_ev("log", {"message": line[:300]})
@@ -1193,17 +1259,23 @@ async def run_claude_chat_workspace(
         if run_id:
             kill_run_by_marker(container, run_id)
 
-    # Capture any files Claude wrote (e.g. index.html) as artifacts BEFORE 'done' so the
-    # workspace Artifacts tab auto-pops with a preview. Text files only, secret-named skipped.
+    # Capture the files Claude wrote THIS RUN as artifacts BEFORE 'done' so the workspace
+    # Artifacts tab auto-pops with a preview. Text files only, secret-named skipped, and
+    # scoped by `-newer` to the baseline marker — without that scope the persistent per-user
+    # sandbox hands back every file it has ever held. No baseline (the touch failed) means we
+    # cannot tell this run's output from last week's, so capture nothing rather than guess.
     try:
+        if not _mark_ok:
+            raise _NoBaseline()
         lp = await asyncio.create_subprocess_exec(
             "docker", "exec", "-u", "1001", container, "sh", "-c",
-            f"cd {workdir} 2>/dev/null && find . -type f -size -524288c 2>/dev/null | head -20",
+            f"cd {workdir} 2>/dev/null && find . -type f -size -524288c "
+            f"-newer ./{_RUN_MARK} 2>/dev/null | head -20",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
         )
         out, _ = await asyncio.wait_for(lp.communicate(), timeout=15)
         for rel in (r.strip().lstrip("./") for r in out.decode("utf-8", "replace").splitlines()):
-            if not rel or _is_secret_artifact(rel):
+            if not rel or rel == _RUN_MARK or _is_secret_artifact(rel):
                 continue
             cp = await asyncio.create_subprocess_exec(
                 "docker", "exec", "-u", "1001", container, "cat", f"{workdir}/{rel}",
@@ -1212,6 +1284,8 @@ async def run_claude_chat_workspace(
             cout, _ = await asyncio.wait_for(cp.communicate(), timeout=15)
             await _db_save_artifact(pool, parent_workspace_id, "file", path=rel,
                                     content=cout.decode("utf-8", "replace"))
+    except _NoBaseline:
+        pass
     except Exception as exc:
         logger.warning("claude chat workspace: artifact capture failed: %s", exc)
 

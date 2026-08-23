@@ -140,11 +140,20 @@ async def _inject_files(request, owui_body: dict, user_id: int | None = None) ->
                 continue
 
             # 2) Uploaded file referenced by id — resolve from owui_files.
-            if fid and pool is not None:
+            #
+            # `user_id` is in the predicate, not merely in scope. A file id is chosen by
+            # the client and carries no proof of ownership, so a query keyed on the id
+            # alone would read any user's upload and inject it — text or image — into
+            # whoever asked. `owui_files_get` and `owui_files_delete` (main.py) have
+            # always scoped on `id AND user_id`; this path did not, and it is the one
+            # that puts the bytes in front of a model.
+            if fid and pool is not None and user_id is not None:
                 async with pool.acquire() as conn:
                     row = await conn.fetchrow(
-                        "SELECT filename, path, content_type FROM owui_files WHERE id=$1",
+                        "SELECT filename, path, content_type FROM owui_files "
+                        "WHERE id=$1 AND user_id=$2",
                         fid,
+                        int(user_id),
                     )
                 if not row or not os.path.exists(row["path"]):
                     continue
@@ -263,12 +272,18 @@ async def _inject_media(request, owui_body: dict, user_id: int | None = None) ->
             if not isinstance(f, dict):
                 continue
             fid = f.get("id") or (f.get("file") or {}).get("id")
-            if not fid or pool is None:
+            # Same ownership rule as `_inject_files`, and it matters as much here: an
+            # unscoped id would hand another user's recording to Whisper and paste the
+            # transcript into this conversation. No caller, no owner, no read.
+            if not fid or pool is None or user_id is None:
                 continue
             try:
                 async with pool.acquire() as conn:
                     row = await conn.fetchrow(
-                        "SELECT filename, path, content_type FROM owui_files WHERE id=$1", fid
+                        "SELECT filename, path, content_type FROM owui_files "
+                        "WHERE id=$1 AND user_id=$2",
+                        fid,
+                        int(user_id),
                     )
                 if not row:
                     continue
@@ -548,12 +563,46 @@ async def _apply_default_model(request, owui_body: dict, user_id: int | None) ->
         pass
 
 
+# A model with no system prompt answers "hello" with a paragraph about itself.
+# This is the house default: it only lands when the turn has no system message of
+# its own, so a project instruction, an attached skill or a user-set prompt always
+# wins. Kept deliberately short — it rides on every turn.
+_DEFAULT_PERSONA = (
+    "You are Harvis, a direct assistant.\n"
+    "Match the length of your answer to the question. A greeting or a one-line "
+    "question gets a one-line reply. Do not introduce yourself, list your "
+    "capabilities, or offer menus of things you could do unless you were asked.\n"
+    "Answer what was asked, then stop. No filler openers, no summary of what you "
+    "just said, no closing offer of further help."
+)
+
+
+def _inject_default_persona(owui_body: dict) -> None:
+    """Prepend the house system prompt when the turn carries none of its own."""
+    if os.getenv("HARVIS_DEFAULT_PERSONA", "1").strip().lower() in {"0", "false", "off"}:
+        return
+    messages = owui_body.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return
+    for m in messages:
+        if isinstance(m, dict) and m.get("role") == "system":
+            return
+    messages.insert(0, {"role": "system", "content": _DEFAULT_PERSONA})
+
+
 async def run_chat_completion(request, owui_body: dict, user_id: int | None = None):
     # Lazy import keeps this package free of import-time coupling to the
     # workspace package (avoids any chance of a circular import at load).
     from workspace.model_proxy import execute_chat_completion
 
     await _inject_media(request, owui_body, user_id=user_id)  # links/audio/video → context
+    # Live web facts for a turn the model cannot answer from training data ("what's
+    # the current X?"). Runs AFTER _inject_media because that one owns pasted links;
+    # chat_reach only fires when the question has no URL to work from. It injects
+    # TEXT, so every lane below — native, cloud Claude/GPT, Hermes — gets grounded
+    # the same way without any of them implementing tool calling.
+    from .chat_reach import append_reach_sources, maybe_inject_reach
+    await maybe_inject_reach(request, owui_body, user_id=user_id)
     await _inject_files(request, owui_body, user_id=user_id)
     await _inject_knowledge(request, owui_body, user_id=user_id)
     # NOTE: skills are NOT auto-injected into every chat — that bled a globally-
@@ -563,6 +612,7 @@ async def run_chat_completion(request, owui_body: dict, user_id: int | None = No
     await _inject_skills(request, owui_body, user_id=user_id)
     await _inject_project_instructions(request, owui_body)
     _inject_canvas_contract(owui_body)  # typed ```canvas panels (opt-in, compact)
+    _inject_default_persona(owui_body)  # house tone: answer length tracks the question
     await _apply_default_model(request, owui_body, user_id)  # Phase D: pref → routing
     # NOTE: model choice is strictly SELECTION-BASED — the picked model is always used. An
     # auto-model-swap router was built + verified here (2026-07-10) and then removed at the
@@ -572,7 +622,13 @@ async def run_chat_completion(request, owui_body: dict, user_id: int | None = No
     from .cloud_chat import is_cloud_chat_model, proxy_cloud_chat
     if is_cloud_chat_model(owui_body.get("model")):
         pool = getattr(request.app.state, "pg_pool", None)
-        return await proxy_cloud_chat(owui_body, pool, user_id)
+        # append_reach_sources wraps every lane's exit, not just this one: the
+        # Sources list has to survive whichever provider answered, and none of
+        # them can be trusted to render a citation the same way. It is a no-op
+        # unless maybe_inject_reach actually grounded this turn.
+        return append_reach_sources(
+            request, await proxy_cloud_chat(owui_body, pool, user_id)
+        )
     # H2: Hermes Agent as a Chat "Agent Mode" — the request carries harvis_agent_mode='hermes'
     # (the user's picked model does NOT drive Hermes; its own runtime model does). The legacy
     # sentinel-model path is kept for back-compat. Routed to the real app's API server (sidecar),
@@ -580,6 +636,10 @@ async def run_chat_completion(request, owui_body: dict, user_id: int | None = No
     from .hermes_chat import is_hermes_chat_model, proxy_hermes_chat
     if (owui_body.get("harvis_agent_mode") == "hermes") or is_hermes_chat_model(owui_body.get("model")):
         pool = getattr(request.app.state, "pg_pool", None)
-        return await proxy_hermes_chat(owui_body, pool, user_id)
+        return append_reach_sources(
+            request, await proxy_hermes_chat(owui_body, pool, user_id)
+        )
     proxy_body = owui_body_to_proxy(owui_body)
-    return await execute_chat_completion(request, proxy_body)
+    return append_reach_sources(
+        request, await execute_chat_completion(request, proxy_body)
+    )

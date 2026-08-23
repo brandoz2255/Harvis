@@ -17,7 +17,7 @@ import re
 from typing import Optional
 
 from .protocol import McpError, flatten_content
-from .runtime import mcp_runtime, runtime_enabled
+from .runtime import any_transport_enabled, mcp_runtime
 from .server_registry import McpServerRegistry
 from .types import McpServerConfig
 
@@ -54,8 +54,12 @@ async def mcp_tool_specs(
     no tools and logs, because one broken connector must not take the whole
     chat down with it.
     """
-    if not runtime_enabled():
+    if not any_transport_enabled():
         return []
+
+    # Remote servers read their OAuth token at connect time; this is where the
+    # runtime first meets something holding a database handle.
+    mcp_runtime.bind_pool(getattr(registry, "pool", None))
 
     specs: list[dict] = []
     try:
@@ -98,11 +102,21 @@ async def mcp_tool_specs(
 
 
 async def dispatch_mcp_tool(
-    registry: McpServerRegistry, user_id: int, wire_tool_name: str, args: dict
+    registry: McpServerRegistry, user_id: int, wire_tool_name: str, args: dict,
+    *, pool=None, workspace_id: str = "",
 ) -> tuple[str, bool]:
-    """Execute one ``mcp__*`` tool. Returns ``(output, ok)`` — never raises."""
-    if not runtime_enabled():
+    """Execute one ``mcp__*`` tool. Returns ``(output, ok)`` — never raises.
+
+    ``pool``/``workspace_id`` are optional and only enable media mirroring: a
+    connector that answers with an image URL on its own service hands back a
+    link no browser can resolve, so with a run to attach it to the bytes are
+    saved as an artifact and the link is rewritten to point at Harvis. Without
+    them the text is returned exactly as the server sent it.
+    """
+    if not any_transport_enabled():
         return ("the MCP runtime is disabled on this deployment", False)
+
+    mcp_runtime.bind_pool(getattr(registry, "pool", None))
 
     try:
         configs = await registry.list_for_user(user_id, include_disabled=False)
@@ -127,6 +141,17 @@ async def dispatch_mcp_tool(
         return (f"{cfg.server_name}: tool call failed ({exc.__class__.__name__})", False)
 
     text, ok = flatten_content(result)
+    # Mirror before truncating: the URL is usually the last thing in a long
+    # result, and clipping it away would strand the image it points at.
+    if ok and pool is not None and workspace_id:
+        try:
+            from .media_capture import mirror_media_urls
+
+            text, _saved = await mirror_media_urls(
+                text, pool=pool, workspace_id=workspace_id,
+            )
+        except Exception:
+            logger.exception("mcp: media mirroring failed for %s", wire_tool_name)
     if len(text) > _MAX_RESULT:
         text = text[:_MAX_RESULT] + f"\n… truncated ({len(text)} chars total)"
     return (text, ok)

@@ -112,16 +112,41 @@ def _parse_diff_files(diff_text: str) -> list[dict]:
 
 def _dedupe(s: str) -> str:
     """Drop consecutive duplicate sentences (some engines, e.g. Claude Code, emit the summary —
-    or a trailing sentence — twice). Handles both whole-string doubles and trailing repeats."""
-    v = re.sub(r"\s+", " ", (s or "")).strip()
+    or a trailing sentence — twice). Handles both whole-string doubles and trailing repeats.
+
+    Line structure is preserved. The original collapsed *all* whitespace with `\\s+ → " "`, which was
+    harmless when a summary was one sentence but destroys the answer now that a single-agent run
+    puts its whole markdown reply here: a bullet list arrived in **What I did** as one run-on line
+    ("Key details include: - **Developer:** … - **Architecture:** …"). Only horizontal whitespace
+    is collapsed; newlines and blank lines survive."""
+    v = "\n".join(re.sub(r"[ \t]+", " ", ln).rstrip() for ln in (s or "").replace("\r\n", "\n").split("\n"))
+    v = re.sub(r"\n{3,}", "\n\n", v).strip()
     if not v:
         return v
-    sents = re.split(r"(?<=[.!?])\s+", v)
+
+    # Whole-string double: some engines emit the entire summary twice, back to back.
+    half, rem = divmod(len(v), 2)
+    if rem in (0, 1) and half > 20:
+        a, b = v[:half].strip(), v[half:].strip()
+        if a and a.lower() == b.lower():
+            v = a
+
     out: list[str] = []
-    for sent in sents:
-        if not out or out[-1].strip().lower() != sent.strip().lower():
-            out.append(sent)
-    return " ".join(out)
+    for line in v.split("\n"):
+        if not line.strip():
+            # Keep paragraph breaks, but never lead with one or stack them.
+            if out and out[-1].strip():
+                out.append("")
+            continue
+        if out and out[-1].strip().lower() == line.strip().lower():
+            continue  # the same line twice in a row is always a repeat, never content
+        sents = re.split(r"(?<=[.!?])\s+", line)
+        kept: list[str] = []
+        for sent in sents:
+            if not kept or kept[-1].strip().lower() != sent.strip().lower():
+                kept.append(sent)
+        out.append(" ".join(kept))
+    return "\n".join(out).strip()
 
 
 def _test_command(paths: list[str]) -> Optional[str]:
@@ -181,6 +206,10 @@ def compose_build_analysis(
         parts += ["", "**What went wrong**", (error_message or "The run ended with an error.").strip()]
         if fix_hint:
             parts.append(fix_hint.strip())
+        # A failed run often still produced real work before it died. Dropping it
+        # here leaves the user with a bare error and nothing to act on.
+        if summary:
+            parts += ["", "**What I got before it stopped**", summary]
         parts += [
             "",
             "**What to try next**",
@@ -261,7 +290,10 @@ def compose_build_analysis(
         + "."
     )
     if summary:
-        did += f" {summary}"
+        # A one-liner reads best continuing the sentence; anything with its own line structure
+        # (a list, several paragraphs) has to start a new block or the markdown collapses into
+        # the run stats.
+        did += f"\n\n{summary}" if "\n" in summary else f" {summary}"
 
     # Files changed — explained.
     file_lines = []

@@ -92,6 +92,7 @@ async def run_orchestrated(
     isolation_mode: str = "scratch",
     repo_config: dict | None = None,
     launch_mode: str = "user",   # "auto" (auto-detected launch) → heavy tools withheld from the offered schema
+    single_agent: bool = False,  # Agent-pill turn: ONE agent on the task as written, no planner
 ) -> AsyncGenerator[OpenClawEvent, None]:
     # Lazy import (avoid circular import at module load). Import the FUNCTIONS
     # from the submodule path — `from .. import workspace_router` would resolve to
@@ -120,10 +121,15 @@ async def run_orchestrated(
     orch_run_id = parent_workspace_id  # orchestrator node == the launched run
     sess = session_id or f"ws-{parent_workspace_id}"
 
+    # A single-agent run has no crew to orchestrate, so calling the parent node
+    # "Orchestrator Agent" would put a coordinator on the graph that never
+    # coordinated anything. Same stream, honest label.
+    root_label = "Harvis Agent" if single_agent else "Orchestrator Agent"
+
     def root_ev(etype: str, data: dict) -> OpenClawEvent:
-        e = OpenClawEvent(etype, {**data, "agent_label": "Orchestrator Agent", "model": model_name})
+        e = OpenClawEvent(etype, {**data, "agent_label": root_label, "model": model_name})
         e.run_id = orch_run_id
-        e.agent_label = "Orchestrator Agent"
+        e.agent_label = root_label
         return e
 
     def _pick_model(profile: dict) -> str:
@@ -131,30 +137,48 @@ async def run_orchestrated(
             return model_name or profile.get("model_name") or "gemma4:e2b"
         return profile.get("model_name") or model_name or "gemma4:e2b"
 
-    yield root_ev("agent_start", {"label": "Orchestrator Agent"})
+    yield root_ev("agent_start", {"label": root_label})
 
-    # LLM task-delegation: split the task into N **task-named** sub-agents (3–10,
-    # scaling to complexity), each on its own model. Replaces the old rule-based
-    # frontend/backend/testing keyword split; falls back to it on any LLM failure.
-    # See planner.plan_agents. (`_pick_model` above is the uniform/per-role policy
-    # the planner now applies internally.)
-    from .planner import plan_agents
-    from .subagent_defs import load_subagents
-    # Custom sub-agents (Customize → Sub-agents): the planner uses their name+description
-    # roster to auto-delegate a step to the right specialist; each resolved profile then
-    # carries that sub-agent's model / system prompt / tool-allowlist / skills / connectors.
-    subagents = await load_subagents(pool, user_id)
-    plan: list[dict] = await plan_agents(
-        task_brief, model_name=model_name, uniform_model=uniform_model,
-        model_pool=model_pool, subagents=subagents,
-    )
+    if single_agent:
+        # Agent-pill turn: ONE agent, on the task exactly as the user wrote it. The
+        # planner is skipped rather than asked for a plan of one — it costs an extra
+        # model round-trip, and its whole job is splitting work that this lane has
+        # already decided not to split. "Read this page and tell me X" is one agent's
+        # job; fanning it into a frontend/backend/testing crew is noise on the graph.
+        profile = get_profile("backend")  # the generic coding profile (tools + limits)
+        profile["display_name"] = "Harvis Agent"
+        profile["model_name"] = model_name
+        plan = [{
+            "role": "agent",
+            "task": task_brief,
+            "profile": profile,
+            "model": model_name,
+            "label": "Harvis Agent",
+        }]
+        yield root_ev("log", {"message": f"Running one agent on {model_name}."})
+    else:
+        # LLM task-delegation: split the task into N **task-named** sub-agents (3–10,
+        # scaling to complexity), each on its own model. Replaces the old rule-based
+        # frontend/backend/testing keyword split; falls back to it on any LLM failure.
+        # See planner.plan_agents. (`_pick_model` above is the uniform/per-role policy
+        # the planner now applies internally.)
+        from .planner import plan_agents
+        from .subagent_defs import load_subagents
+        # Custom sub-agents (Customize → Sub-agents): the planner uses their name+description
+        # roster to auto-delegate a step to the right specialist; each resolved profile then
+        # carries that sub-agent's model / system prompt / tool-allowlist / skills / connectors.
+        subagents = await load_subagents(pool, user_id)
+        plan = await plan_agents(
+            task_brief, model_name=model_name, uniform_model=uniform_model,
+            model_pool=model_pool, subagents=subagents,
+        )
 
-    planned = "; ".join(f"{p['label']} on {p['model']}" for p in plan)
-    mode_note = " (uniform model)" if uniform_model else ""
-    yield root_ev(
-        "log",
-        {"message": f"Planned {len(plan)} sub-agent(s){mode_note}: {planned}."},
-    )
+        planned = "; ".join(f"{p['label']} on {p['model']}" for p in plan)
+        mode_note = " (uniform model)" if uniform_model else ""
+        yield root_ev(
+            "log",
+            {"message": f"Planned {len(plan)} sub-agent(s){mode_note}: {planned}."},
+        )
     # Structured plan for the VibeCode right-rail Plan panel — the log above is the
     # human line; this carries the steps so the UI can render per-step status.
     yield root_ev("plan", {
@@ -339,26 +363,55 @@ async def run_orchestrated(
 
     files_str = ", ".join(all_files) if all_files else "no files"
     n = len(children)
-    # Conversational results recap — the orchestrator "talking back" to the user about what
-    # each agent did, built from the sub-agents' OWN finish() summaries (grounded, no extra
-    # LLM call / no fabrication). The frontend types this out + renders the markdown list.
-    parts: list[str] = []
-    for c in children:
-        label = c.get("label") or c.get("role") or "agent"
-        s = " ".join((c.get("summary") or "").split())  # collapse to one line
-        if len(s) > 240:
-            s = s[:237].rstrip() + "…"
-        if s:
-            parts.append(f"- **{label}** — {s}")
-        elif c.get("ok"):
-            parts.append(f"- **{label}** — done.")
-        else:
-            parts.append(f"- **{label}** — didn't finish cleanly.")
-    summary = (
-        f"Done! I ran {n} agent{'s' if n != 1 else ''} and changed "
-        f"{len(all_files)} file{'s' if len(all_files) != 1 else ''}"
-        + (f" ({files_str})" if all_files else "")
-        + ".\n\nHere's what each did:\n\n"
-        + "\n".join(parts)
-    )
-    yield root_ev("done", {"summary": summary, "changed_files": all_files})
+    # A LONE agent's summary is the answer itself, not one row of a roll-up. The recap
+    # below collapses each summary to a single line and clips it at 240 chars, which is
+    # right for "here's what each of my four agents did" and destroys "here's the answer
+    # to your question": a 2,984-char reply reached the user as 237 chars ending mid-word
+    # ("…current details reg…"), and because the Build Narrator embeds this same string
+    # under "What I did", the truncation was all the user ever saw. Auto mode now runs
+    # single_agent=True, so this is the common path, not an edge case.
+    if n == 1:
+        c = children[0]
+        answer = (c.get("summary") or "").strip()
+        if not answer:
+            answer = "Done." if c.get("ok") else "The agent didn't finish cleanly."
+        # Whole, with its markdown intact. The file line only earns space when there
+        # are files — a question answered in chat shouldn't open with "changed 0 files".
+        summary = (
+            f"Changed {len(all_files)} file{'s' if len(all_files) != 1 else ''} "
+            f"({files_str}).\n\n{answer}"
+            if all_files
+            else answer
+        )
+    else:
+        # Conversational results recap — the orchestrator "talking back" to the user about
+        # what each agent did, built from the sub-agents' OWN finish() summaries (grounded,
+        # no extra LLM call / no fabrication). The frontend renders the markdown list.
+        parts: list[str] = []
+        for c in children:
+            label = c.get("label") or c.get("role") or "agent"
+            s = " ".join((c.get("summary") or "").split())  # collapse to one line
+            if len(s) > 240:
+                s = s[:237].rstrip() + "…"
+            if s:
+                parts.append(f"- **{label}** — {s}")
+            elif c.get("ok"):
+                parts.append(f"- **{label}** — done.")
+            else:
+                parts.append(f"- **{label}** — didn't finish cleanly.")
+        summary = (
+            f"Done! I ran {n} agents and changed "
+            f"{len(all_files)} file{'s' if len(all_files) != 1 else ''}"
+            + (f" ({files_str})" if all_files else "")
+            + ".\n\nHere's what each did:\n\n"
+            + "\n".join(parts)
+        )
+    # The run reached its end, which is not the same as the work succeeding. Every
+    # child could have died and this still emitted a bare 'done' — the run row said
+    # "done" and the narrator headline said "**Build complete**" over a run the user
+    # watched fail. Report it; the router decides what to do with it.
+    yield root_ev("done", {
+        "summary": summary,
+        "changed_files": all_files,
+        "success": all(bool(c.get("ok")) for c in children),
+    })
