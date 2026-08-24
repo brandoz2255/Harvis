@@ -197,6 +197,13 @@ port_listening() { # /dev/tcp probe: succeeds iff something accepts on $1:$2
   ( exec 3<>"/dev/tcp/$1/$2" ) 2>/dev/null
 }
 
+# Which compose project, if any, publishes host port $1. Empty when the holder
+# is not a compose container — then "another process" really is the truth.
+port_owner() {
+  docker ps --format '{{.Ports}}\t{{.Label "com.docker.compose.project"}}' 2>/dev/null \
+    | grep -E ":$1->" | awk -F'\t' 'NF>1 && $2!="" {print $2; exit}'
+}
+
 # Where to look for a model server, most likely first.
 #
 # 127.0.0.1 alone is wrong on the platform most people install from. Under WSL2
@@ -360,7 +367,7 @@ check_ports() {
     add_row SKIP "host ports" "skipped (compose merge unavailable)"
     return 0
   fi
-  local ports project own_ports p conflicts=() checked=0
+  local ports project own_ports p owner conflicts=() checked=0
   # `|| true`: a compose file that publishes nothing makes grep exit 1, which
   # under `set -euo pipefail` would kill the installer here with no message.
   ports="$(grep -o '"published": *"[0-9]*"' "$MERGED_JSON" | grep -o '[0-9]*' | sort -un || true)"
@@ -372,12 +379,24 @@ check_ports() {
     checked=$((checked + 1))
     if printf '%s\n' "$own_ports" | grep -qx "$p"; then continue; fi
     # Loopback only here: this is about ports published on THIS host.
-    if port_listening 127.0.0.1 "$p"; then conflicts+=("$p"); fi
+    if port_listening 127.0.0.1 "$p"; then
+      # Name the stack that holds it. "another process" was misleading in the
+      # one case that matters most: the holder is usually another Harvis.
+      owner="$(port_owner "$p")"
+      if [ -n "$owner" ]; then conflicts+=("${p} (project '${owner}')")
+      else conflicts+=("$p"); fi
+    fi
   done
   if [ "${#conflicts[@]}" -eq 0 ]; then
     add_row PASS "host ports" "${checked} published port(s) free or already ours"
   else
-    add_row FAIL "host ports" "in use by another process: ${conflicts[*]}"
+    add_row FAIL "host ports" "already published: ${conflicts[*]}"
+    add_hint "  Free those ports, or give this stack its own. Every published port
+  is overridable, so a second stack can sit beside the first:
+      HARVIS_STACK_NAME=harvis2 HARVIS_CONTAINER_PREFIX=harvis2- \\
+      HARVIS_PORT_BACKEND=28000 HARVIS_PORT_NGINX=29000 \\
+      HARVIS_PORT_POSTGRES=25432 HARVIS_PORT_MCP=28010 ./install.sh
+  The full list of HARVIS_PORT_* variables is in docker-compose.yaml's header."
   fi
 }
 

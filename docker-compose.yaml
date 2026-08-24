@@ -8,6 +8,25 @@
 # beside a real install) overrides it here instead, together with
 # $HARVIS_CONTAINER_PREFIX below. Both default to today's values, so an
 # ordinary install is byte-for-byte what it always was.
+#
+# Namespacing the NAMES is only half of it: two stacks on one host also need
+# different published PORTS, or the second one cannot bind and never starts.
+# Every host-published port below is therefore overridable, each defaulting to
+# the port it has always used:
+#
+#   HARVIS_PORT_BACKEND       8000   backend API
+#   HARVIS_PORT_NGINX         9000   nginx front door (container :80)
+#   HARVIS_PORT_POSTGRES      5432   pgsql
+#   HARVIS_PORT_MCP           8010   harvis-mcp        (loopback only)
+#   HARVIS_PORT_FRONTEND      3000   frontend          (profile: legacy)
+#   HARVIS_PORT_OPENCLAW     18789   openclaw gateway  (loopback; profile: engines)
+#   HARVIS_PORT_TTS           8001   tts-service       (profile: advanced-voice)
+#   HARVIS_PORT_NOTEBOOK_UI   8502   open-notebook UI  (profile: notebooks-upstream)
+#   HARVIS_PORT_NOTEBOOK_API  5055   open-notebook API (profile: notebooks-upstream)
+#   HARVIS_PORT_MESSAGING    18800   messaging gateway (profile: messaging)
+#
+# Container-internal ports are NOT parameterised — only the host side moves, so
+# every in-container URL and healthcheck keeps working untouched.
 name: ${HARVIS_STACK_NAME:-harvis}
 
 services:
@@ -147,7 +166,7 @@ services:
     group_add:
       - "${HARVIS_DOCKER_GID:-984}"
     ports:
-      - "8000:8000"
+      - "${HARVIS_PORT_BACKEND:-8000}:8000"
     environment:
       DATABASE_URL: "postgresql://pguser:pgpassword@pgsql:5432/database"
       JWT_SECRET: "${JWT_SECRET:?JWT_SECRET must be set in .env}"
@@ -577,7 +596,7 @@ services:
       # propagates to the BYO gateway. Set HOST_OPENCLAW_CONFIG_HOST_PATH
       # in .env to override. Requires file to be writable by UID 1001 (appuser)
       # — chmod 664 and chgrp to a shared group if needed.
-      - "${HOST_OPENCLAW_CONFIG_HOST_PATH:-/home/user/.openclaw}:/host-openclaw:rw"
+      - "${HOST_OPENCLAW_CONFIG_HOST_PATH:-${HOME}/.openclaw}:/host-openclaw:rw"
     networks:
       - ollama-n8n-network
       - openclaw-internal
@@ -696,7 +715,7 @@ services:
     profiles: ["legacy"]
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "${HARVIS_PORT_FRONTEND:-3000}:3000"
     environment:
       NODE_ENV: "production"
       NEXT_TELEMETRY_DISABLED: "1"
@@ -764,7 +783,7 @@ services:
     container_name: ${HARVIS_CONTAINER_PREFIX:-}nginx-proxy
     restart: unless-stopped
     ports:
-      - "9000:80"
+      - "${HARVIS_PORT_NGINX:-9000}:80"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
       - ./front_end/owui/build:/usr/share/nginx/owui:ro
@@ -886,7 +905,7 @@ services:
       - ./python_back_end/workspace/workspace_schema.sql:/docker-entrypoint-initdb.d/002_workspace_schema.sql:ro
       - ./python_back_end/migrations/010_user_openclaw_config.sql:/docker-entrypoint-initdb.d/003_user_openclaw_config.sql:ro
     ports:
-      - "5432:5432"
+      - "${HARVIS_PORT_POSTGRES:-5432}:5432"
     deploy:
       resources:
         limits:
@@ -976,7 +995,7 @@ services:
     user: "1000:1000"
     # Expose to localhost ONLY for Cursor extension — never 0.0.0.0
     ports:
-      - "127.0.0.1:18789:18789"
+      - "127.0.0.1:${HARVIS_PORT_OPENCLAW:-18789}:18789"
     # Chromium needs shared memory — Docker default 64MB causes tab crashes
     shm_size: '256m'
     tmpfs:
@@ -1128,8 +1147,8 @@ services:
     profiles: ["notebooks-upstream"]
     restart: unless-stopped
     ports:
-      - "8502:8502"
-      - "5055:5055"
+      - "${HARVIS_PORT_NOTEBOOK_UI:-8502}:8502"
+      - "${HARVIS_PORT_NOTEBOOK_API:-5055}:5055"
     environment:
       # SurrealDB Configuration
       SURREAL_URL: ws://surrealdb:8000/rpc
@@ -1183,7 +1202,7 @@ services:
       - ollama-n8n-network
       - openclaw-internal
     ports:
-      - "127.0.0.1:8010:8010"
+      - "127.0.0.1:${HARVIS_PORT_MCP:-8010}:8010"
 
   # ═══════════════════════════════════════════════════════════════════════════
   # TTS Service - Voice Cloning & Podcast Generation  (ADVANCED VOICE)
@@ -1204,7 +1223,7 @@ services:
     profiles: ["advanced-voice"]
     restart: unless-stopped
     ports:
-      - "8001:8001"
+      - "${HARVIS_PORT_TTS:-8001}:8001"
     environment:
       # TTS Configuration
       TTS_HOST: "0.0.0.0"
@@ -1431,7 +1450,7 @@ services:
     # Stub inject port — bound to localhost so only operators on the host
     # can drive E2E tests. Comment out for prod deploys.
     ports:
-      - "127.0.0.1:18800:18800"
+      - "127.0.0.1:${HARVIS_PORT_MESSAGING:-18800}:18800"
     depends_on:
       backend:
         condition: service_started
