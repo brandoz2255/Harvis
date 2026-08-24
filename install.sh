@@ -107,12 +107,21 @@ add_row() { # status name detail  (status: PASS|FAIL|WARN|SKIP; FAIL flips exit 
   [ "$1" = "FAIL" ] && CHECK_FAILED=1 || true
 }
 
+# Multi-line remedies for a failed check. Buffered rather than echoed on the
+# spot, because a check that printed its advice immediately put the fix on
+# screen BEFORE the table that says what failed — read top to bottom, that is
+# an instruction with no visible cause.
+CHECK_HINTS=()
+add_hint() { CHECK_HINTS+=("$1"); }
+
 print_check_table() {
   echo ""
   echo "Preflight checks"
   local row
   for row in "${CHECK_ROWS[@]}"; do echo "  $row"; done
   echo ""
+  local hint
+  for hint in "${CHECK_HINTS[@]+"${CHECK_HINTS[@]}"}"; do printf '%s\n\n' "$hint"; done
 }
 
 # ── Prerequisites ───────────────────────────────────────────────────────────
@@ -184,8 +193,28 @@ detect_gpu_runtime() {
 }
 
 # ── Model-server detection ──────────────────────────────────────────────────
-port_listening() { # /dev/tcp probe: succeeds iff something accepts on 127.0.0.1:$1
-  ( exec 3<>"/dev/tcp/127.0.0.1/$1" ) 2>/dev/null
+port_listening() { # /dev/tcp probe: succeeds iff something accepts on $1:$2
+  ( exec 3<>"/dev/tcp/$1/$2" ) 2>/dev/null
+}
+
+# Where to look for a model server, most likely first.
+#
+# 127.0.0.1 alone is wrong on the platform most people install from. Under WSL2
+# in its default NAT mode the distro has its own network namespace, so a server
+# listening on the WINDOWS host's loopback is not reachable at 127.0.0.1 from
+# here — it answers on the default gateway, which is the Windows host. Probing
+# only loopback therefore reported "no model server found" to users running a
+# perfectly healthy Ollama, and sent them off to fix a problem they did not have.
+# (WSL2's newer mirrored mode does forward loopback, which is why 127.0.0.1
+# stays first rather than being replaced.)
+llm_probe_hosts() {
+  printf '127.0.0.1\n'
+  local gw
+  gw="$(ip route show default 2>/dev/null | awk '/^default/{print $3; exit}')"
+  if [ -n "$gw" ] && [ "$gw" != "127.0.0.1" ]; then printf '%s\n' "$gw"; fi
+  # Docker Desktop publishes this name to the WSL distro too on some versions.
+  # Harmless when it does not resolve: the /dev/tcp probe just fails.
+  printf 'host.docker.internal\n'
 }
 
 # Probe from THIS shell (127.0.0.1) but record the URL a CONTAINER will use
@@ -196,10 +225,13 @@ detect_provider() {
     add_row PASS "model server" "using ${LLM_ENDPOINT} (--llm-url)"
     return 0
   fi
-  local entry port name path body count
+  local entry port name path body count host
+  local -a hosts=()
+  while IFS= read -r host; do [ -n "$host" ] && hosts+=("$host"); done < <(llm_probe_hosts)
   for entry in "${KNOWN_PROVIDERS[@]}"; do
     IFS='|' read -r port name path <<<"$entry"
-    port_listening "$port" || continue
+    for host in "${hosts[@]}"; do
+    port_listening "$host" "$port" || continue
     if ! command -v curl >/dev/null 2>&1; then
       # No curl to confirm what it is, but something is listening on a port we
       # know. Say exactly that rather than claiming a positive identification.
@@ -208,7 +240,7 @@ detect_provider() {
       add_row WARN "model server" "port ${port} is open but curl is missing — assuming ${name}"
       return 0
     fi
-    body="$(curl -s -m 4 "http://127.0.0.1:${port}${path}" 2>/dev/null || true)"
+    body="$(curl -s -m 4 "http://${host}:${port}${path}" 2>/dev/null || true)"
     [ -n "$body" ] || continue
     # A reply is not an identification. Harvis's own backend publishes :8000 and
     # answers /v1/models with {"detail":"Not Found"} — accepting any non-empty
@@ -225,15 +257,16 @@ detect_provider() {
     # which is the ordinary "reachable but no models loaded" case, not a failure.
     count="$(printf '%s' "$body" | grep -o '"id"\|"name"' | wc -l | tr -d ' ' || true)"
     if [ "${count:-0}" -gt 0 ]; then
-      add_row PASS "model server" "${name} on :${port}, ${count} model(s)"
+      add_row PASS "model server" "${name} at ${host}:${port}, ${count} model(s)"
     else
-      add_row WARN "model server" "${name} on :${port} but 0 models — chat fails until you load one"
+      add_row WARN "model server" "${name} at ${host}:${port} but 0 models — chat fails until you load one"
     fi
     return 0
+    done
   done
   # Not an error. The stack comes up, the UI loads, and it reports that no
   # provider was found — which is a far better first run than refusing to start.
-  add_row WARN "model server" "none found on :11434 :1234 :8080 :8000 — connect one later in Settings"
+  add_row WARN "model server" "none found on :11434 :1234 :8080 :8000 (tried ${hosts[*]}) — connect one later in Settings"
 }
 
 # ── Compose file selection ──────────────────────────────────────────────────
@@ -305,6 +338,22 @@ check_compose_merge() {
   fi
 }
 
+# The project name Compose will actually use. `docker-compose.yaml` pins
+# `name: harvis` at the top precisely so every checkout and worktree shares one
+# stack, and a top-level `name:` outranks $COMPOSE_PROJECT_NAME. Deriving it from
+# $PWD instead — as this did — makes the port check look for containers under a
+# project that does not exist, find none of its own, and fail a legitimate re-run
+# as a port conflict. From a git worktree it was wrong every time. The rendered
+# merge already carries the answer, so read it rather than guessing.
+compose_project_name() {
+  local n=""
+  if [ -s "${MERGED_JSON:-}" ]; then
+    n="$(sed -n 's/^[[:space:]]*"name":[[:space:]]*"\([^"]*\)".*/\1/p' "$MERGED_JSON" | head -1)"
+  fi
+  [ -n "$n" ] || n="${COMPOSE_PROJECT_NAME:-$(basename "$PWD" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]//g')}"
+  printf '%s' "$n"
+}
+
 # ── Host port preflight ─────────────────────────────────────────────────────
 check_ports() {
   if [ ! -s "${MERGED_JSON:-}" ]; then
@@ -315,19 +364,55 @@ check_ports() {
   # `|| true`: a compose file that publishes nothing makes grep exit 1, which
   # under `set -euo pipefail` would kill the installer here with no message.
   ports="$(grep -o '"published": *"[0-9]*"' "$MERGED_JSON" | grep -o '[0-9]*' | sort -un || true)"
-  project="${COMPOSE_PROJECT_NAME:-$(basename "$PWD" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]//g')}"
+  project="$(compose_project_name)"
   # Ports already published by THIS compose project are a re-run, not a conflict.
   own_ports="$(docker ps --filter "label=com.docker.compose.project=${project}" \
       --format '{{.Ports}}' 2>/dev/null | grep -oE ':[0-9]+->' | grep -oE '[0-9]+' | sort -un || true)"
   for p in $ports; do
     checked=$((checked + 1))
     if printf '%s\n' "$own_ports" | grep -qx "$p"; then continue; fi
-    if port_listening "$p"; then conflicts+=("$p"); fi
+    # Loopback only here: this is about ports published on THIS host.
+    if port_listening 127.0.0.1 "$p"; then conflicts+=("$p"); fi
   done
   if [ "${#conflicts[@]}" -eq 0 ]; then
     add_row PASS "host ports" "${checked} published port(s) free or already ours"
   else
     add_row FAIL "host ports" "in use by another process: ${conflicts[*]}"
+  fi
+}
+
+# ── Container-name preflight ────────────────────────────────────────────────
+# Every service pins an explicit `container_name:`, which is a daemon-global
+# name — it deliberately ignores the compose project namespace so that
+# `docker exec harvis-backend ...` works the same from any checkout, and ~260
+# files in this repo rely on that. The cost is that a container left behind by
+# some OTHER project holding one of those names makes `up` fail with a message
+# about the name being "already in use by container <hash>", which says nothing
+# about which stack owns it or what to do. Name the owner and the remedy.
+check_container_names() {
+  if [ ! -s "${MERGED_JSON:-}" ]; then
+    add_row SKIP "container names" "skipped (compose merge unavailable)"
+    return 0
+  fi
+  local project names n owner stale=() checked=0
+  project="$(compose_project_name)"
+  names="$(sed -n 's/^[[:space:]]*"container_name":[[:space:]]*"\([^"]*\)".*/\1/p' "$MERGED_JSON" | sort -u)"
+  for n in $names; do
+    checked=$((checked + 1))
+    owner="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$n" 2>/dev/null || true)"
+    # Not present, or present and ours: both fine. Ours is just a re-run.
+    [ -z "$owner" ] && continue
+    [ "$owner" = "$project" ] && continue
+    stale+=("${n} (owned by '${owner}')")
+  done
+  if [ "${#stale[@]}" -eq 0 ]; then
+    add_row PASS "container names" "${checked} name(s) free or already ours (project '${project}')"
+  else
+    add_row FAIL "container names" "held by another compose project: ${stale[*]}"
+    add_hint "  Those container names belong to a different stack. Either remove them:
+      docker rm -f ${names//$'\n'/ }
+  or install this one beside it as a separate stack (give it free ports too):
+      HARVIS_STACK_NAME=harvis2 HARVIS_CONTAINER_PREFIX=harvis2- ./install.sh"
   fi
 }
 
@@ -682,7 +767,19 @@ launch() {
     echo ""
     echo "When ready, run:  docker compose up --build -d"
   else
-    docker compose up --build -d
+    # A failed `up` leaves whatever it managed to create running or half-built.
+    # Left behind, those containers hold the very names the next attempt needs,
+    # so the retry fails with a name conflict instead of the original error and
+    # the user chases the wrong problem. Tear this project's own containers down
+    # — only ever ours, selected by the compose project label — and say so.
+    if ! docker compose up --build -d; then
+      echo ""
+      echo "✗ Startup failed. Removing the containers this attempt created so a"
+      echo "  retry reports the real error instead of a name conflict..."
+      docker compose down --remove-orphans >/dev/null 2>&1 || true
+      echo "  Cleaned up. Fix the error above, then run ./install.sh again."
+      return 1
+    fi
     poll_health
   fi
 }
@@ -702,6 +799,7 @@ main() {
   select_compose_files
   check_compose_merge
   check_ports
+  check_container_names
   check_resources
   print_check_table
   [ -n "${MERGED_JSON:-}" ] && rm -f "$MERGED_JSON"

@@ -2,7 +2,13 @@
 # (main or a git worktree) targets the SAME containers, networks, and — the
 # critical part — the same `harvis_*` named data volumes. Without this, running
 # from a worktree would silently create a parallel empty stack (fresh DB).
-name: harvis
+#
+# A top-level `name:` outranks $COMPOSE_PROJECT_NAME, which is exactly what
+# makes the pin work — so a SECOND, deliberately separate stack (a test rig
+# beside a real install) overrides it here instead, together with
+# $HARVIS_CONTAINER_PREFIX below. Both default to today's values, so an
+# ordinary install is byte-for-byte what it always was.
+name: ${HARVIS_STACK_NAME:-harvis}
 
 services:
   # Cookbook hardware scanner for the MAIN HOST. llmfit scans this box's
@@ -35,7 +41,7 @@ services:
     # to point at. 0.9.30 is what this integration was written against.
     image: ghcr.io/alexsjones/llmfit:0.9.30@sha256:465a5197257a3d34a22a52b1e4ea5aecefc1973788c0f6a0a8fd5a4f93c7f93c
     runtime: ${HARVIS_GPU_RUNTIME:-runc}
-    container_name: harvis-llmfit
+    container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-llmfit
     restart: unless-stopped
     command: ["serve", "--host", "0.0.0.0", "--port", "8787"]
     environment:
@@ -54,7 +60,7 @@ services:
         # developer build is honestly labelled "unknown" rather than carrying a
         # stale sha; CI exports HARVIS_VCS_REF and gets the real one.
         VCS_REF: ${HARVIS_VCS_REF:-unknown}
-    container_name: harvis-model-downloader
+    container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-model-downloader
     # Downloads the torch-side weights — Whisper, Chatterbox, Qwen3-TTS — for
     # the in-process/RVC voice path. The ONNX Voice-First preset needs none of
     # them (voice-onnx fetches its own ONNX bundles into its model volume), so
@@ -89,7 +95,7 @@ services:
   # Artifact Volume Permission Setup (runs as root to set proper permissions)
   artifact-init:
     image: busybox:1.37.0@sha256:b3255e7dfbcd10cb367af0d409747d511aeb66dfac98cf30e97e87e4207dd76f
-    container_name: harvis-artifact-init
+    container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-artifact-init
     user: root
     command: >
       sh -c "mkdir -p /data/artifacts &&
@@ -122,7 +128,7 @@ services:
         # developer build is honestly labelled "unknown" rather than carrying a
         # stale sha; CI exports HARVIS_VCS_REF and gets the real one.
         VCS_REF: ${HARVIS_VCS_REF:-unknown}
-    container_name: harvis-backend
+    container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-backend
     restart: unless-stopped
     # The GID that owns /var/run/docker.sock on the HOST. appuser (1001) is not
     # in it by default, and without this the socket mount below is present but
@@ -619,7 +625,7 @@ services:
         # developer build is honestly labelled "unknown" rather than carrying a
         # stale sha; CI exports HARVIS_VCS_REF and gets the real one.
         VCS_REF: ${HARVIS_VCS_REF:-unknown}
-    container_name: harvis-browser-runner
+    container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-browser-runner
     restart: unless-stopped
     networks:
       - openclaw-internal
@@ -650,7 +656,7 @@ services:
       dockerfile: Dockerfile
       args:
         VCS_REF: ${HARVIS_VCS_REF:-unknown}
-    container_name: harvis-preview-runner
+    container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-preview-runner
     restart: unless-stopped
     environment:
       HARVIS_PREVIEW_SAFE_MODE: "1"
@@ -686,7 +692,7 @@ services:
         # Change BUILD_TIMESTAMP to force a fresh build
         BUILD_TIMESTAMP: ${BUILD_TIMESTAMP:-default}
         GIT_COMMIT: ${GIT_COMMIT:-unknown}
-    container_name: harvis-frontend
+    container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-frontend
     profiles: ["legacy"]
     restart: unless-stopped
     ports:
@@ -732,7 +738,7 @@ services:
     # Local build tag — tell Compose to build it, not pull it (a bare
     # `docker compose up -d` without --build otherwise fails: pull access denied).
     pull_policy: build
-    container_name: harvis-owui-builder
+    container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-owui-builder
     restart: "no"
     volumes:
       - ./front_end/owui/build:/out
@@ -755,7 +761,7 @@ services:
     # read the config and then drops every worker to the unprivileged `nginx`
     # user itself; setting `user:` here would break that and gain nothing.
     image: nginx:1.29.6-alpine@sha256:f46cb72c7df02710e693e863a983ac42f6a9579058a59a35f1ae36c9958e4ce0
-    container_name: nginx-proxy
+    container_name: ${HARVIS_CONTAINER_PREFIX:-}nginx-proxy
     restart: unless-stopped
     ports:
       - "9000:80"
@@ -784,7 +790,7 @@ services:
   open-notebook-ui:
     build:
       context: ./front_end/open-notebook
-    container_name: harvis-open-notebook
+    container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-open-notebook
     profiles: ["notebooks"]
     restart: unless-stopped
     environment:
@@ -815,7 +821,7 @@ services:
     build:
       context: ./python_back_end
       dockerfile: Dockerfile.document-worker
-    container_name: harvis-document-worker
+    container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-document-worker
     profiles: ["notebooks"]
     restart: unless-stopped
     environment:
@@ -858,7 +864,7 @@ services:
     # the container holding all user data — a silent minor-version swap on a
     # `compose pull` is the one image where that matters most.
     image: pgvector/pgvector:pg15@sha256:7f5681e45237acdf546cf7cdc0dfc0ed7752ede857fda6e54f6ea21b936f8742
-    container_name: pgsql-db
+    container_name: ${HARVIS_CONTAINER_PREFIX:-}pgsql-db
     restart: unless-stopped
     environment:
       POSTGRES_USER: pguser
@@ -902,7 +908,7 @@ services:
   # DB schema init — runs once per stack start (idempotent CREATE IF NOT EXISTS)
   openclaw-db-init:
     image: postgres:15-alpine@sha256:fceb6f86328c36f2438fae3b851b0cc57c4a7e69a58c866d9ce24281f2cf0c9c
-    container_name: harvis-openclaw-db-init
+    container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-openclaw-db-init
     profiles: ["engines"]
     restart: "no"
     command: >
@@ -964,7 +970,7 @@ services:
     # Registry-style tag but we build it locally — force build so a bare
     # `docker compose up -d` doesn't try to pull it.
     pull_policy: build
-    container_name: harvis-openclaw
+    container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-openclaw
     profiles: ["engines"]
     restart: unless-stopped
     user: "1000:1000"
@@ -1096,7 +1102,7 @@ services:
   # service, so the split is inert for it.
   surrealdb:
     image: surrealdb/surrealdb:v2@sha256:d653f6c8a89e81f865ee31cd2f587c50f50ace922175e04150b1e385d2f86011
-    container_name: surrealdb
+    container_name: ${HARVIS_CONTAINER_PREFIX:-}surrealdb
     profiles: ["notebooks-upstream"]
     restart: unless-stopped
     command: start --log info --user root --pass root rocksdb:/mydata/mydatabase.db
@@ -1117,7 +1123,7 @@ services:
     # v1-latest is a moving tag — same class of problem as :latest, one major
     # version narrower. Digest-pinned; the tag stays in the name for readability.
     image: lfnovo/open_notebook:v1-latest@sha256:65e10ee94f8ce5a9e4e1db9a17316246960b236b6278edf75a965be52e9e882c
-    container_name: open-notebook
+    container_name: ${HARVIS_CONTAINER_PREFIX:-}open-notebook
     # See the surrealdb note above — upstream lane, opt in separately.
     profiles: ["notebooks-upstream"]
     restart: unless-stopped
@@ -1163,7 +1169,7 @@ services:
         # developer build is honestly labelled "unknown" rather than carrying a
         # stale sha; CI exports HARVIS_VCS_REF and gets the real one.
         VCS_REF: ${HARVIS_VCS_REF:-unknown}
-    container_name: harvis-mcp
+    container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-mcp
     restart: unless-stopped
     entrypoint: ["uvicorn", "mcp.server.app:app", "--host", "0.0.0.0", "--port", "8010"]
     environment:
@@ -1194,7 +1200,7 @@ services:
     build:
       context: .
       dockerfile: docker/tts-service/Dockerfile
-    container_name: tts-service
+    container_name: ${HARVIS_CONTAINER_PREFIX:-}tts-service
     profiles: ["advanced-voice"]
     restart: unless-stopped
     ports:
@@ -1276,7 +1282,7 @@ services:
         VCS_REF: ${HARVIS_VCS_REF:-unknown}
     image: harvis-voice-onnx:local
     pull_policy: build
-    container_name: harvis-voice-onnx
+    container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-voice-onnx
     restart: unless-stopped
     environment:
       VOICE_ASR_MODEL: "${VOICE_ASR_MODEL:-whisper-tiny.en}"
@@ -1285,6 +1291,13 @@ services:
       VOICE_ASR_LANGUAGE: "${VOICE_ASR_LANGUAGE:-en}"
       VOICE_NUM_THREADS: "${VOICE_NUM_THREADS:-2}"
       VOICE_API_KEY: "${VOICE_API_KEY:-}"
+      # Pull the SERVER-side bundles at startup instead of on the first request.
+      # The image ships no weights, so without this the first click of a speaker
+      # icon on a fresh install waited ~36 s for 384 MB of Kokoro — inside a
+      # 120 s backend timeout, so a slow link failed outright. Set to 0 for an
+      # air-gapped box that pre-seeds the volume by hand, or to a subset like
+      # "tts,vad" to skip the ASR bundle.
+      VOICE_PREFETCH: "${VOICE_PREFETCH:-1}"
       # Mirror of the Kokoro model the BROWSER loads (nginx serves it at
       # /kokoro/), so in-tab speech survives losing internet. Syncs in the
       # background on startup; ~120 MB for the default q8 build. Add fp32 if
@@ -1336,7 +1349,7 @@ services:
     # Default pinned by digest (upstream tags only the Ubuntu base version, not
     # the app). HARVIS_STT_IMAGE still overrides it for anyone tracking latest.
     image: "${HARVIS_STT_IMAGE:-ghcr.io/speaches-ai/speaches:latest-cpu@sha256:21e3df06d842fb7802ab470dd77c25f0e8c0d22950e8d8c6ae886e851af53ef8}"
-    container_name: harvis-stt
+    container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-stt
     profiles: ["voice-fallback"]
     restart: unless-stopped
     environment:
@@ -1384,7 +1397,7 @@ services:
       dockerfile: Dockerfile
     image: harvis-messaging-gateway:local
     pull_policy: build
-    container_name: harvis-messaging-gateway
+    container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-messaging-gateway
     # Opt-in. The crash loop that first motivated a profile here is fixed — with
     # no adapters enabled the gateway idles rather than exiting — but idling
     # still costs a 294 MB image, a running container and a bound host port on
@@ -1442,7 +1455,7 @@ services:
       dockerfile: Dockerfile
     image: harvis-opencode:local
     pull_policy: build
-    container_name: harvis-opencode
+    container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-opencode
     profiles: ["engines"]
     restart: unless-stopped
     user: "1001:1001"
@@ -1464,7 +1477,7 @@ services:
       dockerfile: Dockerfile
     image: harvis-codex:local
     pull_policy: build
-    container_name: harvis-codex
+    container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-codex
     profiles: ["engines"]
     restart: unless-stopped
     user: "1001:1001"
@@ -1485,7 +1498,7 @@ services:
       dockerfile: Dockerfile
     image: harvis-claude-code:local
     pull_policy: build
-    container_name: harvis-claude-code
+    container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-claude-code
     profiles: ["engines"]
     restart: unless-stopped
     user: "1001:1001"
@@ -1514,7 +1527,7 @@ services:
       dockerfile: Dockerfile
     image: harvis-hermes-agent:local
     pull_policy: build
-    container_name: harvis-hermes-agent
+    container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-hermes-agent
     profiles: ["engines"]
     restart: unless-stopped
     environment:
@@ -1544,7 +1557,7 @@ services:
       dockerfile: Dockerfile
     image: harvis-cad:local
     pull_policy: build
-    container_name: harvis-cad
+    container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-cad
     profiles: ["cad"]
     restart: unless-stopped
     # Dedicated INTERNAL network shared only with the backend. The sidecar has no
@@ -1599,7 +1612,7 @@ services:
   # NEVER attach this to the OpenClaw pod / never widen OpenClaw NetworkPolicy.
   agent-reach-sandbox:
     image: curlimages/curl:8.5.0
-    container_name: harvis-agent-reach-sandbox
+    container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-agent-reach-sandbox
     profiles: ["agent-reach"]
     restart: "no"
     command: ["sleep", "infinity"]
@@ -1617,7 +1630,7 @@ services:
       dockerfile: Dockerfile
     image: harvis-sentrysearch:local
     pull_policy: build
-    container_name: harvis-sentrysearch
+    container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-sentrysearch
     profiles: ["sentrysearch"]
     restart: unless-stopped
     environment:

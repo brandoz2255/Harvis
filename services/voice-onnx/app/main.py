@@ -21,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
-from . import browser_assets, engines, models
+from . import browser_assets, engines, models, warmup
 
 logging.basicConfig(
     level=os.getenv("VOICE_LOG_LEVEL", "INFO"),
@@ -72,6 +72,14 @@ def _sync_browser_assets() -> None:
     browser_assets.sync_in_background()
 
 
+@app.on_event("startup")
+def _prefetch_models() -> None:
+    # The server-side bundles, pulled the same non-blocking way as the browser
+    # mirror above. Without this the first speak on a fresh install paid a
+    # measured 36 s download while the UI showed nothing at all.
+    warmup.prefetch_in_background()
+
+
 @app.get("/v1/browser/manifest", tags=["audio"])
 def browser_manifest() -> dict:
     """What the in-browser path can load locally. `complete: false` means the
@@ -93,11 +101,18 @@ async def browser_sync(force: bool = False, _: None = Depends(require_key)) -> d
 def health() -> dict:
     """Healthy means the process is up and can serve. Model state is reported
     separately so a first-run download in progress doesn't read as an outage."""
+    prefetch = warmup.state()
     return {
         "status": "ok",
         "service": "voice-onnx",
         "engine": "sherpa-onnx",
         "torch": False,
+        # True while the startup prefetch is still pulling bundles. `status`
+        # stays "ok" on purpose — the process serves fine, it just may pay a
+        # download on a request that arrives first — but something now says so
+        # out loud instead of the caller inferring it from a long silence.
+        "warming": prefetch["status"] in {"pending", "running"},
+        "prefetch": prefetch,
         "models_dir": str(models.MODELS_DIR),
         "models": engines.loaded_state(),
     }

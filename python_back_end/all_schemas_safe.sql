@@ -355,7 +355,17 @@ SELECT
     j.built_at,
     j.running_at,
     j.expires_at,
-    EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - j.queued_at))/60 as minutes_in_queue
+    EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - j.queued_at))/60 as minutes_in_queue,
+    -- Must stay byte-for-byte in step with artifacts_build_jobs_schema.sql's copy
+    -- of this view. It had 17 columns and this had 16, and CREATE OR REPLACE VIEW
+    -- can only APPEND trailing columns, never drop one — so once initdb had run
+    -- the richer definition, every subsequent boot replay hit
+    -- "cannot drop columns from view", printed a red ERROR, and abandoned the
+    -- rest of this file from here down.
+    CASE
+        WHEN j.running_at IS NOT NULL THEN EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - j.running_at))/60
+        ELSE NULL
+    END as minutes_running
 FROM artifact_build_jobs j
 JOIN artifacts a ON j.artifact_id = a.id
 WHERE j.status IN ('queued', 'building', 'running')
