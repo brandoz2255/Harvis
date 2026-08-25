@@ -29,6 +29,7 @@ import time
 from typing import AsyncGenerator
 
 from ..openclaw_client import OpenClawEvent
+from .conversation import conversation_prefix
 from .isolation import SESSION_WORKSPACE_ROOT, WorkspaceIsolationManager
 from .runner import SubAgentRunner
 
@@ -384,7 +385,11 @@ async def run_vibecode_turn(
             run_id=run_id,
             parent_run_id=run_id,
             label=label,
-            task=task_brief,
+            # The clone carries file memory across turns; this carries intent memory.
+            # Without it a follow-up ("now make it dark", "fix the second one") arrived
+            # as a sentence about nothing even though the files it referred to were
+            # sitting in the same workspace.
+            task=conversation_prefix(task_brief, chat_history),
             task_images=task_images,
             model_name=model_name,
             workspace_path=workspace_path,

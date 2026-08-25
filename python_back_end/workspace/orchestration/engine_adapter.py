@@ -202,62 +202,11 @@ async def _stage_attachments(
     return block + task_brief, status
 
 
-# How much prior conversation a one-shot CLI turn may carry, and how far back to look.
-# The budget is characters rather than turns because one pasted stack trace can be worth
-# more than ten short exchanges; oldest turns are dropped first so the most recent context
-# — the part a follow-up like "make it viewable" actually refers to — always survives.
-_CTX_MAX_TURNS = int(os.getenv("HARVIS_ENGINE_CTX_TURNS", "12") or "12")
-_CTX_MAX_CHARS = int(os.getenv("HARVIS_ENGINE_CTX_CHARS", "12000") or "12000")
-_CTX_MAX_PER_MSG = int(os.getenv("HARVIS_ENGINE_CTX_PER_MSG", "2000") or "2000")
-
-
-def _conversation_prefix(task_brief: str, chat_history: list | None) -> str:
-    """Prepend the recent conversation to a one-shot CLI prompt.
-
-    `claude -p` starts with an empty head every turn, so without this the brief is the
-    ONLY thing the model ever sees. That is why a follow-up that refers to the previous
-    turn — "make it viewable", "now add a dark mode", "fix the second one" — arrived as a
-    sentence about nothing and the model asked what the user meant. The Kimi and Ollama
-    lanes already build the same block (`kimi_workspace._build_context_message`); this
-    lane was the outlier, not the design.
-
-    The trailing user turn is dropped when it is the brief, so the ask is not stated twice
-    (`_resolve_task_brief` usually promotes exactly that message into the brief).
-    """
-    msgs = [
-        m for m in (chat_history or [])
-        if isinstance(m, dict)
-        and m.get("role") in ("user", "assistant")
-        and isinstance(m.get("content"), str)
-        and m["content"].strip()
-    ]
-    brief_head = task_brief.strip()[:200]
-    while msgs and msgs[-1]["role"] == "user" and msgs[-1]["content"].strip()[:200] == brief_head:
-        msgs.pop()
-    if not msgs:
-        return task_brief
-
-    lines: list[str] = []
-    used = 0
-    for m in reversed(msgs[-_CTX_MAX_TURNS:]):
-        body = m["content"].strip()
-        if len(body) > _CTX_MAX_PER_MSG:
-            body = body[:_CTX_MAX_PER_MSG] + " …[truncated]"
-        line = f"{m['role'].upper()}: {body}"
-        if used + len(line) > _CTX_MAX_CHARS:
-            break
-        lines.append(line)
-        used += len(line)
-    if not lines:
-        return task_brief
-    lines.reverse()
-
-    return (
-        "[RECENT CONVERSATION — earlier turns in this chat, for reference only]\n"
-        + "\n".join(lines)
-        + "\n\n[YOUR TASK — this is what to do now]\n"
-        + task_brief
-    )
+# Prior-turn context. The implementation moved to `conversation.py` when the native
+# runner turned out to need the identical block — this lane was not the only one whose
+# model starts each turn with an empty head. Aliased rather than renamed at the two call
+# sites below so the diff stays about the move.
+from .conversation import conversation_prefix as _conversation_prefix
 
 
 def _sidecar_mcp_args(user_id, *, artifact_run_id=None, **context) -> list[str]:

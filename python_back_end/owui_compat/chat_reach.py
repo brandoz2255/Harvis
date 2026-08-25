@@ -48,6 +48,8 @@ from urllib.parse import urlsplit
 
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from . import reach_gate
+
 logger = logging.getLogger(__name__)
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
@@ -73,6 +75,12 @@ _MAX_TOTAL_CHARS = 16_000
 # reply — one slow host would make the whole conversation feel broken.
 _READ_TIMEOUT_S = 12.0
 _TOTAL_BUDGET_S = 30.0
+# The hedge rescue runs AFTER the user already has an answer on screen, so it is
+# not blocking anything — but it does hold the SSE connection open, and it pays
+# for a second full completion. A wider budget than the pre-answer path, still
+# bounded.
+_HEDGE_BUDGET_S = 75.0
+_HEDGE_SCAN_CHARS = 4_000
 
 # The only two tools this loop offers. Both read-only, both already SSRF-guarded
 # (web_read goes through agent_reach, which pins the resolved IP and refuses
@@ -197,6 +205,8 @@ async def _model_rounds(
     *,
     pool=None,
     user_id: int | None = None,
+    reason: str = "unreadable",
+    query: str | None = None,
 ) -> None:
     """Let the model spend up to ``_MAX_MODEL_ROUNDS`` turns with the two tools.
 
@@ -214,9 +224,15 @@ async def _model_rounds(
         {
             "role": "user",
             "content": (
-                f"web_search({message!r}) returned:\n{_fmt_results(results)}\n\n"
-                "None of those could be fetched directly. Find and read something "
-                "that answers the question, then reply DONE."
+                f"web_search({(query or message)!r}) returned:\n{_fmt_results(results)}\n\n"
+                + (
+                    "None of those could be fetched directly. "
+                    if reason == "unreadable"
+                    else "None of those look like they are about what was asked, so "
+                         "the search terms were probably wrong. Search again with "
+                         "better terms. "
+                )
+                + "Find and read something that answers the question, then reply DONE."
             ),
         },
     ]
@@ -267,13 +283,27 @@ async def _model_rounds(
         messages.append({"role": "user", "content": "\n\n".join(observations)[:8_000]})
 
 
-async def gather(message: str, model_name: str, pool=None, user_id: int | None = None) -> dict:
+async def gather(
+    message: str,
+    model_name: str,
+    pool=None,
+    user_id: int | None = None,
+    query: str | None = None,
+) -> dict:
     """Run the loop. Returns ``{"context": str, "sources": [url, …]}``.
 
     ``context`` is empty when nothing usable was found — the caller then injects
     nothing at all rather than an empty "here are your sources" block.
+
+    ``query`` is what actually gets searched; ``message`` stays the user's turn
+    and is only shown to the model. They used to be the same string, and that
+    was the whole bug: "use a web search if you dont know anything" was typed
+    into a search engine verbatim and came back with a 2010 blog post whose
+    title contained that phrase, a Pinterest board, and India's eCourts portal.
+    The turn the user actually wanted answered was the one before it.
     """
-    results = await _search(message)
+    search_query = (query or message).strip() or message
+    results = await _search(search_query)
     sources: list[str] = [r["url"] for r in results]
 
     # ── Deterministic path: search, then read the top hits concurrently ──────
@@ -292,16 +322,26 @@ async def gather(message: str, model_name: str, pool=None, user_id: int | None =
     pages = await asyncio.gather(*[_read(r["url"]) for r in results[:_MAX_SOURCES]])
     read_pages: list[dict] = [p for p in pages if p["ok"] and p["text"]]
 
+    # Readable is not the same as relevant. On the Fable 5 turn all three top
+    # hits fetched cleanly and none of them were about anything the user asked,
+    # so the rescue round below — which only ever triggered on an empty read —
+    # sat out the one turn that needed it most.
+    relevant = reach_gate.looks_relevant(search_query, results)
+
     # ── Model rounds: only when the cheap path came back thin ───────────────
     # Nothing readable — every top hit was blocked, empty, or JS-only. Only NOW
     # is a model round worth its cost: it can pick a different result or search
     # again with better terms. A model that can't be routed, or that answers
     # without calling a tool, costs us the round and nothing else, and the
     # search snippets above still ground the answer.
-    if not read_pages:
+    if not read_pages or not relevant:
         try:
-            await _model_rounds(message, model_name, results, read_pages, sources,
-                                pool=pool, user_id=user_id)
+            await _model_rounds(
+                message, model_name, results, read_pages, sources,
+                pool=pool, user_id=user_id,
+                reason="unreadable" if not read_pages else "irrelevant",
+                query=search_query,
+            )
         except Exception:
             logger.info(
                 "chat_reach: model rounds unavailable; using search results only",
@@ -362,7 +402,7 @@ async def maybe_inject_reach(request, owui_body: dict, user_id: int | None = Non
             return
 
         from .chat_completion import _content_to_text, _last_user_index
-        from .workspace_bridge import _needs_reach, _URL_RE
+        from .workspace_bridge import _URL_RE
 
         idx = _last_user_index(messages)
         if idx < 0:
@@ -375,22 +415,52 @@ async def maybe_inject_reach(request, owui_body: dict, user_id: int | None = Non
         # would double the latency to say the same thing.
         if _URL_RE.search(message):
             return
-        if not _needs_reach(message):
+
+        model_name = str(owui_body.get("model") or "")
+        pool = getattr(request.app.state, "pg_pool", None)
+        previous = _previous_user_text(messages, idx)
+        decision = reach_gate.verdict(message)
+        query = ""
+
+        if decision == "maybe":
+            # The regex genuinely cannot call this one — a plain lowercase
+            # question with no capitalised name and no version number, like
+            # "who is the ceo of anthropic". One short call decides it and
+            # writes the query in the same breath. A dead route or an
+            # unparsable reply means the turn answers ungrounded, exactly as it
+            # did before this module existed.
+            call = await reach_gate.classify(
+                message, previous, model_name, pool=pool, user_id=user_id
+            )
+            if not call or not call["search"]:
+                _remember_turn(request, message, previous, model_name, user_id)
+                logger.info("chat_reach: classifier declined %r", message[:80])
+                return
+            query = call["query"]
+        elif decision != "yes":
+            _remember_turn(request, message, previous, model_name, user_id)
             return
 
-        pool = getattr(request.app.state, "pg_pool", None)
+        if not query:
+            query = reach_gate.fallback_query(message, previous)
+        logger.info(
+            "chat_reach: gate=%s query=%r (turn=%r)", decision, query[:80], message[:60]
+        )
+
         try:
             found = await asyncio.wait_for(
-                gather(message, str(owui_body.get("model") or ""), pool=pool, user_id=user_id),
+                gather(message, model_name, pool=pool, user_id=user_id, query=query),
                 timeout=_TOTAL_BUDGET_S,
             )
         except asyncio.TimeoutError:
             # Answer ungrounded rather than leave the user watching a dead composer.
             # Losing the grounding is a worse answer; losing the turn is a broken app.
             logger.warning("chat_reach: budget exceeded for %r; answering ungrounded", message[:80])
+            _remember_turn(request, message, previous, model_name, user_id)
             return
         if not found["context"]:
-            logger.info("chat_reach: nothing found for %r", message[:80])
+            logger.info("chat_reach: nothing found for %r", query[:80])
+            _remember_turn(request, message, previous, model_name, user_id)
             return
 
         content = messages[idx].get("content")
@@ -410,6 +480,146 @@ async def maybe_inject_reach(request, owui_body: dict, user_id: int | None = Non
         logger.warning("chat_reach: injection failed; answering ungrounded", exc_info=True)
 
 
+def _previous_user_text(messages: list, idx: int) -> str:
+    """The user turn before ``idx``, or "" — the subject of a meta-instruction."""
+    from .chat_completion import _content_to_text
+
+    for j in range(idx - 1, -1, -1):
+        m = messages[j]
+        if isinstance(m, dict) and m.get("role") == "user":
+            return _content_to_text(m.get("content")).strip()
+    return ""
+
+
+def _remember_turn(request, message: str, previous: str, model_name: str,
+                   user_id: int | None = None) -> None:
+    """Stash an UNGROUNDED turn so the hedge rescue can pick it up afterwards.
+
+    Only for turns with nothing to produce. "write me a function" is excluded
+    because "I don't have access to your files" is a capability statement, not
+    a gap in what the model knows, and searching the web for it is nonsense.
+    """
+    if not hedge_rescue_enabled():
+        return
+    from .workspace_bridge import _ARTIFACT_VERB_RE
+
+    if _ARTIFACT_VERB_RE.search(message or ""):
+        return
+    try:
+        request.state.harvis_reach_turn = {
+            "message": message,
+            "previous": previous,
+            "model": model_name,
+            "user_id": user_id,
+        }
+    except Exception:
+        pass
+
+
+def hedge_rescue_enabled() -> bool:
+    """Default ON. ``HARVIS_CHAT_REACH_HEDGE=0`` leaves an "I don't know" as-is."""
+    return os.getenv("HARVIS_CHAT_REACH_HEDGE", "1").strip().lower() in _TRUTHY
+
+
+class _SseText:
+    """Reassembles ``delta.content`` from an SSE byte stream.
+
+    Buffers across chunk boundaries, because a provider is free to split a
+    frame mid-line and a dropped fragment is exactly the kind of thing that
+    makes hedge detection intermittent.
+    """
+
+    def __init__(self) -> None:
+        self._buf = b""
+        self._parts: list[str] = []
+        self._len = 0
+
+    def feed(self, chunk: bytes) -> None:
+        # Past the detection window there is nothing left to learn, and holding
+        # a whole long answer in memory per request buys nothing.
+        if self._len > _HEDGE_SCAN_CHARS:
+            self._buf = b""
+            return
+        self._buf += chunk
+        while b"\n" in self._buf:
+            line, _, self._buf = self._buf.partition(b"\n")
+            line = line.strip()
+            if not line.startswith(b"data:"):
+                continue
+            payload = line[5:].strip()
+            if not payload or payload == b"[DONE]":
+                continue
+            try:
+                data = json.loads(payload)
+            except Exception:
+                continue
+            for choice in data.get("choices") or []:
+                text = (choice.get("delta") or {}).get("content")
+                if isinstance(text, str) and text:
+                    self._parts.append(text)
+                    self._len += len(text)
+
+    def text(self) -> str:
+        return "".join(self._parts)
+
+
+async def _hedge_continuation(turn: dict, retry, answer: str, pool=None,
+                              user_id: int | None = None) -> str:
+    """Search on the real subject and write a grounded follow-up. "" if not needed.
+
+    This is the second half of the user's rule: *if it doesn't know it or is
+    unsure, search*. The gate cannot catch everything — the model's own "I have
+    no information about Fable 5" is the most reliable signal there is that a
+    fetch was warranted, and it only arrives after the answer is written. So
+    the answer is allowed to finish, and the grounded version is appended under
+    it rather than replacing it.
+    """
+    if not reach_gate.detect_hedge(answer):
+        return ""
+    message = turn.get("message") or ""
+    previous = turn.get("previous") or ""
+    model_name = turn.get("model") or ""
+    logger.info("chat_reach: hedge detected on %r; rescuing", message[:80])
+
+    call = await reach_gate.classify(
+        message, previous, model_name, pool=pool, user_id=user_id
+    )
+    # The verdict is ignored here on purpose: the model has already said out
+    # loud that it does not know. Only the query is worth having.
+    query = (call or {}).get("query") or reach_gate.fallback_query(message, previous)
+    found = await gather(message, model_name, pool=pool, user_id=user_id, query=query)
+    if not found["context"]:
+        logger.info("chat_reach: hedge rescue found nothing for %r", query[:80])
+        return ""
+    text = await retry(f"\n\n<web_results>\n{found['context']}\n</web_results>")
+    if not (text or "").strip():
+        return ""
+    return (
+        "\n\n---\n\n**I looked it up.**\n\n"
+        + text.strip()
+        + _sources_markdown(found["sources"])
+    )
+
+
+async def _hedge_trailer(request, retry, answer: str) -> str:
+    """``_hedge_continuation`` with every failure mode swallowed and a hard budget."""
+    turn = getattr(request.state, "harvis_reach_turn", None)
+    if not (turn and retry and hedge_rescue_enabled()):
+        return ""
+    pool = getattr(request.app.state, "pg_pool", None)
+    try:
+        return await asyncio.wait_for(
+            _hedge_continuation(turn, retry, answer, pool=pool,
+                                user_id=turn.get("user_id")),
+            timeout=_HEDGE_BUDGET_S,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("chat_reach: hedge rescue exceeded its budget")
+    except Exception:
+        logger.warning("chat_reach: hedge rescue failed", exc_info=True)
+    return ""
+
+
 def _sources_markdown(sources: list[str]) -> str:
     """The Sources block appended under a grounded answer.
 
@@ -427,8 +637,18 @@ def _sources_markdown(sources: list[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def append_reach_sources(request, response):
-    """Append the Sources block to a grounded reply. Never raises.
+async def append_reach_sources(request, response, retry=None):
+    """Append the Sources block — or a whole grounded follow-up — to a reply.
+
+    Two jobs, and they are mutually exclusive by construction:
+
+    * the turn WAS grounded → append the numbered Sources list,
+    * the turn was NOT grounded and the model hedged → search on the real
+      subject, ask the same lane again with the results in context, and append
+      that answer under the original one. ``retry`` is the caller-supplied
+      closure that re-runs its own lane; without it this half is skipped.
+
+    Never raises.
 
     This is what actually fixes the "answer looks unfinished" report. Two live
     runs on gpt-oss:20b proved the instruction alone does not hold — it cited
@@ -440,14 +660,24 @@ def append_reach_sources(request, response):
     """
     try:
         sources = getattr(request.state, "harvis_reach_sources", None)
-        if not sources:
+        hedge_possible = bool(
+            retry
+            and getattr(request.state, "harvis_reach_turn", None)
+            and hedge_rescue_enabled()
+        )
+        if not sources and not hedge_possible:
             return response
-        block = _sources_markdown(sources)
+        block = _sources_markdown(sources) if sources else ""
         body_iterator = getattr(response, "body_iterator", None)
         if body_iterator is None:
-            return _append_to_json_response(response, block)
+            return await _append_to_json_response(
+                response, block, request=request, retry=retry if hedge_possible else None
+            )
         return StreamingResponse(
-            _stream_with_sources(body_iterator, block),
+            _stream_with_sources(
+                body_iterator, block,
+                request=request, retry=retry if hedge_possible else None,
+            ),
             status_code=response.status_code,
             media_type=response.media_type or "text/event-stream",
             headers={
@@ -469,8 +699,8 @@ def _sse_chunk(text: str) -> bytes:
     return f"data: {json.dumps(payload)}\n\n".encode()
 
 
-async def _stream_with_sources(body_iterator, block: str):
-    """Pass the model's SSE through, then slip the block in before [DONE].
+async def _stream_with_sources(body_iterator, block: str, *, request=None, retry=None):
+    """Pass the model's SSE through, then slip the trailer in before [DONE].
 
     The trailer has to precede [DONE] because every client stops reading there —
     appending after it would emit bytes nobody reads. If [DONE] never arrives
@@ -479,25 +709,37 @@ async def _stream_with_sources(body_iterator, block: str):
     that already failed.
     """
     sent = False
+    seen = _SseText() if retry is not None else None
     try:
         async for chunk in body_iterator:
             if isinstance(chunk, str):
                 chunk = chunk.encode()
+            if seen is not None:
+                seen.feed(chunk)
             if not sent and b"data: [DONE]" in chunk:
                 head, _, tail = chunk.partition(b"data: [DONE]")
                 if head:
                     yield head
-                yield _sse_chunk(block)
+                trailer = block
+                if seen is not None:
+                    # Only reachable on an ungrounded turn, so `block` is empty
+                    # here and there is nothing to order against.
+                    trailer = await _hedge_trailer(request, retry, seen.text()) or block
                 sent = True
+                if trailer:
+                    yield _sse_chunk(trailer)
                 yield b"data: [DONE]" + tail
                 continue
             yield chunk
     finally:
-        if not sent:
+        # No await in here: a client that disconnected mid-stream closes the
+        # generator, and awaiting during that teardown raises instead of
+        # cleaning up. The hedge rescue is worth losing; the connection is not.
+        if not sent and block:
             yield _sse_chunk(block)
 
 
-def _append_to_json_response(response, block: str):
+async def _append_to_json_response(response, block: str, *, request=None, retry=None):
     """Non-streaming variant: append to the assistant message content.
 
     Two shapes reach here. `stream: false` on the native lane returns the decoded
@@ -506,14 +748,37 @@ def _append_to_json_response(response, block: str):
     what let a non-streamed 【3】 through with no Sources list under it.
     """
     if isinstance(response, dict):
-        return _with_appended_content(response, block) or response
+        trailer = await _json_trailer(response, block, request, retry)
+        if not trailer:
+            return response
+        return _with_appended_content(response, trailer) or response
     body = getattr(response, "body", None)
     if not body:
         return response
-    data = _with_appended_content(json.loads(body), block)
+    data = json.loads(body)
+    trailer = await _json_trailer(data, block, request, retry)
+    if not trailer:
+        return response
+    data = _with_appended_content(data, trailer)
     if data is None:
         return response
     return JSONResponse(content=data, status_code=response.status_code)
+
+
+async def _json_trailer(data: dict, block: str, request, retry) -> str:
+    """What to append to a non-streamed reply: the Sources list or a rescue."""
+    if retry is None or request is None:
+        return block
+    return await _hedge_trailer(request, retry, _answer_text(data)) or block
+
+
+def _answer_text(data: dict) -> str:
+    choices = (data or {}).get("choices") or []
+    if not choices:
+        return ""
+    msg = choices[0].get("message") or {}
+    content = msg.get("content")
+    return content if isinstance(content, str) else ""
 
 
 def _with_appended_content(data: dict, block: str):

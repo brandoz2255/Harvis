@@ -110,27 +110,43 @@ def _parse_diff_files(diff_text: str) -> list[dict]:
     return files
 
 
-def _dedupe(s: str) -> str:
-    """Drop consecutive duplicate sentences (some engines, e.g. Claude Code, emit the summary —
-    or a trailing sentence — twice). Handles both whole-string doubles and trailing repeats.
+# A fenced block opens with ``` or ~~~ (markdown allows up to three leading spaces).
+_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 
-    Line structure is preserved. The original collapsed *all* whitespace with `\\s+ → " "`, which was
-    harmless when a summary was one sentence but destroys the answer now that a single-agent run
-    puts its whole markdown reply here: a bullet list arrived in **What I did** as one run-on line
-    ("Key details include: - **Developer:** … - **Architecture:** …"). Only horizontal whitespace
-    is collapsed; newlines and blank lines survive."""
-    v = "\n".join(re.sub(r"[ \t]+", " ", ln).rstrip() for ln in (s or "").replace("\r\n", "\n").split("\n"))
-    v = re.sub(r"\n{3,}", "\n\n", v).strip()
-    if not v:
-        return v
 
-    # Whole-string double: some engines emit the entire summary twice, back to back.
-    half, rem = divmod(len(v), 2)
-    if rem in (0, 1) and half > 20:
-        a, b = v[:half].strip(), v[half:].strip()
-        if a and a.lower() == b.lower():
-            v = a
+def _fence_segments(text: str) -> list[tuple[bool, str]]:
+    """Split into ``(is_fenced, chunk)`` runs, delimiters kept with their fence.
 
+    An unterminated fence — the streaming tail, or a model that forgot to close —
+    counts as fenced, so a half-written block is preserved rather than mangled.
+    """
+    segs: list[tuple[bool, str]] = []
+    cur: list[str] = []
+    marker = ""
+    for ln in text.split("\n"):
+        if not marker:
+            m = _FENCE_RE.match(ln)
+            if m:
+                if cur:
+                    segs.append((False, "\n".join(cur)))
+                cur, marker = [ln], m.group(1)[0]
+                continue
+            cur.append(ln)
+        else:
+            cur.append(ln)
+            m = _FENCE_RE.match(ln)
+            if m and m.group(1)[0] == marker and len(cur) > 1:
+                segs.append((True, "\n".join(cur)))
+                cur, marker = [], ""
+    if cur:
+        segs.append((bool(marker), "\n".join(cur)))
+    return segs
+
+
+def _dedupe_prose(v: str) -> str:
+    """Normalise + de-repeat ordinary prose. Never called on fenced content."""
+    v = "\n".join(re.sub(r"[ \t]+", " ", ln).rstrip() for ln in v.split("\n"))
+    v = re.sub(r"\n{3,}", "\n\n", v)
     out: list[str] = []
     for line in v.split("\n"):
         if not line.strip():
@@ -139,14 +155,47 @@ def _dedupe(s: str) -> str:
                 out.append("")
             continue
         if out and out[-1].strip().lower() == line.strip().lower():
-            continue  # the same line twice in a row is always a repeat, never content
+            continue  # the same line twice in a row is a repeat — in PROSE
         sents = re.split(r"(?<=[.!?])\s+", line)
         kept: list[str] = []
         for sent in sents:
             if not kept or kept[-1].strip().lower() != sent.strip().lower():
                 kept.append(sent)
         out.append(" ".join(kept))
-    return "\n".join(out).strip()
+    return "\n".join(out)
+
+
+def _dedupe(s: str) -> str:
+    """Drop consecutive duplicate sentences (some engines, e.g. Claude Code, emit the summary —
+    or a trailing sentence — twice). Handles both whole-string doubles and trailing repeats.
+
+    Fenced blocks are passed through byte-for-byte. Everything here is destructive to code:
+    `[ \t]+ → " "` flattens leading indentation, and the consecutive-identical-line rule
+    deletes real content — two rules that between them turned a requested ASCII tree into a
+    left-aligned smear with lines missing. It kept its shape while streaming and lost it on
+    the way to the transcript, because the stream is the model's text and this is not.
+
+    Outside a fence the collapsing stays: it is what stops a one-line summary arriving with
+    ragged spacing, and prose has no load-bearing indentation."""
+    raw = (s or "").replace("\r\n", "\n")
+    if not raw.strip():
+        return ""
+
+    segs = _fence_segments(raw)
+    if not any(fenced for fenced, _ in segs):
+        v = _dedupe_prose(raw).strip()
+        # Whole-string double: some engines emit the entire summary twice, back to back.
+        # Only attempted without fences — slicing at the midpoint can cut through one.
+        half, rem = divmod(len(v), 2)
+        if rem in (0, 1) and half > 20:
+            a, b = v[:half].strip(), v[half:].strip()
+            if a and a.lower() == b.lower():
+                v = a
+        return v
+
+    return "\n".join(
+        chunk if fenced else _dedupe_prose(chunk) for fenced, chunk in segs
+    ).strip()
 
 
 def _test_command(paths: list[str]) -> Optional[str]:
@@ -275,6 +324,12 @@ def compose_build_analysis(
                 parts.append(f"- …and {n - 12} more")
             if renderable:
                 parts += ["", f"The preview for `{renderable[0]}` is open on the right — **Download** to save."]
+        # The agent's own account of what it made. The repo branch below already keeps it;
+        # this branch threw it away, so a chat turn that produced a file left the transcript
+        # holding one line of filing metadata and nothing about the thing itself. The next
+        # turn reads that transcript, which is why "make another tree" had no tree to go on.
+        if summary:
+            parts += ["", summary]
         return "\n".join(parts)
 
     # Headline + lead. (A VibeCode session's diff is cumulative vs the session base, so the file

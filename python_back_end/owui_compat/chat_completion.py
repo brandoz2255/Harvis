@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import json
 import logging
 import os
@@ -590,6 +591,102 @@ def _inject_default_persona(owui_body: dict) -> None:
     messages.insert(0, {"role": "system", "content": _DEFAULT_PERSONA})
 
 
+# The semantic half of the content-block router. The model names a TYPE; the
+# frontend alone decides what that type looks like (see the block registry in
+# Markdown/blocks/registry.ts). Deliberately a short, closed list: a model that
+# could name components or describe layout could reshape the chat, and an
+# unknown type falls back to a plain titled card rather than failing.
+_BLOCK_VOCABULARY = (
+    "\n\n## Structured content blocks\n"
+    "When a span of your answer would be easier to use with its own formatting, "
+    "wrap it in a colon fence and Harvis renders it as the right component:\n"
+    "  :::terminal status=running title=\"npm run dev\"  — a shell session; the body is "
+    "raw terminal output, kept monospaced, ANSI colours preserved.\n"
+    "  :::search status=complete  — what you looked up; one result per line.\n"
+    "  :::file name=report.md size=12KB href=/api/...  — a file you produced. `href` "
+    "must be a path on this server; anything else is dropped.\n"
+    "  :::writing title=\"Cover letter\"  — prose meant to be kept or reused, not "
+    "your explanation of it.\n"
+    "Close every fence with a line containing only `:::`. Set status=running while "
+    "something is still going and status=complete when it finishes.\n"
+    "Use these ONLY when the content genuinely benefits from different handling. "
+    "Ordinary explanation, short answers, and single code snippets are already "
+    "rendered well — a fence around them just adds a box. Never invent a type "
+    "that is not on this list, and never describe how a block should look."
+)
+
+
+def _inject_block_vocabulary(owui_body: dict) -> None:
+    """Teach the turn's system message the colon-fence vocabulary.
+
+    Appended to whatever system prompt the turn already has rather than
+    inserted on its own, so a user with custom instructions still gets blocks —
+    the persona injector above deliberately bows out in that case, and the
+    renderer would otherwise sit unused for exactly the people who customised
+    the most.
+    """
+    if os.getenv("HARVIS_CONTENT_BLOCKS", "1").strip().lower() in {"0", "false", "off"}:
+        return
+    messages = owui_body.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return
+    for m in messages:
+        if isinstance(m, dict) and m.get("role") == "system":
+            content = m.get("content")
+            if isinstance(content, str):
+                m["content"] = content + _BLOCK_VOCABULARY
+            return
+
+
+def _grounded_retry(owui_body: dict, lane):
+    """Build the closure that re-asks one lane with live results in context.
+
+    Deliberately a deep copy of the FULLY INJECTED body: media, files, knowledge,
+    skills, project instructions and persona are all already in there, and a
+    follow-up answered without them would contradict the answer above it. Forced
+    non-streaming, because the caller needs the finished text to append, not
+    another stream to splice into the one it is already inside.
+
+    Returns None when there is nothing to retry into — a body with no user turn
+    would otherwise get the web results grafted onto a system message.
+    """
+    messages = owui_body.get("messages")
+    if not isinstance(messages, list) or _last_user_index(messages) < 0:
+        return None
+
+    async def retry(block: str) -> str:
+        body = copy.deepcopy(owui_body)
+        idx = _last_user_index(body["messages"])
+        content = body["messages"][idx].get("content")
+        if isinstance(content, list):
+            content.append({"type": "text", "text": block})
+        else:
+            body["messages"][idx]["content"] = f"{content or ''}{block}"
+        body["stream"] = False
+        return _completion_text(await lane(body))
+
+    return retry
+
+
+def _completion_text(response) -> str:
+    """The assistant text out of whatever shape a lane hands back."""
+    data = response
+    if not isinstance(data, dict):
+        body = getattr(response, "body", None)
+        if not body:
+            return ""
+        try:
+            data = json.loads(body)
+        except Exception:
+            return ""
+    choices = (data or {}).get("choices") or []
+    if not choices:
+        return ""
+    msg = choices[0].get("message") or {}
+    text = msg.get("content")
+    return text if isinstance(text, str) else ""
+
+
 async def run_chat_completion(request, owui_body: dict, user_id: int | None = None):
     # Lazy import keeps this package free of import-time coupling to the
     # workspace package (avoids any chance of a circular import at load).
@@ -613,6 +710,7 @@ async def run_chat_completion(request, owui_body: dict, user_id: int | None = No
     await _inject_project_instructions(request, owui_body)
     _inject_canvas_contract(owui_body)  # typed ```canvas panels (opt-in, compact)
     _inject_default_persona(owui_body)  # house tone: answer length tracks the question
+    _inject_block_vocabulary(owui_body)  # terminal / search / file / writing renderers
     await _apply_default_model(request, owui_body, user_id)  # Phase D: pref → routing
     # NOTE: model choice is strictly SELECTION-BASED — the picked model is always used. An
     # auto-model-swap router was built + verified here (2026-07-10) and then removed at the
@@ -626,8 +724,17 @@ async def run_chat_completion(request, owui_body: dict, user_id: int | None = No
         # Sources list has to survive whichever provider answered, and none of
         # them can be trusted to render a citation the same way. It is a no-op
         # unless maybe_inject_reach actually grounded this turn.
-        return append_reach_sources(
-            request, await proxy_cloud_chat(owui_body, pool, user_id)
+        #
+        # The retry closure is the other half: when the model answers "I have no
+        # information about X", the gate got it wrong, and the only way to fix
+        # that turn is to search and ask THIS SAME LANE again with the results in
+        # context. Each lane supplies its own, because only the lane knows how to
+        # call itself.
+        return await append_reach_sources(
+            request, await proxy_cloud_chat(owui_body, pool, user_id),
+            retry=_grounded_retry(
+                owui_body, lambda b: proxy_cloud_chat(b, pool, user_id)
+            ),
         )
     # H2: Hermes Agent as a Chat "Agent Mode" — the request carries harvis_agent_mode='hermes'
     # (the user's picked model does NOT drive Hermes; its own runtime model does). The legacy
@@ -636,10 +743,17 @@ async def run_chat_completion(request, owui_body: dict, user_id: int | None = No
     from .hermes_chat import is_hermes_chat_model, proxy_hermes_chat
     if (owui_body.get("harvis_agent_mode") == "hermes") or is_hermes_chat_model(owui_body.get("model")):
         pool = getattr(request.app.state, "pg_pool", None)
-        return append_reach_sources(
-            request, await proxy_hermes_chat(owui_body, pool, user_id)
+        return await append_reach_sources(
+            request, await proxy_hermes_chat(owui_body, pool, user_id),
+            retry=_grounded_retry(
+                owui_body, lambda b: proxy_hermes_chat(b, pool, user_id)
+            ),
         )
     proxy_body = owui_body_to_proxy(owui_body)
-    return append_reach_sources(
-        request, await execute_chat_completion(request, proxy_body)
+    return await append_reach_sources(
+        request, await execute_chat_completion(request, proxy_body),
+        retry=_grounded_retry(
+            owui_body,
+            lambda b: execute_chat_completion(request, owui_body_to_proxy(b)),
+        ),
     )

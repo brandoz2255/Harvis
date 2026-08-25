@@ -6,7 +6,8 @@
 		workspaceControlsTab,
 		dockedRunId,
 		models,
-		workspaceRunMetrics
+		workspaceRunMetrics,
+		workspaceRunAnswers
 	} from '$lib/stores';
 	import { WEBUI_BASE_URL } from '$lib/constants';
 	import {
@@ -251,7 +252,16 @@
 	// answers you have to reconcile — the same trap the duplicate token rows fell into.
 	const _norm = (s: string) => (s ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
 	$: _narrativeNorm = _norm(narrative);
-	$: agentPosts = agents.filter((a) => _norm(a.summary) !== _narrativeNorm);
+	$: agentPosts = agents.filter((a) => {
+		const s = _norm(a.summary);
+		if (!s || s === _narrativeNorm) return false;
+		// Equality alone was not enough: the Build Result Narrator EMBEDS the agent's
+		// summary inside its own "**What I did**" section rather than repeating it
+		// verbatim, so the two strings are never equal — they are nested — and the
+		// whole answer rendered twice, once under "Harvis Agent" and once below it.
+		// The length floor keeps a one-word summary ("Done.") from matching by accident.
+		return !(s.length >= 24 && _narrativeNorm.includes(s));
+	});
 	// Live wall-clock (elapsed); on a reloaded finished run elapsed is 0, so fall
 	// back to the longest sub-agent runtime (replay-safe, from agent_end).
 	$: doneDuration = elapsed > 0 ? elapsed : Math.max(0, ...agents.map((a) => a.durationMs));
@@ -414,6 +424,18 @@
 				// it IS the assistant message in this chat card. Reload-safe — the persisted done
 				// event (saved after enrichment) carries it on stream replay.
 				analysis = (evt as any).analysis_md ?? '';
+				// Publish it for Chat.svelte to fold into the assistant message. Until
+				// this line the answer lived only in the replayed event stream: visible
+				// on screen, invisible to the next turn's prompt, which is how a chat
+				// could research a topic in a run card and then deny knowing it.
+				{
+					const answer = (analysis || summary || '').trim();
+					if (answer)
+						workspaceRunAnswers.update((m) => ({
+							...m,
+							[workspaceId]: { text: answer, label: taskLabel }
+						}));
+				}
 				if (Array.isArray(evt.changed_files)) changedFiles = evt.changed_files;
 				// The artifact now renders inline in this card's completion block, so we
 				// no longer force-open the dock Artifacts tab on finish (it was intrusive

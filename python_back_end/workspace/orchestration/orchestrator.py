@@ -28,6 +28,7 @@ import uuid
 from typing import AsyncGenerator
 
 from ..openclaw_client import OpenClawEvent
+from .conversation import conversation_prefix
 from .isolation import WorkspaceIsolationManager
 from .profiles import get_profile
 from .runner import SubAgentRunner
@@ -205,7 +206,12 @@ async def run_orchestrated(
                     run_id=child["run_id"],
                     parent_run_id=orch_run_id,
                     label=child["label"],
-                    task=child["task"],
+                    # The PROMPT task, not the display task: it carries the recent
+                    # conversation ahead of the brief. `chat_history` used to arrive
+                    # here and go nowhere, so every agent started from an empty head
+                    # and said so — "I have no context from any previous sessions" —
+                    # while the turns it was denying sat in the caller's argument list.
+                    task=child.get("prompt_task") or child["task"],
                     model_name=child["model"],
                     workspace_path=child["wsinfo"]["workspace_path"],
                     max_steps=int(child["profile"].get("max_steps", 12)),
@@ -262,7 +268,10 @@ async def run_orchestrated(
             "model": p["model"],
             "wsinfo": wsinfo,
             "profile": p["profile"],
+            # Two tasks on purpose: `task` is what the run row and the Plan panel show
+            # (the brief, unchanged), `prompt_task` is what the model reads.
             "task": p["task"],
+            "prompt_task": conversation_prefix(p["task"], chat_history),
             "start": time.monotonic(),
             "ok": True,
             "tool_calls": 0,

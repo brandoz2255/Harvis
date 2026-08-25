@@ -77,6 +77,7 @@ def _marker_content(
     *,
     mode: str = "auto",
     engine: str = "OpenClaw",
+    brief: str = "",
 ) -> str:
     """Newline-fenced ``<details type="workspace_run">`` block so OWUI's marked
     extension parses it into a token the WorkspaceRunCard renders.
@@ -89,7 +90,12 @@ def _marker_content(
     stream confirms the executor), so the user sees e.g. "OpenClaw · Auto"."""
     label = html.escape(suggestion.task_type_label or "Workspace task", quote=True)
     ttype = html.escape(suggestion.task_type or "", quote=True)
-    brief = html.escape((suggestion.task_brief or "")[:240], quote=True)
+    # What the run ACTUALLY executes (`resolved_brief`), not the detector's paraphrase.
+    # The paraphrase comes from an LLM reading the last ten turns, and those turns carry
+    # earlier cards with their own `taskbrief=` attribute — so a stale brief re-fed itself
+    # every turn. A card read "Compare the Fable GPT 5.x Sol benchmarks" while the user had
+    # asked for a tree and the agent was, correctly, drawing a tree.
+    brief = html.escape((brief or suggestion.task_brief or "")[:240], quote=True)
     approval_attr = ' needsapproval="1"' if needs_approval else ""
     mode_label = {"auto": "Auto", "agent": "Agent", "orchestrate": "Orchestrate"}.get(
         (mode or "auto").lower(), "Auto"
@@ -548,7 +554,7 @@ async def maybe_handle_workspace(
         workspace_id,
         _marker_content(
             workspace_id, suggestion, needs_approval=needs_approval,
-            mode=mode, engine=_engine_label,
+            mode=mode, engine=_engine_label, brief=resolved_brief,
         ),
     )
 

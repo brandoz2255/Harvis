@@ -5675,6 +5675,60 @@ async def get_active_workspace(
         return {"active": None}
 
 
+@workspace_router.get("/active-runs")
+async def get_active_runs(
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """Every workspace run still live for this user, as ``{id, session_id}``.
+
+    The sidebar polls this so a chat whose agent is still working keeps its spinner
+    while the user reads a different chat. ``/active`` cannot serve that: it returns
+    at most ONE run, and it marks every candidate it walks past as orphaned on the
+    way. Polling that endpoint would quietly kill the very runs this is meant to
+    report, so this one is strictly read-only.
+
+    ``session_id`` IS the chat id -- that is the join the caller needs.
+
+    A row with no entry in ``_workspaces`` is a leftover from a backend restart, not a
+    live run; it is dropped here so the sidebar stops spinning on it. Writing that fact
+    back to the DB stays ``/active``'s job -- a poll should not mutate.
+    """
+    pool = getattr(request.app.state, "pg_pool", None)
+    if pool is None:
+        return {"runs": []}
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, session_id
+                FROM workspace_runs
+                WHERE user_id = $1
+                  AND status = 'running'
+                ORDER BY started_at DESC
+                LIMIT 50
+                """,
+                current_user["id"],
+            )
+    except Exception as exc:
+        logger.error("DB: failed to fetch active runs: %s", exc)
+        return {"runs": []}
+    # `session_id` is the OWUI chat id ONLY when the request carried one; the bridge
+    # falls back to a synthetic `owui-<workspace_id>` (and Discord launches use
+    # `discord-…`). Those are not chats the sidebar can key on, and marking them would
+    # write rows into its localStorage that no chat will ever come along and clear.
+    synthetic = ("owui-", "discord-", "sess-")
+    return {
+        "runs": [
+            {"id": r["id"], "session_id": r["session_id"]}
+            for r in rows
+            if r["id"] in _workspaces
+            and r["session_id"]
+            and not r["session_id"].startswith(synthetic)
+        ]
+    }
+
+
 @workspace_router.get("/active-discord")
 async def get_active_discord_session(
     request: Request,

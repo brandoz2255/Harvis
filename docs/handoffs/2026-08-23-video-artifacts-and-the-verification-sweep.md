@@ -3,7 +3,9 @@
 **Date:** 2026-08-23
 **Branch:** `harvis1.2` in the main checkout at `/home/user/Harvis`
 (**not** the `jolly-dhawan-5babcd` worktree — the deployed code is the main checkout)
-**Head:** `b7f70eb5`. **Nothing from this pass is committed.** Everything below is on disk and
+**Head:** `b7f70eb5`. **Superseded 2026-08-23:** everything below is now committed and pushed on
+`test/fresh-clone-2026-08-23` (`3ae334cb` backend, `f0365af3` owui, `24b37d0d` infra), together with
+the CAD import guards that let a CAD-less fresh clone build and boot. Everything below is on disk and
 deployed to the running stack at `http://localhost:9000`.
 
 ---

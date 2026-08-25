@@ -160,6 +160,10 @@ def _default_system(label: str, disabled: set[str]) -> str:
         "not go looking for one, and do not search the web to work out what your task "
         f"means. If the request is short or vague, choose a sensible interpretation, say "
         f"which one you chose, and build it with {create} straight away.\n\n"
+        "An empty workspace is not an empty memory. When earlier turns of this chat are "
+        "quoted above your task, they are yours — you said those things. Answer from them "
+        "instead of inspecting the filesystem for traces of earlier work, and never tell "
+        "the user you have no context when the conversation is sitting in front of you.\n\n"
         "## How to finish\n"
         "Write each file ONCE. A file you have already written and believe is correct is "
         "done — re-writing it to tidy a comment or rename a variable burns the whole "
@@ -168,7 +172,13 @@ def _default_system(label: str, disabled: set[str]) -> str:
         "Then call finish with a SHORT plain-English summary: what you built, one line "
         "per file, and anything the human has to know to run it. Do NOT paste the file "
         "contents into the summary — Harvis shows every file you wrote as its own opener "
-        "beside your answer, so repeating the code there just prints it twice."
+        "beside your answer, so repeating the code there just prints it twice.\n\n"
+        "## When the request is a QUESTION, not a build\n"
+        "Plain chat routes questions through this same runner, and then the finish "
+        "summary is the entire reply the user sees — there are no files beside it. So "
+        "the summary must BE the answer: the table, the numbers, the comparison, the "
+        "sources you read. A run that answers \"I compiled a comparison of X and Y\" "
+        "has told the user nothing. Write what you found, not what you did."
     )
 
 
@@ -471,9 +481,17 @@ class SubAgentRunner:
         # its answer. Gemini 3.5 Flash did exactly that: three of these in a row and
         # its final reply was the placeholder, which is what the user saw. Name it,
         # and refuse it wherever an answer is read back out.
-        _NO_PROSE = "(used tools)"
+        _NO_PROSE = "[tool calls]"
+        # The guard has to strip the SAME punctuation the stand-in carries. It used
+        # to strip only quotes and periods, so "(used tools)" — parentheses and all —
+        # never matched "used tools" and the guard never fired once. ox-alpha read
+        # four benchmark pages, parroted the placeholder back, and that is the whole
+        # answer the user got. Both spellings stay listed: old transcripts replayed
+        # from the event log still carry the parenthesised one.
+        _PLACEHOLDERS = {"used tools", "tool calls", "tool call"}
+
         def _is_placeholder(s: str) -> bool:
-            return s.strip().strip('"\'`.').lower() == "used tools"
+            return s.strip().strip('"\'`.()[]<>*').strip().lower() in _PLACEHOLDERS
         # Withheld names that apply_patch covers argument-for-argument.
         _WRITE_ALIASES = ("edit_file", "str_replace")
         read_chars_used = 0
@@ -660,13 +678,18 @@ class SubAgentRunner:
                         content = ""
                     if content:
                         yield ev("token", {"content": content[:600]})
-                    summary = content or summary or "Task complete."
                     # Answering in prose is how a question ends — the model has no
                     # reason to call finish() once it has said the answer. Without
                     # this, a correct research answer came back flagged failed. A run
                     # that tried to CHANGE something and merely stopped talking is a
                     # different case and stays a failure.
-                    answered = bool(content) and not edit_attempted
+                    if content or summary:
+                        summary = content or summary
+                        answered = bool(content) and not edit_attempted
+                    # No usable prose and nothing said earlier: leave `summary` empty
+                    # so the tools-removed answer round below runs. Calling this
+                    # "Task complete." shipped a run that had read four pages and
+                    # told the user only that it had used tools.
                     break
 
                 if content:
@@ -679,7 +702,25 @@ class SubAgentRunner:
                 for tc in tcs:
                     name, args = tc["name"], tc["args"]
                     if name == "finish":
-                        summary = str(args.get("summary") or "Task complete.")
+                        _fin = str(args.get("summary") or "Task complete.")
+                        # A model that answers in prose and THEN calls finish() to
+                        # label the answer is behaving correctly — but taking only
+                        # the label threw the answer away. "make it again" came back
+                        # as "Made two new ASCII trees in text blocks … shown
+                        # directly in the chat above" with no trees anywhere,
+                        # because the trees were in `content` on this very turn and
+                        # this line overwrote them. The run's answer is what reaches
+                        # the chat (workspace_router emits `summary` as
+                        # final_message), so for a run that changed no files the
+                        # prose IS the deliverable and the label stays a label.
+                        # A run that edited files keeps the finish summary — there
+                        # the label reports work the prose only narrates.
+                        _prose = "" if _is_placeholder(content) else (content or "").strip()
+                        summary = (
+                            _prose
+                            if (_prose and not edit_attempted and len(_prose) > len(_fin))
+                            else _fin
+                        )
                         finished = True
                         completed = True
                         break

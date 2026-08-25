@@ -441,7 +441,14 @@
 	{:else if token.type === 'details'}
 		{@const textContent = getDetailTextContent(token)}
 
-		{#if token?.attributes?.type === 'workspace_run'}
+		{#if token?.attributes?.type === 'workspace_answer'}
+			<!--
+				A workspace run's finished answer, folded into the message so it reaches
+				the model on the next turn. Renders NOTHING: the run card immediately
+				above it already shows this text, and drawing it twice was the reason
+				the answer was never written back in the first place.
+			-->
+		{:else if token?.attributes?.type === 'workspace_run'}
 			<!-- Harvis live workspace run card (consumes /api/workspace/stream/{id}) -->
 			<WorkspaceRunCard
 				id={`${id}-${tokenIdx}-wr`}

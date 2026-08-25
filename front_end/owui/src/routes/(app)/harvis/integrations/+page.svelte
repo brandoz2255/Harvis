@@ -48,6 +48,7 @@
 	import IntegrationDetailModal from '$lib/integrations/IntegrationDetailModal.svelte';
 	import IntegrationLogs from '$lib/integrations/IntegrationLogs.svelte';
 	import FreeKeysGuide from '$lib/integrations/FreeKeysGuide.svelte';
+	import FeaturedProviderCard from '$lib/integrations/FeaturedProviderCard.svelte';
 
 	const i18n: any = getContext('i18n');
 	const backToChat = () => goto($chatId ? `/c/${$chatId}` : '/');
@@ -87,6 +88,16 @@
 	$: cardsInGroup = (g: GroupKey) => searched.filter((d) => groupOf(d) === g);
 	// P6: the "all" layout renders the five named dashboard sections.
 	$: cardsInSection = (s: SectionKey) => searched.filter((d) => sectionOf(d) === s);
+
+	// A section can nominate one lead card (catalog `featured`). It renders large, first, with
+	// its setup steps opened up; everything else in that section drops to a compact row. This
+	// is the recommended way in, not a ranking — OpenRouter is featured because one free key
+	// there reaches models from several vendors, which is the shortest path to a working chat.
+	const leadOf = (list: IntegrationDefinition[]) => list.find((d) => d.featured) ?? null;
+	const restOf = (list: IntegrationDefinition[]) => {
+		const lead = leadOf(list);
+		return lead ? list.filter((d) => d.id !== lead.id) : list;
+	};
 
 	// Collapsible sections (2026-07-29 directory layout — the chevron on each heading).
 	// Everything starts open. A live search query forces every section open, so a match can
@@ -417,9 +428,15 @@
 						</button>
 						{#if sectionOpen(s)}
 						{#if cardsInSection(s).length}
+							{@const lead = leadOf(cardsInSection(s))}
+							{#if lead}
+								<div class="mt-1 mb-2">
+									<FeaturedProviderCard def={lead} {engineReadiness} on:open={(e) => openModal(e.detail)} />
+								</div>
+							{/if}
 							<div class="grid grid-cols-1 md:grid-cols-2 gap-x-4 mt-0.5">
-								{#each cardsInSection(s) as def (def.id)}
-									<ControlCard {def} {engineReadiness} {prefs} on:open={(e) => openModal(e.detail)} on:setDefault={(e) => setAsDefault(e.detail)} on:logs={(e) => openLogs(e.detail)} />
+								{#each restOf(cardsInSection(s)) as def (def.id)}
+									<ControlCard {def} {engineReadiness} {prefs} compact={!!lead} on:open={(e) => openModal(e.detail)} on:setDefault={(e) => setAsDefault(e.detail)} on:logs={(e) => openLogs(e.detail)} />
 								{/each}
 							</div>
 						{:else if s === 'ssh_remote'}
@@ -437,9 +454,13 @@
 				{/if}
 			{/each}
 		{:else}
+			{@const flatLead = leadOf(flatCards)}
+			{#if flatLead}
+				<FeaturedProviderCard def={flatLead} {engineReadiness} on:open={(e) => openModal(e.detail)} />
+			{/if}
 			<div class="grid grid-cols-1 md:grid-cols-2 gap-x-4">
-				{#each flatCards as def (def.id)}
-					<ControlCard {def} {engineReadiness} {prefs} on:open={(e) => openModal(e.detail)} on:setDefault={(e) => setAsDefault(e.detail)} on:logs={(e) => openLogs(e.detail)} />
+				{#each restOf(flatCards) as def (def.id)}
+					<ControlCard {def} {engineReadiness} {prefs} compact={!!flatLead} on:open={(e) => openModal(e.detail)} on:setDefault={(e) => setAsDefault(e.detail)} on:logs={(e) => openLogs(e.detail)} />
 				{/each}
 			</div>
 			{#if !flatCards.length}

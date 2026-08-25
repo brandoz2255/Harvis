@@ -37,6 +37,7 @@ import time
 from typing import AsyncGenerator
 
 from ..openclaw_client import OpenClawEvent
+from .conversation import conversation_prefix
 from .isolation import SESSION_WORKSPACE_ROOT, WorkspaceIsolationManager
 from .model_router import ModelRouter
 from .runner import SubAgentRunner
@@ -391,7 +392,8 @@ async def run_review_conversation(
                 # ── REVIEWERS: each participant reviews the accumulated diff this round ──
                 truncated = len(diff) > _REVIEW_DIFF_CHARS
                 review_input = (
-                    f"TASK the coding agent was given:\n{task_brief.strip()[:4000]}\n\n"
+                    f"TASK the coding agent was given:\n"
+        f"{conversation_prefix(task_brief, chat_history).strip()[:4000]}\n\n"
                     f"ACCUMULATED DIFF (round {round_no} of {_MAX_REVIEW_ROUNDS}"
                     + (", truncated" if truncated else "")
                     + f"):\n```diff\n{diff[:_REVIEW_DIFF_CHARS]}\n```"

@@ -448,7 +448,14 @@ TOOL_SCHEMA = [
         "type": "function",
         "function": {
             "name": "finish",
-            "description": "Finish the task. Provide a short summary of what you did.",
+            "description": (
+                "Finish the task. `summary` is the ONLY thing the user reads. "
+                "If the task was a question, a comparison, or a research request, "
+                "put the COMPLETE answer here — the tables, the numbers, the "
+                "sources — not a description of the work you did to find it. "
+                "If you created files, keep it short: what you built, one line "
+                "per file."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {"summary": {"type": "string"}},

@@ -53,6 +53,14 @@
 	import { updateUserSettings } from '$lib/apis/users';
 	import { checkActiveChats } from '$lib/apis/tasks';
 	import { getCadCapability } from '$lib/apis/cad';
+	import { fetchActiveResearch } from '$lib/apis/research';
+	import {
+		chatActivity,
+		markChatRunning,
+		markChatDone,
+		clearChatActivity,
+		runningChats
+	} from '$lib/utils/chatActivity';
 	import { createNoteHandler } from '$lib/components/notes/utils';
 	import { WEBUI_API_BASE_URL, WEBUI_BASE_URL } from '$lib/constants';
 
@@ -149,6 +157,65 @@
 				? 'code'
 				: 'chat')
 		: 'chat';
+
+	// ── Chat-mode tool nav — ONE source of truth ────────────────────────────────────────
+	// The expanded sidebar and the collapsed icon rail used to hardcode their own lists.
+	// They drifted: the rail kept drawing the old `pinnedMenuItems` set (Agent Studio,
+	// Notes, Library…) long after the expanded sidebar had moved to Cookbook → Schedules
+	// → Artifacts → Connectors → Engines → CAD Studio. Both now render from this array,
+	// so a new entry shows up in both or in neither. Icons are single-path 24×24 strokes.
+	$: chatTools = [
+		{
+			id: 'sidebar-cookbook-button',
+			href: '/harvis/agent-studio/cookbook',
+			label: 'Cookbook',
+			d: 'M4 19.5A2.5 2.5 0 0 1 6.5 17H20M4 19.5A2.5 2.5 0 0 0 6.5 22H20V2H6.5A2.5 2.5 0 0 0 4 4.5v15z'
+		},
+		{
+			id: 'sidebar-schedules-button',
+			href: '/harvis/agent-studio/schedules',
+			label: 'Schedules',
+			title: 'Schedules run a prompt on a timer and post the reply into a chat.',
+			d: 'M12 6v6l4 2M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z'
+		},
+		{
+			id: 'sidebar-artifacts-button',
+			href: '/harvis/agent-studio/activity',
+			label: 'Artifacts',
+			d: 'M12 2 2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5'
+		},
+		{
+			id: 'sidebar-connectors-button',
+			href: '/harvis/agent-studio/mcp-shop',
+			label: 'Connectors',
+			d: 'M9 2v6M15 2v6M6 8h12v2.5a6 6 0 0 1-12 0V8zM12 16.5V22'
+		},
+		{
+			id: 'sidebar-integrations-button',
+			href: '/harvis/integrations',
+			label: 'Engines',
+			d: 'm7 11 2-2-2-2M11 13h4M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z'
+		},
+		// CAD Studio appears only when the server says the lane is on — `/api/cad/capability`
+		// reads the same flag every /api/cad route enforces, so the entry can never outlive
+		// the feature.
+		...(showCadNav
+			? [
+					{
+						id: 'sidebar-cad-button',
+						href: '/harvis/cad',
+						label: 'CAD Studio',
+						d: 'M12 2.5 20.5 7v10L12 21.5 3.5 17V7L12 2.5zM3.5 7l8.5 4.6L20.5 7M12 11.6v9.9'
+					}
+				]
+			: [])
+	];
+
+	// The two entries that sit above the tools cluster in both layouts.
+	const chatDestinations = [
+		{ id: 'sidebar-projects-button', href: '/harvis/projects', label: 'Projects', icon: 'folder' },
+		{ id: 'sidebar-notebooks-button', href: '/harvis/notebooks', label: 'Notebooks', icon: 'note' }
+	];
 
 	const isMenuItemVisible = (id) => {
 		switch (id) {
@@ -573,6 +640,88 @@
 		document.documentElement.style.setProperty('--sidebar-width', `${newSidebarWidth}px`);
 	};
 
+	// ── background-run poller ───────────────────────────────────────────────────────────
+	// A Deep Research or workspace run keeps going after its chat view unmounts, and nothing
+	// else in the app is watching once that happens. `chatActivity` remembers which chats are
+	// waiting; this asks the backend which runs are still alive and flips the rest to "done",
+	// which is what turns the row's spinner into a blue dot.
+	let activityTimer: ReturnType<typeof setInterval> | null = null;
+
+	/**
+	 * Workspace runs the backend still considers live, as chatId → workspaceId.
+	 *
+	 * Deliberately NOT `/api/workspace/active`: that returns at most one run and marks
+	 * every candidate it walks past as orphaned, so polling it would kill the runs we are
+	 * trying to report. `/active-runs` is the read-only list. Returns null (not an empty
+	 * map) when the poll itself failed, so a network blip can't be read as "all finished".
+	 */
+	const fetchLiveWorkspaceRuns = async (): Promise<Map<string, string> | null> => {
+		try {
+			const res = await fetch(`${WEBUI_BASE_URL}/api/workspace/active-runs`, {
+				headers: { Authorization: `Bearer ${localStorage.token}` }
+			});
+			if (!res.ok) return null;
+			const data = await res.json();
+			return new Map((data?.runs ?? []).map((r: any) => [r.session_id, r.id]));
+		} catch (e) {
+			return null;
+		}
+	};
+
+	const pollChatActivity = async () => {
+		const waiting = runningChats();
+		const [research, workspaces] = await Promise.all([
+			waiting.some(([, v]) => v.research)
+				? fetchActiveResearch(localStorage.token)
+						.then((r) => new Set((r?.active ?? []).map((a) => a.session_id)))
+						// A failed poll says nothing about the run — leave those spinners alone.
+						.catch(() => null)
+				: Promise.resolve(new Set<string>()),
+			fetchLiveWorkspaceRuns()
+		]);
+
+		// A run the user launched and then walked away from: the chat view that started it
+		// is unmounted, so the backend is the only thing that still knows. Raise the spinner
+		// here rather than waiting for that chat to be reopened. The chat currently on screen
+		// is skipped on purpose — its own run card is already showing the state, and a
+		// spinner on the row you are reading is noise.
+		if (workspaces) {
+			const known = $chatActivity;
+			for (const [sessionId, workspaceId] of workspaces) {
+				if (sessionId === $chatId) continue;
+				// Re-marking an unchanged entry every 8s would rewrite localStorage and wake
+				// every sidebar row for nothing.
+				const cur = known[sessionId];
+				if (cur?.state === 'running' && cur.workspace === workspaceId) continue;
+				markChatRunning(sessionId, undefined, workspaceId);
+			}
+		}
+
+		for (const [cid, v] of waiting) {
+			// Unknown (poll failed) is not the same as absent (run finished).
+			if (v.research) {
+				if (research === null) continue;
+				if (research.has(v.research)) continue;
+			} else if (v.workspace) {
+				if (workspaces === null) continue;
+				// `has`, not an id comparison: a chat that started a SECOND run since this
+				// entry was written is still running, and the loop above has already moved
+				// it onto the new id.
+				if (workspaces.has(cid)) continue;
+			} else {
+				// An ordinary reply; its own stream settles it.
+				continue;
+			}
+			// Finished while the user was looking at it: no notification needed.
+			if (cid === $chatId) clearChatActivity(cid);
+			else markChatDone(cid);
+		}
+	};
+
+	// Leaving a chat mid-run is exactly when the spinner needs to appear, so don't make the
+	// user wait out the interval for it.
+	$: if ($chatId !== undefined && activityTimer !== null) pollChatActivity();
+
 	onMount(async () => {
 		try {
 			const width = Number(localStorage.getItem('sidebarWidth'));
@@ -649,6 +798,9 @@
 			})
 		];
 
+		pollChatActivity();
+		activityTimer = setInterval(pollChatActivity, 8000);
+
 		window.addEventListener('keydown', onKeyDown);
 		window.addEventListener('keyup', onKeyUp);
 
@@ -672,6 +824,7 @@
 		initPinnedMenuSortable();
 
 		return () => {
+			if (activityTimer) clearInterval(activityTimer);
 			unsubscribers.forEach((unsubscriber) => unsubscriber());
 
 			window.removeEventListener('keydown', onKeyDown);
@@ -928,87 +1081,146 @@
 					</Tooltip>
 				</div>
 
-				{#each pinnedItems as itemId (itemId)}
-					{@const meta = getMenuItemMeta(itemId)}
-					{#if meta && isMenuItemVisible(itemId)}
-						<div class="">
-							<Tooltip content={$i18n.t(meta.label)} placement="right">
+				<!-- The collapsed rail mirrors the expanded sidebar exactly: same destinations,
+				     same icons, same order — icon-only. Before this it still drew the legacy
+				     `pinnedMenuItems` set, which the expanded sidebar stopped rendering once the
+				     mode switcher shipped, so collapsing the sidebar swapped in a different and
+				     older set of icons. -->
+				{#if modeSwitcherEnabled && activeMode === 'chat'}
+					{#each chatDestinations as dest (dest.id)}
+						<div>
+							<Tooltip content={$i18n.t(dest.label)} placement="right">
 								<a
+									id={dest.id}
 									class=" cursor-pointer flex rounded-xl hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition group"
-									href={meta.href}
+									href={dest.href}
 									on:click={async (e) => {
 										e.stopImmediatePropagation();
 										e.preventDefault();
-										navMenuItem(meta.href);
+										navMenuItem(dest.href);
 										itemClickHandler();
 									}}
 									draggable="false"
-									aria-label={$i18n.t(meta.label)}
+									aria-label={$i18n.t(dest.label)}
 								>
 									<div class=" self-center flex items-center justify-center size-9">
-										{#if itemId === 'notes'}
+										{#if dest.icon === 'folder'}
+											<FolderIcon className="size-4.5" />
+										{:else}
 											<Note className="size-4.5" />
-										{:else if itemId === 'workspace'}
-											<svg
-												xmlns="http://www.w3.org/2000/svg"
-												fill="none"
-												viewBox="0 0 24 24"
-												stroke-width="1.5"
-												stroke="currentColor"
-												class="size-4.5"
-											>
-												<path
-													stroke-linecap="round"
-													stroke-linejoin="round"
-													d="M13.5 16.875h3.375m0 0h3.375m-3.375 0V13.5m0 3.375v3.375M6 10.5h2.25a2.25 2.25 0 0 0 2.25-2.25V6a2.25 2.25 0 0 0-2.25-2.25H6A2.25 2.25 0 0 0 3.75 6v2.25A2.25 2.25 0 0 0 6 10.5Zm0 9.75h2.25A2.25 2.25 0 0 0 10.5 18v-2.25a2.25 2.25 0 0 0-2.25-2.25H6a2.25 2.25 0 0 0-2.25 2.25V18A2.25 2.25 0 0 0 6 20.25Zm9.75-9.75H18a2.25 2.25 0 0 0 2.25-2.25V6A2.25 2.25 0 0 0 18 3.75h-2.25A2.25 2.25 0 0 0 13.5 6v2.25a2.25 2.25 0 0 0 2.25 2.25Z"
-												/>
-											</svg>
-										{:else if itemId === 'automations'}
-											<svg
-												xmlns="http://www.w3.org/2000/svg"
-												fill="none"
-												viewBox="0 0 24 24"
-												stroke-width="1.5"
-												stroke="currentColor"
-												class="size-4.5"
-											>
-												<path
-													stroke-linecap="round"
-													stroke-linejoin="round"
-													d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"
-												/>
-											</svg>
-										{:else if itemId === 'calendar'}
-											<svg
-												xmlns="http://www.w3.org/2000/svg"
-												fill="none"
-												viewBox="0 0 24 24"
-												stroke-width="1.5"
-												stroke="currentColor"
-												class="size-4.5"
-											>
-												<path
-													stroke-linecap="round"
-													stroke-linejoin="round"
-													d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 0 1 2.25-2.25h13.5A2.25 2.25 0 0 1 21 7.5v11.25m-18 0A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75m-18 0v-7.5A2.25 2.25 0 0 1 5.25 9h13.5A2.25 2.25 0 0 1 21 11.25v7.5"
-												/>
-											</svg>
-										{:else if itemId === 'playground'}
-											<Code className="size-4.5" />
-										{:else if itemId === 'agent-studio'}
-											<Sparkles className="size-4.5" />
-										{:else if itemId === 'vibecode'}
-											<Code className="size-4.5" />
-										{:else if itemId === 'open-notebook'}
-											<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" class="size-4.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6.042A8.967 8.967 0 0 0 6 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 0 1 6 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 0 1 6-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0 0 18 18a8.967 8.967 0 0 0-6 2.292m0-14.25v14.25" /></svg>
-										{:else if itemId === 'artifacts'}
-											<ArchiveBox className="size-4.5" />										{/if}
+										{/if}
 									</div>
 								</a>
 							</Tooltip>
 						</div>
-					{/if}
-				{/each}
+					{/each}
+
+					{#each chatTools as tool (tool.id)}
+						<div>
+							<Tooltip content={$i18n.t(tool.label)} placement="right">
+								<a
+									id="rail-{tool.id}"
+									class=" cursor-pointer flex rounded-xl hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition group"
+									href={tool.href}
+									on:click={async (e) => {
+										e.stopImmediatePropagation();
+										e.preventDefault();
+										navMenuItem(tool.href);
+										itemClickHandler();
+									}}
+									draggable="false"
+									aria-label={$i18n.t(tool.label)}
+								>
+									<div class=" self-center flex items-center justify-center size-9">
+										<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="size-4.5"><path d={tool.d} /></svg>
+									</div>
+								</a>
+							</Tooltip>
+						</div>
+					{/each}
+				{:else}
+					{#each pinnedItems as itemId (itemId)}
+						{@const meta = getMenuItemMeta(itemId)}
+						{#if meta && isMenuItemVisible(itemId)}
+							<div class="">
+								<Tooltip content={$i18n.t(meta.label)} placement="right">
+									<a
+										class=" cursor-pointer flex rounded-xl hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition group"
+										href={meta.href}
+										on:click={async (e) => {
+											e.stopImmediatePropagation();
+											e.preventDefault();
+											navMenuItem(meta.href);
+											itemClickHandler();
+										}}
+										draggable="false"
+										aria-label={$i18n.t(meta.label)}
+									>
+										<div class=" self-center flex items-center justify-center size-9">
+											{#if itemId === 'notes'}
+												<Note className="size-4.5" />
+											{:else if itemId === 'workspace'}
+												<svg
+													xmlns="http://www.w3.org/2000/svg"
+													fill="none"
+													viewBox="0 0 24 24"
+													stroke-width="1.5"
+													stroke="currentColor"
+													class="size-4.5"
+												>
+													<path
+														stroke-linecap="round"
+														stroke-linejoin="round"
+														d="M13.5 16.875h3.375m0 0h3.375m-3.375 0V13.5m0 3.375v3.375M6 10.5h2.25a2.25 2.25 0 0 0 2.25-2.25V6a2.25 2.25 0 0 0-2.25-2.25H6A2.25 2.25 0 0 0 3.75 6v2.25A2.25 2.25 0 0 0 6 10.5Zm0 9.75h2.25A2.25 2.25 0 0 0 10.5 18v-2.25a2.25 2.25 0 0 0-2.25-2.25H6a2.25 2.25 0 0 0-2.25 2.25V18A2.25 2.25 0 0 0 6 20.25Zm9.75-9.75H18a2.25 2.25 0 0 0 2.25-2.25V6A2.25 2.25 0 0 0 18 3.75h-2.25A2.25 2.25 0 0 0 13.5 6v2.25a2.25 2.25 0 0 0 2.25 2.25Z"
+													/>
+												</svg>
+											{:else if itemId === 'automations'}
+												<svg
+													xmlns="http://www.w3.org/2000/svg"
+													fill="none"
+													viewBox="0 0 24 24"
+													stroke-width="1.5"
+													stroke="currentColor"
+													class="size-4.5"
+												>
+													<path
+														stroke-linecap="round"
+														stroke-linejoin="round"
+														d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"
+													/>
+												</svg>
+											{:else if itemId === 'calendar'}
+												<svg
+													xmlns="http://www.w3.org/2000/svg"
+													fill="none"
+													viewBox="0 0 24 24"
+													stroke-width="1.5"
+													stroke="currentColor"
+													class="size-4.5"
+												>
+													<path
+														stroke-linecap="round"
+														stroke-linejoin="round"
+														d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 0 1 2.25-2.25h13.5A2.25 2.25 0 0 1 21 7.5v11.25m-18 0A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75m-18 0v-7.5A2.25 2.25 0 0 1 5.25 9h13.5A2.25 2.25 0 0 1 21 11.25v7.5"
+													/>
+												</svg>
+											{:else if itemId === 'playground'}
+												<Code className="size-4.5" />
+											{:else if itemId === 'agent-studio'}
+												<Sparkles className="size-4.5" />
+											{:else if itemId === 'vibecode'}
+												<Code className="size-4.5" />
+											{:else if itemId === 'open-notebook'}
+												<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" class="size-4.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6.042A8.967 8.967 0 0 0 6 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 0 1 6 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 0 1 6-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0 0 18 18a8.967 8.967 0 0 0-6 2.292m0-14.25v14.25" /></svg>
+											{:else if itemId === 'artifacts'}
+												<ArchiveBox className="size-4.5" />										{/if}
+										</div>
+									</a>
+								</Tooltip>
+							</div>
+						{/if}
+					{/each}
+				{/if}
 			</div>
 		</button>
 
@@ -1220,101 +1432,23 @@
 							     Studio. Cookbook, Customize and Settings used to live in the footer;
 							     Cookbook came up here and the other two moved into the user menu. -->
 							<div class="px-[0.4375rem]">
-							<!-- Cookbook moved up out of the footer (2026-08-19) — it sits at the
-							     head of the tools cluster now. -->
-							<a
-								id="sidebar-cookbook-button"
-								href="/harvis/agent-studio/cookbook"
-								class="group flex items-center gap-3 rounded-xl px-2.5 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition outline-none {($page.url.pathname ?? '').startsWith('/harvis/agent-studio/cookbook') ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 font-medium' : ''}"
-								draggable="false"
-								aria-label={$i18n.t('Cookbook')}
-							>
-								<div class="self-center">
-									<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="size-4.5"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20M4 19.5A2.5 2.5 0 0 0 6.5 22H20V2H6.5A2.5 2.5 0 0 0 4 4.5v15z" /></svg>
-								</div>
-								<div class="flex flex-1 self-center translate-y-[0.5px]">
-									<div class=" self-center text-sm font-primary">{$i18n.t('Cookbook')}</div>
-								</div>
-							</a>
-							<!-- Schedules — the chat lens over the cron store (VibeCodeNav's
-							     Routines button is the coding lens of the same store). -->
-							<a
-								href="/harvis/agent-studio/schedules"
-								class="group flex items-center gap-3 rounded-xl px-2.5 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition outline-none {($page.url.pathname ?? '').startsWith('/harvis/agent-studio/schedules') ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 font-medium' : ''}"
-								draggable="false"
-								aria-label={$i18n.t('Schedules')}
-								title={$i18n.t(
-									'Schedules run a prompt on a timer and post the reply into a chat.'
-								)}
-							>
-								<div class="self-center">
-									<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="size-4.5"><path d="M12 6v6l4 2M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z" /></svg>
-								</div>
-								<div class="flex flex-1 self-center translate-y-[0.5px]">
-									<div class=" self-center text-sm font-primary">{$i18n.t('Schedules')}</div>
-								</div>
-							</a>
-							<a
-								href="/harvis/agent-studio/activity"
-								class="group flex items-center gap-3 rounded-xl px-2.5 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition outline-none {($page.url.pathname ?? '').startsWith('/harvis/agent-studio/activity') ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 font-medium' : ''}"
-								draggable="false"
-								aria-label={$i18n.t('Artifacts')}
-							>
-								<div class="self-center">
-									<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="size-4.5"><path d="M12 2 2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" /></svg>
-								</div>
-								<div class="flex flex-1 self-center translate-y-[0.5px]">
-									<div class=" self-center text-sm font-primary">{$i18n.t('Artifacts')}</div>
-								</div>
-							</a>
-							<a
-								id="sidebar-connectors-button"
-								href="/harvis/agent-studio/mcp-shop"
-								class="group flex items-center gap-3 rounded-xl px-2.5 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition outline-none {($page.url.pathname ?? '').startsWith('/harvis/agent-studio/mcp-shop') ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 font-medium' : ''}"
-								draggable="false"
-								aria-label={$i18n.t('Connectors')}
-							>
-								<div class="self-center">
-									<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="size-4.5"><path d="M9 2v6M15 2v6M6 8h12v2.5a6 6 0 0 1-12 0V8zM12 16.5V22" /></svg>
-								</div>
-								<div class="flex flex-1 self-center translate-y-[0.5px]">
-									<div class=" self-center text-sm font-primary">{$i18n.t('Connectors')}</div>
-								</div>
-							</a>
-							<a
-								id="sidebar-integrations-button"
-								href="/harvis/integrations"
-								class="group flex items-center gap-3 rounded-xl px-2.5 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition outline-none {($page.url.pathname ?? '').startsWith('/harvis/integrations') ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 font-medium' : ''}"
-								draggable="false"
-								aria-label={$i18n.t('Engines')}
-							>
-								<div class="self-center">
-									<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="size-4.5"><path d="m7 11 2-2-2-2M11 13h4M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z" /></svg>
-								</div>
-								<div class="flex flex-1 self-center translate-y-[0.5px]">
-									<div class=" self-center text-sm font-primary">{$i18n.t('Engines')}</div>
-								</div>
-							</a>
-							{#if showCadNav}
-								<!-- CAD Studio took over the slot Adaptive Space was holding
-								     (2026-08-03). It appears only when the server says the lane is
-								     on — `/api/cad/capability` reads the same flag every /api/cad
-								     route enforces, so a nav entry can never outlive the feature. -->
+							{#each chatTools as tool (tool.id)}
 								<a
-									id="sidebar-cad-button"
-									href="/harvis/cad"
-									class="group flex items-center gap-3 rounded-xl px-2.5 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition outline-none {($page.url.pathname ?? '').startsWith('/harvis/cad') ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 font-medium' : ''}"
+									id={tool.id}
+									href={tool.href}
+									class="group flex items-center gap-3 rounded-xl px-2.5 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition outline-none {($page.url.pathname ?? '').startsWith(tool.href) ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 font-medium' : ''}"
 									draggable="false"
-									aria-label={$i18n.t('CAD Studio')}
+									aria-label={$i18n.t(tool.label)}
+									title={tool.title ? $i18n.t(tool.title) : null}
 								>
 									<div class="self-center">
-										<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="size-4.5"><path d="M12 2.5 20.5 7v10L12 21.5 3.5 17V7L12 2.5zM3.5 7l8.5 4.6L20.5 7M12 11.6v9.9" /></svg>
+										<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="size-4.5"><path d={tool.d} /></svg>
 									</div>
 									<div class="flex flex-1 self-center translate-y-[0.5px]">
-										<div class=" self-center text-sm font-primary">{$i18n.t('CAD Studio')}</div>
+										<div class=" self-center text-sm font-primary">{$i18n.t(tool.label)}</div>
 									</div>
 								</a>
-							{/if}
+							{/each}
 							</div>
 							<!-- More (bold) stays in the footer bottom-nav cluster. -->
 						{/if}

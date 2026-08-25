@@ -101,6 +101,12 @@ export interface IntegrationDefinition {
 	// What the vendor demands before it will issue the key — the thing that makes someone
 	// abandon a signup halfway. Stated up front so nobody discovers it on the vendor's site.
 	signupRequires?: string;
+	// Lead card for its section: rendered large, first, with the how-to opened up, while its
+	// siblings shrink to compact rows. One per section — the recommended way in, not a ranking.
+	featured?: boolean;
+	// The actual click-path for getting a key into Harvis, in order. Shown inside the featured
+	// card so nobody has to guess that "Connect & verify" is one button doing both jobs.
+	setupSteps?: string[];
 	permissions?: string[];
 	auth?: { required: boolean; modes: AuthMode[]; configured?: boolean; notes?: string };
 	engine?: { support: EngineSupport; adapterId?: string; notes?: string };
@@ -487,6 +493,14 @@ export const CATALOG: IntegrationDefinition[] = [
 		freeTier: 'Free: the zero-priced slice of the catalogue, capped by requests per day.',
 		freeLimits: ['~20 free models', 'Daily request cap', 'No card'],
 		signupRequires: 'Email, Google or GitHub sign-in',
+		featured: true,
+		setupSteps: [
+			'Click “Get a free key” below. It opens openrouter.ai/keys in a new tab — sign in with Google, GitHub or email.',
+			'Press “Create Key”, give it any name, and copy the key. OpenRouter shows it once and never again.',
+			'Come back here and click “Add API key”. That opens this card’s Connection panel.',
+			'Paste the key into the API key field and press “Connect & verify” — one button saves it and checks it against OpenRouter.',
+			'Wait for “Connected & verified.” The free models then appear in the model picker at the top of any chat. Nothing to edit in .env, no restart.'
+		],
 		runtimeNote:
 			'Cloud chat provider — answers in the thread. Only zero-priced models are listed; funding the account does not add paid ones to the picker.',
 		auth: { required: true, modes: ['api_key'] },

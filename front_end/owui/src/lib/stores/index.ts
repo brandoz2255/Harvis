@@ -117,6 +117,18 @@ export const dockedRunId = writable<string | null>(null);
 // Shaped like the `harvis_metrics` chunk field so `messageTokenStats` needs no
 // special case.
 export const workspaceRunMetrics = writable<Record<string, Record<string, any>>>({});
+// The finished answer of a workspace run, keyed by workspace id.
+//
+// The run card renders this itself and always has — but nothing ever wrote it
+// back into the chat message, so of 110 workspace-run assistant messages on
+// this account exactly ONE had any body text. The answer survived a reload only
+// because the card replays the persisted event stream; it never reached the
+// model on the following turn, which is why a chat could answer a question in a
+// run card and then, one message later, say it had never heard of the subject.
+// Chat.svelte watches this and folds the text into `message.content`.
+export const workspaceRunAnswers = writable<Record<string, { text: string; label: string }>>(
+	{}
+);
 // A workspace run launched from Discord that is currently running for this user.
 // Drives the top-bar "Harvis on Discord is running" indicator (polled app-wide).
 export const activeDiscordRun = writable<{ id: string; task_brief?: string } | null>(null);

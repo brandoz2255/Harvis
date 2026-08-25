@@ -1900,20 +1900,6 @@
 												console.error('OneDrive Error:', error);
 											}
 										}}
-										onCreateImage={() => {
-											// Insert an explicit "create image" marker into the composer so the
-											// user describes the image inline — forces the backend image lane
-											// (no NL guessing) rather than opening a modal.
-											// Non-breaking space so the editor keeps the separator (a plain trailing
-											// space gets trimmed → "create imagea fox"). Backend tolerates both.
-											const marker = '🖼️ create image ';
-											const cur = (prompt || '').trim();
-											const next = cur ? `${marker}${cur}` : marker;
-											prompt = next;
-											chatInputElement?.setText(next);
-											setTimeout(() => chatInputElement?.focus(), 0);
-										}}
-										onCreateCad={insertCadMarker}
 										{onUpload}
 										onClose={async () => {
 											await tick();

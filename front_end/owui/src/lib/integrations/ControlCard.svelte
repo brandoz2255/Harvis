@@ -18,6 +18,8 @@
 	export let def: IntegrationDefinition;
 	export let engineReadiness: EngineReadiness = {};
 	export let prefs: Record<string, string> = {};
+	/** Sibling of a featured card — same row, dialled down so the lead card carries the section. */
+	export let compact = false;
 
 	const dispatch = createEventDispatcher();
 
@@ -34,20 +36,26 @@
      Logs / Set-default stay secondary — revealed on hover or keyboard focus at md and up,
      always visible below md where there is no hover. Never hover-only. -->
 <div
-	class="group relative flex items-center gap-3 rounded-xl px-2.5 py-2.5 hover:bg-gray-50 dark:hover:bg-gray-850/70 transition cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40"
+	class="group relative flex items-center rounded-xl hover:bg-gray-50 dark:hover:bg-gray-850/70 transition cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40 {compact
+		? 'gap-2.5 px-2 py-1.5'
+		: 'gap-3 px-2.5 py-2.5'}"
 	role="button"
 	tabindex="0"
 	title={def.description}
 	on:click={() => dispatch('open', def.id)}
 	on:keydown={(e) => (e.key === 'Enter' || e.key === ' ') && dispatch('open', def.id)}
 >
-	<div class="shrink-0 size-10 rounded-xl grid place-items-center {tint}">
-		<BrandGlyph name={def.brandKey} className="size-5" />
+	<div class="shrink-0 rounded-xl grid place-items-center {compact ? 'size-8' : 'size-10'} {tint}">
+		<BrandGlyph name={def.brandKey} className={compact ? 'size-4' : 'size-5'} />
 	</div>
 
 	<div class="min-w-0 flex-1">
 		<div class="flex items-center gap-1.5">
-			<span class="text-sm font-semibold text-gray-900 dark:text-gray-50 truncate">{def.name}</span>
+			<span
+				class="font-semibold text-gray-900 dark:text-gray-50 truncate {compact
+					? 'text-[13px]'
+					: 'text-sm'}">{def.name}</span
+			>
 			{#if isDef}
 				<span
 					class="shrink-0 text-[10px] font-medium px-1.5 py-px rounded-md bg-blue-50 dark:bg-blue-500/15 text-blue-600 dark:text-blue-300"
@@ -55,7 +63,11 @@
 				>
 			{/if}
 		</div>
-		<p class="text-xs text-gray-500 dark:text-gray-400 truncate">{def.description}</p>
+		<p
+			class="text-gray-500 dark:text-gray-400 truncate {compact ? 'text-[11px]' : 'text-xs'}"
+		>
+			{def.description}
+		</p>
 	</div>
 
 	<!-- trailing cluster: secondary actions · the one status · affordance chevron -->
