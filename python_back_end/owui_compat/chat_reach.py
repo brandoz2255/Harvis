@@ -7,21 +7,35 @@ one lane over. Launching a whole workspace for a one-line question is the wrong
 shape: it costs a run card, a sandbox and a planner for what should be a couple
 of seconds of fetching.
 
-This module does the small version. Before the chat answers, when — and only
-when — the turn needs information the model cannot have (``_needs_reach``), it:
+This module does the small version. Before the chat answers, when the turn needs
+information the model cannot have (``reach_gate.verdict``) or the user turned on
+Force Web Search in the + menu, it runs a short corrective retrieval loop:
 
-  1. runs ONE deterministic web search on the user's question and reads the top
-     two hits concurrently — no model call at all,
-  2. ONLY if that came back with nothing readable, lets the model spend up to
-     ``_MAX_MODEL_ROUNDS`` turns with two read-only tools (``web_search``,
-     ``web_read``) to find a page that does work,
-  3. injects what it found — with its source URLs — as a context block on the
-     last user message.
+  1. search the derived query and read the top hits concurrently — no model call,
+  2. GRADE what came back: nothing at all, the wrong subject, or pages that do
+     not actually contain what was asked (``_grade``),
+  3. on a bad grade, REPAIR the query to match the failure — widen a search that
+     returned nothing, pin the entity in quotes when the wrong things came back,
+     and only if neither applies, spend one model call to rewrite it — then go
+     back to 1, up to ``_MAX_RAG_ROUNDS`` (``_FORCED_ROUNDS`` when forced),
+  4. if it is still short, let the model spend up to ``_MAX_MODEL_ROUNDS`` turns
+     with two read-only tools (``web_search``, ``web_read``) to pick a specific
+     result out of the list and read it,
+  5. inject what it found — with its source URLs — as a context block on the
+     last user message, saying so when the search never got there.
+
+That is the self-correcting part, and the reason it is a loop rather than one
+shot: a single search either works or it doesn't, and when it doesn't the old
+code had exactly one move left. Grading names *how* it failed, and each failure
+has a different repair. Every exit path returns the best set gathered so far, so
+the loop can only add to what one search would have produced.
 
 Step 1 goes first on measured latency, not taste: on the reference question it
 cost 4.6s and answered it, while one model round cost 10.3s and produced no tool
 call at all on qwen3:4b. The search engine has already done the ranking; asking a
-small model to re-derive the same two URLs is the expensive way to get there.
+small model to re-derive the same two URLs is the expensive way to get there —
+which is also why the query repairs above are tried in that same order, cheapest
+and most deterministic first.
 
 Then the normal streaming answer runs, unchanged, on whichever lane the user's
 model belongs to. That ordering is the whole design: because the result is
@@ -44,6 +58,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from urllib.parse import urlsplit
 
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -81,6 +96,25 @@ _TOTAL_BUDGET_S = 30.0
 # bounded.
 _HEDGE_BUDGET_S = 75.0
 _HEDGE_SCAN_CHARS = 4_000
+# Retrieval rounds, including the first. Two is enough to fix a bad query and
+# see whether the fix worked; a third round of the same failure is a different
+# problem than search terms, and the user is still waiting.
+_MAX_RAG_ROUNDS = 2
+# The user pressed the button, so waiting is expected — that buys one more
+# round and a wider clock than the automatic path gets.
+_FORCED_ROUNDS = 3
+_FORCED_BUDGET_S = 45.0
+# Below this share of the question's words present in the fetched text, the
+# pages are treated as not actually answering it. Deliberately low: this is the
+# "these pages are about something else" line, not a quality bar.
+_MIN_PAGE_COVERAGE = 0.4
+# A model-written query rewrite measured 17.8–19.4s on gemma4:e4b warm, which is
+# most of the default budget on its own. So it is only affordable when there is
+# room for it AND for the round it exists to enable — otherwise the loop stops
+# with what it has, which beats spending the whole clock on a query it will
+# never get to run. The deterministic repairs are unaffected; they cost nothing.
+_REFINE_MIN_REMAINING_S = 28.0
+_REFINE_ROUND_RESERVE_S = 10.0
 
 # The only two tools this loop offers. Both read-only, both already SSRF-guarded
 # (web_read goes through agent_reach, which pins the resolved IP and refuses
@@ -283,14 +317,92 @@ async def _model_rounds(
         messages.append({"role": "user", "content": "\n\n".join(observations)[:8_000]})
 
 
+def _grade(
+    query: str, results: list[dict], read_pages: list[dict]
+) -> tuple[str, list[str]]:
+    """``(verdict, missing_words)`` — what is wrong, and which word gave it away.
+
+    Verdicts are ``ok`` / ``empty`` / ``irrelevant`` / ``thin``. Each names a
+    different repair, which is the point: a loop that only knows "bad" can do
+    nothing but run the same search again. ``missing_words`` is what the search
+    never found anywhere, and it becomes the next query's focus.
+    """
+    if not results:
+        return "empty", []
+    if not reach_gate.looks_relevant(query, results):
+        return "irrelevant", []
+    missing = reach_gate.missing_terms(query, results, read_pages)
+    if missing:
+        return "thin", missing
+    if not read_pages:
+        # Ranked well, fetched nothing — blocked, JS-only or dead. Different
+        # terms usually surface a mirror that will serve plain HTML.
+        return "thin", []
+    if reach_gate.page_coverage(query, read_pages) < _MIN_PAGE_COVERAGE:
+        return "thin", []
+    return "ok", []
+
+
+async def _next_query(
+    verdict: str,
+    query: str,
+    message: str,
+    tried: list[str],
+    results: list[dict],
+    model_name: str,
+    *,
+    missing: list[str] | None = None,
+    pool=None,
+    user_id: int | None = None,
+    deadline: float | None = None,
+) -> str:
+    """The corrected query for the next round, or ``""`` to stop looping.
+
+    Deterministic repairs are matched to the verdict — widen when nothing came
+    back, pin the entity when the wrong things came back — and only when both
+    decline does this spend a model call, and then only if the clock can afford
+    both it and the round it buys. Anything already tried is rejected here
+    rather than re-run, which is what keeps the loop from oscillating between
+    two bad queries until the clock runs out.
+    """
+    seen = {q.strip().lower() for q in tried}
+
+    def _fresh(candidate: str | None) -> str:
+        c = (candidate or "").strip()
+        return c if c and c.lower() not in seen else ""
+
+    if verdict == "empty":
+        out = _fresh(reach_gate.broader_query(query))
+    else:
+        out = _fresh(reach_gate.narrower_query(
+            query, message, focus=(missing or [""])[0],
+        ))
+    if out:
+        return out
+    remaining = None if deadline is None else deadline - time.monotonic()
+    if remaining is not None and remaining < _REFINE_MIN_REMAINING_S:
+        logger.info(
+            "chat_reach: %.0fs left, not enough for a model rewrite; stopping", remaining
+        )
+        return ""
+    timeout = 20.0 if remaining is None else min(20.0, remaining - _REFINE_ROUND_RESERVE_S)
+    return _fresh(await reach_gate.refine_query(
+        message, tried, results, model_name,
+        pool=pool, user_id=user_id, timeout=timeout,
+    ))
+
+
 async def gather(
     message: str,
     model_name: str,
     pool=None,
     user_id: int | None = None,
     query: str | None = None,
+    *,
+    forced: bool = False,
+    deadline: float | None = None,
 ) -> dict:
-    """Run the loop. Returns ``{"context": str, "sources": [url, …]}``.
+    """Run the corrective retrieval loop. Returns ``{"context", "sources"}``.
 
     ``context`` is empty when nothing usable was found — the caller then injects
     nothing at all rather than an empty "here are your sources" block.
@@ -301,40 +413,83 @@ async def gather(
     into a search engine verbatim and came back with a 2010 blog post whose
     title contained that phrase, a Pinterest board, and India's eCourts portal.
     The turn the user actually wanted answered was the one before it.
+
+    The loop is search → read → grade → repair the query → search again, up to
+    ``_MAX_RAG_ROUNDS`` (``_FORCED_ROUNDS`` when the user asked for the search
+    outright). It stops the moment the pages it has actually answer the
+    question, and every exit — a good grade, a clock, no repair left to try —
+    returns the best set gathered so far. That last part is not a detail: this
+    runs in front of an answer the user is waiting on, so a loop that could come
+    back with less than one search would be a downgrade, not an improvement.
+
+    ``deadline`` is a ``time.monotonic()`` stamp. It is checked between rounds,
+    never inside one, because abandoning a round in flight throws away reads
+    that are already paid for.
     """
     search_query = (query or message).strip() or message
-    results = await _search(search_query)
-    sources: list[str] = [r["url"] for r in results]
+    max_rounds = _FORCED_ROUNDS if forced else _MAX_RAG_ROUNDS
 
-    # ── Deterministic path: search, then read the top hits concurrently ──────
-    # Measured on the reference question: search 2.9s + two parallel reads 1.7s,
-    # against 10.3s for a single model round that returned no tool calls at all
-    # on qwen3:4b. So the model does NOT go first. Search engines already rank
-    # for the question, and reading the top two answers it most of the time —
-    # for a third of the latency, with no model call, which also means this path
-    # behaves identically on every lane including ones with no tool support.
-    #
-    # Read _MAX_SOURCES of them, not one: a live test answered "latest PostgreSQL"
-    # with 17.4 off a random blog while the official "PostgreSQL 18 Released!"
-    # announcement sat un-read two results below. One page is one opinion; several
-    # let the model see that the blog is the outlier. The reads are concurrent, so
-    # the extra coverage costs no wall-clock.
-    pages = await asyncio.gather(*[_read(r["url"]) for r in results[:_MAX_SOURCES]])
-    read_pages: list[dict] = [p for p in pages if p["ok"] and p["text"]]
+    tried: list[str] = []
+    results: list[dict] = []      # accumulated, deduped, in the order shown
+    sources: list[str] = []
+    read_pages: list[dict] = []
+    seen_urls: set[str] = set()
+    verdict, missing = "empty", []
 
-    # Readable is not the same as relevant. On the Fable 5 turn all three top
-    # hits fetched cleanly and none of them were about anything the user asked,
-    # so the rescue round below — which only ever triggered on an empty read —
-    # sat out the one turn that needed it most.
-    relevant = reach_gate.looks_relevant(search_query, results)
+    for round_no in range(1, max_rounds + 1):
+        tried.append(search_query)
+        found = await _search(search_query)
+        fresh = [r for r in found if r["url"] not in seen_urls]
+        for r in fresh:
+            seen_urls.add(r["url"])
+            results.append(r)
+            sources.append(r["url"])
 
-    # ── Model rounds: only when the cheap path came back thin ───────────────
-    # Nothing readable — every top hit was blocked, empty, or JS-only. Only NOW
-    # is a model round worth its cost: it can pick a different result or search
-    # again with better terms. A model that can't be routed, or that answers
-    # without calling a tool, costs us the round and nothing else, and the
-    # search snippets above still ground the answer.
-    if not read_pages or not relevant:
+        # ── Deterministic path: read the top hits concurrently ──────────────
+        # Measured on the reference question: search 2.9s + two parallel reads
+        # 1.7s, against 10.3s for a single model round that returned no tool
+        # calls at all on qwen3:4b. So the model does NOT go first. Search
+        # engines already rank for the question, and reading the top few answers
+        # it most of the time — for a third of the latency, with no model call,
+        # which also means this path behaves identically on every lane including
+        # ones with no tool support.
+        #
+        # Read several, not one: a live test answered "latest PostgreSQL" with
+        # 17.4 off a random blog while the official "PostgreSQL 18 Released!"
+        # announcement sat un-read two results below. One page is one opinion;
+        # several let the model see that the blog is the outlier. The reads are
+        # concurrent, so the extra coverage costs no wall-clock.
+        room = _MAX_SOURCES - len(read_pages)
+        if room > 0 and fresh:
+            pages = await asyncio.gather(*[_read(r["url"]) for r in fresh[:room]])
+            read_pages.extend(p for p in pages if p["ok"] and p["text"])
+
+        verdict, missing = _grade(search_query, results, read_pages)
+        logger.info(
+            "chat_reach: round %d/%d query=%r -> %s (%d result(s), %d page(s))%s",
+            round_no, max_rounds, search_query[:70], verdict,
+            len(results), len(read_pages),
+            f" missing={missing}" if missing else "",
+        )
+        if verdict == "ok" or round_no == max_rounds:
+            break
+        if deadline is not None and time.monotonic() >= deadline:
+            logger.info("chat_reach: out of budget after round %d; using what we have", round_no)
+            break
+        nxt = await _next_query(
+            verdict, search_query, message, tried, results, model_name,
+            missing=missing, pool=pool, user_id=user_id, deadline=deadline,
+        )
+        if not nxt:
+            logger.info("chat_reach: no better query to try; stopping at %s", verdict)
+            break
+        search_query = nxt
+
+    # ── Model rounds: only when the loop ran out and still has nothing ──────
+    # The tool loop can do one thing the query repair above cannot — pick a
+    # specific result out of the list and read it. That is worth a round-trip
+    # only after the cheap repairs have failed, and only if the clock allows.
+    if verdict != "ok" and (deadline is None or time.monotonic() < deadline):
         try:
             await _model_rounds(
                 message, model_name, results, read_pages, sources,
@@ -374,10 +529,18 @@ async def gather(
         "lists every version is not a claim that the last row has shipped. If a "
         "source is about a different version or product than the one asked "
         "about, ignore it.",
-        "",
-        "Search results:",
-        _fmt_results(results),
     ]
+    if verdict != "ok":
+        # Say so rather than let a thin set read as a complete one. A model
+        # handed weak sources with no warning states them as fact; told the
+        # search struggled, it hedges in the one place hedging is correct.
+        parts += [
+            "",
+            "The search did not find a clear answer — these are the best pages "
+            "it could reach. Say plainly what they do and do not establish "
+            "rather than filling the gap.",
+        ]
+    parts += ["", "Search results:", _fmt_results(results)]
     for page in read_pages:
         parts.append("")
         parts.append(f"--- {page['url']} ---")
@@ -419,10 +582,17 @@ async def maybe_inject_reach(request, owui_body: dict, user_id: int | None = Non
         model_name = str(owui_body.get("model") or "")
         pool = getattr(request.app.state, "pg_pool", None)
         previous = _previous_user_text(messages, idx)
-        decision = reach_gate.verdict(message)
+        # The Force Web Search toggle in the + menu. When it is on the gate has
+        # nothing left to decide — the user has already answered the only
+        # question it asks — so the classifier is skipped entirely rather than
+        # given a chance to overrule them.
+        forced = _forced_search(owui_body)
+        decision = "yes" if forced else reach_gate.verdict(message)
         query = ""
 
-        if decision == "maybe":
+        if forced:
+            pass
+        elif decision == "maybe":
             # The regex genuinely cannot call this one — a plain lowercase
             # question with no capitalised name and no version number, like
             # "who is the ceo of anthropic". One short call decides it and
@@ -444,13 +614,22 @@ async def maybe_inject_reach(request, owui_body: dict, user_id: int | None = Non
         if not query:
             query = reach_gate.fallback_query(message, previous)
         logger.info(
-            "chat_reach: gate=%s query=%r (turn=%r)", decision, query[:80], message[:60]
+            "chat_reach: gate=%s%s query=%r (turn=%r)",
+            decision, " (forced)" if forced else "", query[:80], message[:60],
         )
 
+        budget = _FORCED_BUDGET_S if forced else _TOTAL_BUDGET_S
         try:
             found = await asyncio.wait_for(
-                gather(message, model_name, pool=pool, user_id=user_id, query=query),
-                timeout=_TOTAL_BUDGET_S,
+                gather(
+                    message, model_name, pool=pool, user_id=user_id, query=query,
+                    forced=forced, deadline=time.monotonic() + budget,
+                ),
+                # A backstop, not the budget. gather() watches the deadline
+                # between rounds and returns what it has; this only fires if a
+                # single round hangs past everything below it, and unlike the
+                # deadline it costs us every source already gathered.
+                timeout=budget + 15.0,
             )
         except asyncio.TimeoutError:
             # Answer ungrounded rather than leave the user watching a dead composer.
@@ -478,6 +657,18 @@ async def maybe_inject_reach(request, owui_body: dict, user_id: int | None = Non
         )
     except Exception:
         logger.warning("chat_reach: injection failed; answering ungrounded", exc_info=True)
+
+
+def _forced_search(owui_body: dict) -> bool:
+    """Did the user turn on Force Web Search for this turn?
+
+    The frontend has always sent ``features.web_search``; nothing on this side
+    read it, so the toggle lit up and changed nothing. ``translate`` strips the
+    whole ``features`` block before the body reaches a provider, which is why
+    this has to be read here, while the OWUI shape is still intact.
+    """
+    features = owui_body.get("features")
+    return bool(isinstance(features, dict) and features.get("web_search"))
 
 
 def _previous_user_text(messages: list, idx: int) -> str:

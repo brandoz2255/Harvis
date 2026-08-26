@@ -336,6 +336,210 @@ def looks_relevant(query: str, results: list[dict]) -> bool:
     return hits / len(wanted) >= 0.34
 
 
+# ── Query repair ─────────────────────────────────────────────────────────────
+# The corrective half of the loop in ``chat_reach``: when a search comes back
+# empty or off-topic, these say what to type instead. Deterministic first for
+# the same reason the search itself is — a rewrite that needs no model works on
+# every lane, and costs nothing to try before spending a round-trip.
+
+def page_coverage(query: str, pages: list[dict]) -> float:
+    """Fraction of the query's content words that appear in the fetched text.
+
+    ``looks_relevant`` grades *snippets*, which a search engine wrote to look
+    like a match. This grades what the page actually says, which is the thing
+    the answer will be built from. A page that ranked first and then turns out
+    to be a listing, a paywall stub, or a cookie wall scores near zero here and
+    near one there.
+    """
+    wanted = set(_content_words(query))
+    if not wanted or not pages:
+        return 0.0
+    haystack = " ".join((p.get("text") or "") for p in pages).lower()
+    if not haystack.strip():
+        return 0.0
+    return sum(1 for w in wanted if w in haystack) / len(wanted)
+
+
+def _distinctive(query: str, n: int = 2) -> list[str]:
+    """The ``n`` words that make this query specific rather than generic.
+
+    Length as a proxy for specificity — the same proxy ``broader_query`` uses,
+    and for the same reason: with no corpus to count against, the long words in
+    a query are usually the product names and technical terms while the short
+    ones are connective tissue. It is only a tie-breaker. It is NOT how the
+    grader decides what matters — ``missing_terms`` does that, because length
+    gets this wrong in exactly the case that matters most: a made-up eight-letter
+    product name ranks below the word "configuration".
+    """
+    words = _content_words(query)
+    return sorted(sorted(set(words), key=words.index), key=len, reverse=True)[:n]
+
+
+def missing_terms(query: str, results: list[dict], pages: list[dict]) -> list[str]:
+    """Query words that appear NOWHERE in what the search came back with.
+
+    This is the grader's real signal, and it comes free: the search engine has
+    already told us which words it could match. A word that survives ranking,
+    five titles, five snippets and every page fetched is a word nothing on the
+    web associates with this subject — which means the search found something
+    else, no matter how relevant the snippets look.
+
+    Measured on live searches: three genuinely answerable queries returned an
+    empty list here and 1.00 page coverage, while two queries carrying an
+    invented product name returned the invented name and scored 0.50–0.60. That
+    gap is the whole check. Coverage alone graded both sides the same way,
+    because "gateway", "policy" and "configuration" are on every page ever
+    written and the two words naming the subject were the two that were gone.
+    """
+    words = list(dict.fromkeys(_content_words(query)))
+    if not words:
+        return []
+    haystack = " ".join(
+        f"{r.get('title', '')} {r.get('snippet', '')} {r.get('url', '')}"
+        for r in results
+    )
+    haystack += " " + " ".join((p.get("text") or "") for p in pages)
+    haystack = haystack.lower()
+    if not haystack.strip():
+        return []   # nothing fetched at all is "empty", judged elsewhere
+    return [w for w in words if w not in haystack]
+
+
+def narrower_query(query: str, message: str = "", focus: str = "") -> str | None:
+    """Pin the search to the entity that was actually asked about, or ``None``.
+
+    For the "readable but about nothing" failure. A bare word sequence lets the
+    engine match any of the words; quoting the distinguishing phrase makes it
+    match the thing. Order of preference is how specific each signal is: the
+    ``focus`` word the grader saw the engine drop, then an explicitly quoted
+    phrase, then a version-bearing token, then a run of proper nouns. Returns
+    ``None`` when there is no such entity, or when the query
+    already quotes one — repeating a rewrite that has already been tried is how
+    a self-correcting loop turns into a stuck one.
+    """
+    if '"' in query:
+        return None
+    source = f"{query} {message}".strip()
+    entity = ""
+    if focus:
+        # The grader already found the word the engine dropped. Quoting exactly
+        # that is a better repair than re-deriving a guess from the phrasing —
+        # and when the quoted search then comes back empty, that is the honest
+        # answer to the question, not a failure of the loop.
+        for m in re.finditer(rf"\b\S*{re.escape(focus)}\S*\b", source, re.IGNORECASE):
+            entity = m.group(0).strip(".,:;!?")
+            break
+    quoted = _QUOTED_RE.search(source) if not entity else None
+    if quoted:
+        entity = quoted.group(1).strip()
+    if not entity:
+        versioned = _VERSIONED_RE.search(source)
+        if versioned:
+            entity = versioned.group(0).strip()
+    if not entity:
+        proper = _PROPER_RE.search(source)
+        if proper:
+            entity = proper.group(0).strip()
+    if not entity or len(entity) < 3:
+        return None
+    rest = [w for w in _content_words(query) if w not in entity.lower()]
+    return f'"{entity}" {" ".join(rest[:6])}'.strip()[:300]
+
+
+def broader_query(query: str) -> str | None:
+    """Drop the narrowest terms, or ``None`` when there is nothing left to drop.
+
+    For the opposite failure: zero results, which usually means the query
+    carried a phrase no page contains verbatim. Longer words are the specific
+    ones — a model number, a full product name — so keeping those and dropping
+    the short connective ones widens the net without losing the subject.
+    """
+    words = _content_words(query)
+    if len(words) <= 3:
+        return None
+    kept = sorted(_distinctive(query, 3), key=words.index)
+    out = " ".join(kept)
+    return out if out and out != query.strip().lower() else None
+
+
+_REFINE_SYSTEM = (
+    "You repair failing web searches. You are given the user's question, the "
+    "queries already tried, and the titles those queries returned. The results "
+    "did not answer the question.\n"
+    "Write ONE different query that would. Change the terms — do not reword the "
+    "same search. Use the names, versions and technical terms a page that "
+    "answers this would actually contain.\n"
+    'Reply with JSON only, no prose: {"query": "..."}'
+)
+
+
+def _parse_refine(raw: str) -> str:
+    text = re.sub(r"<think>.*?</think>", " ", raw or "", flags=re.DOTALL | re.IGNORECASE)
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        return ""
+    try:
+        data = json.loads(text[start:end + 1])
+    except Exception:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    return str(data.get("query") or "").strip()[:300]
+
+
+async def refine_query(
+    message: str,
+    tried: list[str],
+    results: list[dict],
+    model_name: str,
+    *,
+    pool=None,
+    user_id: int | None = None,
+    timeout: float = 20.0,
+) -> str:
+    """A model-written replacement query, or ``""`` when unavailable.
+
+    Only reached when both deterministic rewrites declined, so the cost is paid
+    on the turns that actually need it. Every failure mode — no route, a
+    timeout, an unparsable reply, a query the loop has already run — comes back
+    as ``""`` and ends the loop with whatever it has, which is never worse than
+    the one-shot search this replaced.
+    """
+    model = classifier_model(model_name)
+    if not model:
+        return ""
+    seen = ", ".join(repr(q) for q in tried[-3:])
+    titles = "\n".join(
+        f"- {(r.get('title') or r.get('url') or '')[:120]}" for r in results[:6]
+    ) or "(no results at all)"
+    try:
+        from workspace.orchestration.model_router import ModelRouter
+
+        msg = await ModelRouter().complete(
+            model_name=model,
+            messages=[
+                {"role": "system", "content": _REFINE_SYSTEM},
+                {"role": "user", "content": (
+                    f"Question: {message.strip()[:600]}\n"
+                    f"Queries already tried: {seen}\n"
+                    f"Titles they returned:\n{titles}"
+                )},
+            ],
+            temperature=0.2,
+            max_tokens=600,
+            timeout=timeout,
+            pool=pool,
+            user_id=user_id,
+        )
+    except Exception:
+        logger.info("reach_gate: refine unavailable for %r", message[:60], exc_info=True)
+        return ""
+    out = _parse_refine(str(msg.get("content") or ""))
+    if out and out.strip().lower() in {q.strip().lower() for q in tried}:
+        return ""
+    return out
+
+
 # ── Hedge detection ──────────────────────────────────────────────────────────
 # Only KNOWLEDGE hedges. "I don't have access to your files" is a capability
 # statement and searching the web for it would be nonsense, so the patterns all
