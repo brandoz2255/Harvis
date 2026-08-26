@@ -45,9 +45,9 @@
 						<span class="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/5 text-blue-600/80 dark:text-blue-300/70">{CAPABILITY_LABEL[c]}</span>
 					{/each}
 					{#if def.usedBy?.length}
-						<span class="text-[10px] text-gray-400">Used by {def.usedBy.map((s) => SURFACE_LABEL[s]).join(', ')}</span>
+						<span class="text-[10px] text-gray-500 dark:text-gray-400">Used by {def.usedBy.map((s) => SURFACE_LABEL[s]).join(', ')}</span>
 					{/if}
-					<span class="text-[10px] text-gray-400">{formatSourceLine(def)}</span>
+					<span class="text-[10px] text-gray-500 dark:text-gray-400">{formatSourceLine(def)}</span>
 				</div>
 				{#if def.runtimeNote}
 					<span class="block text-[10px] text-amber-500/80 mt-1">{def.runtimeNote}</span>

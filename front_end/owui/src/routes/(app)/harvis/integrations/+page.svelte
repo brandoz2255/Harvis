@@ -265,7 +265,7 @@
 	<div class="max-w-5xl mx-auto px-5 py-6 space-y-5">
 		<!-- header -->
 		<header>
-			<button class="text-xs text-gray-400 hover:text-gray-600 dark:hover:text-gray-200" on:click={backToChat}>
+			<button class="text-xs text-gray-500 dark:text-gray-400 hover:text-gray-600 dark:hover:text-gray-200" on:click={backToChat}>
 				← {$i18n.t('Back to chat')}
 			</button>
 			<div class="flex items-end justify-between gap-3 mt-2 flex-wrap">
@@ -277,7 +277,7 @@
 				</div>
 				<div class="flex items-center gap-3">
 					<!-- live indicator -->
-					<span class="inline-flex items-center gap-1.5 text-[11px] text-gray-400">
+					<span class="inline-flex items-center gap-1.5 text-[11px] text-gray-500 dark:text-gray-400">
 						<span
 							class="size-1.5 rounded-full {checking ? 'bg-blue-500 animate-pulse' : 'bg-green-500'}"
 						></span>
@@ -302,7 +302,7 @@
 			<!-- page-level search: the primary way to find something in a long directory -->
 			<div class="relative mt-4">
 				<svg
-					class="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-gray-400 pointer-events-none"
+					class="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-gray-500 dark:text-gray-400 pointer-events-none"
 					viewBox="0 0 24 24"
 					fill="none"
 					stroke="currentColor"
@@ -316,11 +316,11 @@
 					type="text"
 					placeholder={$i18n.t('Search engines and connectors')}
 					aria-label={$i18n.t('Search engines and connectors')}
-					class="w-full text-sm rounded-xl border border-gray-200 dark:border-white/10 bg-gray-50 dark:bg-[#0c111d] pl-9 pr-9 py-2.5 text-gray-700 dark:text-gray-200 placeholder:text-gray-400 outline-none focus:border-blue-500/40"
+					class="w-full text-sm rounded-xl border border-gray-200 dark:border-white/10 bg-gray-50 dark:bg-[#0c111d] pl-9 pr-9 py-2.5 text-gray-700 dark:text-gray-200 placeholder:text-gray-500 dark:placeholder:text-gray-400 outline-none focus:border-blue-500/40"
 				/>
 				{#if q}
 					<button
-						class="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 rounded-lg text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 transition"
+						class="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 rounded-lg text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 transition"
 						title={$i18n.t('Clear')}
 						aria-label={$i18n.t('Clear')}
 						on:click={() => (q = '')}
@@ -408,7 +408,7 @@
 								<h2 class="text-base font-semibold text-gray-800 dark:text-gray-100">
 									{$i18n.t(SECTION_LABEL[s])}
 								</h2>
-								<p class="text-xs text-gray-400 dark:text-gray-500">{$i18n.t(SECTION_HINT[s])}</p>
+								<p class="text-xs text-gray-500 dark:text-gray-400">{$i18n.t(SECTION_HINT[s])}</p>
 							</div>
 							<svg
 								viewBox="0 0 24 24"
@@ -417,7 +417,7 @@
 								stroke-width="2"
 								stroke-linecap="round"
 								stroke-linejoin="round"
-								class="size-4 shrink-0 text-gray-400 group-hover:text-gray-600 dark:group-hover:text-gray-300 transition-transform {sectionOpen(
+								class="size-4 shrink-0 text-gray-500 dark:text-gray-400 group-hover:text-gray-600 dark:group-hover:text-gray-300 transition-transform {sectionOpen(
 									s
 								)
 									? 'rotate-0'
@@ -441,10 +441,10 @@
 						{:else if s === 'ssh_remote'}
 							<!-- SSH ships scaffold-only (HARVIS_SSH_ENABLED off) — placeholder, no functionality -->
 							<div class="rounded-xl border border-dashed border-gray-200 dark:border-gray-800 px-4 py-3 flex items-center gap-3">
-								<svg class="size-4 text-gray-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" /><path d="m6 8 3 2.5L6 13M11 13h5" /></svg>
+								<svg class="size-4 text-gray-500 dark:text-gray-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" /><path d="m6 8 3 2.5L6 13M11 13h5" /></svg>
 								<div class="min-w-0">
 									<div class="text-sm text-gray-600 dark:text-gray-300">{$i18n.t('SSH remote workspaces')}</div>
-									<div class="text-[11px] text-gray-400">{$i18n.t('Coming soon — pending security review. Connection manager, folder mounts, and remote terminal are gated behind explicit approval.')}</div>
+									<div class="text-[11px] text-gray-500 dark:text-gray-400">{$i18n.t('Coming soon — pending security review. Connection manager, folder mounts, and remote terminal are gated behind explicit approval.')}</div>
 								</div>
 							</div>
 						{/if}
@@ -463,7 +463,7 @@
 				{/each}
 			</div>
 			{#if !flatCards.length}
-				<div class="text-center text-sm text-gray-400 py-12">{$i18n.t('Nothing here.')}</div>
+				<div class="text-center text-sm text-gray-500 dark:text-gray-400 py-12">{$i18n.t('Nothing here.')}</div>
 			{/if}
 		{/if}
 	</div>

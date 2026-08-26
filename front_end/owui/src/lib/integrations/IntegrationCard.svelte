@@ -35,7 +35,7 @@
 				</span>
 				<div class="min-w-0">
 					<div class="text-sm font-semibold text-gray-800 dark:text-gray-100 truncate">{def.name}</div>
-					<div class="text-[10px] uppercase tracking-wide text-gray-400">{CATEGORY_LABEL[def.category]}</div>
+					<div class="text-[10px] uppercase tracking-wide text-gray-500 dark:text-gray-400">{CATEGORY_LABEL[def.category]}</div>
 				</div>
 			</div>
 			<StatusBadge status={def.status} />
@@ -49,9 +49,9 @@
 			</div>
 		{/if}
 		{#if def.usedBy?.length}
-			<span class="text-[10px] text-gray-400">Used by {def.usedBy.map((s) => SURFACE_LABEL[s]).join(', ')}</span>
+			<span class="text-[10px] text-gray-500 dark:text-gray-400">Used by {def.usedBy.map((s) => SURFACE_LABEL[s]).join(', ')}</span>
 		{/if}
-		<span class="text-[10px] text-gray-400">{formatSourceLine(def)}</span>
+		<span class="text-[10px] text-gray-500 dark:text-gray-400">{formatSourceLine(def)}</span>
 		{#if def.runtimeNote}<span class="text-[10px] text-amber-500/80 line-clamp-1">{def.runtimeNote}</span>{/if}
 	</button>
 

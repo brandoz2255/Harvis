@@ -82,7 +82,7 @@
 			{#if !pack}
 				<button
 					type="button"
-					class="p-1.5 rounded-lg text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-150 dark:hover:bg-gray-800 transition"
+					class="p-1.5 rounded-lg text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-150 dark:hover:bg-gray-800 transition"
 					title={$i18n.t('Recent activity')}
 					aria-label={$i18n.t('Recent activity')}
 					on:click={() => dispatch('logs', def)}
@@ -93,7 +93,7 @@
 			{#if canSetDefault && !isDef}
 				<button
 					type="button"
-					class="p-1.5 rounded-lg text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-gray-150 dark:hover:bg-gray-800 transition"
+					class="p-1.5 rounded-lg text-gray-500 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-gray-150 dark:hover:bg-gray-800 transition"
 					title={defaultLabelFor(def)}
 					aria-label={defaultLabelFor(def)}
 					on:click={() => dispatch('setDefault', def)}
@@ -109,7 +109,7 @@
 				<span class="hidden sm:inline">{$i18n.t(meta.label)}</span>
 			</span>
 		{:else}
-			<span class="text-xs text-gray-400">{$i18n.t('Recipe')}</span>
+			<span class="text-xs text-gray-500 dark:text-gray-400">{$i18n.t('Recipe')}</span>
 		{/if}
 
 		<svg
@@ -119,7 +119,7 @@
 			stroke-width="2"
 			stroke-linecap="round"
 			stroke-linejoin="round"
-			class="size-4 text-gray-300 dark:text-gray-600 group-hover:text-gray-500 dark:group-hover:text-gray-400 transition"
+			class="size-4 text-gray-400 dark:text-gray-500 group-hover:text-gray-600 dark:group-hover:text-gray-300 transition"
 			aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg
 		>
 	</div>

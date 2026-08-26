@@ -219,7 +219,7 @@
 					{$i18n.t('Imported')} {importDone.files} {$i18n.t('files')}. {$i18n.t('Previous profile backed up.')} {$i18n.t('The local Hermes sidecar now runs with your profile.')}
 				</p>
 			{/if}
-			<p class="text-[10px] text-gray-400 dark:text-gray-500 leading-relaxed">
+			<p class="text-[10px] text-gray-500 dark:text-gray-400 leading-relaxed">
 				{$i18n.t('Only folders under the server import root can be imported. Symlinks are skipped. Files that look like secrets/credentials are flagged but imported as-is.')}
 			</p>
 		</div>
@@ -253,7 +253,7 @@
 				{:else if ext?.url}
 					<span class="text-amber-500">● {$i18n.t('Saved · not verified')}</span>
 				{:else}
-					<span class="text-gray-400">{$i18n.t('Not connected')}</span>
+					<span class="text-gray-500 dark:text-gray-400">{$i18n.t('Not connected')}</span>
 				{/if}
 			</div>
 			<div class="flex items-center gap-2">
@@ -310,7 +310,7 @@
 					<option value="">{$i18n.t('Auto (recommended installed model)')}</option>
 					{#each installedModels as m}<option value={m}>{m}</option>{/each}
 				</select>
-				<p class="text-[11px] text-gray-400 dark:text-gray-500 leading-relaxed">
+				<p class="text-[11px] text-gray-500 dark:text-gray-400 leading-relaxed">
 					{$i18n.t('Smaller models are faster but may be less reliable with tools. Larger models may be slower but better for complex tasks.')}
 				</p>
 			</div>

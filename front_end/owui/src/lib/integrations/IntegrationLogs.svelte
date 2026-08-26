@@ -76,7 +76,7 @@
 				<div class="text-sm font-semibold text-gray-800 dark:text-gray-100 truncate">
 					{name || integrationId} — {$i18n.t('Recent activity')}
 				</div>
-				<div class="text-[11px] text-gray-400">{$i18n.t('Read-only · secrets redacted server-side')}</div>
+				<div class="text-[11px] text-gray-500 dark:text-gray-400">{$i18n.t('Read-only · secrets redacted server-side')}</div>
 			</div>
 			<button
 				class="ml-auto shrink-0 text-xs px-2 py-1 rounded-lg border border-gray-200 dark:border-gray-800 text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 transition disabled:opacity-50"
@@ -84,7 +84,7 @@
 				on:click={load}>{loading ? $i18n.t('Loading…') : $i18n.t('Refresh')}</button
 			>
 			<button
-				class="shrink-0 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 p-1"
+				class="shrink-0 text-gray-500 dark:text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 p-1"
 				aria-label={$i18n.t('Close')}
 				on:click={() => (show = false)}
 			>
@@ -95,9 +95,9 @@
 			{#if error}
 				<div class="text-xs text-red-500 py-2">{error}</div>
 			{:else if loading && !entries.length}
-				<div class="text-xs text-gray-400 py-2">{$i18n.t('Loading…')}</div>
+				<div class="text-xs text-gray-500 dark:text-gray-400 py-2">{$i18n.t('Loading…')}</div>
 			{:else if !entries.length}
-				<div class="text-xs text-gray-400 py-6 text-center">
+				<div class="text-xs text-gray-500 dark:text-gray-400 py-6 text-center">
 					{$i18n.t('No recent activity for this integration.')}
 				</div>
 			{:else}
@@ -110,7 +110,7 @@
 									<span class="text-xs font-medium text-gray-800 dark:text-gray-100 truncate">
 										{e.title || e.kind || $i18n.t('Event')}
 									</span>
-									<span class="ml-auto text-[10px] text-gray-400 tabular-nums shrink-0">{fmtTs(e.ts)}</span>
+									<span class="ml-auto text-[10px] text-gray-500 dark:text-gray-400 tabular-nums shrink-0">{fmtTs(e.ts)}</span>
 								</div>
 								{#if e.detail}
 									<div class="text-[11px] text-gray-500 leading-snug break-words">{e.detail}</div>

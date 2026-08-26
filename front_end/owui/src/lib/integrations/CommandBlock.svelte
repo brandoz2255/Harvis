@@ -30,7 +30,7 @@
 			<code class="flex-1 min-w-0 truncate text-[11px] font-mono text-gray-700 dark:text-gray-300">{command}</code>
 			<button
 				type="button"
-				class="shrink-0 text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 transition"
+				class="shrink-0 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 transition"
 				on:click={copy}
 				title={$i18n.t('Copy')}
 				aria-label={$i18n.t('Copy')}
