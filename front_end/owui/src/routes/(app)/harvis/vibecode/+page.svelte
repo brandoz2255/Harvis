@@ -2348,7 +2348,7 @@
 						<!-- Engine pill removed — the Build engine now follows the model dropdown
 						     (see the selectedEngine reactive); the model IS the single control. -->
 						{#if hermesNeedsModel}
-							<span class="text-[11px] text-amber-400/80"
+							<span class="text-[11px] text-amber-700 dark:text-amber-400/80"
 								>{$i18n.t('Pull a Hermes model to enable the Hermes engine.')}</span
 							>
 						{/if}

@@ -109,7 +109,7 @@
 	});
 </script>
 
-<div class="h-full flex flex-col min-h-0">
+<div class="dark-surface h-full flex flex-col min-h-0">
 	<!-- top tab bar: Overview + one tab per sub-agent (sift through every agent's result);
 	     ✕ closes the inspector and brings the workspace dock back. -->
 	<div class="shrink-0 flex items-center gap-1 border-b border-white/8 bg-[#080c16] px-2 py-1.5 overflow-x-auto">

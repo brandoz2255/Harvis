@@ -111,7 +111,7 @@
 	</div>
 {:else if kind === 'image'}
 	<div
-		class="flex items-center justify-center rounded-lg border border-gray-100 dark:border-gray-850 bg-[#0b1220] p-2 overflow-auto {fill
+		class="dark-surface flex items-center justify-center rounded-lg border border-gray-100 dark:border-gray-850 bg-[#0b1220] p-2 overflow-auto {fill
 			? 'h-full'
 			: 'max-h-96'}"
 	>

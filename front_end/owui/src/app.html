@@ -72,9 +72,8 @@
 				if (FONT[t]) document.documentElement.style.setProperty('--theme-font-body', FONT[t]);
 				metaThemeColorTag.setAttribute('content', t === 'system' ? (prefersDarkTheme ? '#00030b' : '#ffffff') : (META[t] || (base === 'dark' ? '#00030b' : '#ffffff')));
 
-				const preloadHref = document.documentElement.classList.contains('dark')
-					? '/static/harvis-logo.svg'
-					: '/static/harvis-logo.svg';
+				// one logo, both themes — its palette works on either ground
+				const preloadHref = '/static/harvis-logo.svg';
 				const preload = document.createElement('link');
 				preload.rel = 'preload';
 				preload.as = 'image';
@@ -95,15 +94,13 @@
 						}
 					}
 				});
-				const isDarkMode = document.documentElement.classList.contains('dark');
-
 				const logo = document.createElement('img');
 				logo.id = 'logo';
 				logo.style =
 					'position: absolute; width: auto; height: 6rem; top: 44%; left: 50%; transform: translateX(-50%); display:block;';
 				logo.loading = 'eager';
 				logo.fetchPriority = 'high';
-				logo.src = isDarkMode ? '/static/harvis-logo.svg' : '/static/harvis-logo.svg';
+				logo.src = '/static/harvis-logo.svg';
 
 				document.addEventListener('DOMContentLoaded', function () {
 					const splash = document.getElementById('splash-screen');

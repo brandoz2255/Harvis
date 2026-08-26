@@ -925,34 +925,143 @@ body {
    Overriding the BARE class therefore touches only the light-mode value and
    leaves dark mode, hover states, and input placeholders exactly as authored.
 
-   Escape hatch: a few surfaces genuinely DO want pale text in light mode —
-   terminal-style log panes sit on `bg-black/40` in both themes, so darkening
-   them would be the bug rather than the fix. Those opt out with `.log-pane`
-   (a real class, not Tailwind's important modifier, whose prefix/suffix form
-   changed between Tailwind 3 and 4 and would silently no-op if written the
-   old way). */
+   Escape hatch: some surfaces genuinely DO want pale text in light mode,
+   because they paint their own near-black ground and keep it in both themes —
+   a terminal/log pane, a run's stdout block, the Adaptive Space HUD and its
+   modals. Darkening those is the bug, not the fix, so they opt out with
+   `.log-pane` or `.dark-surface` and every selector below skips them. Tag the
+   element that OWNS the dark background, not the text: the `:not()` skips that
+   element and everything inside it. (Both are real classes, not Tailwind's
+   important modifier, whose prefix/suffix form changed between Tailwind 3 and 4
+   and would silently no-op if written the old way.) */
 html:not(.dark) {
-	.text-gray-400,
-	.text-gray-300,
-	.text-gray-200 {
+	.text-gray-400:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.text-gray-300:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.text-gray-200:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)) {
 		color: #6b7280; /* gray-500 — 4.83:1 on white, the lightest AA-passing step */
 	}
 
 	/* Dark-first hovers move the WRONG way in light mode: the text gets lighter
 	   on hover, so the thing you are pointing at is the hardest to read. Land
 	   them on a darker step than the resting colour above. */
-	.hover\:text-gray-400:hover,
-	.hover\:text-gray-300:hover,
-	.hover\:text-gray-200:hover {
+	.hover\:text-gray-400:hover:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.hover\:text-gray-300:hover:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.hover\:text-gray-200:hover:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)) {
 		color: #374151; /* gray-700 — clear "this is interactive" darkening */
 	}
 }
 
-/* Opt-out for surfaces that are dark in BOTH themes (terminal/log panes). */
-html:not(.dark) .log-pane,
-html:not(.dark) .log-pane .text-gray-400,
-html:not(.dark) .log-pane .text-gray-300 {
-	color: #d1d5db; /* gray-300 — correct against the pane's own black ground */
+/* The same problem one layer up: accent text. Every tinted label in
+   agent-studio was picked at the -400/-300/-200 step to glow on a near-black
+   ground. Measured on its own light tile those land between 1.4:1 and 2.6:1 —
+   amber-300 and lime-400 are effectively invisible. The -700 step of the same
+   hue clears 4.6:1 on that tile across all seventeen hues, which is why every
+   rule lands there rather than on a per-hue guess. Hue is preserved, so nothing
+   changes identity: an amber warning stays amber, it just stops being a
+   rumour. */
+html:not(.dark) {
+	.text-red-400:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.text-red-300:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.text-red-200:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)) {
+		color: #b91c1c; /* red-700 */
+	}
+
+	.text-orange-400:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.text-orange-300:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.text-orange-200:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)) {
+		color: #c2410c; /* orange-700 */
+	}
+
+	.text-amber-400:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.text-amber-300:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.text-amber-200:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)) {
+		color: #b45309; /* amber-700 */
+	}
+
+	.text-yellow-400:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.text-yellow-300:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.text-yellow-200:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)) {
+		color: #a16207; /* yellow-700 */
+	}
+
+	.text-lime-400:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.text-lime-300:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.text-lime-200:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)) {
+		color: #4d7c0f; /* lime-700 */
+	}
+
+	.text-green-400:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.text-green-300:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.text-green-200:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)) {
+		color: #15803d; /* green-700 */
+	}
+
+	.text-emerald-400:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.text-emerald-300:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.text-emerald-200:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)) {
+		color: #047857; /* emerald-700 */
+	}
+
+	.text-teal-400:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.text-teal-300:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.text-teal-200:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)) {
+		color: #0f766e; /* teal-700 */
+	}
+
+	.text-cyan-400:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.text-cyan-300:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.text-cyan-200:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)) {
+		color: #0e7490; /* cyan-700 */
+	}
+
+	.text-sky-400:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.text-sky-300:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.text-sky-200:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)) {
+		color: #0369a1; /* sky-700 */
+	}
+
+	.text-blue-400:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.text-blue-300:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.text-blue-200:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)) {
+		color: #1d4ed8; /* blue-700 */
+	}
+
+	.text-indigo-400:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.text-indigo-300:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.text-indigo-200:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)) {
+		color: #4338ca; /* indigo-700 */
+	}
+
+	.text-violet-400:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.text-violet-300:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.text-violet-200:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)) {
+		color: #6d28d9; /* violet-700 */
+	}
+
+	.text-purple-400:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.text-purple-300:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.text-purple-200:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)) {
+		color: #7e22ce; /* purple-700 */
+	}
+
+	.text-fuchsia-400:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.text-fuchsia-300:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.text-fuchsia-200:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)) {
+		color: #a21caf; /* fuchsia-700 */
+	}
+
+	.text-pink-400:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.text-pink-300:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.text-pink-200:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)) {
+		color: #be185d; /* pink-700 */
+	}
+
+	.text-rose-400:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.text-rose-300:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
+	.text-rose-200:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)) {
+		color: #be123c; /* rose-700 */
+	}
+}
 
 /* A sandbox file path in the prose. The file lives in a container, so the path is not
    something the user can open — clicking it is the only way in. It has to look like a

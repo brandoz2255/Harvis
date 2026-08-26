@@ -139,9 +139,14 @@
 			icon: `<svg xmlns="http://www.w3.org/2000/svg" ${_capAttrs}><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>`
 		},
 		{
-			title: 'Use Cookbook',
-			desc: 'Find the local models your hardware can actually run, then pull them.',
-			icon: `<svg xmlns="http://www.w3.org/2000/svg" ${_capAttrs}><path d="M12 7v14M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg>`
+			// Named for the job, not the surface. "Use Cookbook" + an open book read as a
+			// recipe shelf of ready-made workflows, which is not what this is — it measures
+			// your GPU and RAM with llmfit and ranks local models by what will actually run.
+			// The surface's own name still appears in the sentence so it stays findable in
+			// the sidebar, and the icon is the same cube Cookbook itself uses for a model.
+			title: 'Fit Models to Your Hardware',
+			desc: 'Cookbook ranks local models against your GPU and RAM, then pulls the ones that fit.',
+			icon: `<svg xmlns="http://www.w3.org/2000/svg" ${_capAttrs}><path d="m12 2 9 5v10l-9 5-9-5V7z"/><path d="m3 7 9 5 9-5M12 12v10"/></svg>`
 		},
 		{
 			title: 'Generate Images',

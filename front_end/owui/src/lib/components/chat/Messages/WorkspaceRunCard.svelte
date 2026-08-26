@@ -850,7 +850,7 @@
 		></div>
 		<div class="absolute inset-0 flex items-center justify-center p-4 pointer-events-none">
 			<div
-				class="pointer-events-auto w-full max-w-5xl h-[85vh] flex flex-col rounded-2xl border border-white/10 bg-[#0c111d] shadow-2xl shadow-black/50 overflow-hidden"
+				class="dark-surface pointer-events-auto w-full max-w-5xl h-[85vh] flex flex-col rounded-2xl border border-white/10 bg-[#0c111d] shadow-2xl shadow-black/50 overflow-hidden"
 			>
 				<WorkflowInspector wsId={workspaceId} on:close={() => (showInspector = false)} />
 			</div>

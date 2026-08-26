@@ -342,7 +342,7 @@
 <!-- SHELL: rail · canvas · composer — one page, transforms in place.
      The app sidebar is an overlay; pages self-offset (vibecode/chat recipe). -->
 <div
-	class="w-full h-full flex text-gray-200 {$showSidebar
+	class="dark-surface w-full h-full flex text-gray-200 {$showSidebar
 		? 'md:max-w-[calc(100%-var(--sidebar-width))]'
 		: ''}"
 	style="background-color:#070b14;background-image:linear-gradient(rgba(56,189,248,0.04) 1px,transparent 1px),linear-gradient(90deg,rgba(56,189,248,0.04) 1px,transparent 1px);background-size:44px 44px;"
@@ -664,7 +664,7 @@
 <!-- Ambiguous shape → ONE focused question (chip answers + safe default; not a wizard) -->
 {#if askShape}
 	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" transition:fade={{ duration: 150 }}>
-		<div class="w-full max-w-md rounded-2xl bg-[#0c111d] border border-cyan-400/25 shadow-xl p-4 space-y-3">
+		<div class="dark-surface w-full max-w-md rounded-2xl bg-[#0c111d] border border-cyan-400/25 shadow-xl p-4 space-y-3">
 			<h3 class="text-sm font-semibold text-gray-100">{$i18n.t('What kind of task is this?')}</h3>
 			<p class="text-[11px] text-gray-500">
 				{$i18n.t('Harvis couldn’t infer the workspace shape from the description — pick one:')}
@@ -698,7 +698,7 @@
 <!-- Approval gate confirm (server enforces approved:true) -->
 {#if gateStep}
 	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" transition:fade={{ duration: 150 }}>
-		<div class="w-full max-w-md rounded-2xl bg-[#0c111d] border border-amber-400/30 shadow-xl p-4 space-y-3">
+		<div class="dark-surface w-full max-w-md rounded-2xl bg-[#0c111d] border border-amber-400/30 shadow-xl p-4 space-y-3">
 			<div class="flex items-center gap-2">
 				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="size-5 text-amber-300"><path d="M12 9v4m0 4h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" stroke-linecap="round" stroke-linejoin="round" /></svg>
 				<h3 class="text-sm font-semibold text-gray-100">{$i18n.t('Approve this step?')}</h3>

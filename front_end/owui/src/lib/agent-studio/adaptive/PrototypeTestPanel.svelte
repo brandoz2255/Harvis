@@ -328,7 +328,7 @@
 <!-- ONE focused question — the load is the primary driver; everything else has a safe default -->
 {#if popupOpen}
 	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" transition:fade={{ duration: 150 }}>
-		<div class="w-full max-w-md rounded-2xl bg-[#0c111d] border border-cyan-400/25 shadow-xl p-4 space-y-3">
+		<div class="dark-surface w-full max-w-md rounded-2xl bg-[#0c111d] border border-cyan-400/25 shadow-xl p-4 space-y-3">
 			<h3 class="text-sm font-semibold text-gray-100">{$i18n.t('What approximate weight should this hanger support?')}</h3>
 			<p class="text-[11px] text-gray-500">{$i18n.t('The load drives the stress calculation. Material and geometry start from safe defaults you can tune after.')}</p>
 			<div class="flex flex-wrap gap-1.5">

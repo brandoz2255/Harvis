@@ -203,7 +203,7 @@
 		{/if}
 	</button>
 
-	<div class="min-w-0 bg-[#0b0d10]">
+	<div class="dark-surface min-w-0 bg-[#0b0d10]">
 		<div
 			bind:this={terminalElement}
 			class="terminal-output relative max-h-[260px] min-h-[96px] overflow-y-auto overflow-x-hidden px-3.5 py-3 font-mono text-[12px] leading-5 text-gray-200 selection:bg-blue-500/35 sm:max-h-[380px] sm:px-4 sm:text-[13px]"
@@ -245,7 +245,7 @@
 	</div>
 
 	<div
-		class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 border-t border-gray-800 bg-[#0f1115] px-3.5 py-2 text-[11px] text-gray-400"
+		class="dark-surface flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 border-t border-gray-800 bg-[#0f1115] px-3.5 py-2 text-[11px] text-gray-400"
 	>
 		<span class="font-medium {statusMeta.text}">{completionLabel}</span>
 		{#if run.truncated}

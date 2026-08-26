@@ -244,7 +244,7 @@
 		{:else if b.kind === 'term'}
 			<!-- sandbox/terminal output row -->
 			<div
-				class="rounded-md bg-black/30 px-2 py-1.5 font-mono text-[11px] whitespace-pre-wrap break-words {b.stream ===
+				class="dark-surface rounded-md bg-black/30 px-2 py-1.5 font-mono text-[11px] whitespace-pre-wrap break-words {b.stream ===
 				'stderr'
 					? 'text-red-300'
 					: 'text-gray-300'}"
