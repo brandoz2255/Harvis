@@ -402,7 +402,7 @@ export const getSkillSyncPreview = async (token: string) => {
 
 	// Response: { flag, enabled, config_set, skills: { target_dir, items }, mcp, notes }
 	// notes includes the skipped-unverified summary when skills lack a 'supported' verdict
-	const res = await fetch(`${WEBUI_BASE_URL}/api/owui/openclaw/sync/preview`, {
+	const res = await fetch(`${WEBUI_BASE_URL}/api/owui/engine/sync/preview`, {
 		method: 'GET',
 		headers: {
 			Accept: 'application/json',
@@ -458,7 +458,7 @@ export const applySkillSync = async (token: string, override: boolean = false) =
 	// server-side sync flag is off. override=true includes skills without a
 	// 'supported' verdict (explicit human choice).
 	const res = await fetch(
-		`${WEBUI_BASE_URL}/api/owui/openclaw/sync/apply${override ? '?override=true' : ''}`,
+		`${WEBUI_BASE_URL}/api/owui/engine/sync/apply${override ? '?override=true' : ''}`,
 		{
 			method: 'POST',
 			headers: {

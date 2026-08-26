@@ -13,7 +13,6 @@
 	const ENGINES: { id: string; label: string }[] = [
 		{ id: '', label: 'Session default' },
 		{ id: 'native', label: 'Harvis native' },
-		{ id: 'opencode', label: 'OpenCode' },
 		{ id: 'codex', label: 'Codex' },
 		{ id: 'claude-code', label: 'Claude Code' },
 		{ id: 'hermes-agent', label: 'Hermes Agent' }

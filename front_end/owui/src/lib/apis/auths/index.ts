@@ -298,8 +298,9 @@ export const userSignUp = async (
 	const headers: Record<string, string> = {
 		'Content-Type': 'application/json'
 	};
-	// First-admin claim on a fresh instance requires X-Setup-Code matching
-	// HARVIS_SETUP_CODE (printed by ./install.sh / stored in .env).
+	// Optional. The first-admin claim is open unless the operator set
+	// HARVIS_SETUP_CODE, which the backend advertises as
+	// features.setup_code_required; the callers only pass a code when it does.
 	if (setupCode) {
 		headers['X-Setup-Code'] = setupCode;
 	}

@@ -58,10 +58,27 @@ async def probe_services(request: Request, user) -> tuple[dict, list]:
         services["ollama"] = {"status": "error"}
 
     # ── OpenClaw gateway health ──
+    # "Not deployed" and "deployed but broken" are different things and used to look
+    # identical: the core profile doesn't start harvis-openclaw at all, so a stock
+    # install showed a red "Error" on a service the user never asked for. A connect
+    # failure (no DNS entry, connection refused) means the container isn't running —
+    # that's `available`, with a line saying how to start it. `error` is reserved for
+    # a gateway that IS answering and answering badly.
     try:
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as hc:
             r = await hc.get(_openclaw_health_url())
-        services["openclaw"] = {"status": "ready" if r.status_code < 400 else "error"}
+        services["openclaw"] = (
+            {"status": "ready"}
+            if r.status_code < 400
+            else {"status": "error", "detail": f"Gateway returned HTTP {r.status_code}"}
+        )
+    except httpx.ConnectError:
+        services["openclaw"] = {
+            "status": "available",
+            "detail": "Not running — start it with: docker compose --profile engines up -d openclaw",
+        }
+    except httpx.TimeoutException:
+        services["openclaw"] = {"status": "error", "detail": "Gateway did not respond in 3s"}
     except Exception:
         services["openclaw"] = {"status": "error"}
 
@@ -144,7 +161,10 @@ async def probe_services(request: Request, user) -> tuple[dict, list]:
     # `connected` is an ADDITIVE signal the Integrations card reads for the chat-usable case.
     # Keyed by service_key so the capability mirror reads them directly.
     _engines = (
-        ("opencode", "HARVIS_OPENCODE_CONTAINER", "harvis-opencode", False),
+        # "opencode" is deliberately not probed: the sidecar still exists, but the
+        # engine is shelved and its storefront card was removed, so advertising a
+        # readiness state for it would put a lane back in the Build selector that
+        # nothing points at. Add the tuple back to un-shelve it.
         ("codex", "HARVIS_CODEX_CONTAINER", "harvis-codex", True),
         ("claude-code", "HARVIS_CLAUDE_CODE_CONTAINER", "harvis-claude-code", True),
     )

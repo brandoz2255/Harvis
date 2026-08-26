@@ -57,6 +57,13 @@ def add_persisted_admin_id(uid: int) -> None:
     _persisted_admin_ids.add(uid)
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = (os.getenv(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes", "on")
+
+
 def _admin_user_ids() -> set[int]:
     """User ids treated as OWUI ``admin`` (default: the first registrant)."""
     raw = os.getenv("HARVIS_OWUI_ADMIN_USER_IDS", "1")
@@ -97,7 +104,12 @@ def _default_permissions(role: str) -> dict:
             "tts": True,
         },
         "features": {
-            "web_search": False,
+            # Web search is gated TWICE — config.features.enable_web_search AND this
+            # per-user permission. Leaving this False kept the toggle hidden for every
+            # non-admin even with the server flag on. Searching the public web is not a
+            # privileged action here, so it follows the server flag; set
+            # HARVIS_OWUI_WEB_SEARCH=false to turn it off for everyone.
+            "web_search": _env_bool("HARVIS_OWUI_WEB_SEARCH", True),
             "image_generation": False,
             "code_interpreter": False,
         },

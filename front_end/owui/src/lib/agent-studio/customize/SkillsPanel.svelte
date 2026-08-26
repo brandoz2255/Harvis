@@ -1,5 +1,5 @@
 <script lang="ts">
-	// Skills panel — user skills CRUD + governance (Exec Core C2) + OpenClaw sync.
+	// Skills panel — user skills CRUD + governance (Exec Core C2) + engine sync.
 	// Extracted from Customize.svelte so the Settings modal, the Customize page
 	// and any future mount share ONE implementation. Skills → /api/v1/skills.
 	import { getContext, onMount } from 'svelte';
@@ -94,7 +94,7 @@
 		}
 	};
 
-	// ── Skill governance (Exec Core C2) — audit → human verdict → OpenClaw sync ──
+	// ── Skill governance (Exec Core C2) — audit → human verdict → engine sync ──
 	// Only a human 'supported' verdict lets a skill inject into chats / publish.
 	const VERDICTS = [
 		'supported',
@@ -177,7 +177,9 @@
 		}
 	};
 
-	// OpenClaw sync — dry-run preview, then an explicit apply (server-flag gated).
+	// Engine sync — dry-run preview, then an explicit apply (server-flag gated).
+	// Publishes to the SHARED engine skills tree, mounted into every engine sidecar
+	// (OpenClaw, Claude Code, Codex, Hermes) — not to OpenClaw alone as it once did.
 	let syncPreview: any = null;
 	let syncPreviewing = false;
 	let syncApplying = false;
@@ -222,12 +224,12 @@
 			const _s = _sk.filter((x) => x.status === 'skipped').length;
 			const _e = _sk.filter((x) => x.status === 'error').length;
 			if (_e > 0)
-				toast.error(`${_w} written · ${_s} skipped · ${_e} failed — check the OpenClaw skills mount.`);
+				toast.error(`${_w} written · ${_s} skipped · ${_e} failed — check the engine skills mount.`);
 			else if (_w === 0)
 				toast.warning(
 					`Nothing written — ${_s} skill(s) skipped (need a "supported" verdict, or HARVIS_OPENCLAW_SKILLS_DIR is unset).`
 				);
-			else toast.success(`Sync applied: ${_w} written · ${_s} skipped. Restart OpenClaw to load changes.`);
+			else toast.success(`Sync applied: ${_w} written · ${_s} skipped. Restart the engine sidecars to load changes.`);
 			if (!override) await previewSync(); // refresh the dry run (skip after override — it would contradict what was just written)
 			syncApplyResult = r; // surface exactly what the apply wrote/skipped
 		}
@@ -338,7 +340,7 @@
 								<input bind:value={verdictNotes} placeholder={$i18n.t('Notes (optional)')} class="flex-1 rounded-lg border border-gray-200 dark:border-gray-800 bg-transparent px-3 py-1.5 text-xs outline-none focus:border-blue-500" />
 								<button on:click={() => saveVerdict(s)} disabled={!verdictDraft || savingVerdict} class="rounded-lg bg-blue-600 text-white px-3 py-1.5 text-xs font-medium hover:bg-blue-700 disabled:opacity-40">{savingVerdict ? $i18n.t('Saving…') : $i18n.t('Record verdict')}</button>
 							</div>
-							<p class="text-[11px] text-gray-400">{$i18n.t('Only a "supported" verdict lets this skill inject into chats and publish to OpenClaw. Editing the skill body invalidates the verdict.')}</p>
+							<p class="text-[11px] text-gray-400">{$i18n.t('Only a "supported" verdict lets this skill inject into chats and publish to the engines. Editing the skill body invalidates the verdict.')}</p>
 						</div>
 					{/if}
 				</div>
@@ -355,20 +357,20 @@
 		<div class="text-xs text-gray-500 py-1">{$i18n.t('No skills yet. Create one to get started.')}</div>
 	{/if}
 
-	<!-- OpenClaw sync (C2): dry-run preview + explicit apply of human-verified skills -->
+	<!-- Engine sync (C2): dry-run preview + explicit apply of human-verified skills -->
 	<div class="mt-4 rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-950 p-3 space-y-2">
 		<div class="flex items-center justify-between gap-2">
 			<div class="flex items-center gap-2">
 				<svg class="size-4 text-blue-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6" /></svg>
-				<div class="text-sm font-medium text-gray-800 dark:text-gray-100">{$i18n.t('OpenClaw sync')}</div>
+				<div class="text-sm font-medium text-gray-800 dark:text-gray-100">{$i18n.t('Engine sync')}</div>
 			</div>
 			<div class="flex items-center gap-1.5">
 				<button on:click={previewSync} disabled={syncPreviewing} class="rounded-lg border border-gray-200 dark:border-gray-800 px-3 py-1.5 text-xs font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-850 disabled:opacity-40 transition">{syncPreviewing ? $i18n.t('Previewing…') : $i18n.t('Preview sync')}</button>
-				<button on:click={() => applySync(false)} disabled={syncApplying || !syncPreview} title={syncPreview ? $i18n.t('Write verified skills to the OpenClaw mounts') : $i18n.t('Run a preview first')} class="rounded-lg bg-blue-600 text-white px-3 py-1.5 text-xs font-medium hover:bg-blue-700 disabled:opacity-40">{syncApplying ? $i18n.t('Applying…') : $i18n.t('Apply sync')}</button>
+				<button on:click={() => applySync(false)} disabled={syncApplying || !syncPreview} title={syncPreview ? $i18n.t('Write verified skills to the shared engine mounts') : $i18n.t('Run a preview first')} class="rounded-lg bg-blue-600 text-white px-3 py-1.5 text-xs font-medium hover:bg-blue-700 disabled:opacity-40">{syncApplying ? $i18n.t('Applying…') : $i18n.t('Apply sync')}</button>
 			</div>
 		</div>
 		<p class="text-xs text-gray-500">
-			{$i18n.t('Publishes your skills to the live OpenClaw agent. Only skills with a human "supported" verdict are included. Preview is a dry run — nothing is written until you apply.')}
+			{$i18n.t('Publishes your skills to every Build engine — OpenClaw, Claude Code, Codex and Hermes read the same skills tree. Only skills with a human "supported" verdict are included. Preview is a dry run — nothing is written until you apply.')}
 		</p>
 
 		{#if syncPreview}
@@ -423,7 +425,7 @@
 				{_w} {$i18n.t('written')} · {_s} {$i18n.t('skipped')}{_e > 0
 					? ` · ${_e} ${$i18n.t('failed')}`
 					: ''}{syncApplyResult.config_set ? ` · ${$i18n.t('config')}: ${syncApplyResult.config_set}` : ''}{#if _w > 0}
-					— {$i18n.t('restart the OpenClaw container to load the changes.')}{/if}
+					— {$i18n.t('restart the engine sidecars to load the changes.')}{/if}
 			</div>
 		{/if}
 	</div>

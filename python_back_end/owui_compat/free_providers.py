@@ -43,6 +43,13 @@ class FreeProvider:
     # Some vendors namespace model ids with '/' themselves (nvidia: "meta/llama-3.3-70b").
     # That is fine: the facade id is "<provider>/<vendor id>" and we split ONCE.
     extra_headers: dict = field(default_factory=dict)
+    # Does this vendor accept OpenAI's ``stream_options: {include_usage: true}``? A streamed
+    # OpenAI-compatible response omits the usage object unless asked, so without this the chat
+    # usage meter reads zero tokens. It is per-vendor because it is a real compatibility fact,
+    # not a preference — and a vendor that rejects unknown fields answers 400 to the whole
+    # request. ``_proxy_openai_api`` retries once without the field if that happens, so a wrong
+    # value here costs token counts, never the chat itself.
+    stream_usage: bool = True
 
 
 # Ordered by how useful the free tier actually is for coding/chat work.
@@ -70,6 +77,9 @@ FREE_PROVIDERS: tuple[FreeProvider, ...] = (
         base_url="https://generativelanguage.googleapis.com/v1beta/openai",
         console_url="https://aistudio.google.com/apikey",
         free_note="Free tier via AI Studio: generous daily request limits on Flash models, long context.",
+        # Google's OpenAI-compat shim is the strictest of the five about unknown request fields,
+        # so we don't send stream_options here. Costs nothing but token counts on streamed chats.
+        stream_usage=False,
     ),
     FreeProvider(
         id="nvidia",
@@ -93,6 +103,25 @@ PROVIDERS_BY_ID: dict[str, FreeProvider] = {p.id: p for p in FREE_PROVIDERS}
 PROVIDERS_BY_ENGINE: dict[str, FreeProvider] = {p.engine: p for p in FREE_PROVIDERS}
 FREE_PROVIDER_IDS: frozenset[str] = frozenset(p.id for p in FREE_PROVIDERS)
 FREE_ENGINE_IDS: frozenset[str] = frozenset(p.engine for p in FREE_PROVIDERS)
+
+
+# ── stream_options learning ─────────────────────────────────────────────────────────────
+# The table above is a starting guess. If a vendor actually rejects stream_options the chat
+# retries without it once, then records the fact here so every later request skips the wasted
+# round-trip. Process-local and deliberately not persisted — a vendor that adds support later
+# gets picked up on the next restart rather than being wrong forever.
+_stream_usage_denied: set[str] = set()
+
+
+def stream_usage_enabled(provider_id: str) -> bool:
+    prov = PROVIDERS_BY_ID.get(provider_id)
+    return bool(prov and prov.stream_usage and provider_id not in _stream_usage_denied)
+
+
+def note_stream_usage_rejected(provider_id: str) -> None:
+    if provider_id not in _stream_usage_denied:
+        _stream_usage_denied.add(provider_id)
+        logger.info("free_providers: %s rejected stream_options — disabled for this process", provider_id)
 
 
 # ── Facade id helpers ───────────────────────────────────────────────────────────────────

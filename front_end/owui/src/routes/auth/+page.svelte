@@ -40,6 +40,9 @@
 	let password = '';
 	let confirmPassword = '';
 	let setupCode = '';
+	// Off unless the backend says it wants one — see owui_compat/config.py.
+	$: setupCodeRequired =
+		($config?.onboarding ?? false) && ($config?.features?.setup_code_required ?? false);
 
 	let ldapUsername = '';
 
@@ -86,7 +89,9 @@
 			}
 		}
 
-		if (($config?.onboarding ?? false) && !setupCode.trim()) {
+		// Claiming a fresh instance is open by default; a code is only demanded
+		// when the operator set HARVIS_SETUP_CODE (features.setup_code_required).
+		if (setupCodeRequired && !setupCode.trim()) {
 			toast.error($i18n.t('Setup code is required to create the administrator account.'));
 			return;
 		}
@@ -96,7 +101,7 @@
 			email,
 			password,
 			generateInitialsImage(name),
-			($config?.onboarding ?? false) ? setupCode.trim() : undefined
+			setupCodeRequired ? setupCode.trim() : undefined
 		).catch((error) => {
 			toast.error(`${error}`);
 			return null;
@@ -363,7 +368,7 @@
 											/>
 										</div>
 
-										{#if mode === 'signup' && ($config?.onboarding ?? false)}
+										{#if mode === 'signup' && setupCodeRequired}
 											<div class="mb-2">
 												<label for="setup-code" class="text-sm font-medium text-left mb-1 block"
 													>{$i18n.t('Setup Code')}</label
@@ -373,7 +378,7 @@
 													type="password"
 													id="setup-code"
 													class="my-0.5 w-full text-sm outline-hidden bg-transparent placeholder:text-gray-300 dark:placeholder:text-gray-600"
-													placeholder={$i18n.t('From ./install.sh or .env (HARVIS_SETUP_CODE)')}
+													placeholder={$i18n.t('From .env (HARVIS_SETUP_CODE)')}
 													autocomplete="one-time-code"
 													name="setup-code"
 													required
@@ -381,7 +386,7 @@
 												/>
 												<div class="mt-1 text-xs text-gray-600 dark:text-gray-500">
 													{$i18n.t(
-														'Printed once by the installer. Also in .env as HARVIS_SETUP_CODE.'
+														'This instance sets HARVIS_SETUP_CODE in .env; the first admin needs it.'
 													)}
 												</div>
 											</div>

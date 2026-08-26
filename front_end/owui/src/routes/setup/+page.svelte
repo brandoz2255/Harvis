@@ -37,6 +37,9 @@
 	let email = '';
 	let password = '';
 	let setupCode = '';
+	// The claim is open unless the operator set HARVIS_SETUP_CODE; the backend
+	// advertises that as features.setup_code_required (owui_compat/config.py).
+	$: setupCodeRequired = $config?.features?.setup_code_required ?? false;
 	let claiming = false;
 
 	// Model. The step branches on what is actually reachable, in this order:
@@ -167,7 +170,6 @@
 
 	// Exposure
 	let cookieSecure = false;
-	let enableSignup = false;
 	let savingPrefs = false;
 
 	// Verify. Raw tick keys are backend field names; these are what a person reads.
@@ -357,8 +359,12 @@
 	};
 
 	const claimAdmin = async () => {
-		if (!setupCode.trim() || !name.trim() || !email.trim() || !password) {
-			toast.error($i18n.t('Name, email, password, and setup code are required.'));
+		if (!name.trim() || !email.trim() || !password) {
+			toast.error($i18n.t('Name, email, and password are required.'));
+			return;
+		}
+		if (setupCodeRequired && !setupCode.trim()) {
+			toast.error($i18n.t('This instance requires a setup code to create the administrator.'));
 			return;
 		}
 		claiming = true;
@@ -368,7 +374,7 @@
 				email,
 				password,
 				generateInitialsImage(name),
-				setupCode.trim()
+				setupCodeRequired ? setupCode.trim() : undefined
 			);
 			if (sessionUser?.token) {
 				localStorage.token = sessionUser.token;
@@ -424,17 +430,9 @@
 		savingPrefs = true;
 		try {
 			await postSetupPreferences(token, {
-				cookie_secure: cookieSecure,
-				enable_signup: enableSignup
+				cookie_secure: cookieSecure
 			});
 			toast.success($i18n.t('Preferences saved for this process.'));
-			if (enableSignup) {
-				toast.message(
-					$i18n.t(
-						'Open signup still requires HARVIS_OWUI_ENABLE_SIGNUP=true in .env (server-enforced).'
-					)
-				);
-			}
 			step = 3;
 		} catch (e) {
 			toast.error(`${e}`);
@@ -580,9 +578,11 @@
 			{:else if step === 0}
 				<div class="space-y-3">
 					<p class="text-sm text-gray-600 dark:text-gray-400">
-						{$i18n.t(
-							'The first account becomes the admin. Use the setup code from ./install.sh (or HARVIS_SETUP_CODE in .env).'
-						)}
+						{setupCodeRequired
+							? $i18n.t(
+									'The first account becomes the admin. This instance also requires the setup code from .env (HARVIS_SETUP_CODE).'
+								)
+							: $i18n.t('The first account becomes the admin.')}
 					</p>
 					<label class="block text-sm font-medium" for="su-name">{$i18n.t('Name')}</label>
 					<input
@@ -612,17 +612,19 @@
 							required
 						/>
 					</div>
-					<label class="block text-sm font-medium" for="su-code">{$i18n.t('Setup Code')}</label>
-					<div class="w-full border-b border-gray-300 dark:border-gray-700">
-						<SensitiveInput
-							id="su-code"
-							bind:value={setupCode}
-							type="password"
-							inputClassName="w-full bg-transparent py-1.5 text-sm outline-none"
-							autocomplete="one-time-code"
-							required
-						/>
-					</div>
+					{#if setupCodeRequired}
+						<label class="block text-sm font-medium" for="su-code">{$i18n.t('Setup Code')}</label>
+						<div class="w-full border-b border-gray-300 dark:border-gray-700">
+							<SensitiveInput
+								id="su-code"
+								bind:value={setupCode}
+								type="password"
+								inputClassName="w-full bg-transparent py-1.5 text-sm outline-none"
+								autocomplete="one-time-code"
+								required
+							/>
+						</div>
+					{/if}
 					<button
 						type="button"
 						class="mt-4 w-full rounded-full bg-gray-900 text-white dark:bg-white dark:text-black py-2.5 text-sm font-medium disabled:opacity-50"
@@ -972,17 +974,6 @@
 							<span class="block text-xs text-gray-500">
 								{$i18n.t(
 									'Sets HARVIS_COOKIE_SECURE for this backend process. For permanence, also put it in .env.'
-								)}
-							</span>
-						</span>
-					</label>
-					<label class="flex items-start gap-2 text-sm">
-						<input type="checkbox" bind:checked={enableSignup} class="mt-1" />
-						<span>
-							<span class="font-medium">{$i18n.t('Allow open signup later')}</span>
-							<span class="block text-xs text-gray-500">
-								{$i18n.t(
-									'Default stays closed. Enabling still needs HARVIS_OWUI_ENABLE_SIGNUP=true in .env — the server enforces that flag.'
 								)}
 							</span>
 						</span>

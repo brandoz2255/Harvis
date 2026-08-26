@@ -420,7 +420,6 @@ class TestModelBody(BaseModel):
 
 class PreferencesBody(BaseModel):
     cookie_secure: bool | None = None
-    enable_signup: bool | None = None
 
 
 class CompleteBody(BaseModel):
@@ -608,9 +607,14 @@ def create_setup_router(
         ``cookie_secure`` takes effect for the RUNNING backend process only — it
         is not durable, because the container's HARVIS_COOKIE_SECURE env (set by
         compose) is authoritative and is restored on restart. Set that var in
-        .env for a permanent value (install.sh documents this). ``enable_signup``
-        is stored for display; live enforcement always reads
-        HARVIS_OWUI_ENABLE_SIGNUP, per the wizard copy.
+        .env for a permanent value (install.sh documents this).
+
+        There is deliberately no ``enable_signup`` here. The wizard used to
+        offer that toggle; it wrote an ``enable_signup_preference`` row that
+        NOTHING ever read back, while enforcement went on reading
+        HARVIS_OWUI_ENABLE_SIGNUP. A control that cannot change the thing it
+        names is worse than no control, so it was removed rather than wired up
+        — closing signup is a one-line .env change the operator makes directly.
         """
         updated: list[str] = []
         if body.cookie_secure is not None:
@@ -620,20 +624,6 @@ def create_setup_router(
             # nothing after a restart.
             os.environ["HARVIS_COOKIE_SECURE"] = "true" if body.cookie_secure else "false"
             updated.append("cookie_secure")
-        if body.enable_signup is not None:
-            pool = getattr(request.app.state, "pg_pool", None)
-            if pool is None:
-                raise HTTPException(status_code=503, detail="database unavailable")
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    """
-                    INSERT INTO instance_settings (key, value)
-                    VALUES ('enable_signup_preference', $1)
-                    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
-                    """,
-                    "true" if body.enable_signup else "false",
-                )
-            updated.append("enable_signup")
         return {
             "ok": True,
             "updated": updated,

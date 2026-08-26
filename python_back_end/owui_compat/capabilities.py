@@ -54,14 +54,15 @@ PREFERABLE_CAPS: set[str] = {
 # they are intentionally omitted. service_key=None ⇒ catalog reference, never `ready`.
 _PROVIDER_MIRROR: dict[str, dict] = {
     "ollama":       {"capabilities": ["model_provider"],                                          "service_key": "ollama"},
-    "hermes-agent": {"capabilities": ["model_provider", "agent_runtime"],                          "service_key": "hermes"},
+    # code_engine_candidate mirrors catalog.ts: Hermes is a real Build engine, so it must be
+    # selectable as the Build default, not just runnable.
+    "hermes-agent": {"capabilities": ["model_provider", "agent_runtime", "code_engine_candidate"], "service_key": "hermes"},
     "openclaw":     {"capabilities": ["agent_runtime", "tool_runtime", "code_engine_candidate"],  "service_key": "openclaw"},
     "github":       {"capabilities": ["repo_provider", "pr_provider"],                            "service_key": "github"},
     "mcp":          {"capabilities": ["tool_provider"],                                           "service_key": "mcp"},
     "discord":      {"capabilities": ["notification_provider"],                                   "service_key": "discord"},
     "claude-code":  {"capabilities": ["code_engine_candidate"],                                   "service_key": "claude-code"},
     "codex-app":    {"capabilities": ["code_engine_candidate"],                                   "service_key": "codex"},
-    "opencode":     {"capabilities": ["code_engine_candidate"],                                   "service_key": "opencode"},
     "ssh":          {"capabilities": ["remote_execution_target"],                                 "service_key": None},
 }
 
@@ -69,7 +70,6 @@ _PROVIDER_MIRROR: dict[str, dict] = {
 _STATIC_STATUS: dict[str, str] = {
     "claude-code": "available",
     "codex-app": "available",
-    "opencode": "available",
     "ssh": "coming_soon",
 }
 
@@ -220,8 +220,9 @@ def register_capabilities_routes(router: APIRouter, get_current_user: Callable) 
         # "hermes-agent" = the REAL Hermes Agent app engine (sidecar). "hermes-native" =
         # the experimental E4 native engine (keyed under "hermes-engine"). Both are distinct
         # from the "hermes" model-provider status, so flags/gating are read without conflation.
+        # "opencode" is shelved — see integrations_status.py. It has no probe and no
+        # storefront card, so it must not appear in engine_readiness either.
         for _eng, _svc_key in (
-            ("opencode", "opencode"),
             ("codex", "codex"),
             ("claude-code", "claude-code"),
             ("hermes-agent", "hermes-agent"),

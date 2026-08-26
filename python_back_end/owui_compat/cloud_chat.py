@@ -39,7 +39,9 @@ from .engine_auth import get_verified_engine_auth, get_verified_auth_mode
 from .free_providers import (
     PROVIDERS_BY_ID,
     list_provider_models,
+    note_stream_usage_rejected,
     provider_of_model,
+    stream_usage_enabled,
     upstream_model_id,
 )
 from .free_providers import FREE_PROVIDERS as _FREE_PROVIDERS
@@ -455,12 +457,19 @@ async def _free_provider_entries(pool, user_id: int) -> list[dict]:
                 "info": {
                     "meta": {
                         "description": f"{prov.name} via your connected API key. {prov.free_note}",
-                        "capabilities": {},
+                        # usage:true is what makes the frontend ASK for token counts at all
+                        # (Chat.svelte gates on capabilities.usage) — without it the chat meter
+                        # reads zero no matter what the vendor returns.
+                        "capabilities": {"usage": True},
                         "supports_effort": False,
                         "cloud_provider": prov.id,
                         "context_length": m.get("context_length"),
-                        # Free tier — no price to show. Left unset so the Build usage meter
-                        # renders "—" rather than an invented $0.00 that looks like a measurement.
+                        # Stated explicitly rather than left unset: zero-priced is the true fact
+                        # about a free tier, and the meter reads it to show "Free" instead of a
+                        # dollar figure. Relying on an absent field to coerce to 0 would be the
+                        # same result by accident.
+                        "price_in": 0,
+                        "price_out": 0,
                     },
                     "params": {},
                 },
@@ -530,6 +539,7 @@ async def proxy_cloud_chat(owui_body: dict, pool, user_id: Optional[int]):
                 url=f"{free.base_url}/chat/completions",
                 label=free.name,
                 extra_headers=free.extra_headers,
+                usage_provider=free.id,
             )
         if provider == "openai":
             return await _proxy_openai_api(owui_body, model_id, secret, effort)
@@ -812,6 +822,7 @@ async def _proxy_openai_api(
     url: str = _OPENAI_URL,
     label: str = "GPT",
     extra_headers: Optional[dict] = None,
+    usage_provider: Optional[str] = None,
 ):
     """OpenAI is the target wire format → near-passthrough. Build a clean body (strip OWUI-only
     keys) + add reasoning_effort for reasoning models. Reasoning models reject temperature/top_p,
@@ -820,7 +831,12 @@ async def _proxy_openai_api(
     ``url``/``label`` generalize this to every OpenAI-compatible vendor (the free-tier providers in
     ``free_providers.py``) — same wire format, different host, so one proxy serves them all. Those
     providers aren't in ``_OPENAI_BY_ID``, so ``spec`` is empty and no ``reasoning_effort`` is sent,
-    which is what a vendor that doesn't implement it needs."""
+    which is what a vendor that doesn't implement it needs.
+
+    ``usage_provider`` opts a free provider into ``stream_options.include_usage``. A streamed
+    OpenAI-compatible response carries NO usage object unless it is asked for, so without this the
+    chat's token/cost meter reads zero for the whole conversation. Left None for the fixed OpenAI
+    lane so this change cannot alter behaviour there."""
     spec = _OPENAI_BY_ID.get(model_id, {})
     messages = [
         {"role": m.get("role"), "content": m.get("content")}
@@ -840,20 +856,35 @@ async def _proxy_openai_api(
             return _err_response(owui_body, 502, _safe_openai_error(r, label))
         return JSONResponse(status_code=200, content=r.json())
 
+    want_usage = bool(usage_provider) and stream_usage_enabled(usage_provider)
+    if want_usage:
+        body["stream_options"] = {"include_usage": True}
+
     async def _gen():
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(None, connect=10.0)) as client:
-                async with client.stream("POST", url, headers=headers, json=body) as r:
-                    if r.status_code >= 400:
-                        detail = (await r.aread()).decode("utf-8", "replace")
-                        err = {"error": {"message": f"{label} error: {_clip(detail)}"}}
-                        yield ("data: " + json.dumps(err) + "\n\n").encode()
-                        yield b"data: [DONE]\n\n"
+                attempt = dict(body)
+                while True:
+                    async with client.stream("POST", url, headers=headers, json=attempt) as r:
+                        if r.status_code >= 400:
+                            detail = (await r.aread()).decode("utf-8", "replace")
+                            # A vendor that doesn't know stream_options rejects the WHOLE request.
+                            # Retry once without it and remember, so one bad guess in the provider
+                            # table costs token counts rather than the chat. Safe to retry here:
+                            # nothing has been yielded yet on a >=400.
+                            if "stream_options" in attempt and r.status_code == 400:
+                                note_stream_usage_rejected(usage_provider)
+                                attempt.pop("stream_options", None)
+                                continue
+                            err = {"error": {"message": f"{label} error: {_clip(detail)}"}}
+                            yield ("data: " + json.dumps(err) + "\n\n").encode()
+                            yield b"data: [DONE]\n\n"
+                            return
+                        # OpenAI already emits chat.completion.chunk SSE — forward verbatim.
+                        async for chunk in r.aiter_raw():
+                            if chunk:
+                                yield chunk
                         return
-                    # OpenAI already emits chat.completion.chunk SSE — forward verbatim.
-                    async for chunk in r.aiter_raw():
-                        if chunk:
-                            yield chunk
         except Exception as exc:
             logger.warning("cloud_chat: %s stream dropped: %s", label, type(exc).__name__)
             yield ("data: " + json.dumps({"error": {"message": f"{label} chat stream dropped."}}) + "\n\n").encode()

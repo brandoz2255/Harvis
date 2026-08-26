@@ -88,7 +88,7 @@ export async function postSetupTestModel(
 
 export async function postSetupPreferences(
 	token: string,
-	body: { cookie_secure?: boolean; enable_signup?: boolean }
+	body: { cookie_secure?: boolean }
 ): Promise<{ ok: boolean; updated: string[] }> {
 	const res = await fetch(`${base}/api/setup/preferences`, {
 		method: 'POST',

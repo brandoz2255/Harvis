@@ -1494,11 +1494,17 @@ def get_fallback_models():
 # ─── Middleware ────────────────────────────────────────────────────────────────
 
 # CORS Middleware must be added before routes
+# Origins beyond the built-in local ones. A deployment behind a real hostname
+# adds it here rather than editing this list, so no operator's private domain
+# ships inside everyone else's trusted-origin set.
+#   HARVIS_EXTRA_ORIGINS=https://harvis.example.com,http://harvis.example.com
+_EXTRA_ORIGINS = [
+    o.strip() for o in os.getenv("HARVIS_EXTRA_ORIGINS", "").split(",") if o.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://harvis.dulc3.tech",
-        "https://harvis.dulc3.tech",
+    allow_origins=_EXTRA_ORIGINS + [
         "http://localhost:9000",  # Main nginx proxy access point
         "http://127.0.0.1:9000",  # Main nginx proxy access point
         "http://localhost:3000",
@@ -1524,7 +1530,7 @@ app.add_middleware(
 # Same-origin requests, allowlisted (CORS) origins, and non-browser callers (no
 # Origin header, which are Bearer-authed and not a CSRF vector) all pass untouched.
 _CSRF_ALLOWED_NETLOCS = {
-    "harvis.dulc3.tech",
+    *(o.split("://", 1)[-1] for o in _EXTRA_ORIGINS),
     "localhost:9000", "127.0.0.1:9000",
     "localhost:3000", "localhost:3001", "127.0.0.1:3000", "127.0.0.1:3001",
     "frontend:3000", "nginx-proxy:80", "localhost:8000", "127.0.0.1:8000",
@@ -2854,9 +2860,9 @@ def _signup_enabled() -> bool:
     # Default ON, and it must stay in lockstep with owui_compat/config.py's
     # "enable_signup" — that flag is what draws the "Don't have an account?
     # Sign up" link, so a mismatch either hides a working signup or shows a
-    # link that 403s. Open signup is safe here because claiming the instance
-    # (the first signup, which becomes admin) additionally requires
-    # HARVIS_SETUP_CODE; every later signup creates an ordinary user.
+    # link that 403s. The first signup claims admin; every later one creates an
+    # ordinary user. Set this false for a closed instance — on anything
+    # internet-facing that is the flag that matters, not HARVIS_SETUP_CODE.
     raw = os.getenv("HARVIS_OWUI_ENABLE_SIGNUP", "").strip().lower()
     if not raw:
         return True
@@ -2872,15 +2878,22 @@ async def _signup_with_connection(request: SignupRequest, conn, setup_code: str 
             user_count = await conn.fetchval("SELECT COUNT(*) FROM users")
 
             if user_count == 0:
-                # First signup claims the instance: requires the setup code.
-                expected = os.getenv("HARVIS_SETUP_CODE", "")
-                if not expected:
-                    raise HTTPException(
-                        status_code=403,
-                        detail="Instance setup code not configured — set HARVIS_SETUP_CODE on the backend before claiming this instance",
-                    )
-                if not setup_code or not hmac.compare_digest(
-                    expected.encode(), setup_code.encode()
+                # First signup claims the instance and becomes admin. Open by
+                # default, same as OpenWebUI and Jellyfin: a fresh install
+                # should be usable without digging a code out of .env, and on
+                # a laptop there is nobody to race you to it.
+                #
+                # An operator who leaves an UNCLAIMED instance reachable from
+                # an untrusted network (VPS, shared LAN) closes that window by
+                # setting HARVIS_SETUP_CODE — present and non-empty turns the
+                # claim back into a gated one. build_config() mirrors this as
+                # features.setup_code_required so the signup form knows to ask;
+                # the two must stay in lockstep or the form asks for a code
+                # nothing checks, or omits one the server demands.
+                expected = os.getenv("HARVIS_SETUP_CODE", "").strip()
+                if expected and not (
+                    setup_code
+                    and hmac.compare_digest(expected.encode(), setup_code.encode())
                 ):
                     raise HTTPException(
                         status_code=403,

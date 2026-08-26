@@ -98,16 +98,26 @@ def build_config(onboarding: bool = False) -> dict:
             # Must match main.py's _signup_enabled() default exactly. If this
             # says True and the server gate says False, the auth page shows a
             # "Sign up" link that 403s — the worst of both. Self-serve signup
-            # is on by default so a fresh deploy has a working front door; the
-            # instance still cannot be hijacked, because the FIRST signup
-            # additionally requires HARVIS_SETUP_CODE (main.py:2675). Operators
-            # who want a closed instance set HARVIS_OWUI_ENABLE_SIGNUP=false.
+            # is on by default so a fresh deploy has a working front door. The
+            # FIRST signup claims admin and is open too; an operator exposing an
+            # unclaimed instance gates it by setting HARVIS_SETUP_CODE.
+            # Operators who want a closed instance set
+            # HARVIS_OWUI_ENABLE_SIGNUP=false.
             "enable_signup": _env_bool("HARVIS_OWUI_ENABLE_SIGNUP", True),
+            # Mirrors main.py's first-signup gate exactly: the claim asks for a
+            # code only when the operator set one. Off by default, so the
+            # signup form shows no code field on an ordinary install.
+            "setup_code_required": bool(os.getenv("HARVIS_SETUP_CODE", "").strip()),
             "enable_login_form": True,
             # OPTION A: HTTP-SSE chat, no Socket.IO. Do not flip without also
             # implementing an OWUI-compatible Socket.IO server (owui_compat).
             "enable_websocket": False,
-            "enable_web_search": False,
+            # Web search is a real, shipped capability (python_back_end/research/ —
+            # DuckDuckGo via LangChain, with content extraction). This was a bare
+            # `False` with no env var and no comment, unlike every other flag here,
+            # so the toggle simply never rendered and the feature was unreachable
+            # from the UI. Default ON; set HARVIS_OWUI_WEB_SEARCH=false to hide it.
+            "enable_web_search": _env_bool("HARVIS_OWUI_WEB_SEARCH", True),
             # Image-gen v0 (docs/plans/image-generation-v0.md): default OFF in code —
             # the deploy flips this env once a local provider (ComfyUI/A1111) is
             # confirmed ready. Gates POST /api/harvis/image/generate too.
