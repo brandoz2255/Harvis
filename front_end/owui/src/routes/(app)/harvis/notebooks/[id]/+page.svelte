@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { getContext, onMount, onDestroy, tick } from 'svelte';
+	import { getContext, onDestroy, tick } from 'svelte';
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
 	import { WEBUI_NAME, showSidebar } from '$lib/stores';
@@ -74,21 +74,80 @@
 	};
 	$: displayEmoji = nb?.emoji || (nb ? fallbackEmoji(nb.id) : '📓');
 
-	const load = async () => {
+	// ── Which notebook this component is actually showing ──────────────────────
+	// SvelteKit reuses one component instance across /notebooks/A → /notebooks/B,
+	// so `onMount(load)` fired exactly once: every later switch left the notebook
+	// you LEFT on screen — its sources, its notes, and worst of all its chat
+	// transcript — under the new notebook's id. A question typed after the switch
+	// was then sent to B while the screen showed A's conversation.
+	//
+	// `openId` is the notebook currently on screen; `loadSeq` bumps on every
+	// switch. An async that started before a switch compares its captured seq and
+	// drops its result rather than writing it into the notebook now being viewed.
+	// Same discipline as the chat-session guard.
+	let openId = '';
+	let loadSeq = 0;
+	const isCurrent = (seq: number) => seq === loadSeq;
+
+	const load = async (target: string, seq: number) => {
 		loaded = false;
-		[nb, sources, notes, podcasts] = await Promise.all([
-			getNotebook(id),
-			listSources(id),
-			listNotes(id),
-			listPodcasts(id)
+		const [_nb, _sources, _notes, _podcasts] = await Promise.all([
+			getNotebook(target),
+			listSources(target),
+			listNotes(target),
+			listPodcasts(target)
 		]);
+		if (!isCurrent(seq)) return; // switched notebooks mid-fetch — drop the stale answer
+		nb = _nb;
+		sources = _sources;
+		notes = _notes;
+		podcasts = _podcasts;
 		loaded = true;
 		schedulePodcastPoll();
 	};
-	const reloadSources = async () => (sources = await listSources(id));
-	const reloadNotes = async () => (notes = await listNotes(id));
-	const reloadPodcasts = async () => (podcasts = await listPodcasts(id));
-	onMount(load);
+	const reloadSources = async (target = openId, seq = loadSeq) => {
+		const v = await listSources(target);
+		if (isCurrent(seq)) sources = v;
+	};
+	const reloadNotes = async (target = openId, seq = loadSeq) => {
+		const v = await listNotes(target);
+		if (isCurrent(seq)) notes = v;
+	};
+	const reloadPodcasts = async (target = openId, seq = loadSeq) => {
+		const v = await listPodcasts(target);
+		if (isCurrent(seq)) podcasts = v;
+	};
+
+	// Every piece of per-notebook state is reset here. Anything left behind is
+	// something the next notebook inherits from the last one.
+	const switchTo = (target: string) => {
+		openId = target;
+		const seq = ++loadSeq;
+		if (pollTimer) {
+			clearTimeout(pollTimer);
+			pollTimer = null;
+		}
+		nb = null;
+		sources = [];
+		notes = [];
+		podcasts = [];
+		messages = [];
+		input = '';
+		sending = false;
+		noteOpen = false;
+		noteTitle = '';
+		noteVal = '';
+		savingNote = false;
+		genningPodcast = false;
+		podcastError = '';
+		closeAdd();
+		void load(target, seq);
+	};
+
+	// Fires on first render as well as on every later param change, which is why
+	// there is no onMount(load) any more.
+	$: if (id && id !== openId) switchTo(id);
+
 	onDestroy(() => pollTimer && clearTimeout(pollTimer));
 
 	const isUntitled = (t?: string | null): boolean =>
@@ -99,8 +158,11 @@
 		if (!nb) return;
 		if (!isUntitled(nb.title) && nb.emoji) return;
 		if (sources.length === 0) return;
-		const res = await autonameNotebook(id);
-		if (res && nb) {
+		const seq = loadSeq;
+		const res = await autonameNotebook(openId);
+		// Without this check a name generated for the notebook you left lands on
+		// the one you opened.
+		if (res && nb && isCurrent(seq)) {
 			nb = { ...nb, title: res.title || nb.title, emoji: res.emoji || nb.emoji };
 		}
 	};
@@ -129,35 +191,35 @@
 		if (!urlVal.trim()) return;
 		adding = true;
 		addError = '';
-		await afterAdd(await addUrlSource(id, urlVal.trim()));
+		await afterAdd(await addUrlSource(openId, urlVal.trim()));
 	};
 	const submitYoutube = async () => {
 		if (!ytVal.trim()) return;
 		adding = true;
 		addError = '';
-		await afterAdd(await addYoutubeSource(id, ytVal.trim()));
+		await afterAdd(await addYoutubeSource(openId, ytVal.trim()));
 	};
 	const submitText = async () => {
 		if (!textTitle.trim() || !textVal.trim()) return;
 		adding = true;
 		addError = '';
-		await afterAdd(await addTextSource(id, textTitle.trim(), textVal.trim()));
+		await afterAdd(await addTextSource(openId, textTitle.trim(), textVal.trim()));
 	};
 	const onFile = async (e: Event) => {
 		const f = (e.target as HTMLInputElement).files?.[0];
 		if (!f) return;
 		adding = true;
 		addError = '';
-		await afterAdd(await uploadFileSource(id, f));
+		await afterAdd(await uploadFileSource(openId, f));
 	};
 	const removeSource = async (sourceId: string) => {
-		if (await deleteSource(id, sourceId)) await reloadSources();
+		if (await deleteSource(openId, sourceId)) await reloadSources();
 	};
 
 	const submitNote = async () => {
 		if (!noteVal.trim()) return;
 		savingNote = true;
-		await createNote(id, noteVal.trim(), noteTitle.trim());
+		await createNote(openId, noteVal.trim(), noteTitle.trim());
 		savingNote = false;
 		noteTitle = noteVal = '';
 		noteOpen = false;
@@ -170,8 +232,11 @@
 	const schedulePodcastPoll = () => {
 		if (pollTimer) clearTimeout(pollTimer);
 		if (podcasts.some(podcastActive)) {
+			const seq = loadSeq;
+			const target = openId;
 			pollTimer = setTimeout(async () => {
-				await reloadPodcasts();
+				await reloadPodcasts(target, seq);
+				if (!isCurrent(seq)) return; // this timer belongs to a notebook that is no longer open
 				genningPodcast = podcasts.some(podcastActive);
 				schedulePodcastPoll();
 			}, 5000);
@@ -183,14 +248,17 @@
 		if (sources.length === 0 || genningPodcast) return;
 		genningPodcast = true;
 		podcastError = '';
-		const res = await generatePodcast(id, { title: nb?.title || 'Audio Overview' });
+		const seq = loadSeq;
+		const target = openId;
+		const res = await generatePodcast(target, { title: nb?.title || 'Audio Overview' });
+		if (!isCurrent(seq)) return;
 		if (!res.ok) {
 			genningPodcast = false;
 			podcastError = res.error || $i18n.t('Could not start generation.');
 			return;
 		}
-		await reloadPodcasts();
-		schedulePodcastPoll();
+		await reloadPodcasts(target, seq);
+		if (isCurrent(seq)) schedulePodcastPoll();
 	};
 
 	const send = async () => {
@@ -201,7 +269,10 @@
 		sending = true;
 		await tick();
 		feedEl && (feedEl.scrollTop = feedEl.scrollHeight);
-		const res = await chatNotebook(id, q);
+		const seq = loadSeq;
+		const res = await chatNotebook(openId, q);
+		// An answer about the notebook you left must not appear in the one you opened.
+		if (!isCurrent(seq)) return;
 		messages = [...messages, { role: 'assistant', content: res.answer, sources: res.sources }];
 		sending = false;
 		await tick();
@@ -500,7 +571,7 @@
 									<span class="text-[10px] {srcStatusColor(p.status)} uppercase tracking-wide ml-2 shrink-0">{p.status || ''}</span>
 								</div>
 								{#if p.status === 'completed'}
-									<audio controls src={podcastAudioUrl(id, p.id)} class="w-full mt-1.5 h-8"></audio>
+									<audio controls src={podcastAudioUrl(openId, p.id)} class="w-full mt-1.5 h-8"></audio>
 								{:else if p.status === 'error'}
 									<div class="text-[11px] text-red-500 mt-1">{p.error_message || $i18n.t('Generation failed.')}</div>
 								{/if}

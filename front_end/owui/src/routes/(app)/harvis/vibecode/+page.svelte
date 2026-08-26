@@ -863,39 +863,59 @@
 		const first = turns[0];
 		if (!first || (first.status !== 'done' && first.status !== 'error')) return;
 		autonameTriggered = true;
-		const named = await autonameVibecodeSession(sessionId);
-		if (named && session) session = { ...session, title: named.title, emoji: named.emoji };
+		const seq = sessionSeq;
+		const target = sessionId;
+		const named = await autonameVibecodeSession(target);
+		// Otherwise a title generated for the session you left lands on the one you opened.
+		if (named && session && isCurrentSession(seq)) {
+			session = { ...session, title: named.title, emoji: named.emoji };
+		}
 	};
 
 	const schedule = () => {
 		clearTimeout(pollTimer);
 		if (!sessionId) return;
+		const seq = sessionSeq;
 		pollTimer = setTimeout(
 			async () => {
 				try {
 					await loadSession();
 					await pollPending();
-					await maybeWriteBack();
+					await maybeWriteBack(seq);
 				} finally {
-					// One failed poll must never silently kill the loop — always re-arm.
-					schedule();
+					// One failed poll must never silently kill the loop — always re-arm,
+					// but only while this generation is still the open session.
+					if (isCurrentSession(seq)) schedule();
 				}
 			},
 			anyRunning ? 2000 : 30000
 		);
 	};
 
+	// Every switch bumps `sessionSeq`. Work that started under the old session
+	// captures the value and compares it before writing anything back — `loadSession`
+	// already did this with `reqId`, but the folder relink, the write-back and the
+	// autoname all straddle awaits too, and those write to the user's DISK, not just
+	// to component state: a write-back that resolved after a switch pushed the session
+	// you left into the folder of the one you opened.
+	let sessionSeq = 0;
+	const isCurrentSession = (seq: number) => seq === sessionSeq;
+
 	let loadedFor = '';
 	$: if (sessionId !== loadedFor) {
 		loadedFor = sessionId;
 		autonameTriggered = false;
+		const seq = ++sessionSeq;
 		// Drop the previous session's folder binding; relink this one from IndexedDB.
 		clearLocalFolder();
 		lastWriteBackDone = -1;
 		(async () => {
 			await loadSession();
-			await relinkSessionFolder();
-			await maybeWriteBack();
+			if (!isCurrentSession(seq)) return;
+			await relinkSessionFolder(seq);
+			if (!isCurrentSession(seq)) return;
+			await maybeWriteBack(seq);
+			if (!isCurrentSession(seq)) return;
 			schedule();
 		})();
 	}
@@ -998,8 +1018,8 @@
 	// its flag is on), so we gate the selector purely on "≥1 ready engine + clone-mode" — no
 	// separate front-end flag check. This lets each Hermes engine show under its own flag
 	// without coupling to the external-engines flag, and vice-versa.
+	// 'opencode' is intentionally not listed — the engine is shelved, see catalog.ts.
 	$: readyEngineIds = [
-		'opencode',
 		'codex',
 		'claude-code',
 		'hermes-agent',
@@ -1310,14 +1330,20 @@
 	// ── Live write-back: after each turn, push the agent's changes to the real folder ──
 	let lastWriteBackDone = -1; // doneTurns we last synced (−1 = uninitialised baseline)
 
-	const applyWriteback = async () => {
-		const wb = await getVibecodeWriteback(sessionId);
-		if (wb.changed?.length) await writeFilesToFolder(localFolderHandle, wb.changed);
-		if (wb.deleted?.length) await deleteFilesFromFolder(localFolderHandle, wb.deleted);
+	const applyWriteback = async (seq = sessionSeq) => {
+		const target = sessionId;
+		const handle = localFolderHandle; // pin the folder this write belongs to
+		const wb = await getVibecodeWriteback(target);
+		// The fetch can outlive the session. Writing here after a switch would drop
+		// one session's files into another session's folder on the user's disk.
+		if (!isCurrentSession(seq)) return { changed: [], deleted: [] } as typeof wb;
+		if (wb.changed?.length) await writeFilesToFolder(handle, wb.changed);
+		if (wb.deleted?.length) await deleteFilesFromFolder(handle, wb.deleted);
 		return wb;
 	};
 
-	const maybeWriteBack = async () => {
+	const maybeWriteBack = async (seq = sessionSeq) => {
+		if (!isCurrentSession(seq)) return;
 		if (!session?.local_folder_name || !localFolderHandle || anyRunning) return;
 		if (lastWriteBackDone === -1) {
 			lastWriteBackDone = doneTurns; // baseline on first observation — don't write yet
@@ -1327,7 +1353,7 @@
 		lastWriteBackDone = doneTurns;
 		writeBackStatus = $i18n.t('Saving to your folder…');
 		try {
-			const wb = await applyWriteback();
+			const wb = await applyWriteback(seq);
 			const n = (wb.changed?.length || 0) + (wb.deleted?.length || 0);
 			if (n) toast.success($i18n.t('Saved changes to {{name}}', { name: localFolderName }));
 		} catch (e: any) {
@@ -1338,14 +1364,17 @@
 	};
 
 	// Reconnect a reopened local-folder session to its handle, then sync once.
-	const relinkSessionFolder = async () => {
+	const relinkSessionFolder = async (seq = sessionSeq) => {
 		if (!session?.local_folder_name || localFolderHandle) {
 			needsRelink = false;
 			return;
 		}
 		localFolderName = session.local_folder_name;
 		const rec = await findFolderForSession(sessionId);
-		if (rec && (await verifyPermission(rec.handle, true))) {
+		// verifyPermission can sit on a browser permission prompt indefinitely, which
+		// is plenty of time to switch sessions and adopt the wrong folder handle.
+		if (!isCurrentSession(seq)) return;
+		if (rec && (await verifyPermission(rec.handle, true)) && isCurrentSession(seq)) {
 			localFolderHandle = rec.handle;
 			localFolderName = rec.name;
 			localFolderKey = rec.key;
@@ -1358,7 +1387,9 @@
 
 	// User-triggered reconnect (re-grants permission, then writes accumulated changes back).
 	const reconnectFolder = async () => {
-		const rec = (await findFolderForSession(sessionId)) || recentFolders[0];
+		const seq = sessionSeq;
+		const target = sessionId;
+		const rec = (await findFolderForSession(target)) || recentFolders[0];
 		if (!rec) {
 			await openFolder();
 			return;
@@ -1367,14 +1398,16 @@
 			toast.error($i18n.t('Permission to that folder was denied.'));
 			return;
 		}
+		// The permission prompt above is a long, user-paced await.
+		if (!isCurrentSession(seq)) return;
 		localFolderHandle = rec.handle;
 		localFolderName = rec.name;
 		localFolderKey = rec.key;
 		needsRelink = false;
-		await linkSessionToFolder(rec.key, sessionId);
+		await linkSessionToFolder(rec.key, target);
 		writeBackStatus = $i18n.t('Saving to your folder…');
 		try {
-			await applyWriteback();
+			await applyWriteback(seq);
 			lastWriteBackDone = doneTurns;
 			toast.success($i18n.t('Reconnected {{name}}', { name: localFolderName }));
 		} catch (_) {
@@ -2756,7 +2789,7 @@
 			>
 				<div class="shrink-0 flex items-center gap-2 px-4 py-3 border-b border-gray-100 dark:border-gray-850">
 					<div class="min-w-0">
-						<div class="text-sm font-semibold text-gray-800 dark:text-gray-100">{$i18n.t('Tune')}</div>
+						<div class="text-sm font-semibold text-gray-800 dark:text-gray-100">{$i18n.t('Customize')}</div>
 						<div class="text-[11px] text-gray-400">{$i18n.t('Models, presets, skills & MCP — without leaving Build')}</div>
 					</div>
 					<a
