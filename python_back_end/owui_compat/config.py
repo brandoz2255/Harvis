@@ -68,7 +68,7 @@ def _audio_config() -> dict:
     }
 
 
-def build_config(onboarding: bool = False) -> dict:
+def build_config(onboarding: bool = False, signup_enabled: bool | None = None) -> dict:
     """Build the static-ish config dict OWUI reads at boot.
 
     ``onboarding`` is OWUI's stock setup-state signal: true ONLY while no
@@ -95,15 +95,20 @@ def build_config(onboarding: bool = False) -> dict:
             "auth": True,
             "auth_trusted_header": False,
             "enable_ldap": False,
-            # Must match main.py's _signup_enabled() default exactly. If this
+            # Must match main.py's _signup_enabled() answer exactly. If this
             # says True and the server gate says False, the auth page shows a
-            # "Sign up" link that 403s — the worst of both. Self-serve signup
-            # is on by default so a fresh deploy has a working front door. The
-            # FIRST signup claims admin and is open too; an operator exposing an
+            # "Sign up" link that 403s — the worst of both. The caller resolves
+            # it through owui_compat.admin_config so the admin switch and the
+            # .env var land on the same answer; the env default only applies
+            # when the caller has no database to ask. Self-serve signup is on
+            # by default so a fresh deploy has a working front door. The FIRST
+            # signup claims admin and is open too; an operator exposing an
             # unclaimed instance gates it by setting HARVIS_SETUP_CODE.
-            # Operators who want a closed instance set
-            # HARVIS_OWUI_ENABLE_SIGNUP=false.
-            "enable_signup": _env_bool("HARVIS_OWUI_ENABLE_SIGNUP", True),
+            "enable_signup": (
+                signup_enabled
+                if signup_enabled is not None
+                else _env_bool("HARVIS_OWUI_ENABLE_SIGNUP", True)
+            ),
             # Mirrors main.py's first-signup gate exactly: the claim asks for a
             # code only when the operator set one. Off by default, so the
             # signup form shows no code field on an ordinary install.

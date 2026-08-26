@@ -3005,17 +3005,22 @@ async def signup(request: SignupRequest, app_request: Request):
 _FIRST_SIGNUP_LOCK_KEY = 0x48415256  # "HARV"
 
 
-def _signup_enabled() -> bool:
+async def _signup_enabled(conn) -> bool:
     # Default ON, and it must stay in lockstep with owui_compat/config.py's
     # "enable_signup" — that flag is what draws the "Don't have an account?
     # Sign up" link, so a mismatch either hides a working signup or shows a
     # link that 403s. The first signup claims admin; every later one creates an
-    # ordinary user. Set this false for a closed instance — on anything
-    # internet-facing that is the flag that matters, not HARVIS_SETUP_CODE.
-    raw = os.getenv("HARVIS_OWUI_ENABLE_SIGNUP", "").strip().lower()
-    if not raw:
-        return True
-    return raw in {"1", "true", "yes", "on"}
+    # ordinary user. Close signup for an internet-facing instance — that is the
+    # flag that matters, not HARVIS_SETUP_CODE.
+    #
+    # The answer now comes from owui_compat.admin_config, which reads the value
+    # the admin last set in Settings → General and falls back to
+    # HARVIS_OWUI_ENABLE_SIGNUP when they never touched it. Both the switch and
+    # the .env var therefore work, and /api/config resolves the same way, so
+    # the form and the gate cannot disagree.
+    from owui_compat.admin_config import signup_enabled
+
+    return await signup_enabled(conn)
 
 
 async def _signup_with_connection(request: SignupRequest, conn, setup_code: str | None = None):
@@ -3048,7 +3053,7 @@ async def _signup_with_connection(request: SignupRequest, conn, setup_code: str 
                         status_code=403,
                         detail="First signup requires a valid setup code (X-Setup-Code header)",
                     )
-            elif not _signup_enabled():
+            elif not await _signup_enabled(conn):
                 raise HTTPException(
                     status_code=403,
                     detail="Signup is disabled on this instance",

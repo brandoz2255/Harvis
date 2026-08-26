@@ -46,6 +46,7 @@ from .integration_logs import register_integration_logs_routes
 from .adaptive_space import register_adaptive_space_routes
 from .capabilities import register_capabilities_routes
 from .engine_auth import register_engine_auth_routes
+from .admin_config import register_admin_config_routes
 from .user_settings import register_user_settings_routes
 from .orchestration_pool import register_orchestration_pool_routes
 from .translate import harvis_models_to_owui, harvis_user_to_owui
@@ -112,7 +113,15 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
                     ) == 0
             except Exception:
                 onboarding = False
-        return owui_config.build_config(onboarding=onboarding)
+        # The signup flag is an ADMIN-SETTABLE value now, not just an env var,
+        # so the "Sign up" link this draws stays in lockstep with the gate in
+        # main._signup_with_connection — both read admin_config.signup_enabled.
+        from .admin_config import signup_enabled_via_pool
+
+        return owui_config.build_config(
+            onboarding=onboarding,
+            signup_enabled=await signup_enabled_via_pool(pool),
+        )
 
     @router.get("/api/version")
     async def owui_version():
@@ -758,6 +767,7 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
     # Stub v1 routes (settings, tools, tags, profile images, …) — must be
     # registered before parameterized chat routes where paths overlap.
     register_stub_routes(router, get_current_user)
+    register_admin_config_routes(router, get_current_user)
     register_knowledge_routes(router, get_current_user)
     register_skill_routes(router, get_current_user)
     register_skill_audit_routes(router, get_current_user)

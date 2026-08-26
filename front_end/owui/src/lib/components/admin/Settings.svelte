@@ -75,24 +75,12 @@
 			id: 'general',
 			title: 'General',
 			route: '/admin/settings/general',
-			keywords: [
-				'general',
-				'admin',
-				'settings',
-				'version',
-				'update',
-				'language',
-				'theme',
-				'data',
-				'users',
-				'roles',
-				'ldap',
-				'authentication',
-				'reverse proxy',
-				'webhook',
-				'community',
-				'channels'
-			]
+			// Trimmed to what the General panel still contains. It used to list
+			// ldap / webhook / roles / channels, all of which were removed when
+			// the panel was cut down to the settings Harvis actually enforces —
+			// searching for them and landing on a tab without them is its own
+			// small lie.
+			keywords: ['general', 'admin', 'settings', 'version', 'sign up', 'signup', 'registration']
 		},
 		{
 			id: 'connections',
