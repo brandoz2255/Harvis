@@ -934,6 +934,20 @@ body {
    element and everything inside it. (Both are real classes, not Tailwind's
    important modifier, whose prefix/suffix form changed between Tailwind 3 and 4
    and would silently no-op if written the old way.) */
+/* The inlined Harvis marks (sidebar logo, empty-chat mascot, the claw) paint their
+   antennas, arms and face with the theme's blue-400. That was chosen against a
+   near-black sidebar; on a light one it measures 2.4:1, under the 3:1 floor a
+   graphic needs. Light themes step the accent to blue-600 — 4.5:1 on white,
+   4.9:1 on Airy's paper, 3.2:1 on Warm's coral — while dark keeps the glow it
+   was drawn for. It stays a var so the per-theme blue ramp still re-hues the
+   mark (cyan in Midnight, indigo in Airy, coral in Warm). */
+:root {
+	--harvis-mark-accent: var(--color-blue-400);
+}
+html:not(.dark) {
+	--harvis-mark-accent: var(--color-blue-600);
+}
+
 html:not(.dark) {
 	.text-gray-400:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),
 	.text-gray-300:not(:is(.log-pane, .dark-surface, :where(.log-pane, .dark-surface) *)),

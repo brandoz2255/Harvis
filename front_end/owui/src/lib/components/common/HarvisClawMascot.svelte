@@ -168,7 +168,7 @@
 
 	// Theme accent — --color-blue-* re-hues per theme (Midnight cyan-blue,
 	// Airy indigo, Warm coral). ANGRY stays hardcoded red: semantic state color.
-	const ACCENT = 'var(--color-blue-400)';
+	const ACCENT = 'var(--harvis-mark-accent)';
 	const ANGRY = '#E53E3E';
 	$: accent = isAngry ? ANGRY : ACCENT;
 </script>
@@ -196,7 +196,7 @@
 			</feMerge>
 		</filter>
 		<linearGradient id="clawHeadGradient" x1="0%" y1="0%" x2="0%" y2="100%">
-			<stop offset="0%" stop-color="var(--color-blue-400)" />
+			<stop offset="0%" stop-color="var(--harvis-mark-accent)" />
 			<stop offset="100%" stop-color="var(--color-blue-600)" />
 		</linearGradient>
 		<linearGradient id="clawScreenGradient" x1="0%" y1="0%" x2="0%" y2="100%">
@@ -204,7 +204,7 @@
 			<stop offset="100%" stop-color="var(--color-gray-950)" />
 		</linearGradient>
 		<linearGradient id="clawGradient" x1="0%" y1="0%" x2="0%" y2="100%">
-			<stop offset="0%" stop-color="var(--color-blue-400)" />
+			<stop offset="0%" stop-color="var(--harvis-mark-accent)" />
 			<stop offset="100%" stop-color="var(--color-blue-600)" />
 		</linearGradient>
 		<linearGradient id="clawBodyGradient" x1="0%" y1="0%" x2="0%" y2="100%">

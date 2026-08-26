@@ -157,7 +157,7 @@
 
 	// Theme accent — --color-blue-* re-hues per theme (Midnight cyan-blue,
 	// Airy indigo, Warm coral). ANGRY stays hardcoded red: semantic state color.
-	const ACCENT = 'var(--color-blue-400)';
+	const ACCENT = 'var(--harvis-mark-accent)';
 	const ANGRY = '#E53E3E';
 	$: accent = isAngry ? ANGRY : ACCENT;
 </script>

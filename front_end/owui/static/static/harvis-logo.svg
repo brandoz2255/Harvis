@@ -17,12 +17,16 @@
     </linearGradient>
   </defs>
 
-  <!-- single Harvis robot -->
+  <!-- Single Harvis robot. Two accent blues on purpose: #6FA0FF for the face, which is
+       always drawn on the robot's own near-black screen, and #3B76E0 for the antennas and
+       arms, which sit on the PAGE. The lighter blue is 2.6:1 on white — it washed out in
+       light mode. #3B76E0 is 4.3:1 on white and 3.9:1 on the dark splash, so it clears the
+       3:1 non-text floor in both themes. Do not collapse them into one value. -->
   <g>
-    <line x1="20" y1="8" x2="16" y2="0" stroke="#6FA0FF" stroke-width="2" stroke-linecap="round" />
-    <circle cx="16" cy="2" r="3" fill="#6FA0FF" filter="url(#harvisGlow)" />
-    <line x1="40" y1="8" x2="44" y2="0" stroke="#6FA0FF" stroke-width="2" stroke-linecap="round" />
-    <circle cx="44" cy="2" r="3" fill="#6FA0FF" filter="url(#harvisGlow)" />
+    <line x1="20" y1="8" x2="16" y2="0" stroke="#3B76E0" stroke-width="2" stroke-linecap="round" />
+    <circle cx="16" cy="2" r="3" fill="#3B76E0" filter="url(#harvisGlow)" />
+    <line x1="40" y1="8" x2="44" y2="0" stroke="#3B76E0" stroke-width="2" stroke-linecap="round" />
+    <circle cx="44" cy="2" r="3" fill="#3B76E0" filter="url(#harvisGlow)" />
 
     <rect x="12" y="8" width="36" height="30" rx="6" fill="url(#harvisBodyGradient)" />
     <rect x="16" y="12" width="28" height="22" rx="3" fill="url(#harvisScreenGradient)" />
@@ -35,7 +39,7 @@
     <rect x="36" y="38" width="10" height="28" rx="3" fill="url(#harvisBodyGradient)" />
     <rect x="14" y="48" width="32" height="8" rx="2" fill="url(#harvisBodyGradient)" />
 
-    <rect x="4" y="42" width="6" height="14" rx="3" fill="#6FA0FF" />
-    <rect x="50" y="42" width="6" height="14" rx="3" fill="#6FA0FF" />
+    <rect x="4" y="42" width="6" height="14" rx="3" fill="#3B76E0" />
+    <rect x="50" y="42" width="6" height="14" rx="3" fill="#3B76E0" />
   </g>
 </svg>

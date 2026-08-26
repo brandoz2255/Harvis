@@ -43,28 +43,28 @@
 			y1="8"
 			x2="16"
 			y2="0"
-			stroke="var(--color-blue-400)"
+			stroke="var(--harvis-mark-accent)"
 			stroke-width="2"
 			stroke-linecap="round"
 		/>
-		<circle cx="16" cy="2" r="3" fill="var(--color-blue-400)" filter="url(#harvisMarkGlow)" />
+		<circle cx="16" cy="2" r="3" fill="var(--harvis-mark-accent)" filter="url(#harvisMarkGlow)" />
 		<line
 			x1="40"
 			y1="8"
 			x2="44"
 			y2="0"
-			stroke="var(--color-blue-400)"
+			stroke="var(--harvis-mark-accent)"
 			stroke-width="2"
 			stroke-linecap="round"
 		/>
-		<circle cx="44" cy="2" r="3" fill="var(--color-blue-400)" filter="url(#harvisMarkGlow)" />
+		<circle cx="44" cy="2" r="3" fill="var(--harvis-mark-accent)" filter="url(#harvisMarkGlow)" />
 
 		<rect x="12" y="8" width="36" height="30" rx="6" fill="url(#harvisMarkBody)" />
 		<rect x="16" y="12" width="28" height="22" rx="3" fill="url(#harvisMarkScreen)" />
 
 		<path
 			d="M21 21 Q24 17 27 21"
-			stroke="var(--color-blue-400)"
+			stroke="var(--harvis-mark-accent)"
 			stroke-width="2.5"
 			stroke-linecap="round"
 			fill="none"
@@ -72,7 +72,7 @@
 		/>
 		<path
 			d="M33 21 Q36 17 39 21"
-			stroke="var(--color-blue-400)"
+			stroke="var(--harvis-mark-accent)"
 			stroke-width="2.5"
 			stroke-linecap="round"
 			fill="none"
@@ -80,7 +80,7 @@
 		/>
 		<path
 			d="M24 28 Q30 33 36 28"
-			stroke="var(--color-blue-400)"
+			stroke="var(--harvis-mark-accent)"
 			stroke-width="2"
 			stroke-linecap="round"
 			fill="none"
@@ -91,7 +91,7 @@
 		<rect x="36" y="38" width="10" height="28" rx="3" fill="url(#harvisMarkBody)" />
 		<rect x="14" y="48" width="32" height="8" rx="2" fill="url(#harvisMarkBody)" />
 
-		<rect x="4" y="42" width="6" height="14" rx="3" fill="var(--color-blue-400)" />
-		<rect x="50" y="42" width="6" height="14" rx="3" fill="var(--color-blue-400)" />
+		<rect x="4" y="42" width="6" height="14" rx="3" fill="var(--harvis-mark-accent)" />
+		<rect x="50" y="42" width="6" height="14" rx="3" fill="var(--harvis-mark-accent)" />
 	</g>
 </svg>
