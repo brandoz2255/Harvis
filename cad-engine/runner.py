@@ -126,12 +126,20 @@ class BuildCancelled(RuntimeError):
 
 
 class BuildFailed(RuntimeError):
-    """The child reported a structured failure, or died without reporting one."""
+    """The child reported a structured failure, or died without reporting one.
 
-    def __init__(self, code: str, message: str):
+    ``scene_manifest`` rides along when the child managed to describe the tree it was
+    attempting — the operation that broke, and the ones that were suppressed or never
+    reached. It is the failure case the workspace most needs: there is no geometry to
+    derive a tree from, and "which step went wrong" is the only useful thing to show.
+    A child that died outright supplies none, which is honest — nothing is known.
+    """
+
+    def __init__(self, code: str, message: str, scene_manifest: dict | None = None):
         super().__init__(message)
         self.code = code
         self.message = message
+        self.scene_manifest = scene_manifest
 
 
 def group_members(pgid: int, include_zombies: bool = False) -> list[int]:
@@ -301,11 +309,15 @@ def run_build(
     recipe: str,
     params: dict,
     *,
+    document: dict | None = None,
+    asset: tuple[str, bytes] | None = None,
     step: bool = True,
     formats: list[str] | tuple[str, ...] | None = None,
     deadline_s: float = DEADLINE_S,
     grace_s: float = GRACE_S,
     build_id: str | None = None,
+    scope: str | None = None,
+    measurements: list[dict] | None = None,
     entrypoint: str = _WORKER,
 ):
     """Run one build in a killable child. Yields a :class:`BuildOutcome`.
@@ -313,6 +325,22 @@ def run_build(
     A context manager because the workdir's lifetime is the point: it is removed on
     the way out whether the build succeeded, failed, timed out or was cancelled.
     The caller reads the artifacts inside the ``with`` block.
+
+    ``document`` switches the child from a named recipe to a CadIR source. ``recipe``
+    stays required either way and is then the document's own name — it is what the
+    registry, the logs and the exported ``meta`` are keyed on, and a build with no
+    label is one nobody can find afterwards.
+
+    ``scope`` is what the child hashes node ids from. Sent only when the caller owns
+    a stable one; otherwise the child falls back to the document's own ``name``, which
+    is a field the authoring model writes and can therefore change between two turns
+    that built the same part.
+
+    ``measurements`` is the HE-2 request list, already validated by the caller against
+    ``measure_spec``. It travels in ``job.json`` because the measurements have to be
+    taken where the shape lives, inside this same killable child — a Python deadline in
+    the parent cannot interrupt an OpenCascade call already running, which Gate 1B
+    established and which is why the whole process group is what gets killed.
 
     ``entrypoint`` is a seam for the kill-path tests, which point it at a script
     that deliberately forks a grandchild and refuses to die. Adding a runaway
@@ -331,8 +359,28 @@ def run_build(
     started = time.monotonic()
     try:
         job = {"recipe": recipe, "params": params, "step": bool(step)}
+        # Omitted rather than sent as null when there is none, so a job file written
+        # for a caller that does not own a scope is exactly what it was before.
+        if scope is not None:
+            job["scope"] = scope
+        if document is not None:
+            job["source_kind"] = "cadir"
+            job["document"] = document
+        if asset is not None:
+            # Gate 8B. The bytes go on disk here, in the workdir the parent already
+            # owns and already removes, and the job names only the basename — the
+            # child re-checks that and refuses a path. Writing the file in the parent
+            # rather than passing it inline keeps a 32 MB upload out of job.json,
+            # which the child reads whole.
+            asset_name = os.path.basename(asset[0]) or "asset"
+            with open(os.path.join(workdir, asset_name), "wb") as fh:
+                fh.write(asset[1])
+            job["source_kind"] = "import"
+            job["asset"] = asset_name
         if formats is not None:
             job["formats"] = list(formats)
+        if measurements:
+            job["measurements"] = list(measurements)
         with open(os.path.join(workdir, "job.json"), "w", encoding="utf-8") as fh:
             json.dump(job, fh)
 
@@ -438,9 +486,11 @@ def run_build(
             result = json.load(fh)
 
         if not result.get("ok"):
+            scene = result.get("scene_manifest")
             raise BuildFailed(
                 str(result.get("error_code") or "geometry_failed"),
                 str(result.get("message") or "the geometry engine failed"),
+                scene if isinstance(scene, dict) else None,
             )
 
         # Trust the child's own list of what it wrote, then confirm each file is there.

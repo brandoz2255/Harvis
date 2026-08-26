@@ -247,3 +247,65 @@ def test_v1_rejects_a_formats_field():
     r = client.post("/cad/execute", json={
         "recipe": "helmet_hanger_v1", "params": GOLDEN_PARAMS, "formats": ["glb"]})
     _assert_invalid(r)
+
+
+# --- a server-owned scope (CS-2) ---------------------------------------------------
+# Node ids are hashed from a scope, and the engine's fallback for that scope is the
+# document's own `name`. That field is written by whatever authored the document — an
+# LLM, in the lane this matters for — so a rename between two turns reissues every id
+# and resets the selection and per-part colours keyed on them. `scope` lets the caller
+# hand over something it owns instead.
+
+def _two_part_doc(name: str) -> dict:
+    return {
+        "schema_version": "0.1", "name": name, "units": "mm", "parameters": [],
+        "operations": [
+            {"op_id": "bottle_body", "op": "box", "mode": "add", "component": "bottle",
+             "size": [30, 30, 80]},
+            {"op_id": "pencil_body", "op": "box", "mode": "add", "component": "pencil",
+             "size": [8, 8, 150], "at": {"positions": [[60, 0, 0]]}},
+        ],
+        "expected_solids": 2,
+    }
+
+
+def _body_ids(name: str, scope: str | None = None) -> dict[str, str]:
+    body = {"document": _two_part_doc(name), "formats": ["stl"]}
+    if scope is not None:
+        body["scope"] = scope
+    r = client.post("/cad/v2/build", json=body)
+    assert r.status_code == 200, r.text
+    result, _files = parse_multipart(r.headers["content-type"], r.content)
+    return {n["component"]: n["node_id"]
+            for n in result["scene_manifest"]["nodes"] if n["kind"] == "body"}
+
+
+def test_renaming_the_document_reissues_every_id_without_a_scope():
+    """The failure this field exists for, asserted rather than assumed."""
+    first = _body_ids("cs2_two")
+    renamed = _body_ids("cs2_three")
+    assert set(first) == set(renamed) == {"bottle", "pencil"}
+    assert first["bottle"] != renamed["bottle"]
+    assert first["pencil"] != renamed["pencil"]
+
+
+def test_a_caller_owned_scope_survives_the_rename():
+    scope = "proj_0e2f1a"
+    first = _body_ids("cs2_two", scope=scope)
+    renamed = _body_ids("cs2_three", scope=scope)
+    assert first == renamed
+    # And still distinguishes the two parts of the same build.
+    assert first["bottle"] != first["pencil"]
+
+
+def test_two_projects_never_share_a_part_id():
+    """Same document, two scopes: ids must not collide across projects."""
+    a = _body_ids("cs2_two", scope="proj_aaaa")
+    b = _body_ids("cs2_two", scope="proj_bbbb")
+    assert a["bottle"] != b["bottle"]
+
+
+def test_a_blank_scope_is_refused():
+    r = client.post("/cad/v2/build", json={
+        "document": _two_part_doc("cs2_two"), "formats": ["stl"], "scope": ""})
+    _assert_invalid(r)

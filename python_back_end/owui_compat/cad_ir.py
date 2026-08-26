@@ -38,11 +38,33 @@ import math
 # refused here rather than at the sidecar, so a version skew between a rolling
 # frontend and a not-yet-updated engine reads as "unsupported", not as a parse error
 # from a container the user cannot see.
-KNOWN_SCHEMA_VERSIONS = ("0.1",)
+#
+# Both versions stay listed after a bump. 0.1 documents are what every stored revision
+# written before Gate 7D holds, and they still parse — dropping the old string here
+# would refuse the project history rather than the new grammar.
+KNOWN_SCHEMA_VERSIONS = ("0.1", "0.2", "0.3")
 
 # Operation names this backend will forward. Same reasoning as
 # ``fab_cad.KNOWN_RECIPES``: a local allowlist, not a mirror of the sidecar's.
-KNOWN_OPS = ("box", "cylinder", "fillet")
+KNOWN_OPS = (
+    "box", "cylinder", "sphere", "cone", "torus", "extrude", "revolve",
+    "fillet", "chamfer", "mirror", "shell",
+)
+
+# Dimension-bearing keys walked as formulas. Listed rather than inferred because this
+# module deliberately does not own the grammar: a key the sidecar adds and this list
+# forgets is forwarded unchecked, which is the honest failure (the engine still parses
+# it), whereas a key this list invents and the sidecar rejects would surface as a
+# backend refusing a document the engine would have built.
+#
+# ``openings`` is deliberately absent for the same reason ``select`` is: a selector's
+# fields are axis names and integer slices, not dimensions, and walking them would try
+# to compile ``"Z"`` as arithmetic over the document's parameters.
+_FORMULA_KEYS = (
+    "size", "radius", "height", "when", "at", "profile", "amount", "angle",
+    "length", "major_radius", "minor_radius", "bottom_radius", "top_radius",
+    "thickness",
+)
 
 # Caps. Each is at or above the corresponding sidecar limit, never below — a backend
 # that refuses what the engine would have accepted is a bug that presents as a missing
@@ -56,8 +78,14 @@ MAX_LITERAL_INSTANCES = 1024
 
 _TOP_LEVEL_KEYS = {
     "schema_version", "units", "name", "parameters", "derived",
-    "operations", "expected_solids",
+    "operations", "placements", "expected_solids",
 }
+
+# Placement translate, in millimetres per axis. The same cap the engine's schema
+# declares — listed again rather than imported because this module deliberately does not
+# share code with the sidecar, and a coarse fence that disagreed downward would refuse a
+# drag the engine would have built.
+MAX_TRANSLATE_MM = 1000.0
 
 
 class CadIRError(ValueError):
@@ -122,6 +150,11 @@ def _literal_instances(at: dict, where: str) -> None:
     """Bound a grid whose counts are literal numbers. A formula-valued count is left
     to the sidecar's budget, which has the parameter environment this layer lacks."""
     counts = at.get("count")
+    if isinstance(counts, bool):
+        raise CadIRError("invalid_placement", f"{where}: count must be a number")
+    if isinstance(counts, (int, float)):
+        # A polar placement's count is a single number, not a triple.
+        counts = [counts]
     if not isinstance(counts, list):
         return
     total = 1
@@ -198,15 +231,58 @@ def check_document(doc) -> dict:
                     raise CadIRError("invalid_document",
                                      f"{where}.rotation must contain finite numbers")
 
-        for key in ("size", "radius", "height", "when", "at"):
-            if key in op and key != "rotation":
+        for key in _FORMULA_KEYS:
+            if key in op:
                 _walk_formulas(op[key], f"{where}.{key}")
 
     for i, d in enumerate(doc.get("derived", [])):
         _require(isinstance(d, dict), "invalid_document", f"derived[{i}] must be an object")
         _check_formula(d.get("value"), f"derived[{i}].value")
 
+    _check_placements(doc.get("placements"), {op.get("component") for op in ops})
+
     return doc
+
+
+def _check_placements(placements, built: set) -> None:
+    """Coarse fence on the CS-8 per-component transforms.
+
+    Checked here and not only at the engine because a placement is the one part of a
+    document a *drag* writes rather than a model, so a UI bug — a NaN from an
+    unconstrained gizmo, a component name that no longer exists after a rebuild — is
+    the likely failure rather than the exotic one. The engine re-checks all of it.
+    """
+    if placements is None:
+        return
+    _require(isinstance(placements, list), "invalid_document", "placements must be a list")
+    _require(len(placements) <= 16, "document_too_large",
+             f"placements has {len(placements)} entries, over the cap of 16")
+    seen = set()
+    for i, p in enumerate(placements):
+        where = f"placements[{i}]"
+        _require(isinstance(p, dict), "invalid_document", f"{where} must be an object")
+        unknown = sorted(set(p) - {"component", "translate", "rotate"})
+        _require(not unknown, "unknown_field", f"{where}: unknown field(s): {', '.join(unknown)}")
+        name = p.get("component")
+        _require(isinstance(name, str) and name, "invalid_document",
+                 f"{where}.component must be a name")
+        _require(name not in seen, "invalid_document", f"{where}: duplicate placement for {name}")
+        seen.add(name)
+        _require(name in built, "invalid_document",
+                 f"{where}: no operation builds component {name!r}")
+        for key, cap in (("translate", MAX_TRANSLATE_MM), ("rotate", None)):
+            v = p.get(key)
+            if v is None:
+                continue
+            _require(isinstance(v, list) and len(v) == 3, "invalid_document",
+                     f"{where}.{key} must be [x, y, z]")
+            for n in v:
+                if isinstance(n, bool) or not isinstance(n, (int, float)) or not math.isfinite(n):
+                    raise CadIRError("invalid_document",
+                                     f"{where}.{key} must contain finite numbers")
+                if cap is not None and abs(float(n)) > cap:
+                    raise CadIRError("invalid_document",
+                                     f"{where}.{key} is limited to ±{cap:g} mm per axis")
 
 
 def check_params(params) -> dict:
