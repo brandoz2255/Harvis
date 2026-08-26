@@ -889,3 +889,48 @@ body {
 		scroll-behavior: auto !important;
 	}
 }
+
+/* ── Light-mode contrast floor ────────────────────────────────────────────────
+   A large part of the app (agent-studio especially) was authored dark-first:
+   the muted greys were picked against a near-black ground and carry no `dark:`
+   variant, so light mode inherits a colour meant for the opposite background.
+   Measured against white, those greys fail WCAG AA badly — gray-400 is 2.85:1,
+   gray-300 is 1.47:1, gray-200 is 1.24:1, where body text needs 4.5:1. That is
+   the "too light to read" the UI actually has.
+
+   This raises the floor in ONE place instead of rewriting ~720 class
+   occurrences across ~197 files. It is safe to do globally because Tailwind
+   emits each variant as its own selector: `dark:text-gray-400` compiles to a
+   separate `.dark\:text-gray-400` class, as do `hover:` and `placeholder:`.
+   Overriding the BARE class therefore touches only the light-mode value and
+   leaves dark mode, hover states, and input placeholders exactly as authored.
+
+   Escape hatch: a few surfaces genuinely DO want pale text in light mode —
+   terminal-style log panes sit on `bg-black/40` in both themes, so darkening
+   them would be the bug rather than the fix. Those opt out with `.log-pane`
+   (a real class, not Tailwind's important modifier, whose prefix/suffix form
+   changed between Tailwind 3 and 4 and would silently no-op if written the
+   old way). */
+html:not(.dark) {
+	.text-gray-400,
+	.text-gray-300,
+	.text-gray-200 {
+		color: #6b7280; /* gray-500 — 4.83:1 on white, the lightest AA-passing step */
+	}
+
+	/* Dark-first hovers move the WRONG way in light mode: the text gets lighter
+	   on hover, so the thing you are pointing at is the hardest to read. Land
+	   them on a darker step than the resting colour above. */
+	.hover\:text-gray-400:hover,
+	.hover\:text-gray-300:hover,
+	.hover\:text-gray-200:hover {
+		color: #374151; /* gray-700 — clear "this is interactive" darkening */
+	}
+}
+
+/* Opt-out for surfaces that are dark in BOTH themes (terminal/log panes). */
+html:not(.dark) .log-pane,
+html:not(.dark) .log-pane .text-gray-400,
+html:not(.dark) .log-pane .text-gray-300 {
+	color: #d1d5db; /* gray-300 — correct against the pane's own black ground */
+}

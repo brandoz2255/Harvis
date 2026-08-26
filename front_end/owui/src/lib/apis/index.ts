@@ -801,39 +801,55 @@ export const generateTitle = async (
 		throw error;
 	}
 
-	try {
-		// Step 1: Safely extract the response string
-		const response = res?.choices[0]?.message?.content ?? '';
-
-		// Step 2: Attempt to fix common JSON format issues like single quotes
-		const sanitizedResponse = response.replace(/['‘’`]/g, '"'); // Convert single quotes to double quotes for valid JSON
-
-		// Step 3: Find the relevant JSON block within the response
-		const jsonStartIndex = sanitizedResponse.indexOf('{');
-		const jsonEndIndex = sanitizedResponse.lastIndexOf('}');
-
-		// Step 4: Check if we found a valid JSON block (with both `{` and `}`)
-		if (jsonStartIndex !== -1 && jsonEndIndex !== -1) {
-			const jsonResponse = sanitizedResponse.substring(jsonStartIndex, jsonEndIndex + 1);
-
-			// Step 5: Parse the JSON block
-			const parsed = JSON.parse(jsonResponse);
-
-			// Step 6: If there's a "tags" key, return the tags array; otherwise, return an empty array
-			if (parsed && parsed.title) {
-				return parsed.title;
-			} else {
-				return null;
-			}
-		}
-
-		// If no valid JSON block found, return an empty array
-		return null;
-	} catch (e) {
-		// Catch and safely return empty array on any parsing errors
-		console.error('Failed to parse response: ', e);
+	const raw = (res?.choices?.[0]?.message?.content ?? '').trim();
+	if (!raw) {
 		return null;
 	}
+
+	// The task endpoint asks for {"title": "..."} and normally returns exactly that.
+	// Parse what it actually sent BEFORE trying to repair anything: the old code
+	// unconditionally rewrote ' ' ` into ", which turns a perfectly valid title
+	// like {"title": "Bob's Server"} into {"title": "Bob"s Server"} and throws.
+	// That is why chats with an apostrophe in the title silently stayed unnamed.
+	const fromJson = (text: string): string | null => {
+		const start = text.indexOf('{');
+		const end = text.lastIndexOf('}');
+		if (start === -1 || end === -1 || end < start) {
+			return null;
+		}
+		try {
+			const parsed = JSON.parse(text.substring(start, end + 1));
+			return typeof parsed?.title === 'string' && parsed.title.trim() ? parsed.title.trim() : null;
+		} catch (e) {
+			return null;
+		}
+	};
+
+	// Strip a ```json fence if the model wrapped its answer in one.
+	const unfenced = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+
+	// 1. the response as sent — the overwhelmingly common case
+	// 2. the same text with smart quotes normalised, for models that emit
+	//    {'title': 'x'} or curly quotes instead of real JSON
+	const title =
+		fromJson(unfenced) ?? fromJson(unfenced.replace(/[\u2018\u2019\u201c\u201d`]/g, '"'));
+	if (title) {
+		return title;
+	}
+
+	// 3. A small model that ignored the JSON instruction and just answered with the
+	//    title is still giving us a usable title. Taking it beats leaving the chat
+	//    called "New Chat" — which is the failure the user actually sees.
+	const plain = unfenced
+		.split('\n')[0]
+		.replace(/^["'\u201c\u2018]|["'\u201d\u2019]$/g, '')
+		.replace(/^(?:title|chat title)\s*[:\-]\s*/i, '')
+		.trim();
+	if (plain && plain.length <= 80 && !plain.includes('{')) {
+		return plain;
+	}
+
+	return null;
 };
 
 export const generateFollowUps = async (

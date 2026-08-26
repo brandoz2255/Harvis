@@ -121,10 +121,11 @@
 		</div>
 	</a>
 
-	<!-- Code-mode tools: Routines · Tune. (Agent Studio / Model Comparison / etc.
-	     live in the footer "More".) "Tune" rather than "Customize" so it doesn't
-	     read as the footer's Customize, which opens the Settings modal — this one
-	     opens the in-Build customize drawer. -->
+	<!-- Code-mode tools: Routines · Customize. (Agent Studio / Model Comparison /
+	     etc. live in the footer "More".) This used to read "Tune" to keep it apart
+	     from the footer's Customize, which opens the Settings modal. Renamed on the
+	     user's call: the drawer it opens is labelled Customize everywhere else, and
+	     matching that beats disambiguating from a different menu. -->
 	<button
 		type="button"
 		on:click={() => openPanel('routines')}
@@ -138,10 +139,10 @@
 		type="button"
 		on:click={() => openPanel('customize')}
 		class="w-full flex items-center gap-3 rounded-xl px-2.5 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-850 transition outline-none"
-		aria-label={$i18n.t('Tune')}
+		aria-label={$i18n.t('Customize')}
 	>
 		<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="size-4.5 shrink-0"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6" /></svg>
-		<span class="self-center translate-y-[0.5px] truncate">{$i18n.t('Tune')}</span>
+		<span class="self-center translate-y-[0.5px] truncate">{$i18n.t('Customize')}</span>
 	</button>
 
 	<!-- Sessions (this kind only — sits where the chat list sits in chat mode). -->

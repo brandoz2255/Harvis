@@ -113,6 +113,7 @@
 	import EventConfirmDialog from '../common/ConfirmDialog.svelte';
 	import DeleteConfirmDialog from '../common/ConfirmDialog.svelte';
 	import Placeholder from './Placeholder.svelte';
+	import WipNotice from './WipNotice.svelte';
 	import FilesOverlay from './MessageInput/FilesOverlay.svelte';
 	import NotificationToast from '../NotificationToast.svelte';
 	import Spinner from '../common/Spinner.svelte';
@@ -1804,7 +1805,19 @@
 					const _gen = await generateTitle(localStorage.token, modelId, _msgs, _chatId).catch(
 						() => null
 					);
-					const _title = typeof _gen === 'string' ? _gen : _gen?.choices?.[0]?.message?.content;
+					let _title = typeof _gen === 'string' ? _gen : _gen?.choices?.[0]?.message?.content;
+
+					// The endpoint, the model, or the parse can all come up empty. Leaving
+					// the chat on its raw first prompt is the "the model didn't name it"
+					// symptom, so fall back to a short phrase from that prompt instead.
+					if (!_title) {
+						const _firstUser = _msgs.find((m) => m.role === 'user')?.content ?? '';
+						const _words = _firstUser.replace(/\s+/g, ' ').trim().split(' ').slice(0, 6);
+						if (_words.length) {
+							_title = _words.join(' ') + (_firstUser.trim().split(/\s+/).length > 6 ? '…' : '');
+						}
+					}
+
 					if (_title && $chatId == _chatId) {
 						chatTitle.set(_title);
 						await updateChatById(localStorage.token, _chatId, { title: _title });
@@ -3559,14 +3572,12 @@
 									on:research={researchHandler}
 								/>
 
-								<div
-									class="absolute bottom-1 text-xs text-gray-500 text-center line-clamp-1 right-0 left-0"
-								>
-									<!-- {$i18n.t('LLMs can make mistakes. Verify important information.')} -->
+								<div class="absolute bottom-1 right-0 left-0">
+									<WipNotice />
 								</div>
 							</div>
 						{:else}
-							<div class="flex items-center h-full">
+							<div class="relative flex items-center h-full">
 								<Placeholder
 									{history}
 									bind:selectedModels
@@ -3603,6 +3614,10 @@
 									}}
 									on:research={researchHandler}
 								/>
+
+								<div class="absolute bottom-1 right-0 left-0">
+									<WipNotice />
+								</div>
 							</div>
 						{/if}
 					</div>

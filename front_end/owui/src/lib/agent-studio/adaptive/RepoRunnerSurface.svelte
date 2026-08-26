@@ -481,7 +481,7 @@
 			</div>
 
 			{#if running && previewViewable}
-				<div class="mt-2 rounded-lg overflow-hidden border border-cyan-400/15 bg-black/40">
+				<div class="log-pane mt-2 rounded-lg overflow-hidden border border-cyan-400/15 bg-black/40">
 					<iframe
 						title="App preview"
 						src={previewSrc}
@@ -514,7 +514,7 @@
 					<svg class="size-4 animate-spin" viewBox="0 0 24 24" fill="none"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" /><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 0 1 8-8V0C5.4 0 0 5.4 0 12h4z" /></svg>
 					{$i18n.t(_statusLabel[preview.status] ?? 'Working…')}
 				</div>
-				{#if preview?.log_tail}<pre class="mt-2 max-h-44 overflow-auto text-[10px] font-mono text-gray-400 bg-black/40 rounded-lg p-2.5 whitespace-pre-wrap">{preview.log_tail}</pre>{/if}
+				{#if preview?.log_tail}<pre class="log-pane mt-2 max-h-44 overflow-auto text-[10px] font-mono text-gray-400 bg-black/40 rounded-lg p-2.5 whitespace-pre-wrap">{preview.log_tail}</pre>{/if}
 				<div class="mt-1.5 flex items-center justify-between gap-2">
 					<div class="text-[9px] text-gray-600">{$i18n.t('Running in an isolated sandbox — no access to your database, models, or other users’ data. First install can take a minute.')}</div>
 					<button class="shrink-0 text-[10px] px-2 py-0.5 rounded-lg border border-red-400/30 text-red-200 hover:bg-red-400/10 transition" on:click={stopApp}>{$i18n.t('Cancel')}</button>
@@ -522,7 +522,7 @@
 			{:else}
 				{#if preview?.status === 'failed'}
 					<div class="mt-2 text-[11px] text-red-300">{preview.error || $i18n.t('The app did not start.')}</div>
-					{#if preview?.log_tail}<pre class="mt-2 max-h-40 overflow-auto text-[10px] font-mono text-gray-400 bg-black/40 rounded-lg p-2.5 whitespace-pre-wrap">{preview.log_tail}</pre>{/if}
+					{#if preview?.log_tail}<pre class="log-pane mt-2 max-h-40 overflow-auto text-[10px] font-mono text-gray-400 bg-black/40 rounded-lg p-2.5 whitespace-pre-wrap">{preview.log_tail}</pre>{/if}
 				{/if}
 				{#if runErr}<div class="mt-2 text-[11px] text-amber-300">{runErr}</div>{/if}
 				{#if autoMode}
@@ -603,7 +603,7 @@
 					<h3 class="text-xs font-semibold text-gray-100">{$i18n.t('Terminal')}</h3>
 					<span class="text-[8px] uppercase tracking-widest text-cyan-300/60">{$i18n.t('Clone log · real output')}</span>
 				</div>
-				<pre class="mt-2 max-h-56 overflow-auto text-[10.5px] leading-relaxed font-mono text-gray-300 bg-black/40 rounded-lg p-2.5 whitespace-pre-wrap">{repo.log}</pre>
+				<pre class="log-pane mt-2 max-h-56 overflow-auto text-[10.5px] leading-relaxed font-mono text-gray-300 bg-black/40 rounded-lg p-2.5 whitespace-pre-wrap">{repo.log}</pre>
 			</article>
 
 			<!-- SETUP TRACKER -->

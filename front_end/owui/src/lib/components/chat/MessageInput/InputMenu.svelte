@@ -47,6 +47,12 @@
 
 	export let onCreateImage: Function;
 
+	// Force web search. The pill next to the input only appears when EVERY selected
+	// model advertises the web_search capability, so on a model that doesn't there was
+	// no way to ask for a search at all. This entry is that override: it sets the same
+	// flag the pill sets, from a place that is always reachable.
+	export let webSearchEnabled = false;
+
 	export let onUpload: Function;
 	export let onClose: Function;
 
@@ -175,6 +181,26 @@
 					>
 						<Search />
 						<div class="line-clamp-1">{$i18n.t('Deep Research')}</div>
+					</button>
+
+					<!-- Force web search — always available, unlike the capability-gated pill. -->
+					<button
+						class="flex w-full gap-2 items-center px-3 py-1.5 text-sm select-none cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50 rounded-xl"
+						type="button"
+						on:click={() => {
+							webSearchEnabled = !webSearchEnabled;
+							show = false;
+						}}
+					>
+						<GlobeAlt />
+						<div class="line-clamp-1 flex-1 text-left">{$i18n.t('Force Web Search')}</div>
+						{#if webSearchEnabled}
+							<div
+								class="shrink-0 text-[10px] font-medium uppercase tracking-wide text-blue-600 dark:text-blue-400"
+							>
+								{$i18n.t('On')}
+							</div>
+						{/if}
 					</button>
 
 					<!-- Always shown — the backend gates generation honestly (flag + provider readiness). -->
