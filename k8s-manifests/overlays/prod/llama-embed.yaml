@@ -89,7 +89,7 @@ spec:
         # Fix PVC permissions first — local PVs are owned by root by default,
         # curlimages/curl runs as non-root (curl_user) and can't write without this.
         - name: fix-permissions
-          image: busybox:1.36
+          image: busybox:1.36@sha256:b7f3d86d6e84fc17718c48bcde1450807faa2d56704205c697b4bd5df7b9e29f
           command: ["sh", "-c", "chmod 777 /embed-models && echo 'permissions fixed'"]
           securityContext:
             runAsUser: 0    # must run as root to chmod the PVC mount
@@ -106,7 +106,7 @@ spec:
 
         # Download nomic-embed-text-v1.5 Q4_K_M (~274MB) — skip if present
         - name: download-nomic
-          image: curlimages/curl:latest
+          image: curlimages/curl:8.13.0@sha256:e6ebb770fb6e2236c2e83ad6b6dbbd32cb6dff0b17a9482a7d4bca20f1c9b50a
           command: ["/bin/sh", "-c"]
           securityContext:
             runAsUser: 0    # run as root so curl can write to PVC mount
@@ -145,7 +145,7 @@ spec:
 
         # Download Qwen3-Embedding-4B Q4_K_M (~2.5GB) — skip if present
         - name: download-qwen3-embed
-          image: curlimages/curl:latest
+          image: curlimages/curl:8.13.0@sha256:e6ebb770fb6e2236c2e83ad6b6dbbd32cb6dff0b17a9482a7d4bca20f1c9b50a
           command: ["/bin/sh", "-c"]
           securityContext:
             runAsUser: 0    # run as root so curl can write to PVC mount
@@ -186,8 +186,8 @@ spec:
         # embed-nomic — nomic-embed-text-v1.5, 768 dims, STANDARD tier
         # CPU-only: -ngl 0; ~274MB model, fast on CPU for RAG batch workloads
         - name: embed-nomic
-          image: ghcr.io/ggml-org/llama.cpp:server-cuda
-          imagePullPolicy: Always
+          image: ghcr.io/ggml-org/llama.cpp:server-cuda@sha256:c12b8a7325a1b5cc1480cb44d026518860f4810c5cf77dc450bdd05d87231062
+          imagePullPolicy: IfNotPresent
           ports:
             - name: embed-nomic
               containerPort: 8081
@@ -244,8 +244,8 @@ spec:
         # Q4_K_M quality loss vs BF16: <0.5% on MTEB — negligible for RAG use
         # Embedding forward-pass only (no generation) so KV cache is essentially zero
         - name: embed-qwen3
-          image: ghcr.io/ggml-org/llama.cpp:server-cuda
-          imagePullPolicy: Always
+          image: ghcr.io/ggml-org/llama.cpp:server-cuda@sha256:c12b8a7325a1b5cc1480cb44d026518860f4810c5cf77dc450bdd05d87231062
+          imagePullPolicy: IfNotPresent
           ports:
             - name: embed-qwen3
               containerPort: 8082

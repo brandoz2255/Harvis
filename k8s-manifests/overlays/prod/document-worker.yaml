@@ -59,7 +59,7 @@ spec:
               value: "http://harvis-ai-merged-backend:11434"
 
             - name: BACKEND_URL
-              value: "http://harvis-ai-backend.ai-agents.svc.cluster.local:8000"
+              value: "http://harvis-ai-merged-backend.ai-agents.svc.cluster.local:8000"
 
             # Output directory for generated documents
             - name: ARTIFACT_STORAGE_DIR
@@ -74,6 +74,14 @@ spec:
             # Run document generation locally in pod (Docker not available in K8s)
             - name: CODE_EXECUTOR_LOCAL
               value: "true"
+
+            # Artifact generation settings
+            - name: ARTIFACT_MAX_AUTO_RETRIES
+              value: "4"
+            - name: ARTIFACT_JOB_TIMEOUT_SECONDS
+              value: "60"
+            - name: ARTIFACT_RETRY_POLL_INTERVAL
+              value: "0.5"
 
             # Worker-specific settings
             - name: WORKER_NAME

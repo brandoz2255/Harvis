@@ -22,7 +22,7 @@ spec:
         kubernetes.io/hostname: dulc3-os
       containers:
         - name: nginx
-          image: "nginx:alpine"
+          image: "nginx:1.27-alpine@sha256:62223d644fa234c3a1cc785ee14242ec47a77364226f1c811d2f669f96dc2ac8"
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

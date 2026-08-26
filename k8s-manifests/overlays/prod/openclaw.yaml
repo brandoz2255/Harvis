@@ -1,22 +1,21 @@
 ---
-# Static PersistentVolume pinned to rocky2vm.local.
-# Using a static local PV (not local-path provisioner) so we control exactly
-# which node OpenClaw's data lives on — critical for the security isolation model.
+# Static PersistentVolume pinned to dulc3-os.
+# Moved from rocky2vm.local so OpenClaw runs on the same node as the dev workspace,
+# enabling direct hostPath file access without SSH round-trips.
 # Retain policy: data survives PVC deletion and must be manually cleaned up.
-# Before applying: ensure /var/lib/openclaw-data exists on rocky2vm.local.
-#   kubectl debug node/rocky2vm.local -it --image=busybox -- mkdir -p /host/var/lib/openclaw-data
-#   (or ssh rocky2vm.local "sudo mkdir -p /var/lib/openclaw-data && sudo chown 1000:1000 /var/lib/openclaw-data")
+# Before applying: ensure /var/lib/openclaw-data exists on dulc3-os.
+#   sudo mkdir -p /var/lib/openclaw-data && sudo chown 1000:1000 /var/lib/openclaw-data
 apiVersion: v1
 kind: PersistentVolume
 metadata:
-  name: openclaw-data-rocky2
+  name: openclaw-data-dulc3
 spec:
   capacity:
     storage: 5Gi
   accessModes:
     - ReadWriteOnce
   persistentVolumeReclaimPolicy: Retain
-  storageClassName: ""
+  storageClassName: local-path
   local:
     path: /var/lib/openclaw-data
   nodeAffinity:
@@ -26,7 +25,7 @@ spec:
             - key: kubernetes.io/hostname
               operator: In
               values:
-                - rocky2vm.local
+                - dulc3-os
 
 ---
 # PersistentVolumeClaim — bound explicitly to the static PV above.
@@ -39,316 +38,11 @@ metadata:
 spec:
   accessModes:
     - ReadWriteOnce
-  storageClassName: ""
-  volumeName: openclaw-data-rocky2
+  storageClassName: local-path
+  volumeName: openclaw-data-dulc3
   resources:
     requests:
       storage: 5Gi
-
----
-# ConfigMap: openclaw.json config file (mounted read-only)
-# Key security setting: models.mode = "replace" so NO cloud provider fallback exists.
-# channels.discord enables the Discord channel driver — bot responds to @mentions and DMs.
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: openclaw-config
-  namespace: ai-agents
-data:
-  # Exec approval config — controls which commands require human approval before running.
-  # security: "full" + ask: "off" = all commands run immediately, no approval gate.
-  # This is safe here because the NetworkPolicy already restricts egress and the
-  # harvis-github skill enforces repo/branch allowlists at a higher level.
-  exec-approvals.json: |
-    {
-      "version": 1,
-      "defaults": {
-        "security": "full",
-        "ask": "off",
-        "askFallback": "deny",
-        "autoAllowSkills": true
-      }
-    }
-
-  openclaw.json: |
-    {
-      "gateway": {
-        "bind": "lan",
-        "port": 18789,
-        "auth": {
-          "mode": "token"
-        },
-        "controlUi": {
-          "enabled": false
-        }
-      },
-      "commands": {
-        "bash": true,
-        "bashForegroundMs": 30000
-      },
-      "browser": {
-        "enabled": true,
-        "headless": true
-      },
-      "session": {
-        "scope": "per-sender",
-        "maintenance": {
-          "pruneAfter": "90d",
-          "maxEntries": 2000
-        }
-      },
-      "models": {
-        "mode": "replace",
-        "providers": {
-          "vllm-local": {
-            "api": "openai-completions",
-            "baseUrl": "http://harvis-ai-merged-backend:8001/v1",
-            "apiKey": "vllm-local",
-            "models": [
-              { "id": "qwen3.5:9b", "name": "Qwen3.5 9B (vLLM, fast agentic, 256K ctx)" }
-            ]
-          },
-          "llama-local": {
-            "api": "openai-completions",
-            "baseUrl": "http://harvis-ai-llama-server:8080/v1",
-            "apiKey": "llama-local",
-            "models": [
-              { "id": "deepseek-r1:14b", "name": "DeepSeek R1 14B (llama.cpp, reasoning, dulc3-top)" }
-            ]
-          },
-          "harvis-proxy": {
-            "api": "openai-completions",
-            "baseUrl": "http://harvis-ai-merged-backend:8000/v1",
-            "apiKey": "${OPENCLAW_GATEWAY_TOKEN}",
-            "models": [
-              { "id": "nvidia-kimi", "name": "Kimi K2.5 (NVIDIA NIM)" },
-              { "id": "kimi-k2.5", "name": "Kimi K2.5 (Moonshot)" },
-              { "id": "gpt-oss:120b", "name": "GPT-OSS 120B (via Harvis proxy)" },
-              { "id": "qwen3:235b-a22b-q8_0", "name": "Qwen3 235B (via Harvis proxy)" }
-            ]
-          },
-          "user-config": {
-            "api": "openai-completions",
-            "baseUrl": "http://harvis-ai-merged-backend:8000/v1",
-            "apiKey": "${OPENCLAW_GATEWAY_TOKEN}",
-            "models": [
-              { "id": "harvis-llm", "name": "User Configured LLM (set in Settings)" }
-            ]
-          }
-        }
-      },
-      "tools": {
-        "elevated": {
-          "enabled": true,
-          "allowFrom": {
-            "discord": ["783435788431261777"]
-          }
-        },
-        "exec": {
-          "host": "gateway"
-        }
-      },
-      "agents": {
-        "defaults": {
-          "elevatedDefault": "full",
-          "timeoutSeconds": 600,
-          "model": {
-            "primary": "harvis-proxy/harvis-llm"
-          },
-          "subagents": {
-            "runTimeoutSeconds": 600,
-            "announceTimeoutMs": 180000,
-            "maxSpawnDepth": 2,
-            "maxChildrenPerAgent": 5,
-            "maxConcurrent": 8
-          }
-        },
-        "list": [
-          {
-            "id": "main",
-            "default": true,
-            "model": {
-              "primary": "harvis-proxy/kimi-k2.5"
-            }
-          },
-          {
-            "id": "deep",
-            "model": {
-              "primary": "llama-local/deepseek-r1:14b"
-            }
-          },
-          {
-            "id": "planner",
-            "model": {
-              "primary": "harvis-proxy/nvidia-kimi"
-            },
-            "skills": ["harvis-planner", "harvis-coding", "harvis-github", "harvis-rag", "harvis-research", "harvis-document"]
-          },
-          {
-            "id": "kimi",
-            "model": {
-              "primary": "harvis-proxy/kimi-k2.5"
-            },
-            "subagents": {
-              "model": "harvis-proxy/kimi-k2.5"
-            },
-            "skills": ["harvis-coding"]
-          },
-          {
-            "id": "gpt-oss",
-            "model": {
-              "primary": "harvis-proxy/gpt-oss:120b"
-            }
-          },
-          {
-            "id": "qwen3",
-            "model": {
-              "primary": "harvis-proxy/qwen3:235b-a22b-q8_0"
-            }
-          }
-        ]
-      },
-      "skills": {
-        "load": {
-          "extraDirs": ["/app/skills"]
-        }
-      },
-      "channels": {
-        "discord": {
-          "token": "${DISCORD_BOT_TOKEN}"
-        }
-      },
-      "heartbeat": {
-        "every": "1h",
-        "target": "none",
-        "activeHours": "08:00-22:00",
-        "timezone": "America/Los_Angeles"
-      }
-    }
-
----
-# ConfigMap: HEARTBEAT.md — workspace-level heartbeat checklist
-# Mounted at /home/node/.openclaw/workspace/HEARTBEAT.md
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: openclaw-heartbeat
-  namespace: ai-agents
-data:
-  HEARTBEAT.md: |
-    # Harvis Development Pulse
-
-    ## Purpose
-
-    Periodic check-in for the Harvis project. Runs hourly during active
-    hours. Scans recent git activity across the Harvis repo, summarizes
-    changes, posts to the #harvis-heartbeat Discord channel.
-
-    ## CRITICAL RESPONSE CONTRACT
-
-    If none of the scripts below produce output, reply with exactly
-    `HEARTBEAT_OK` and nothing else. The gateway drops this reply and
-    stays silent. This prevents heartbeat spam.
-
-    Only produce a real response when a script actually finds something
-    worth reporting.
-
-    ## Checks (run in order)
-
-    ### Check 1 — Recent git activity in the Harvis repo
-
-    Run: `exec /home/node/.openclaw/workspace/scripts/check-git-activity.sh 1`
-
-    The script takes one argument: hours to scan back.
-    - No output → no commits in window → move on
-    - Output block → commits found → format and post to Discord
-
-    If output was produced, format a Discord summary and post via:
-
-    ```bash
-    exec curl -s -X POST http://harvis-ai-merged-backend:8000/api/tools/discord/post \
-      -H "Authorization: Bearer $OPENCLAW_GATEWAY_TOKEN" \
-      -H "Content-Type: application/json" \
-      -d "$(jq -n --arg content \"$SUMMARY\" '{channel: \"heartbeat\", content: $content}')"
-    ```
-
-    ### Check 2 — Workspace run failures in last hour
-
-    Run: `exec /home/node/.openclaw/workspace/scripts/check-workspace-failures.sh 1`
-
-    If output produced, post to `alerts` channel.
-
-    ### Check 3 — Disk usage
-
-    Run: `exec df -h /home/node/.openclaw | tail -1 | awk '{print $5}'`
-
-    If usage > 80%, post to `alerts`.
-
-    ## Decision tree
-
-    1. Run Check 1. Output → format, post to #harvis-heartbeat, mark reported
-    2. Run Check 2. Output → post to #alerts, mark reported
-    3. Run Check 3. Usage > 80% → post to #alerts, mark reported
-    4. NONE reported → reply exactly `HEARTBEAT_OK`
-    5. At least one reported → brief summary like "Posted N updates"
-
-    ## Rules
-
-    - Do NOT ask the user questions. Scheduled task.
-    - Do NOT post empty or "nothing to report" messages.
-    - Do NOT print credentials or tokens.
-    - Do NOT run destructive commands. Checks only read state.
-    - Keep Discord messages under 1800 characters.
-
----
-# ConfigMap: heartbeat helper scripts (silent-success pattern)
-# Mounted at /home/node/.openclaw/workspace/scripts/ with executable mode
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: openclaw-heartbeat-scripts
-  namespace: ai-agents
-data:
-  check-git-activity.sh: |
-    #!/usr/bin/env bash
-    set -euo pipefail
-    HOURS="${1:-1}"
-    REPO_DIR="/home/node/.openclaw/workspace/Harvis"
-    [ -d "$REPO_DIR/.git" ] || exit 0
-    cd "$REPO_DIR"
-    git fetch --all --quiet 2>/dev/null || exit 0
-    COMMITS=$(git log --all --since="${HOURS} hours ago" \
-      --pretty=format:"- %h %s (%an, %ar)" --abbrev-commit 2>/dev/null | head -20)
-    [ -z "$COMMITS" ] && exit 0
-    COMMIT_COUNT=$(echo "$COMMITS" | wc -l)
-    CHANGED_FILES=$(git log --all --since="${HOURS} hours ago" \
-      --name-only --pretty=format: 2>/dev/null | sort -u | grep -v '^$' | head -15)
-    DIFF_STATS=$(git log --all --since="${HOURS} hours ago" \
-      --shortstat --pretty=format: 2>/dev/null | grep -v '^$' | tail -5)
-    cat <<EOF
-    COMMITS_COUNT: $COMMIT_COUNT
-    COMMITS:
-    $COMMITS
-    FILES_CHANGED:
-    $CHANGED_FILES
-    DIFF_STATS:
-    $DIFF_STATS
-    EOF
-
-  check-workspace-failures.sh: |
-    #!/usr/bin/env bash
-    set -euo pipefail
-    HOURS="${1:-1}"
-    BACKEND="${BACKEND_URL:-http://harvis-ai-merged-backend:8000}"
-    RESPONSE=$(curl -s -m 10 \
-      -H "Authorization: Bearer $OPENCLAW_GATEWAY_TOKEN" \
-      "$BACKEND/api/workspace/recent-failures?hours=$HOURS" 2>/dev/null || echo '{}')
-    COUNT=$(echo "$RESPONSE" | jq -r '.count // 0' 2>/dev/null || echo 0)
-    [ "$COUNT" = "0" ] || [ -z "$COUNT" ] && exit 0
-    echo "FAILURE_COUNT: $COUNT"
-    echo ""
-    echo "FAILURES:"
-    echo "$RESPONSE" | jq -r '.failures[] | "- \(.workspace_id): \(.error_message // "unknown" | split("\n")[0])"'
 
 ---
 # NetworkPolicy: Enforce OpenClaw's isolation at the network level.
@@ -403,27 +97,10 @@ spec:
         - protocol: TCP
           port: 5432
 
-    # vLLM (qwen3.5:9b — fast agentic, co-located in the backend pod)
-    - to:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/component: merged-ollama-backend
-      ports:
-        - protocol: TCP
-          port: 8001
-
-    # llama-server (qwen3.5:9b via llama.cpp — separate pod on dulc3-top)
-    - to:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/component: llama-server
-      ports:
-        - protocol: TCP
-          port: 8080
-
-    # Harvis backend proxy (port 8000) — for Kimi K2.5 forwarding AND the
-    # GitHub API proxy (/github/ endpoint).  PR creation goes through this
-    # proxy so the backend can enforce the repo allowlist and log all actions.
+    # merged-ollama-backend — all ports in one rule:
+    #   8000: Harvis backend proxy (Kimi K2.5, GitHub API proxy)
+    #   8001: vLLM sidecar (qwen3.5:9b, fast agentic)
+    #   8080: llama-cpp sidecar (qwen3.5-27b Claude-distilled, 262K ctx) ← DEFAULT MODEL
     - to:
         - podSelector:
             matchLabels:
@@ -431,6 +108,24 @@ spec:
       ports:
         - protocol: TCP
           port: 8000
+        - protocol: TCP
+          port: 8001
+        - protocol: TCP
+          port: 8080
+
+    # K3s API server — allows Harvis to run kubectl natively inside the pod.
+    # 10.43.0.1 = kubernetes.default.svc ClusterIP (in-cluster API endpoint).
+    # 10.0.0.2  = dulc3-os host IP (for kubeconfig using node IP directly).
+    - to:
+        - ipBlock:
+            cidr: 10.43.0.1/32   # kubernetes.default.svc
+        - ipBlock:
+            cidr: 10.0.0.2/32    # dulc3-os host (k3s API on :6443)
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
 
     # GitHub HTTPS — required for git clone/push operations.
     # PR creation is handled by the backend proxy above (no direct API calls
@@ -464,57 +159,6 @@ spec:
           port: 443
 
 ---
-# OpenCode ConfigMap — contains opencode.json and harvis-coder agent definition
-# Mounted to /root/.config/opencode/ in the OpenClaw pod
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: opencode-config
-  namespace: ai-agents
-data:
-  opencode.json: |
-    {
-      "$schema": "https://opencode.ai/config.json",
-      "model": "harvis/kimi-k2.5",
-      "provider": {
-        "harvis": {
-          "options": {
-            "baseURL": "http://harvis-ai-merged-backend:8000/api/opencode/chat"
-          }
-        }
-      }
-    }
-
-  harvis-coder.md: |
-    ---
-    description: "Coding sub-agent for Harvis OpenClaw tasks. Always returns compact JSON."
-    mode: subagent
-    model: harvis/kimi-k2.5
-    tools:
-      bash: true
-      read: true
-      write: true
-      edit: true
-    permissions:
-      bash: allow
-      edit: allow
-    ---
-
-    You are a focused coding agent. Complete the task, then output ONLY this JSON block
-    as your final message — nothing else after it, no explanation, no markdown:
-
-    {
-      "files_changed": ["list of file paths created or modified"],
-      "commands_run": ["list of bash commands executed"],
-      "tests_passed": true,
-      "summary": "One sentence and outcome.",
-     : what was done "status": "ok | error | needs_review"
-    }
-
-    If status is "error", add an "error" key with one sentence describing the failure.
-    Never output raw terminal logs. Summarize everything.
-
----
 # Deployment: OpenClaw gateway
 # Single replica — OpenClaw writes session state to local JSONL files on the PVC.
 # Multiple replicas would cause split-brain session state.
@@ -545,14 +189,81 @@ spec:
         fsGroup: 1000
         runAsNonRoot: true
 
-      # Run OpenClaw on its own dedicated node, isolated from the main Harvis workload
+      # Run OpenClaw on dulc3-os so it can directly access the dev workspace via hostPath
       nodeSelector:
-        kubernetes.io/hostname: rocky2vm.local
+        kubernetes.io/hostname: dulc3-os
 
       initContainers:
-        # 1. Wait for PostgreSQL before starting
+        # 0. Set up SSH key — copy from secret to emptyDir for correct permissions
+        # Secret mounts are read-only with wrong perms; emptyDir is writable.
+        - name: setup-ssh
+          image: alpine:3.18
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+          command: ["sh", "-c"]
+          args:
+            - |
+              mkdir -p /ssh-key
+              chmod 700 /ssh-key
+              cp /ssh-secret/id_ed25519 /ssh-key/id_ed25519
+              chmod 600 /ssh-key/id_ed25519
+              echo "SSH key ready ($(wc -c < /ssh-key/id_ed25519) bytes)"
+          volumeMounts:
+            - name: ssh-secret-vol
+              mountPath: /ssh-secret
+            - name: ssh-key
+              mountPath: /ssh-key
+          resources:
+            requests:
+              memory: 16Mi
+              cpu: 10m
+            limits:
+              memory: 32Mi
+              cpu: 50m
+
+        # 1. Sync config from image to PVC — ensures the baked openclaw.json always
+        # wins over any stale version on the PVC. The PVC mount overlays the image
+        # layer at /home/node/.openclaw so the Dockerfile copy is shadowed at
+        # runtime; this initContainer re-applies it before the gateway starts.
+        - name: sync-config
+          image: dulc3/openclaw:latest
+          imagePullPolicy: Always
+          command: ["sh", "-c"]
+          args:
+            - |
+              echo "Syncing openclaw config from image to PVC..."
+              cp /app/openclaw.json /home/node/.openclaw/openclaw.json
+              chown 1000:1000 /home/node/.openclaw/openclaw.json
+
+              # Always write exec-approvals.json — disables per-command approval prompts.
+              # askFallback: allow means when no approval UI is connected to the socket,
+              # exec auto-allows. Without this, exec blocks for 120s then denies.
+              # Use printf (not heredoc) to avoid indentation issues with leading spaces.
+              printf '{"version":1,"defaults":{"security":"full","ask":"off","askFallback":"full","autoAllowSkills":true},"agents":{}}\n' \
+                > /home/node/.openclaw/exec-approvals.json
+              chmod 644 /home/node/.openclaw/exec-approvals.json
+
+              # Remove stale approval socket from previous pod run.
+              # If this file exists, OpenClaw thinks a UI is connected and sends
+              # approval requests there — gets no response — then denies the exec.
+              # Deleting it before startup forces OpenClaw to use askFallback: allow.
+              rm -f /home/node/.openclaw/exec-approvals.sock
+              echo "Config synced."
+          volumeMounts:
+            - name: openclaw-data
+              mountPath: /home/node/.openclaw
+          resources:
+            requests:
+              memory: 16Mi
+              cpu: 10m
+            limits:
+              memory: 32Mi
+              cpu: 50m
+
+        # 2. Wait for PostgreSQL before starting
         - name: wait-for-db
-          image: busybox:1.36
+          image: busybox:1.36@sha256:b7f3d86d6e84fc17718c48bcde1450807faa2d56704205c697b4bd5df7b9e29f
           command: ["sh", "-c"]
           args:
             - |
@@ -573,7 +284,7 @@ spec:
         # 2. Create OpenClaw tables in the shared PostgreSQL (idempotent)
         # Uses CREATE TABLE IF NOT EXISTS — safe to run on every pod start.
         - name: db-schema-init
-          image: postgres:15-alpine
+          image: postgres:15-alpine@sha256:79e73c0029e3a99b462253bba85352c6e748b93b9ffc5818ac0326cdbed62e76
           command: ["sh", "-c"]
           args:
             - |
@@ -626,7 +337,7 @@ spec:
         # 3. Install python-docx for document generation tools
         # Installs to shared python-extra volume for use by OpenClaw agents.
         - name: install-python-docx
-          image: python:3.11-slim
+          image: python:3.11-slim@sha256:16cb75beff0e104520a4bc4e98b08987b6978b82e37b81b87d786504e17579e7
           command: ["sh", "-c"]
           args:
             - |
@@ -692,8 +403,9 @@ spec:
               else
                 echo "Cloning harvis-aidev into $WORKSPACE..."
                 mkdir -p "$(dirname $WORKSPACE)"
-                git clone https://github.com/dulc3/harvis-aidev.git "$WORKSPACE"
-                echo "Clone complete."
+                git clone https://github.com/brandoz2255/aidev.git "$WORKSPACE" || \
+                  echo "Clone failed — repo may be private or workspace already mounted at /workspace"
+                echo "Clone step done."
               fi
           env:
             - name: HOME
@@ -727,13 +439,12 @@ spec:
 
       containers:
         - name: openclaw
-          # Browser-enabled image: dulc3/openclaw-browser:latest
-          # Built from openclaw-browser/Dockerfile (extends dulc3/openclaw:latest + Chromium)
-          # docker build -t dulc3/openclaw-browser:latest -f openclaw-browser/Dockerfile .
-          # docker push dulc3/openclaw-browser:latest
-          image: dulc3/openclaw-browser:latest
+          # Build context is openclaw/ (skills baked in) — push to: dulc3/openclaw:latest
+          # docker build -t dulc3/openclaw:latest -f openclaw/openclaw/Dockerfile openclaw/
+          # docker push dulc3/openclaw:latest
+          image: dulc3/openclaw:latest
           imagePullPolicy: Always
-          command: ["/home/node/start-opencode.sh"]
+          command: ["node", "/app/openclaw.mjs", "gateway", "--bind", "lan", "--port", "18789", "--allow-unconfigured"]
 
           ports:
             - name: gateway
@@ -760,9 +471,8 @@ spec:
                   name: harvis-ai-openclaw-secret
                   key: openclaw-gateway-token
 
-            # Ollama discovery — any non-empty value triggers auto-discovery
-            - name: OLLAMA_API_KEY
-              value: "ollama-local"
+            # OLLAMA_API_KEY removed - using llama.cpp (merged-backend) not Ollama
+             # Any non-empty value here triggers Ollama auto-discovery which fails
 
             # Database URL for session storage
             - name: DATABASE_URL
@@ -825,50 +535,24 @@ spec:
             - name: GIT_ASKPASS
               value: "echo"
 
-            # Chromium discovery — belt-and-suspenders for OpenClaw's native browser tool
-            - name: CHROME_BIN
-              value: /usr/bin/chromium
-            - name: PUPPETEER_EXECUTABLE_PATH
-              value: /usr/bin/chromium
-            - name: PUPPETEER_SKIP_CHROMIUM_DOWNLOAD
-              value: "true"
-
           volumeMounts:
             # PVC for all OpenClaw runtime state (sessions, logs, agent workspaces)
             - name: openclaw-data
               mountPath: /home/node/.openclaw
-            # Config file overlaid on top of the state dir (read-only)
-            - name: openclaw-config
-              mountPath: /home/node/.openclaw/openclaw.json
-              subPath: openclaw.json
-            # OpenCode config — contains opencode.json and harvis-coder agent
-            # Mounted under /home/node (not /root) — container runs as uid 1000
-            - name: opencode-config
-              mountPath: /home/node/.config/opencode/opencode.json
-              subPath: opencode.json
-              readOnly: true
-            - name: opencode-config
-              mountPath: /home/node/.config/opencode/.opencode/agent/harvis-coder.md
-              subPath: harvis-coder.md
-              readOnly: true
             # python-extra: shared emptyDir where install-python-docx puts python-docx
             - name: python-extra
               mountPath: /python-extra
               readOnly: true
-            # Shared memory for Chromium — prevents tab crashes on heavy pages
-            - name: dshm
-              mountPath: /dev/shm
-            # Temp storage for Chromium profiles and crash dumps
-            - name: chromium-tmp
-              mountPath: /tmp/.chromium
-            # Heartbeat workspace files
-            - name: openclaw-heartbeat
-              mountPath: /home/node/.openclaw/workspace/HEARTBEAT.md
-              subPath: HEARTBEAT.md
-            - name: openclaw-heartbeat-scripts
-              mountPath: /home/node/.openclaw/workspace/scripts
-
-          # OpenClaw exposes health only as a WebSocket RPC method, not HTTP.
+            # SSH key for host access — written by setup-ssh init container
+            - name: ssh-key
+              mountPath: /home/node/.ssh
+            # Live dev workspace — direct access to dulc3-os GitHub repos.
+            # OpenClaw's native read/write/exec tools work here without SSH.
+            - name: github-workspace
+              mountPath: /workspace
+            # kubeconfig — Harvis can run kubectl natively without SSH
+            - name: kubeconfig
+              mountPath: /home/node/.kube
           # tcpSocket probes verify the port is bound and accepting connections.
           livenessProbe:
             tcpSocket:
@@ -891,40 +575,36 @@ spec:
               memory: 512Mi
               cpu: 250m
             limits:
-              memory: 3Gi
-              cpu: 1500m
+              memory: 2Gi
+              cpu: 1000m
 
       volumes:
         - name: openclaw-data
           persistentVolumeClaim:
             claimName: openclaw-data
-        - name: openclaw-config
-          configMap:
-            name: openclaw-config
-        # OpenCode config — mounted to /root/.config/opencode/
-        - name: opencode-config
-          configMap:
-            name: opencode-config
         - name: python-extra
           emptyDir: {}
-        # Shared memory for Chromium (replaces default /dev/shm which is only 64MB)
-        - name: dshm
-          emptyDir:
-            medium: Memory
-            sizeLimit: 256Mi
-        # Temp storage for Chromium profiles and crash dumps
-        - name: chromium-tmp
-          emptyDir:
-            medium: Memory
-            sizeLimit: 128Mi
-        # Heartbeat workspace files
-        - name: openclaw-heartbeat
-          configMap:
-            name: openclaw-heartbeat
-        - name: openclaw-heartbeat-scripts
-          configMap:
-            name: openclaw-heartbeat-scripts
-            defaultMode: 0755
+        - name: ssh-key
+          emptyDir: {}
+        - name: ssh-secret-vol
+          secret:
+            secretName: openclaw-ssh-key
+            items:
+              - key: harvis_key
+                path: id_ed25519
+        # Dev workspace — hostPath on dulc3-os pointing at all GitHub repos.
+        # Harvis edits files here natively; no SSH needed for file operations.
+        - name: github-workspace
+          hostPath:
+            path: /home/dulc3/Documents/github
+            type: Directory
+        # kubeconfig — patched copy with server: https://10.0.0.2:6443
+        # (host kubeconfig uses 127.0.0.1 which is unreachable from inside a pod)
+        # Regenerate with: sed 's|127.0.0.1:6443|10.0.0.2:6443|g' ~/.kube/config |
+        #   kubectl create secret generic openclaw-kubeconfig -n ai-agents --from-file=config=/dev/stdin
+        - name: kubeconfig
+          secret:
+            secretName: openclaw-kubeconfig
 ---
 # Service: ClusterIP only — OpenClaw is never exposed to the host or LoadBalancer.
 # Only reachable within the cluster from the Harvis backend pod.

@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: harvis-ai-skills
+  namespace: ai-agents
+data:
+  # This ConfigMap will be populated with skills from the skills/Harvis directory
+  # Use kubectl create configmap from the local directory:
+  # kubectl create configmap harvis-ai-skills --from-file=skills/Harvis -n ai-agents
+  placeholder: "Skills ConfigMap - populate with actual skills"

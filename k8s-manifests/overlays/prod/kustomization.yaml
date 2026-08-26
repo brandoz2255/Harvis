@@ -7,10 +7,15 @@ resources:
   - frontend.yaml
   - nginx.yaml
   - merged-ollama-backend.yaml
+  - merged-ollama-backend-moe.yaml
   # - tts-worker.yaml  # REMOVED: TTS/Whisper now runs in main backend pod
   - document-worker.yaml
   - openclaw.yaml
+  - hermes.yaml
+  - hermes-network.yaml
   - llama-embed.yaml
+  - mcp-rag-server.yaml
+  - mempalace.yaml
 
 # Namespace
 namespace: ai-agents
@@ -19,19 +24,26 @@ namespace: ai-agents
 images:
   - name: harvis-backend
     newName: dulc3/jarvis-backend
-    newTag: test2
+    newTag: latestv1
   - name: harvis-frontend
     newName: dulc3/jarvis-frontend
-    newTag: test2
+    newTag: latestv1
   - name: harvis-document-worker
     newName: dulc3/harvis-document-worker
-    newTag: test2
-  # - name: harvis-tts-worker  # REMOVED: TTS/Whisper now runs in main backend
-  #   newName: dulc3/harvis-tts-worker
+    newTag: latestv1
+ # - name: harvis-tts-worker  # REMOVED: TTS/Whisper now runs in main backend
+  #   newName: harvis-tts-worker
   #   newTag: unbroken
-  - name: dulc3/openclaw-browser
-    newName: dulc3/openclaw-browser
-    newTag: latest
+  - name: dulc3/openclaw
+    newName: dulc3/openclaw
+    newTag: v20260426-opencode
+  - name: dulc3/hermes
+    newName: dulc3/hermes
+    newTag: v0.11.3
+  - name: dulc3/harvis-mempalace
+    newName: dulc3/harvis-mempalace
+    newTag: latestv1
+
 # Patches for production
 patches:
   - target:
@@ -39,28 +51,31 @@ patches:
       name: harvis-ai-merged-ollama-backend
     patch: |-
       - op: replace
-        path: /spec/replicas
-        value: 1
-      - op: replace
         path: /spec/template/spec/containers/0/image
-        value: dulc3/jarvis-backend:test2
+        value: dulc3/jarvis-backend:latestv1
   - target:
       kind: Deployment
       name: harvis-ai-frontend
     patch: |
       - op: replace
         path: /spec/template/spec/containers/0/image
-        value: dulc3/jarvis-frontend:test2
+        value: dulc3/jarvis-frontend:latestv1
   - target:
       kind: Deployment
       name: harvis-document-worker
     patch: |
+     - op: replace
+        path: /spec/template/spec/containers/0/image
+        value: dulc3/harvis-document-worker:latestv1
+  - target:
+      kind: Deployment
+      name: harvis-ai-mcp-rag
+    patch: |-
       - op: replace
         path: /spec/template/spec/containers/0/image
-        value: dulc3/harvis-document-worker:test2
+        value: dulc3/jarvis-backend:latestv1
 
-  # Inject OpenClaw + Kimi K2.5 env vars into the backend container (index 0 = harvis-backend)
-  # so the Python orchestrator knows where to find OpenClaw and has the Moonshot API key.
+  # Inject Hermes env vars into the backend container (index 0 = harvis-backend)
   - target:
       kind: Deployment
       name: harvis-ai-merged-ollama-backend
@@ -68,16 +83,90 @@ patches:
       - op: add
         path: /spec/template/spec/containers/0/env/-
         value:
-          name: OPENCLAW_URL
-          value: "ws://harvis-ai-openclaw:18789"
+          name: HERMES_URL
+          value: "http://harvis-ai-hermes:8642"
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: HERMES_GATEWAY_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: harvis-ai-hermes-secret
+              key: hermes-gateway-token
       - op: add
         path: /spec/template/spec/containers/0/env/-
         value:
           name: OPENCLAW_GATEWAY_TOKEN
           valueFrom:
             secretKeyRef:
+              name: harvis-ai-hermes-secret
+              key: hermes-gateway-token
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: MOONSHOT_API_KEY
+          valueFrom:
+            secretKeyRef:
               name: harvis-ai-openclaw-secret
-              key: openclaw-gateway-token
+              key: moonshot-api-key
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: MOONSHOT_BASE_URL
+          value: "https://api.moonshot.ai/v1"
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: NVIDIA_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: harvis-ai-openclaw-secret
+              key: nvidia-api-key
+              optional: true
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: LLAMA_URL
+          value: "http://localhost:8080/v1"
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: EMBED_QW3_URL
+          value: "http://harvis-ai-llama-embed:8082"
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: EMBED_NOMIC_URL
+          value: "http://harvis-ai-llama-embed:8081"
+
+  - target:
+      kind: Deployment
+      name: harvis-ai-merged-ollama-backend-moe
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/image
+        value: dulc3/jarvis-backend:latestv1
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: HERMES_URL
+          value: "http://harvis-ai-hermes:8642"
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: HERMES_GATEWAY_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: harvis-ai-hermes-secret
+              key: hermes-gateway-token
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: OPENCLAW_GATEWAY_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: harvis-ai-hermes-secret
+              key: hermes-gateway-token
       - op: add
         path: /spec/template/spec/containers/0/env/-
         value:
@@ -104,3 +193,20 @@ patches:
       # GitHub auth is now handled by the HarvisAI GitHub App (App ID 2995570).
       # The harvis-github skill mints short-lived installation tokens at runtime
       # using GH_APP_ID + GH_INSTALLATION_ID + GH_PRIVATE_KEY in the openclaw pod.
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: LLAMA_URL
+          value: "http://localhost:8080/v1"
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: EMBED_QW3_URL
+          value: "http://harvis-ai-llama-embed:8082"
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: EMBED_NOMIC_URL
+          value: "http://harvis-ai-llama-embed:8081"
+
+ 
