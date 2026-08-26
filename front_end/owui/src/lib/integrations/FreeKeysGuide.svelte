@@ -64,7 +64,7 @@
 			</div>
 			<button
 				type="button"
-				class="shrink-0 rounded-lg p-1.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+				class="shrink-0 rounded-lg p-1.5 text-gray-500 dark:text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
 				on:click={() => (show = false)}
 				aria-label={$i18n.t('Close')}
 			>
@@ -127,7 +127,7 @@
 							<!-- Stated here rather than discovered on the vendor's signup form. Phone
 							     verification is the one that makes people give up halfway. -->
 							{#if def.signupRequires}
-								<p class="mt-1.5 flex items-start gap-1.5 text-[11px] text-gray-400 dark:text-gray-500">
+								<p class="mt-1.5 flex items-start gap-1.5 text-[11px] text-gray-500 dark:text-gray-400">
 									<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="size-3 mt-0.5 shrink-0" aria-hidden="true">
 										<path d="M12 3l7.5 3.5v5c0 4.2-3.1 7.8-7.5 9-4.4-1.2-7.5-4.8-7.5-9v-5z" />
 									</svg>
@@ -170,7 +170,7 @@
 		</div>
 
 		<div class="space-y-2 border-t border-gray-100 dark:border-white/10 pt-3.5">
-			<p class="text-[11px] text-gray-400 dark:text-gray-500">
+			<p class="text-[11px] text-gray-500 dark:text-gray-400">
 				{$i18n.t(
 					'Free tiers have rate limits and change without notice — the allowances above are what each vendor advertised when this build shipped, not a guarantee. Keys are stored encrypted per-user, never shown again, and sent only to the vendor they belong to.'
 				)}
@@ -183,7 +183,7 @@
 
 			<!-- Where to check whether any of the above has moved. Named in full rather than hidden
 			     behind "learn more" so it's usable from a screenshot or a copy-paste. -->
-			<p class="text-[11px] text-gray-400 dark:text-gray-500">
+			<p class="text-[11px] text-gray-500 dark:text-gray-400">
 				{$i18n.t('Looking for more, or checking whether a limit has changed?')}
 				<a
 					href={SOURCE_REPO}

@@ -10,9 +10,18 @@
 	export let name: string = 'pack';
 	export let className: string = 'size-5';
 
-	// brands with a vendored official logo at /integrations/<name>.svg
-	const LOGOS = new Set(['claude', 'openai', 'ollama', 'github', 'discord', 'mcp', 'opencode', 'openclaw', 'hermes']);
-	$: hasLogo = LOGOS.has(name);
+	// Vendored marks split by the colour they actually carry, because that decides whether an
+	// <img> can be used at all:
+	//   MONO_LOGOS ship as a single #FFFFFF path. As an <img> that is invisible on any light
+	//     tile — which is exactly what light mode gives them — and an <img> cannot be recoloured.
+	//     They are painted through a CSS mask instead, so the file stays the source of truth and
+	//     only the colour comes from the tile (currentColor, i.e. the tint's text class).
+	//   COLOR_LOGOS carry their own brand colours (or, for OpenClaw, their own dark ground) and
+	//     already read on both grounds, so they stay plain images.
+	const MONO_LOGOS = new Set(['openai', 'ollama', 'github', 'mcp', 'opencode', 'hermes']);
+	const COLOR_LOGOS = new Set(['claude', 'discord', 'openclaw']);
+	$: isMono = MONO_LOGOS.has(name);
+	$: isColorLogo = COLOR_LOGOS.has(name);
 
 	// Free-tier cloud providers carry their own official marks (below), single-path where the
 	// vendor's logo allows it. 'cloud-api' stays as the generic fallback for a future provider
@@ -38,7 +47,13 @@
 	$: cloudMark = CLOUD_MARKS[name];
 </script>
 
-{#if hasLogo}
+{#if isMono}
+	<span
+		class="{className} brand-mask"
+		style="--brand-mask: url('/integrations/{name}.svg')"
+		aria-hidden="true"
+	></span>
+{:else if isColorLogo}
 	<img src="/integrations/{name}.svg" alt="" class="{className} object-contain" loading="lazy" draggable="false" />
 {:else if name === 'ssh'}
 	<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" class={className} aria-hidden="true">
@@ -100,3 +115,20 @@
 		<path d="M12 12v9M4 7.5l8 4.5 8-4.5" />
 	</svg>
 {/if}
+
+<style>
+	/* Paints a single-colour vendored mark in the tile's own text colour. mask-size: contain
+	   keeps the file's aspect ratio inside whatever size class the caller passed. */
+	.brand-mask {
+		display: inline-block;
+		background-color: currentColor;
+		-webkit-mask-image: var(--brand-mask);
+		mask-image: var(--brand-mask);
+		-webkit-mask-repeat: no-repeat;
+		mask-repeat: no-repeat;
+		-webkit-mask-position: center;
+		mask-position: center;
+		-webkit-mask-size: contain;
+		mask-size: contain;
+	}
+</style>

@@ -191,9 +191,15 @@ export function sectionOf(def: IntegrationDefinition): SectionKey {
 
 // ── Icon-tile tint (directory look, 2026-07-29) ───────────────────────────────────────────
 // Keyed by brandKey, biased toward each vendor's own colour so a row is recognizable before
-// the name is read. Vendored logos are full-colour images and sit on the tint unchanged; the
-// inline glyphs inherit the text colour. Kept as static class strings so Tailwind's scanner
-// sees them (a template-built `bg-${hue}-50` would be purged).
+// the name is read. Every mark on this page takes its colour from the tile's text class:
+// inline glyphs paint with currentColor, and the single-colour vendored logos are masked with
+// it (see BrandGlyph). Only Claude, Discord and OpenClaw stay fixed-colour images. Kept as
+// static class strings so Tailwind's scanner sees them (a template-built `bg-${hue}-50` would
+// be purged).
+//
+// EVERY brandKey the catalog uses needs a row here. The fallback is grey, so a brand that is
+// missing does not look broken — it just quietly loses its colour, which is how the five free
+// providers ended up as grey tiles in a page that was otherwise fully branded.
 export const TILE_TINT: Record<string, string> = {
 	claude: 'bg-orange-50 dark:bg-orange-500/10 text-orange-600 dark:text-orange-400',
 	openai: 'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
@@ -201,11 +207,23 @@ export const TILE_TINT: Record<string, string> = {
 	openclaw: 'bg-blue-50 dark:bg-blue-500/10 text-blue-600 dark:text-blue-400',
 	hermes: 'bg-violet-50 dark:bg-violet-500/10 text-violet-600 dark:text-violet-400',
 	opencode: 'bg-cyan-50 dark:bg-cyan-500/10 text-cyan-600 dark:text-cyan-400',
-	ollama: 'bg-slate-100 dark:bg-slate-500/10 text-slate-600 dark:text-slate-300',
+	ollama: 'bg-slate-100 dark:bg-slate-500/10 text-slate-700 dark:text-slate-300',
 	github: 'bg-gray-100 dark:bg-gray-500/10 text-gray-700 dark:text-gray-300',
 	mcp: 'bg-amber-50 dark:bg-amber-500/10 text-amber-600 dark:text-amber-400',
 	discord: 'bg-indigo-50 dark:bg-indigo-500/10 text-indigo-600 dark:text-indigo-400',
 	ssh: 'bg-teal-50 dark:bg-teal-500/10 text-teal-600 dark:text-teal-400',
+	// Free-tier cloud providers, approximated to each vendor's own hue. Groq (#F55036) and
+	// Cerebras (#F15A29) are near-identical oranges in real life, so Cerebras is nudged to amber
+	// to stay tellable apart in a vertical list. Mistral's mark is a yellow-to-red gradient that
+	// one colour cannot reproduce; rose takes the red end. OpenRouter ships no official mark
+	// here, so violet is ours and only has to stay distinct.
+	groq: 'bg-orange-50 dark:bg-orange-500/10 text-orange-600 dark:text-orange-400',
+	cerebras: 'bg-amber-50 dark:bg-amber-500/10 text-amber-700 dark:text-amber-400',
+	gemini: 'bg-sky-50 dark:bg-sky-500/10 text-sky-600 dark:text-sky-400',
+	nvidia: 'bg-lime-50 dark:bg-lime-500/10 text-lime-700 dark:text-lime-400',
+	mistral: 'bg-rose-50 dark:bg-rose-500/10 text-rose-600 dark:text-rose-400',
+	openrouter: 'bg-violet-50 dark:bg-violet-500/10 text-violet-600 dark:text-violet-400',
+	harvis: 'bg-blue-50 dark:bg-blue-500/10 text-blue-600 dark:text-blue-400',
 	pack: 'bg-rose-50 dark:bg-rose-500/10 text-rose-600 dark:text-rose-400'
 };
 

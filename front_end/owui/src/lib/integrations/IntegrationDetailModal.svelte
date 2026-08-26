@@ -80,17 +80,17 @@
 							<h2 class="text-lg font-semibold text-gray-900 dark:text-white truncate">{def.name}</h2>
 							<StatusBadge status={def.status} />
 						</div>
-						<div class="text-xs text-gray-400 mt-0.5">
+						<div class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
 							{CATEGORY_LABEL[def.category]}{#if def.provider} · {def.provider}{/if} · {formatSourceLine(def)}
 						</div>
 						{#if def.usedBy?.length}
-							<div class="text-[11px] text-gray-400 mt-0.5">Used by {def.usedBy.map((s) => SURFACE_LABEL[s]).join(', ')}</div>
+							<div class="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5">Used by {def.usedBy.map((s) => SURFACE_LABEL[s]).join(', ')}</div>
 						{/if}
 					</div>
 				</div>
 				<button
 					type="button"
-					class="shrink-0 text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 transition text-xl leading-none"
+					class="shrink-0 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 transition text-xl leading-none"
 					on:click={() => (show = false)}
 					aria-label={$i18n.t('Close')}>×</button
 				>

@@ -117,7 +117,7 @@
 			</a>
 		{/if}
 		{#if def.signupRequires}
-			<span class="text-[11px] text-gray-400 dark:text-gray-500"
+			<span class="text-[11px] text-gray-500 dark:text-gray-400"
 				>{$i18n.t('Sign-up needs')}: {$i18n.t(def.signupRequires)}</span
 			>
 		{/if}

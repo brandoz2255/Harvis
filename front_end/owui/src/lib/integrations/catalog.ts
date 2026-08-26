@@ -726,40 +726,48 @@ export const PREFERABLE_CAPABILITIES: IntegrationCapability[] = [
 	'research_runtime'
 ];
 
-// Per-brand color so icons aren't a wall of blue. tile = bg+border classes, icon = text color.
-// Brands with a real vendored logo (static/integrations/<key>.svg) sit on a uniform dark
-// logo-chip so the white/colored marks read in any theme. Custom-glyph brands keep a
-// brand-tinted tile (their inline SVG uses currentColor = the `icon` color).
-const LOGO_TILE = 'bg-[#0e1320] border-white/10';
+// Per-brand colour so icons aren't a wall of blue. tile = bg+border classes, icon = text colour.
+// Both halves are written light-first with a `dark:` variant, because a single dark chip made
+// every mark unreadable in light mode: the vendored logos are solid white, and a 400-step icon
+// on a near-white tile has no contrast left to spend.
+//
+// Every mark takes its colour from `icon` — inline glyphs paint with currentColor and the
+// single-colour vendored logos are masked with it (see BrandGlyph). Claude, Discord and
+// OpenClaw are the exceptions: their files carry their own colours, so `icon` is inert for them
+// and the tile just has to sit behind the artwork.
+//
+// Keep this in step with TILE_TINT in status.ts, which is the same palette for the Engines page
+// (status.ts already imports from here, so the two cannot be merged without inverting that).
+const LOGO_TILE = 'bg-gray-100 border-gray-200 dark:bg-[#0e1320] dark:border-white/10';
 export const BRAND_TONE: Record<string, { icon: string; tile: string }> = {
-	claude: { icon: '', tile: LOGO_TILE },
-	openai: { icon: '', tile: LOGO_TILE },
-	ollama: { icon: '', tile: LOGO_TILE },
-	github: { icon: '', tile: LOGO_TILE },
-	discord: { icon: '', tile: LOGO_TILE },
-	mcp: { icon: '', tile: LOGO_TILE },
-	opencode: { icon: '', tile: LOGO_TILE },
-	openclaw: { icon: '', tile: LOGO_TILE },
-	hermes: { icon: '', tile: LOGO_TILE },
-	kimi: { icon: 'text-indigo-400', tile: 'bg-indigo-500/10 border-indigo-500/25' },
-	// Free providers now carry their real marks (BrandGlyph, currentColor), so `icon` is the
-	// colour the logo is actually painted in — approximated to each vendor's own brand hue with
-	// a Tailwind step light enough to hold contrast on the dark tile. Groq (#F55036) and Cerebras
-	// (#F15A29) are near-identical oranges in real life; cerebras is nudged to amber so the two
-	// stay tellable apart in a vertical list. Mistral's mark is a yellow→red gradient we can't
-	// reproduce in one colour — rose takes the red end.
-	groq: { icon: 'text-orange-400', tile: 'bg-orange-500/10 border-orange-500/25' },
-	cerebras: { icon: 'text-amber-400', tile: 'bg-amber-500/10 border-amber-500/25' },
-	gemini: { icon: 'text-sky-400', tile: 'bg-sky-500/10 border-sky-500/25' },
-	nvidia: { icon: 'text-lime-400', tile: 'bg-lime-500/10 border-lime-500/25' },
-	mistral: { icon: 'text-rose-400', tile: 'bg-rose-500/10 border-rose-500/25' },
-	openrouter: { icon: 'text-violet-400', tile: 'bg-violet-500/10 border-violet-500/25' },
-	ssh: { icon: 'text-emerald-400', tile: 'bg-emerald-500/10 border-emerald-500/25' },
-	harvis: { icon: 'text-blue-400', tile: 'bg-blue-500/15 border-blue-500/30' },
-	pack: { icon: 'text-blue-400', tile: 'bg-blue-500/10 border-blue-500/25' }
+	claude: { icon: '', tile: 'bg-orange-50 border-orange-200/70 dark:bg-[#0e1320] dark:border-white/10' },
+	discord: { icon: '', tile: 'bg-indigo-50 border-indigo-200/70 dark:bg-[#0e1320] dark:border-white/10' },
+	openclaw: { icon: '', tile: 'bg-blue-50 border-blue-200/70 dark:bg-[#0e1320] dark:border-white/10' },
+	openai: { icon: 'text-emerald-600 dark:text-white', tile: LOGO_TILE },
+	ollama: { icon: 'text-slate-700 dark:text-white', tile: LOGO_TILE },
+	github: { icon: 'text-gray-700 dark:text-white', tile: LOGO_TILE },
+	mcp: { icon: 'text-amber-600 dark:text-white', tile: LOGO_TILE },
+	opencode: { icon: 'text-cyan-600 dark:text-white', tile: LOGO_TILE },
+	hermes: { icon: 'text-violet-600 dark:text-white', tile: LOGO_TILE },
+	kimi: { icon: 'text-indigo-600 dark:text-indigo-400', tile: 'bg-indigo-50 border-indigo-200/70 dark:bg-indigo-500/10 dark:border-indigo-500/25' },
+	// Free providers carry their real marks (BrandGlyph, currentColor), so `icon` is the colour
+	// the logo is actually painted in — each vendor's own brand hue, at a step dark enough to
+	// hold contrast on the light tile and light enough to hold it on the dark one. Groq (#F55036)
+	// and Cerebras (#F15A29) are near-identical oranges in real life; cerebras is nudged to amber
+	// so the two stay tellable apart in a vertical list. Mistral's mark is a yellow-to-red
+	// gradient we can't reproduce in one colour — rose takes the red end.
+	groq: { icon: 'text-orange-600 dark:text-orange-400', tile: 'bg-orange-50 border-orange-200/70 dark:bg-orange-500/10 dark:border-orange-500/25' },
+	cerebras: { icon: 'text-amber-700 dark:text-amber-400', tile: 'bg-amber-50 border-amber-200/70 dark:bg-amber-500/10 dark:border-amber-500/25' },
+	gemini: { icon: 'text-sky-600 dark:text-sky-400', tile: 'bg-sky-50 border-sky-200/70 dark:bg-sky-500/10 dark:border-sky-500/25' },
+	nvidia: { icon: 'text-lime-700 dark:text-lime-400', tile: 'bg-lime-50 border-lime-200/70 dark:bg-lime-500/10 dark:border-lime-500/25' },
+	mistral: { icon: 'text-rose-600 dark:text-rose-400', tile: 'bg-rose-50 border-rose-200/70 dark:bg-rose-500/10 dark:border-rose-500/25' },
+	openrouter: { icon: 'text-violet-600 dark:text-violet-400', tile: 'bg-violet-50 border-violet-200/70 dark:bg-violet-500/10 dark:border-violet-500/25' },
+	ssh: { icon: 'text-emerald-600 dark:text-emerald-400', tile: 'bg-emerald-50 border-emerald-200/70 dark:bg-emerald-500/10 dark:border-emerald-500/25' },
+	harvis: { icon: 'text-blue-600 dark:text-blue-400', tile: 'bg-blue-50 border-blue-200/70 dark:bg-blue-500/15 dark:border-blue-500/30' },
+	pack: { icon: 'text-blue-600 dark:text-blue-400', tile: 'bg-blue-50 border-blue-200/70 dark:bg-blue-500/10 dark:border-blue-500/25' }
 };
 export const toneFor = (brandKey: string) =>
-	BRAND_TONE[brandKey] ?? { icon: 'text-blue-400', tile: 'bg-blue-500/10 border-blue-500/25' };
+	BRAND_TONE[brandKey] ?? BRAND_TONE.pack;
 
 // Substitute the {{model}} token. Pure string replace — NEVER executed. With no model the
 // literal {{model}} placeholder is preserved (copy-as-is; the user fills their model).

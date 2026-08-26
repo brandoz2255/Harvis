@@ -387,7 +387,7 @@
 				{/if}
 			</div>
 
-			<p class="text-[11px] text-gray-400">
+			<p class="text-[11px] text-gray-500 dark:text-gray-400">
 				{$i18n.t('Verify enables routing to your gateway. Saving without verifying keeps bundled routing until verified.')}
 			</p>
 
@@ -559,7 +559,7 @@
 						<li>{$i18n.t('Sign in with your Claude account (Pro, Max, Team, or Enterprise).')}</li>
 						<li>{$i18n.t('Copy the token it prints and paste it below.')}</li>
 					</ol>
-					<div class="text-gray-400">
+					<div class="text-gray-500 dark:text-gray-400">
 						{$i18n.t('Lasts ~1 year · no API credits used · stored encrypted, never shown.')}
 					</div>
 				</div>
@@ -610,7 +610,7 @@
 				</p>
 			{/if}
 
-			<p class="text-[11px] text-gray-400">
+			<p class="text-[11px] text-gray-500 dark:text-gray-400">
 				{#if def.keyHelp}
 					{$i18n.t(def.keyHelp)}
 				{:else if def.id === 'codex-app'}
