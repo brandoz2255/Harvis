@@ -149,11 +149,6 @@
 			icon: `<svg xmlns="http://www.w3.org/2000/svg" ${_capAttrs}><path d="m12 2 9 5v10l-9 5-9-5V7z"/><path d="m3 7 9 5 9-5M12 12v10"/></svg>`
 		},
 		{
-			title: 'Generate Images',
-			desc: 'Create images locally with ComfyUI or A1111.',
-			icon: `<svg xmlns="http://www.w3.org/2000/svg" ${_capAttrs}><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/></svg>`
-		},
-		{
 			title: 'Code with Harvis',
 			desc: 'Build features, fix bugs, and open PRs from a single prompt.',
 			icon: `<svg xmlns="http://www.w3.org/2000/svg" ${_capAttrs}><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>`

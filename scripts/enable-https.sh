@@ -158,6 +158,22 @@ say ""
 if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
     say "Applying to the running stack..."
     if docker compose up -d nginx; then
+        # `up -d` alone is not enough either. On a stack whose nginx container
+        # already carries the tls bind mount — which every install on the current
+        # compose file does — compose sees an unchanged spec and leaves the
+        # container running untouched. The new listener file lands inside the
+        # container through the mount but nginx never re-reads its config, so
+        # HTTPS silently stays off and the script still says it is on. Reloading
+        # afterwards costs nothing on a container that was just recreated and is
+        # the only thing that turns it on for one that was not.
+        if docker compose exec -T nginx nginx -t >/dev/null 2>&1; then
+            docker compose exec -T nginx nginx -s reload >/dev/null 2>&1 || true
+        else
+            say ""
+            say "nginx rejected the new configuration. Details:"
+            docker compose exec -T nginx nginx -t || true
+            fail "HTTPS was not enabled."
+        fi
         say ""
         say "HTTPS is on."
     else
