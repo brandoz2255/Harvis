@@ -7,6 +7,7 @@
 	import MarkdownTokens from './MarkdownTokens.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import DocumentDuplicate from '$lib/components/icons/DocumentDuplicate.svelte';
+	import { resolveBlock } from './blocks/registry';
 
 	export let id: string = '';
 	export let token: any;
@@ -19,6 +20,11 @@
 	export let onSourceClick: Function = () => {};
 
 	const fenceType: string = token.fenceType ?? 'default';
+
+	// The router: semantic type in, trusted component out. `null` means no
+	// dedicated renderer is registered for this type, and the generic card
+	// below runs — which is exactly what every colon fence used to do.
+	const block = resolveBlock(fenceType);
 
 	const label = fenceType.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 
@@ -33,51 +39,68 @@
 	};
 </script>
 
-<div class="relative group my-2 rounded-2xl border border-gray-100 dark:border-gray-800 px-4 py-3">
-	<!-- Header row: type badge + copy button -->
-	<div class="flex items-center justify-between mb-2">
-		<span class="text-xs font-medium text-gray-500 dark:text-gray-400">
-			{label}
-		</span>
+{#if block}
+	<!-- A registered type renders through its own trusted component. The token
+	     is passed whole; the renderer reads only `text`, `attrs`, `tokens` and
+	     `open`, never anything the model could use to describe layout. -->
+	<svelte:component
+		this={block.component}
+		{id}
+		{token}
+		{tokenIdx}
+		{done}
+		{editCodeBlock}
+		{sourceIds}
+		{onTaskClick}
+		{onSourceClick}
+	/>
+{:else}
+	<div class="relative group my-2 rounded-2xl border border-gray-100 dark:border-gray-800 px-4 py-3">
+		<!-- Header row: type badge + copy button -->
+		<div class="flex items-center justify-between mb-2">
+			<span class="text-xs font-medium text-gray-500 dark:text-gray-400">
+				{label}
+			</span>
 
-		<div class="invisible group-hover:visible flex gap-0.5">
-			<Tooltip content={copied ? $i18n.t('Copied') : $i18n.t('Copy')}>
-				<button
-					class="p-1 rounded-lg bg-transparent hover:bg-black/5 dark:hover:bg-white/5 transition"
-					on:click={(e) => {
-						e.stopPropagation();
-						copyText();
-					}}
-				>
-					{#if copied}
-						<svg
-							xmlns="http://www.w3.org/2000/svg"
-							fill="none"
-							viewBox="0 0 24 24"
-							stroke-width="1.5"
-							stroke="currentColor"
-							class="size-3.5 text-green-500"
-						>
-							<path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" />
-						</svg>
-					{:else}
-						<DocumentDuplicate className="size-3.5" strokeWidth="1.5" />
-					{/if}
-				</button>
-			</Tooltip>
+			<div class="invisible group-hover:visible flex gap-0.5">
+				<Tooltip content={copied ? $i18n.t('Copied') : $i18n.t('Copy')}>
+					<button
+						class="p-1 rounded-lg bg-transparent hover:bg-black/5 dark:hover:bg-white/5 transition"
+						on:click={(e) => {
+							e.stopPropagation();
+							copyText();
+						}}
+					>
+						{#if copied}
+							<svg
+								xmlns="http://www.w3.org/2000/svg"
+								fill="none"
+								viewBox="0 0 24 24"
+								stroke-width="1.5"
+								stroke="currentColor"
+								class="size-3.5 text-green-500"
+							>
+								<path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" />
+							</svg>
+						{:else}
+							<DocumentDuplicate className="size-3.5" strokeWidth="1.5" />
+						{/if}
+					</button>
+				</Tooltip>
+			</div>
+		</div>
+
+		<!-- Content -->
+		<div class="prose-sm" dir="auto">
+			<MarkdownTokens
+				id={`${id}-${tokenIdx}-cf`}
+				tokens={token.tokens}
+				{done}
+				{editCodeBlock}
+				{sourceIds}
+				{onTaskClick}
+				{onSourceClick}
+			/>
 		</div>
 	</div>
-
-	<!-- Content -->
-	<div class="prose-sm" dir="auto">
-		<MarkdownTokens
-			id={`${id}-${tokenIdx}-cf`}
-			tokens={token.tokens}
-			{done}
-			{editCodeBlock}
-			{sourceIds}
-			{onTaskClick}
-			{onSourceClick}
-		/>
-	</div>
-</div>
+{/if}

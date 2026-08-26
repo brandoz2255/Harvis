@@ -42,7 +42,7 @@
 	{#each intents as intent (intent.key)}
 		<button
 			type="button"
-			class="text-sm px-3.5 py-1.5 rounded-full border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 text-gray-700 dark:text-gray-200 hover:border-blue-500 hover:text-blue-600 dark:hover:text-blue-400 transition"
+			class="text-sm px-3.5 py-1.5 rounded-lg border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 text-gray-700 dark:text-gray-200 hover:border-blue-500 hover:text-blue-600 dark:hover:text-blue-400 transition"
 			title={$i18n.t(intent.hint)}
 			on:click={intent.run}
 		>

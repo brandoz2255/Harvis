@@ -74,8 +74,14 @@
 		return result;
 	})();
 
-	$: summaryText = (() => {
+	// Shell-ish tools read better counted as commands than listed by tool name —
+	// "ran 3 commands" instead of "3 Bash".
+	const TERMINAL_TOOL =
+		/^(?:exec|run_code|run_tests|bash|shell|terminal|terminal\.exec|harvis-terminal)$/i;
+
+	$: summary = (() => {
 		const parts = [];
+		let commandCount = 0;
 
 		if (toolCallCount > 0) {
 			// Group by tool name and show counts
@@ -84,6 +90,10 @@
 				.filter((t) => t?.attributes?.type === 'tool_calls')
 				.forEach((t) => {
 					const name = t?.attributes?.name ?? 'tool';
+					if (TERMINAL_TOOL.test(name)) {
+						commandCount += 1;
+						return;
+					}
 					nameCounts[name] = (nameCounts[name] || 0) + 1;
 				});
 
@@ -101,12 +111,28 @@
 			}
 		}
 
-		const prefix = hasPending ? $i18n.t('Exploring') : $i18n.t('Explored');
-		const detail = parts.join(', ');
-		return detail;
+		const commandPhrase = `${commandCount} ${commandCount === 1 ? 'command' : 'commands'}`;
+
+		if (commandCount > 0 && parts.length === 0) {
+			// Nothing but shell calls ran, so the verb carries the whole line.
+			return {
+				prefix: hasPending ? $i18n.t('Running') : $i18n.t('Ran'),
+				detail: commandPhrase
+			};
+		}
+
+		if (commandCount > 0) {
+			parts.push(`${hasPending ? 'running' : 'ran'} ${commandPhrase}`);
+		}
+
+		return {
+			prefix: hasPending ? $i18n.t('Exploring') : $i18n.t('Explored'),
+			detail: parts.join(', ')
+		};
 	})();
 
-	$: prefixText = hasPending ? $i18n.t('Exploring') : $i18n.t('Explored');
+	$: summaryText = summary.detail;
+	$: prefixText = summary.prefix;
 </script>
 
 <div {id} class="w-full">

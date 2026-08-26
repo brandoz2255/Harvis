@@ -152,7 +152,7 @@
 	</div>
 	<button
 		on:click={() => (showForm ? resetForm() : ((resetForm(), (showForm = true))))}
-		class="inline-flex items-center gap-1.5 rounded-full bg-blue-600 text-white px-3 py-2 text-xs font-medium hover:bg-blue-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 transition"
+		class="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 text-white px-3 py-2 text-xs font-medium hover:bg-blue-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 transition"
 	>
 		<svg class="size-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg>
 		{$i18n.t('New sub-agent')}

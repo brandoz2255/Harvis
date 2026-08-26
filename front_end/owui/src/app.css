@@ -863,6 +863,26 @@ body {
 	mask-image: linear-gradient(to right, #000 calc(100% - 22px), #0000);
 }
 
+/* LM Studio-like code blocks: charcoal header, editor body, live caret while streaming */
+.lms-codeblock .hljs {
+	background: transparent !important;
+}
+.lms-caret {
+	display: inline-block;
+	width: 0.5rem;
+	height: 1em;
+	margin-left: 1px;
+	vertical-align: text-bottom;
+	background: currentColor;
+	opacity: 0.7;
+	animation: lms-caret-blink 1s steps(1) infinite;
+}
+@keyframes lms-caret-blink {
+	50% {
+		opacity: 0;
+	}
+}
+
 /* ─── Reduced motion (WCAG 2.3.3) ─────────────────────────────────────────────
    One global rule instead of tagging ~86 `animate-*` uses across 62 files: it
    covers everything that exists today AND anything added later, which a
@@ -933,4 +953,54 @@ html:not(.dark) .log-pane,
 html:not(.dark) .log-pane .text-gray-400,
 html:not(.dark) .log-pane .text-gray-300 {
 	color: #d1d5db; /* gray-300 — correct against the pane's own black ground */
+
+/* A sandbox file path in the prose. The file lives in a container, so the path is not
+   something the user can open — clicking it is the only way in. It has to look like a
+   control, not like decoration. */
+.harvis-sandbox-path {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.3em;
+	max-width: 100%;
+	padding: 0.1em 0.45em;
+	border: 1px solid rgb(0 0 0 / 0.12);
+	border-radius: 0.375rem;
+	background: rgb(0 0 0 / 0.04);
+	color: inherit;
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	font-size: 0.875em;
+	line-height: 1.4;
+	vertical-align: baseline;
+	cursor: pointer;
+	transition: background 120ms ease, border-color 120ms ease;
+}
+
+.harvis-sandbox-path::before {
+	content: '';
+	width: 0.85em;
+	height: 0.85em;
+	flex: none;
+	background: currentColor;
+	opacity: 0.55;
+	-webkit-mask: var(--harvis-file-icon) center / contain no-repeat;
+	mask: var(--harvis-file-icon) center / contain no-repeat;
+}
+
+.harvis-sandbox-path:hover {
+	background: rgb(0 0 0 / 0.08);
+	border-color: rgb(0 0 0 / 0.2);
+}
+
+.dark .harvis-sandbox-path {
+	border-color: rgb(255 255 255 / 0.14);
+	background: rgb(255 255 255 / 0.06);
+}
+
+.dark .harvis-sandbox-path:hover {
+	background: rgb(255 255 255 / 0.12);
+	border-color: rgb(255 255 255 / 0.24);
+}
+
+:root {
+	--harvis-file-icon: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='black'%3E%3Cpath d='M4 3.5A1.5 1.5 0 0 1 5.5 2h5.086a1.5 1.5 0 0 1 1.06.44l3.415 3.414A1.5 1.5 0 0 1 15.5 6.914V16.5A1.5 1.5 0 0 1 14 18H5.5A1.5 1.5 0 0 1 4 16.5v-13Zm7 .62V6a.5.5 0 0 0 .5.5h1.88L11 4.12Z'/%3E%3C/svg%3E");
 }

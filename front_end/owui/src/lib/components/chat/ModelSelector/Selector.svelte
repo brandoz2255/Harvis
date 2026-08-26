@@ -532,7 +532,13 @@
 			}}
 		>
 			{#if selectedModel}
-				{selectedModel.label}
+				<!-- The composer is too narrow to spell out a 50-character provider id, so
+				     the visible text stays truncated and the full name + id lives one hover
+				     away. Without this there was nowhere in the UI that stated which of the
+				     several near-identically-named models was actually answering. -->
+				<span class="truncate" title={`${selectedModel.label} (${selectedModel.value})`}>
+					{selectedModel.label}
+				</span>
 			{:else}
 				{placeholder}
 			{/if}
@@ -605,7 +611,7 @@
 								}}
 							>
 								<div
-									class="flex gap-1 w-fit text-center text-sm rounded-full bg-transparent px-1.5 whitespace-nowrap"
+									class="flex gap-1 w-fit text-center text-sm rounded-lg bg-transparent px-1.5 whitespace-nowrap"
 									bind:this={tagsContainerElement}
 								>
 									{#if items.find((item) => item.model?.connection_type === 'local') || items.find((item) => item.model?.connection_type === 'external') || items.find((item) => item.model?.direct) || tags.length > 0}

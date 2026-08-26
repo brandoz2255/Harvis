@@ -7,9 +7,10 @@ import { WEBUI_BASE_URL } from '$lib/constants';
 export type WorkspaceEvent = {
 	type: string;
 	content?: string;
+	text?: string;
 	tool?: string;
 	args?: Record<string, unknown>;
-	output?: string;
+	output?: unknown;
 	success?: boolean;
 	message?: string;
 	summary?: string;
@@ -22,6 +23,10 @@ export type WorkspaceEvent = {
 	// Harvis Execution Trace (Phase 1) event fields:
 	// terminal_output — {command_id, target, stream, content, exit_code?, duration_ms?, truncated?}
 	command_id?: string;
+	job_id?: string;
+	tool_call_id?: string;
+	item_id?: string;
+	id?: string;
 	target?: { kind: string; id: string };
 	stream?: 'stdout' | 'stderr';
 	exit_code?: number;

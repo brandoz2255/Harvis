@@ -59,9 +59,14 @@ class AuthzResult:
     needs_approval: bool = False
 
 
-def _lane_flag_enabled(lane: int) -> bool:
+def _lane_flag_enabled(lane: int, tool_name: str = "") -> bool:
     """Deployment-level enablement per lane. Lanes 1-3 are always on; higher
-    lanes each map to an env flag (truthy set: 1/true/yes/on)."""
+    lanes each map to an env flag (truthy set: 1/true/yes/on).
+
+    Lane 5 holds more than one capability, so the flag is chosen per capability
+    rather than per lane: SSH answers to HARVIS_SSH_ENABLED, MCP connectors to
+    HARVIS_MCP_RUNTIME_ENABLED. Sharing one flag across both would mean turning
+    on remote shell access to use a filesystem connector."""
     if lane <= DEFAULT_SAFE_LANE:
         return True
     if lane == LANE_LOCAL_DESKTOP:
@@ -70,6 +75,21 @@ def _lane_flag_enabled(lane: int) -> bool:
         # can reach the host shell until it is deliberately built + reviewed.
         return False
     if lane == LANE_EXTERNAL_SERVICES:
+        name = (tool_name or "").lower()
+        if name.startswith("mcp__"):
+            return (
+                os.getenv("HARVIS_MCP_RUNTIME_ENABLED") or ""
+            ).strip().lower() in _TRUTHY
+        # Screenshot-to-code verify loop — renders model HTML in browser-runner.
+        if name == "screenshot_preview":
+            return (
+                os.getenv("HARVIS_VISION_SELF_CHECK_ENABLED") or ""
+            ).strip().lower() in _TRUTHY
+        # Agent Reach / research internet tools (lane-5, never OpenClaw egress).
+        if name.startswith("agent_reach.") or name.startswith("web_reach_"):
+            return (
+                os.getenv("HARVIS_AGENT_REACH_ENABLED") or ""
+            ).strip().lower() in _TRUTHY
         return (os.getenv("HARVIS_SSH_ENABLED") or "").strip().lower() in _TRUTHY
     # Lane 6 (real hardware) and anything unrecognized: unconditional deny in v0.
     return False
@@ -110,7 +130,9 @@ async def authorize_action(
         "status": "ready",
         "approval": False,
     }
-    ok, reason = tool_can_execute(tool, flag_enabled=_lane_flag_enabled(lane), approved=False)
+    ok, reason = tool_can_execute(
+        tool, flag_enabled=_lane_flag_enabled(lane, tool_name), approved=False
+    )
     if not ok:
         await _emit_decision(emit, {
             "tool": tool_name, "lane": lane, "tier": None,

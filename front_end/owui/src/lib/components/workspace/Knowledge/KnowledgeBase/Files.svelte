@@ -37,7 +37,7 @@
 				{#if file?.status !== 'uploading'}
 					<Tooltip content={$i18n.t('Open file')}>
 						<button
-							class="p-1 rounded-full hover:bg-gray-100 dark:hover:bg-gray-850 transition"
+							class="p-1 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-850 transition"
 							type="button"
 							on:click={() => {
 								let fileId = file?.id ?? file?.tempId;
@@ -102,7 +102,7 @@
 				<div class="flex items-center">
 					<Tooltip content={$i18n.t('Delete')}>
 						<button
-							class="p-1 rounded-full hover:bg-gray-100 dark:hover:bg-gray-850 transition"
+							class="p-1 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-850 transition"
 							type="button"
 							on:click={() => {
 								onDelete(file?.id ?? file?.tempId);

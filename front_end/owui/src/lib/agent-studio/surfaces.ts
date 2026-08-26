@@ -12,6 +12,7 @@ import GlobalArtifacts from './GlobalArtifacts.svelte';
 import Cookbook from './Cookbook.svelte';
 import Customize from './Customize.svelte';
 import ConnectorsPanel from './customize/ConnectorsPanel.svelte';
+import SkillsPanel from './customize/SkillsPanel.svelte';
 
 export interface Surface {
 	key: string;
@@ -46,7 +47,10 @@ export const surfaces: Surface[] = [
 	{ key: 'cookbook', label: 'Models', component: Cookbook, modes: ['full', 'dock'] },
 	{ key: 'tuning', label: 'Tuning', component: TuningPanel, modes: ['full', 'dock'] },
 	{ key: 'customize', label: 'Customize', component: Customize, modes: ['full'] },
-	{ key: 'mcp-shop', label: 'Connectors', component: ConnectorsPanel, modes: ['full'] }
+	{ key: 'mcp-shop', label: 'Plugins', component: ConnectorsPanel, modes: ['full'] },
+	// The other half of "what your agents can do" — paired with mcp-shop by the
+	// Plugins | Skills switch at the top of both surfaces.
+	{ key: 'skills', label: 'Skills', component: SkillsPanel, modes: ['full'] }
 ];
 
 const KEY_ALIASES: Record<string, string> = {

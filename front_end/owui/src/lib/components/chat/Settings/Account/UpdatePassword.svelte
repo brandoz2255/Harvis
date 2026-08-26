@@ -6,12 +6,12 @@
 
 	const i18n = getContext('i18n');
 
-	// HONESTY GATE: the Harvis owui_compat facade does not implement
-	// POST /api/v1/auths/update/password (see python_back_end/owui_compat/router.py —
-	// only signin/signup/signout and GET /auths/ exist), so every submit would 404.
-	// Same pattern as PROFILE_UPDATE_AVAILABLE / API_KEYS_AVAILABLE in Account.svelte;
-	// flip this const when the route lands to re-enable the form as-is.
-	const PASSWORD_CHANGE_AVAILABLE = false;
+	// The route this gate was waiting on now exists:
+	// POST /api/v1/auths/update/password (python_back_end/owui_compat/account.py).
+	// It verifies the current password with the same bcrypt context main.py uses,
+	// requires 8+ characters, and returns 400 (not 401) on a wrong current
+	// password so a failed attempt does not log the user out mid-form.
+	const PASSWORD_CHANGE_AVAILABLE = true;
 
 	let show = false;
 	let currentPassword = '';
@@ -120,7 +120,7 @@
 				</div>
 			{/if}
 			<button
-				class="px-3.5 py-1.5 text-sm font-medium bg-black text-white dark:bg-white dark:text-black transition rounded-full {PASSWORD_CHANGE_AVAILABLE
+				class="px-3.5 py-1.5 text-sm font-medium bg-black text-white dark:bg-white dark:text-black transition rounded-lg {PASSWORD_CHANGE_AVAILABLE
 					? 'hover:bg-gray-900 dark:hover:bg-gray-100'
 					: 'opacity-50 cursor-not-allowed'}"
 				disabled={!PASSWORD_CHANGE_AVAILABLE}

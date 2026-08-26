@@ -49,7 +49,7 @@
 	<!-- LEFT -->
 	<div class="flex items-center gap-3 min-w-0">
 		<div class="flex items-center gap-1.5 text-sm shrink-0">
-			<span class="text-gray-500">{$i18n.t('Build')}</span>
+			<span class="text-gray-500">{$i18n.t('Work')}</span>
 			{#if hasProject && projectName}
 				<span class="text-gray-700">/</span>
 				<span class="text-gray-800 dark:text-gray-100 font-medium truncate max-w-[16rem]">

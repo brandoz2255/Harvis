@@ -516,7 +516,7 @@
 
 									<div class=" mt-6 mx-auto relative group w-fit">
 										<button
-											class="relative z-20 flex px-5 py-2 rounded-full bg-white border border-gray-100 dark:border-none hover:bg-gray-100 transition font-medium text-sm"
+											class="relative z-20 flex px-5 py-2 rounded-lg bg-white border border-gray-100 dark:border-none hover:bg-gray-100 transition font-medium text-sm"
 											on:click={async () => {
 												let blob = new Blob([JSON.stringify(localDBChats)], {
 													type: 'application/json'

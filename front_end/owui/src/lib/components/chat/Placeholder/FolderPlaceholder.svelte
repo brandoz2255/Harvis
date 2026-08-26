@@ -69,7 +69,7 @@
 <div>
 	<!-- <div class="mb-1">
 		<div
-			class="flex gap-1 scrollbar-none overflow-x-auto w-fit text-center text-sm font-medium rounded-full bg-transparent py-1 touch-auto pointer-events-auto"
+			class="flex gap-1 scrollbar-none overflow-x-auto w-fit text-center text-sm font-medium rounded-lg bg-transparent py-1 touch-auto pointer-events-auto"
 		>
 			<button
 				class="min-w-fit p-1.5 {selectedTab === 'knowledge'

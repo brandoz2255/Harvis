@@ -1,5 +1,488 @@
 # Recent Changes and Fixes Documentation
 
+## Date: 2026-08-01 — Attachments reach every Build lane; the Build preview finally exists
+
+Asks: *"can you just make it so the engine models like anthropic and kimi can do the task too it has
+to run on everything"*, then *"it still did the same issue, saying the screenshot could not be read.
+also it says still working when its finished"*, then *"the preview did not move to the side ... and
+when i press full it doesnt move over to the side like it should or take over the whole screen"*.
+
+**Problem 1 — an attachment only worked on the native lane.** The CLI engine path
+(`engine_adapter.py`) had zero attachment handling, so a screenshot arrived at the model as the
+literal text `/api/v1/files/<id>/content`. Run `67155356` spent 90 s and 10 tool calls hunting for
+it — `curl` exit 127, `ECONNREFUSED 127.0.0.1:80`, a port scan — before honestly reporting blocked.
+
+**Root cause of the follow-up failure — Harvis has TWO upload stores.** `POST /api/uploads` writes
+`IMAGES_DIR` (`/app/images`) with a `.meta.json` sidecar; the chat/Build composer uploads through the
+OWUI-compat `POST /api/v1/files/` (`main.py:5647`), which writes `OWUI_FILES_DIR` (`/app/owui_files`)
+as `<uuid><ext>` with the authoritative row in Postgres. The resolver knew only the first, so a real
+Build attachment reported "no longer on disk" while its bytes sat in the other directory. A second
+defect made this cost an extra round: the staging status line said "1 unavailable" — the count with
+no reason — which sent the investigation into CLI behaviour when the cause was already known.
+
+**Problem 2 — "Working…" over a finished task.** The server was honest (`status='done'`,
+`completed_at` set, endpoint returns it verbatim). Three client defects: `schedule()` read the
+frame-behind reactive `anyRunning`; the page subscribed to the run stream but ignored its terminal
+`done`/`error`/`cancelled` phase; and — the one that survived to the user — `RunView.svelte` derived
+`running` purely from the stream `phase`, which starts at `'connecting'`. A view mounted on an
+already-finished run whose replay closes without a terminal event never leaves `'connecting'`.
+`loadMeta()` had the authoritative status the whole time and never fed it in.
+
+**Problem 3 — the Build preview was never built.** `WorkspaceMainPanel.svelte` had
+`const BUILD_FILE_PREVIEW = false` and a "No preview available yet." body, so a run's artifact only
+ever rendered inline in the chat. And ⤢ Full was *guaranteed* inert: it renders only on running
+turns, and `headerOpenRunId` refuses running turns (the inspector pegs the main thread on a live run).
+
+**Solution.**
+
+- One audited byte resolver (`resolve_attachment_bytes`) behind two delivery mechanisms: real
+  multimodal image parts for API lanes, real files on disk under `harvis-attachments/` for CLI lanes
+  (the shared `artifact_data` volume is the delivery mechanism — sidecars mount nothing else).
+  Non-image attachments stage into the working tree on the native lane.
+- `_resolve_file_id` falls back to the OWUI store, regex-validating the client-supplied id and
+  confirming the path is a direct child of the directory (it would otherwise be a traversal
+  primitive). Skip reasons are now stated, not counted.
+- `RunView` treats a terminal server status as authoritative over the stream phase, and takes an
+  `artifactsMode` prop so the thread renders changes only.
+- `WorkspaceMainPanel` gets a real `hasPreview` prop + `preview` slot; the Build page feeds it the
+  run's primary artifact, surfaces it on the rising edge, and adds a full-page preview overlay
+  (Esc/✕). ⤢ Full in the thread now docks a live run's output to the side instead of toasting.
+
+**Files modified.** `python_back_end/vision_to_code/attachments.py`,
+`python_back_end/workspace/orchestration/{engine_adapter,session_turn}.py`,
+`python_back_end/workspace/{kimi_workspace,workspace_router}.py`,
+`front_end/owui/src/lib/agent-studio/RunView.svelte`,
+`front_end/owui/src/lib/agent-studio/build/WorkspaceMainPanel.svelte`,
+`front_end/owui/src/routes/(app)/harvis/vibecode/+page.svelte`.
+
+**Result.** Verified live: run `66661e05` (kimi-code/k3) ended with the model saying *"I can see the
+screenshot clearly"* and rebuilding the page from it. All four engine sidecars read the staged PNG at
+the identical briefed path; traversal and SSRF refused. Full write-up:
+`docs/handoffs/2026-08-01-attachments-every-lane-and-build-preview.md`.
+
+**Known limits.** The side Preview shows the latest run's artifact, not the expanded turn's. ⤢ Full
+still cannot open the inspector on a live run — that gate predates this work.
+
+**⚠ Open security item.** Run `67155356` seq 14 ran `env | grep -i api` and that tool result is
+stored in plaintext in `workspace_events`, including a live Kimi API key. Rotate it and redact env
+output from persisted CLI events.
+
+
+## Date: 2026-08-01 (latest) — Real provider logos, honest key verification, richer free-key guide
+
+Ask: *"first we need to get the svg or images for the model images, also we need to verify that all
+of the models are available as well ... then also inside of the same area give them the exact link
+to the repo where the informaiton is from and then make the UI a little better like give them
+better details on requirements"*. (Image-gen model picker explicitly deferred: *"we can discuss
+that later"*.)
+
+**Problem.** Three things. (1) All five free providers rendered the same hand-drawn cloud+key glyph,
+told apart only by tile tint — the cards looked generic and interchangeable. (2) Nothing had ever
+confirmed the vendor endpoints actually resolve. (3) The "Get free API keys" modal gave one line of
+prose per provider and never said where the allowances came from.
+
+**Root cause of what the verification pass found.** Probing all five `/models` endpoints from inside
+`harvis-backend` turned up two real defects that no amount of reading would have shown:
+
+- **NVIDIA's `/v1/models` is public.** HTTP 200 and the full 102-model catalog with no
+  `Authorization` header. `verify_provider_key` proved a key by listing models, so it returned
+  `ok=True` for *any string*. The user was told Connected, watched 86 models appear in the picker,
+  and then every single chat 401'd. Silent success — the same shape this project keeps hitting.
+- **Google answers a bad key with 400, not 401.** `{"message": "Please pass a valid API key"}`. The
+  generic handler surfaced that as `"Google Gemini returned HTTP 400."` — names no cause, suggests
+  no fix, on the single most likely error a new user hits.
+
+**Solution.**
+
+- `BrandGlyph.svelte` now renders each vendor's real mark, inline with `fill="currentColor"` so it
+  inherits the tile's brand tint and reads in both themes. Source: `@lobehub/icons-static-svg`
+  (MIT) — demonstrably the same set `static/integrations/openai.svg` already came from (identical
+  `fill-rule="evenodd" height="1em" style="flex:none;line-height:1"` signature). The cloud+key glyph
+  is kept as the `cloud-api` generic fallback, never as an approximation of a vendor's logo.
+- Two new `FreeProvider` fields encode the probe results as facts, not guesses:
+  `models_endpoint_public` (NVIDIA → verify against `/chat/completions`, which does require auth,
+  aimed at a model discovered at runtime rather than pinned) and `bad_key_statuses` (Gemini → 400
+  also means "rejected the key").
+- Catalog gains `freeLimits: string[]` (the two or three numbers you actually compare, as chips) and
+  `signupRequires` (stated up front — Mistral's phone verification is what makes people abandon a
+  signup halfway).
+- `FreeKeysGuide.svelte` renders both, adds a per-provider Docs link, and names
+  `github.com/cheahjs/free-llm-api-resources` in full in the footer. Linked, never vendored — that
+  repo publishes `license: null`.
+- Fixed `border-gray-150` in the new chip markup → `gray-200`. `gray-150` is not defined in this
+  project's `tailwind.config.js` and silently emits no CSS. **`ControlCard.svelte` has the same
+  latent bug and was left alone** — out of scope, but it is real.
+
+**Files modified.** `python_back_end/owui_compat/free_providers.py`,
+`front_end/owui/src/lib/integrations/BrandGlyph.svelte`,
+`front_end/owui/src/lib/integrations/catalog.ts`,
+`front_end/owui/src/lib/integrations/FreeKeysGuide.svelte`.
+
+**Result.** All five `/models` endpoints confirmed reachable and correctly addressed from inside the
+backend container. All five now reject a garbage key with a message naming the cause (previously
+NVIDIA accepted one and Gemini gave a bare HTTP code). No model-cache residue left behind on a
+failed verify. The chat-model filter checked against NVIDIA's real public catalog: 102 → 86 kept,
+and all 16 dropped are genuinely embeddings/guard models. Frontend built, nginx restarted, and all
+five mark paths plus the source-repo link confirmed served over HTTP 200. Still open: no run with a
+real vendor key (#106) — only David can supply one.
+
+## Date: 2026-08-01 — Free-tier LLM providers, and the main chat learns what it costs
+
+Ask: *"ok lets move without omni route and lets move iwth the free llm api stuff"*, then *"we are
+gioing to need the UI part ... while also tracking how many tokens and costs are used just like how
+it is in the build area just in the main chat"*, then *"fix those bugs and then realize that
+integrtions is engines tab now / but feel free to make whatever is needed to help a new user get
+the api keys for free"*.
+
+Full orientation: `docs/handoffs/2026-08-01-free-providers-and-chat-usage-meter.md`.
+
+### The problem
+
+Harvis had no path to a free model without a local GPU. OmniRoute was trialled as a gateway and
+rejected on measurement — 2.63 GB of image for routing Harvis can do itself. What the product
+actually needed was the *providers*, BYO-key and direct to vendor.
+
+And the main chat had no idea what it was spending. The Build area has had a token/cost meter since
+`RunView`; the chat composer had nothing, so the surface where most usage happens was the one
+surface with no accounting.
+
+### Root cause of the two bugs found on the way
+
+**Local models never reported tokens.** `Chat.svelte:2829` only appends
+`stream_options: {include_usage: true}` when the model declares `info.meta.capabilities.usage`.
+`translate.py`'s `harvis_models_to_owui` emitted no `info` key at all, so every native/Ollama model
+silently opted out and the meter would have read zero forever, regardless of what the vendor
+returned.
+
+**But declaring that capability universally would break unknown upstreams.** An OpenAI-compatible
+server that has never heard of `stream_options` rejects the *whole request* with a 4xx. Ollama
+honours it (probed live: `{'prompt_tokens': 67, 'completion_tokens': 8, 'total_tokens': 75}`); some
+llama.cpp and vLLM builds do not. Declaring it blind trades a working chat for a token count.
+
+### Solution
+
+- `owui_compat/free_providers.py` (new) — five-row provider table: Groq, Cerebras, Google AI
+  Studio, NVIDIA NIM, Mistral. Each row carries base URL, credential name, discovery endpoint, and
+  a `stream_usage` flag (Gemini `False`; the rest start `True` and get demoted at runtime into
+  `_stream_usage_denied` when an upstream rejects the field). Keys are the user's own — no shared
+  pool, nothing hard-coded.
+- `cloud_chat.py` — free-provider model entries declare `capabilities.usage = True` and
+  `price_in: 0` / `price_out: 0` explicitly, because the meter's free test is *both prices zero*.
+  `_proxy_openai_api` gained `usage_provider` and retries once without `stream_options` on a 400.
+- `translate.py:151` — native entries now declare `{"meta": {"capabilities": {"usage": True}}}`.
+- `workspace/model_proxy.py` — `_stream_from_upstream` split into a retry wrapper over
+  `_stream_from_upstream_once`. A 4xx *where `stream_options` was in the body* drops the field and
+  retries exactly once; the second attempt passes `state=None` so it cannot recurse, and a 4xx on a
+  request that never carried the field still surfaces as a real error.
+- `integrations/catalog.ts` — five Engines cards (`groq-api`, `cerebras-api`, `gemini-api`,
+  `nvidia-api`, `mistral-api`) with `authEngine`, `keyConsoleUrl`, `keyHelp`, `freeTier`, and
+  `detect.serviceKey` (that last one is what makes `mergeLiveStatus` resolve the backend probe onto
+  the card).
+- `integrations/FreeKeysGuide.svelte` (new) — the "Get free API keys" modal, reached from the
+  Engines header and from a callout shown when no provider is configured. Its list is derived:
+  `CATALOG.filter(d => d.freeTier && d.keyConsoleUrl)`.
+- `components/chat/ChatUsageMeter.svelte` (new) — mounted in the composer's right cluster in
+  `MessageInput.svelte`, hidden below `sm:`. Walks `parentId` from `history.currentId` rather than
+  summing `history.messages`, so abandoned regenerate branches aren't billed. Reads both usage
+  shapes (`prompt_tokens`/`completion_tokens` and `prompt_eval_count`/`eval_count`) because a
+  thread can switch models mid-way. Renders nothing until a reply carries usage.
+- `agent-studio/UsageMeter.svelte` — two additive props so `RunView` and VibeCode are untouched:
+  `placement` (the composer sits at the viewport bottom, where a downward popup opens off-screen)
+  and `freeLabel` (a free-tier vendor key is free but not *local*).
+
+### Files modified
+
+`python_back_end/owui_compat/free_providers.py` (new), `cloud_chat.py`, `engine_auth.py`,
+`integrations_status.py`, `translate.py`, `python_back_end/workspace/model_proxy.py`,
+`front_end/owui/src/lib/components/chat/ChatUsageMeter.svelte` (new),
+`front_end/owui/src/lib/integrations/FreeKeysGuide.svelte` (new),
+`front_end/owui/src/lib/agent-studio/UsageMeter.svelte`,
+`front_end/owui/src/lib/components/chat/MessageInput.svelte`,
+`front_end/owui/src/lib/integrations/{catalog.ts,capabilities.ts,status.ts,BrandGlyph.svelte,ConnectionPanel.svelte}`,
+`front_end/owui/src/routes/(app)/harvis/integrations/+page.svelte`.
+
+### Result
+
+Deployed and serving. `npm run build` clean in 1m 12s; `docker compose restart backend nginx`;
+backend `/health` 200; native model entries confirmed live as
+`{'capabilities': {'usage': True}}`; both new bundle chunks confirmed served over HTTP. The retry
+was proven against a fake httpx client in three cases (retry succeeds / no `stream_options` so no
+retry / retry also fails — two attempts, no loop), and the meter's derivation against a fixture
+containing both usage shapes plus a 999,999-token abandoned branch, which it correctly excluded.
+
+**Not verified:** end-to-end with a real vendor key (task #106 — only the user can supply one).
+**Known gap:** paid cloud entries (`cloud_chat.py:328`) still declare `"capabilities": {}`, so the
+meter stays hidden on Claude/OpenAI/Kimi — exactly where cost matters most (task #110).
+
+Nothing committed, nothing pushed.
+
+## Date: 2026-07-30 — Harvis gets an MCP client: connectors can finally execute
+
+Ask: *"go ahead and build the mcp stuff thats important"* + *"tts routes can be removed or archived"*.
+
+### The problem: a saved connector reached nothing
+
+The storefront ships 71 plugin cards, 14 of which promise *"Harvis runs the server itself (stdio via
+npx/uvx)"*. Nothing behind that was real. `plugins/mcp/server_registry.py` — the full `mcp_servers`
+CRUD — had **zero importers**. `plugins/mcp/registry.py`'s `execute_tool` returned the literal string
+`"Tool execution not yet implemented"` and its discovery was a `TODO`. No chat or tool-loop module
+read `mcp_servers`; no MCP server process was ever spawned. Task #97 (OAuth) blocks 15 cards; the
+missing runtime blocked all 71.
+
+### Constraint that shaped the design
+
+The backend image is `python:3.12-slim` and has **no `node`, `npx`, `uv` or `uvx`** — checked, not
+assumed. Adding a Node toolchain to the API image to run third-party npm packages would grow the
+image (against the under-7 GB deploy track) *and* execute untrusted code as the backend.
+
+So an MCP server runs the same way an untrusted repo does: as a **sibling container on the isolated
+`harvis_repo-sandbox` network**, from `harvis-repo-sandbox:local` — the Repo Runner's polyglot image,
+which already ships Node 20 + npx + uv + uvx and was already on disk. No new image, no new network.
+
+Reaching a stdio server across a container boundary via Docker's attach socket is multiplexed and
+blocking, a poor fit for asyncio. Instead the container's PID 1 is a small Python bridge that listens
+on a port and pumps a socket to the server's stdio; the backend opens a plain asyncio TCP connection.
+Nothing is published to the host. Server stderr drains to `docker logs`, so "failed to start" looks
+different from "hung".
+
+### Files
+
+| File | Role |
+|---|---|
+| `python_back_end/plugins/mcp/protocol.py` (NEW) | JSON-RPC 2.0 / MCP client — `initialize`, paginated `tools/list`, `tools/call`, `flatten_content`. **No SDK dependency**; the client half is ~200 lines and this image is fighting for megabytes. |
+| `python_back_end/plugins/mcp/runtime.py` (NEW) | container session manager: spawn · dial-with-retry · idle reap · session cap · the bridge source |
+| `python_back_end/plugins/mcp/tool_bridge.py` (NEW) | the only place MCP and the agent loop's vocabularies meet |
+| `workspace/orchestration/authz.py` | lane 5's flag is now chosen **per capability** |
+| `workspace/orchestration/tools.py` | `lane_for_tool`: any `mcp__*` → lane 5 |
+| `workspace/orchestration/runner.py` | offers MCP tools once per run; dispatches `mcp__*` |
+| `docker-compose.yaml` | 7 new env knobs, all default OFF |
+
+### Decisions
+
+- **Namespacing `mcp__<server>__<tool>`.** Without it, a connector exposing its own `read_file` would
+  silently shadow Harvis's built-in. It also lets the runner route on the prefix alone.
+- **Lane 5, always.** Connector tools run third-party code and usually reach an external service, so
+  they are lane 5 *by definition* — never an ungated lane, whatever the tool claims to do. That routes
+  them through the existing `authorize_action` choke point for free.
+- **Lane 5's flag had to be split.** It was a single `HARVIS_SSH_ENABLED` check. Leaving it would have
+  meant *turning on remote shell access in order to use a filesystem connector.*
+- **Discovery once per run**, not per step — connecting spawns a container, so a down server costs one
+  failed attempt, not one per loop iteration. A discovery failure logs and contributes no tools; one
+  broken connector cannot take a chat down.
+- **In-runner dispatch**, following the `propose_skill` / `generate_image` precedent: `dispatch_tool`
+  has no `user_id` and so cannot look up per-user servers.
+
+### Verified live
+
+Against a real `@modelcontextprotocol/server-filesystem` spawned by the runtime inside the backend:
+**14 tools discovered**; `write_file` → `('Successfully wrote to /tmp/harvis_mcp_proof.txt', True)`;
+`read_text_file` → `('written via MCP', True)`; a blocked read of `/etc/shadow` →
+`('Access denied - path outside allowed directories', False)` (an ordinary failed result, never an
+exception into the loop); teardown removes the container and `live_keys()` empties.
+
+Isolation measured on the running container: `CapDrop=[ALL]`, `no-new-privileges`, `Memory=768m`,
+`PidsLimit=256`, `Binds=None`, no published ports, `Privileged=false`, one network. From inside it
+`pgsql`, `ollama` and `openclaw` do not resolve.
+
+Lane wiring measured: `lane_for_tool("mcp__github__create_issue") == 5`; with SSH on and MCP off the
+lane-5 flag is `False` for `mcp__*` and `True` for `ssh.exec`, and exactly inverted when swapped. With
+the runtime off, `authorize_action` denies: *"External service access is not enabled."*
+
+### Stated honestly
+
+- **`backend` resolves from inside the sandbox** — inherited from the Repo Runner (which dual-homes the
+  backend to probe dev servers), not introduced here. Checked rather than assumed: unauthenticated
+  calls from a sandbox container return **401**. Reachable, not usable. It matters more for MCP than
+  for the Repo Runner because a connector is a prompt-injection surface.
+- **stdio only.** `streamable-http` / `sse` raise an honest "not supported yet"; the 15 `remote_oauth`
+  cards remain blocked on task #97.
+- **Not yet exercised through a live chat turn** — runtime, lane gate and dispatch are each verified
+  individually; the full model→tool→model loop with a connector attached is not.
+- **No UI.** Connecting a server still means an `mcp_servers` row.
+
+### Also: `python_back_end/api/` removed
+
+`api/tts_routes.py` was 336 lines and 15 endpoints (voice cloning, presets, podcast generation), never
+mounted in `main.py`, with zero frontend callers. Its `__init__.py` contained nothing but the import of
+it. Removed with `git rm -r`; `import main` still succeeds. Git history is the archive.
+
+---
+
+## Date: 2026-07-30 (later) — "OpenClaw sync" becomes Engine sync, and Settings gets the row-list layout
+
+Two asks: *"instead of openclaw sync it should be engine sync so it can say that it hits all engines"*,
+and *"tone down the yellow stuff … the connector openclaw error/warning just gives another error"*,
+plus *"make the ui like this for the skills and connectors in the settings area"* (ChatGPT
+Settings → Plugins screenshot: icon tile · label · chevron rows).
+
+### 1. The warning was structurally broken, not badly worded
+
+`HARVIS_OPENCLAW_SYNC` is **unset** in the running `harvis-backend`, and `openclaw_sync_apply` raises
+403 whenever it is. So *every* Apply click returned an error — the button could not succeed. The fix
+is not better error copy: the Apply button is **no longer rendered** when the server can't apply, and
+the panel names the env var an operator would have to set instead.
+
+### 2. Engine sync tells the truth about all four engines
+
+A literal rename would have claimed that one apply reaches every engine. It doesn't: OpenClaw is the
+only engine Harvis has a write target for (`mcpServers` merged into `openclaw.json`, plus SKILL.md
+files when `HARVIS_OPENCLAW_SKILLS_DIR` is set). The three CLI sidecars read their **own** MCP config
+and nothing in Harvis writes it.
+
+New `_engine_targets()` in `python_back_end/owui_compat/mcp_wizard.py` puts an `engines` list in the
+dry-run preview, each row carrying `status` (`ready` / `blocked` / `unsupported`), `target`, `writes`
+and a plain-language `note`. Verified inside the container: openclaw → `blocked`, claude-code /
+kimi-code / codex → `unsupported`. The banner is now neutral gray, reads *"Engine sync — 1
+connector(s) saved in Harvis. No engine can receive them yet."*, and expands to those four rows. So
+it does cover every engine — by saying where each one actually stands.
+
+### 3. Settings → Skills and Settings → Connectors are row lists
+
+`SkillsManager.svelte`'s table became navigable rows (icon tile · name + verdict pill · description ·
+date/author · chevron) with a persistent **Browse skill directory** row at the bottom, and
+`ConnectorsPanel.svelte` gained a `dock` layout: `h1` "Connectors", no segmented control, no status
+filter, no Add dropdown, sections start collapsed as one row per category, and **Add custom
+connector** / **Browse the MCP registry** are rows.
+
+`SettingsModal.svelte:934` now passes `mode="dock"`. **This was the one real defect found by opening
+the page** — every earlier gate (compiler, `npm run build`) passed while Settings still rendered the
+full-width storefront, because the prop simply wasn't threaded. Verified live in both light and dark.
+
+Files: `mcp_wizard.py`, `ConnectorsPanel.svelte`, `SkillsManager.svelte`, `SettingsModal.svelte`.
+
+---
+
+## Date: 2026-07-30 — Engines, Plugins and Skills become one storefront (with an honest connect taxonomy)
+
+Driven by pasted ChatGPT/Claude screenshots plus a research block on MCP whose conclusion was taken
+literally: **do not invent a protocol.** MCP already won; the contribution is the catalog and install
+UX on top of it. Nothing below defines a wire spec.
+
+Handoff: `docs/handoffs/2026-07-30-plugins-skills-storefront.md`.
+Branch `harvis1.2`, deployed to the dev box and verified live at `http://localhost:9000`.
+**Nothing committed, nothing pushed.**
+
+### 1. Engines: renamed, moved up, and the two Kimi products merged into one tile
+
+The sidebar's footer row **"Providers" is now "Engines"** and moved into the chat-mode tools cluster —
+it's the first thing a fresh install needs. Order is now **Engines → Connectors → Artifacts →
+Schedules**; Customize and Settings stay in the footer.
+
+Kimi Code membership and the Moonshot platform are different products with different credentials, and
+the old UI shipped them as two unrelated cards. They are now one tile with a variant toggle:
+
+| variant | credential | what it drives |
+|---|---|---|
+| Kimi Code (membership) | `engine_api_key` → `owui_compat/engine_auth.py` | the Claude Code sidecar's tool loop |
+| Moonshot platform | `user_api_key`, provider `moonshot` | pay-as-you-go cloud chat |
+
+`IntegrationVariant` (new, `lib/integrations/catalog.ts`) models it. The important detail: every
+downstream drawer section — engine-support tone, permissions, auth, links — reads from `viewDef` (the
+merge of definition + chosen variant), not the definition. Otherwise the toggle changes the label and
+lies about everything else. An **empty** `permissions` array is meaningful and hides the section: a
+cloud chat key must not advertise shell and repo access.
+
+Logos are real now. `brandMarks.ts` is generated from `simple-icons` 16.27.1 (CC0-1.0) and covers
+**50 of the 63 brands** the directory names. The other 13 (adobe, canva, salesforce, slack, twilio,
+teams, outlook, monday, amplitude, consensus, descript, gamma, ramp) were removed from simple-icons
+over **trademark takedowns** — they will not come back by upgrading the package — and fall back to a
+hash-colored lettermark tile. Slack has a hand-tuned multi-color entry in `ConnectorLogo.svelte`.
+Near-black marks carry `dim: true` and render as a theme-following gray; painted with their own hex
+they vanish on dark backgrounds.
+
+**Files:** `lib/components/layout/Sidebar.svelte`, `routes/(app)/harvis/integrations/+page.svelte`,
+`lib/integrations/{catalog.ts,IntegrationDetailModal.svelte,ConnectionPanel.svelte,ControlCard.svelte,BrandGlyph.svelte,status.ts}`,
+`lib/agent-studio/customize/{ConnectorLogo.svelte,brandMarks.ts}`, `i18n/locales/en-US/translation.json`.
+
+### 2. Plugins: a sectioned storefront, and a backend that knows what it can't do
+
+`/harvis/agent-studio/mcp-shop` (surface key unchanged, label now **Plugins**) lists **71 cards across
+10 sections**, up from 14 installable servers. The load-bearing change is the `connect` taxonomy in
+`python_back_end/owui_compat/mcp_catalog.py` — each card declares how it can actually be connected, and
+the UI never renders a button that can't work:
+
+| `connect` | count | UI behavior |
+|---|---|---|
+| `install` | 14 | Harvis runs the server itself. Connect works, writes an `mcp_servers` row. |
+| `remote_oauth` | 15 | Real vendor MCP endpoint, but **Harvis has no OAuth 2.1 + PKCE client** — no Connect button. Shows publisher, endpoint, and a link to the vendor's own page. |
+| `external` | 42 | Directory entry only. Vendor link, no endpoint claim. |
+
+This is what "a proper backend so it takes the user to the official page" means in practice: for 57 of
+71 cards the honest answer is a link, and the card says *which kind* of link instead of dressing a dead
+end as a Connect button. It is a seam, not a wall — **when an OAuth client lands, the 15
+`remote_oauth` rows become connectable without touching this data.**
+
+**Two defects found and fixed while building it:**
+
+- `visiblePlugins` went **stale after a keystroke**. The filter read `plugins` and `query` through a
+  helper function, which hid both from Svelte's reactive tracking. They are now read directly inside
+  the `$:` statement. Same discipline applied preemptively to `visibleSkills`.
+- The embedded Directory had **two back buttons** — see §3.
+
+**Files:** `python_back_end/owui_compat/{mcp_catalog.py,mcp_wizard.py}`,
+`lib/agent-studio/customize/ConnectorsPanel.svelte`, `lib/agent-studio/surfaces.ts`.
+
+### 3. Skills: the same storefront treatment, with the safety contract untouched
+
+`SkillsPanel.svelte` is one component with two mounts off a `mode` prop:
+
+- `mode="full"` (the `/harvis/agent-studio/skills` route) — centered `Plugins | Skills` pill, "Skills"
+  h1 + tagline, "Search skills" pill input, refresh, round `+`, and a `Your skills | Directory`
+  segmented control. Rows are an icon tile + name + one-line description + a `···` overflow menu
+  (Edit / Audit & verdict / Delete).
+- `mode="dock"` (Customize and the Settings modal) — the old compact header, unchanged.
+
+`mode === 'full'` is a sufficient gate because there are only two mounts. `ConnectorsPanel` needed
+`$page.url.pathname` for the same job because it has three.
+
+The `···` menu **replaces hover-only icon buttons**, which were unreachable on touch — a real defect,
+not a style preference. `SkillsBrowse.svelte` gained one additive prop, `showBack` (default `true`, so
+`SkillsManager` and `SkillsBrowseSection` are unchanged): it was rendering its own "← Skills" chevron
+directly beneath the new tabs, giving two ways back to the same place. No compile gate could catch
+that; it took opening the page.
+
+**The Skills SAFETY CONTRACT is unchanged.** Browsing is free. Installing imports **only the SKILL.md
+text**, as an unaudited DRAFT, via `createNewSkill`. Scripts in a bundle are never downloaded and never
+executed, and the backend strips a client-sent `meta.audit`. Only a human `'supported'` verdict lets a
+skill inject into chats or publish to OpenClaw, and editing the body invalidates the verdict. Reusing
+the two existing components rather than writing a new surface is *why* that's provable.
+
+**Files:** `lib/agent-studio/customize/SkillsPanel.svelte`,
+`lib/components/chat/Settings/Skills/SkillsBrowse.svelte`.
+
+### Verified live (not inferred from a clean build)
+
+Pill navigates both ways (Skills ⇄ Plugins). Installed + Turned-off sections render with tiled rows;
+`unaudited` verdict chips, On/Off pills and the `···` menu all behave, and "Audit & verdict" expands
+the governance panel inline. Search `pirate` narrows to 1 row and drops the emptied section. The
+Directory tab fetches **Anthropic's real live skill list** — the check that proves the fetch path, not
+just that the tab mounts. The Customize dock mount kept its compact header. Forced light theme is
+legible (hashed tiles + white letters), which a dark-only screenshot cannot prove. On Plugins:
+sections collapse, the drawer shows publisher/endpoint/vendor link for `remote_oauth`, `install` rows
+still connect, and the Kimi variant toggle swaps the whole drawer.
+
+Both edit rounds compiled OK, each followed by `npm run build` → exit 0, `docker compose restart
+nginx`, nginx → 200.
+
+### Gotchas for the next session
+
+- **`svelte-check` is unusable here** (9,729 pre-existing errors). The working compile gate is a
+  throwaway `svelte/compiler` script that **must live inside `front_end/owui/`** (Node resolves
+  `svelte` nowhere else), and **`svelte-preprocess` is not installed** — so the script must blank the
+  TypeScript `<script>` block *and* re-declare every name it declared, or store refs like `$i18n` fail
+  with "illegal variable name".
+- Svelte 5 in **legacy mode**: `$:` works, `{#snippet}` was not used; repeated row markup is a
+  `skillSections` array.
+- Deploy = rebuild owui, then `docker compose restart nginx` — `npm run build` does `rm -rf build`,
+  replacing the inode the bind mount pinned.
+
+### Still open
+
+**Harvis has no MCP OAuth 2.1 + PKCE client.** That one missing piece is the entire distance between
+the storefront and 15 live vendor MCP endpoints. Worth its own task.
+
+---
+
 ## Date: 2026-07-29 — First-run setup: the wizard stopped lying, and the mic says what's actually wrong
 
 Two reports, one theme. The setup wizard and the chat composer both had places where a working

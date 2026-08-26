@@ -73,6 +73,12 @@ export function deriveSource(def: IntegrationDefinition): IntegrationSource {
 	// user-supplied connections
 	if (key === 'github') return live ? 'configured' : 'static';
 	if (key === 'mcp') return def.status !== 'available' && def.status !== 'error' ? 'configured' : 'static';
+	// A card that names its own engine-auth row is a BYO credential: the backend reports it ready
+	// only when THIS user has a verified key, so a live status here means the user connected it.
+	// Keyed off the card's own field rather than a hardcoded id list, so a new provider needs no
+	// edit here — and without this branch it would fall through to the green auto-detected
+	// "Ready", claiming Harvis found something when the user is the one who supplied it.
+	if (def.authEngine && key === def.authEngine) return live ? 'configured' : 'static';
 	// auto-probed services (no per-user config in Phase A)
 	if (key === 'ollama' || key === 'openclaw' || key === 'discord' || key === 'hermes' || key === 'hermes-agent')
 		return live ? 'detected' : 'static';

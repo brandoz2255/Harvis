@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import uuid
+from collections.abc import Iterable
 
 from owui_compat.workspace_method import (
     DEFAULT_SAFE_LANE,
@@ -325,8 +326,136 @@ TOOL_SCHEMA = [
     {
         "type": "function",
         "function": {
+            "name": "screenshot_preview",
+            "description": (
+                "Render an HTML file from your workspace at desktop AND mobile viewports "
+                "(full-page) via the headless browser, and return the PNGs for visual "
+                "comparison against the user's screenshot. Use after create/edit of the "
+                "HTML. PNGs are for seeing, not keeping — they are not saved as artifacts. "
+                "Requires HARVIS_VISION_SELF_CHECK_ENABLED. Prefer str_replace to fix "
+                "issues after preview; do not regenerate the whole file."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Workspace-relative HTML path (usually index.html).",
+                    },
+                },
+                "required": ["path"],
+            },
+        },
+        "lane": LANE_EXTERNAL_SERVICES,
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "agent_reach.web_search",
+            "description": (
+                "Search the web and get back numbered results (title, url, snippet) — no page "
+                "bodies. USE THIS FIRST for anything you cannot answer from memory: a release, a "
+                "version, a price, a model card, anything current. Never guess a URL for "
+                "agent_reach.web_read — search for it, then read the result you want. "
+                "Lane 5 / HARVIS_AGENT_REACH_ENABLED. Not available inside OpenClaw."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "What to search for."},
+                    "max_results": {"type": "integer", "description": "1-10 (default 5)."},
+                },
+                "required": ["query"],
+            },
+        },
+        "lane": LANE_EXTERNAL_SERVICES,
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "agent_reach.web_read",
+            "description": (
+                "Read a public web page as text (Jina reader via Harvis backend). Pass a URL you "
+                "got from agent_reach.web_search — a URL assembled from memory is usually a 404. "
+                "Lane 5 / HARVIS_AGENT_REACH_ENABLED. No cookies. Not available inside OpenClaw."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "Public http(s) URL."},
+                },
+                "required": ["url"],
+            },
+        },
+        "lane": LANE_EXTERNAL_SERVICES,
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "agent_reach.yt_transcript",
+            "description": (
+                "Fetch YouTube captions/transcript for a public video URL. "
+                "Requires HARVIS_AGENT_REACH_ENABLED."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "YouTube watch/shorts URL."},
+                },
+                "required": ["url"],
+            },
+        },
+        "lane": LANE_EXTERNAL_SERVICES,
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "agent_reach.gh_view",
+            "description": (
+                "Read a public GitHub file (raw). Pass a github.com/raw URL or "
+                "owner/repo/path[@ref]. Requires HARVIS_AGENT_REACH_ENABLED."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "GitHub URL or owner/repo/path."},
+                    "path": {"type": "string", "description": "Alias for url."},
+                },
+            },
+        },
+        "lane": LANE_EXTERNAL_SERVICES,
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "agent_reach.rss_read",
+            "description": (
+                "Read items from a public RSS/Atom feed URL. "
+                "Requires HARVIS_AGENT_REACH_ENABLED."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "Feed URL."},
+                    "max_items": {"type": "integer", "description": "Max items (1-25)."},
+                },
+                "required": ["url"],
+            },
+        },
+        "lane": LANE_EXTERNAL_SERVICES,
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "finish",
-            "description": "Finish the task. Provide a short summary of what you did.",
+            "description": (
+                "Finish the task. `summary` is the ONLY thing the user reads. "
+                "If the task was a question, a comparison, or a research request, "
+                "put the COMPLETE answer here — the tables, the numbers, the "
+                "sources — not a description of the work you did to find it. "
+                "If you created files, keep it short: what you built, one line "
+                "per file."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {"summary": {"type": "string"}},
@@ -387,6 +516,11 @@ def lane_for_tool(name: str) -> int:
     """Permission lane for a tool name. Unknown tools default to the safe
     ceiling (lane 3, sandbox terminal) — never accidentally lane-1 trivial."""
     n = (name or "").lower()
+    # MCP connector tools (mcp__<server>__<tool>) run third-party server code
+    # and usually reach an external service, so they sit in lane 5 by
+    # definition — never in the ungated lanes, whatever the tool claims to do.
+    if n.startswith("mcp__"):
+        return LANE_EXTERNAL_SERVICES
     for entry in TOOL_SCHEMA:
         if ((entry.get("function") or {}).get("name") or "").lower() == n:
             try:
@@ -548,6 +682,17 @@ async def dispatch_tool(
                 return ("git_commit needs a non-empty `message`.", False)
             return await _git_commit_workspace(workspace_path, message)
 
+        if name.startswith("agent_reach."):
+            from agent_reach import dispatch_agent_reach
+
+            out = await dispatch_agent_reach(name, args)
+            # Contract: dispatch_agent_reach converts any {"ok": false} payload
+            # into an "ERROR: ..." string before returning, so this prefix test
+            # is the whole success signal. It used to see the raw JSON and read
+            # {"ok": false, "error": ...} as a successful tool call.
+            ok = not out.startswith("ERROR:") and not out.startswith("DENIED:")
+            return (out, ok)
+
         if name in ("exec", "run_tests"):
             cmd = str(args.get("command") or ("pytest -q" if name == "run_tests" else ""))
             if not cmd.strip():
@@ -584,10 +729,59 @@ async def dispatch_tool(
         return (f"Tool error: {exc}", False)
 
 
-def parse_tool_calls(msg: dict) -> list[dict]:
+def _json_objects_in(text: str) -> list[dict]:
+    """Every top-level JSON object embedded in ``text``, in order.
+
+    Brace-counting rather than a regex, because a tool call's arguments are themselves
+    an object and a regex that can be written in one line cannot count. String literals
+    are tracked so a ``}`` inside a path or a snippet of code does not close the object
+    early — which is exactly the content these calls carry.
+    """
+    out: list[dict] = []
+    depth = 0
+    start = -1
+    in_str = False
+    esc = False
+    for i, ch in enumerate(text or ""):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start >= 0:
+                    try:
+                        obj = json.loads(text[start : i + 1])
+                    except Exception:
+                        obj = None
+                    if isinstance(obj, dict):
+                        out.append(obj)
+                    start = -1
+    return out
+
+
+def parse_tool_calls(msg: dict, known: Iterable[str] | None = None) -> list[dict]:
     """Extract tool calls from a completion message. Primary path = the OpenAI
     `tool_calls` array; fallback = a JSON tool object embedded in content (small
-    local models sometimes narrate one instead of using the tool channel)."""
+    local models sometimes narrate one instead of using the tool channel).
+
+    ``known`` is the caller's tool universe. When given, the content fallback only
+    accepts names from it — otherwise an unrelated JSON object in prose, say
+    ``{"name": "Alice", "age": 3}``, reads as a call to a tool named Alice. Callers
+    each have a different universe (workspace wire tools, CAD tools, chat_reach's
+    two), so the list comes from the caller rather than a constant here.
+    """
     out: list[dict] = []
     for tc in (msg.get("tool_calls") or []):
         fn = (tc or {}).get("function") or {}
@@ -608,20 +802,33 @@ def parse_tool_calls(msg: dict) -> list[dict]:
     if out:
         return out
 
-    # Fallback: a fenced/bare JSON tool object in the content.
+    # Fallback: a fenced/bare JSON tool object in the content. Small local models
+    # narrate the call instead of using the tool channel, and llama3.1:8b does it with
+    # no fence at all — a whole reply that is just
+    # ``{"name": "edit_file", "parameters": {...}}``.
+    #
+    # This used to be one regex ending in ``[\s\S]*?\}``. Lazy, so it stopped at the
+    # FIRST closing brace — which is the one closing the arguments object, not the one
+    # closing the call. Every candidate therefore arrived at json.loads() one brace
+    # short, threw, and was swallowed by the bare except: a narrated tool call with an
+    # object argument, i.e. every real one, could never be recovered. Measured on
+    # workspace b5142379, where the dropped call surfaced to the user as the raw JSON
+    # printed as the run's summary instead of a file being written.
     content = msg.get("content") or ""
-    import re
-
-    m = re.search(r'\{[^{}]*"(?:tool|name)"\s*:\s*"(\w+)"[\s\S]*?\}', content)
-    if m:
-        try:
-            obj = json.loads(m.group(0))
-            name = obj.get("tool") or obj.get("name")
-            args = obj.get("args") or obj.get("arguments")
-            if not isinstance(args, dict):
-                args = {k: v for k, v in obj.items() if k not in ("tool", "name")}
-            if name:
-                return [{"id": None, "name": name, "args": args}]
-        except Exception:
-            pass
-    return []
+    for obj in _json_objects_in(content):
+        name = obj.get("tool") or obj.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        if known is not None and name not in known:
+            continue
+        # ``arguments`` is the OpenAI spelling; the others are what models actually
+        # emit when they are writing the call out by hand.
+        args = None
+        for key in ("arguments", "args", "parameters", "input"):
+            if isinstance(obj.get(key), dict):
+                args = obj[key]
+                break
+        if args is None:
+            args = {k: v for k, v in obj.items() if k not in ("tool", "name")}
+        out.append({"id": None, "name": name, "args": args})
+    return out

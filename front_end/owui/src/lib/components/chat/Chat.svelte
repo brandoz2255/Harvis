@@ -2,6 +2,15 @@
 	import { v4 as uuidv4 } from 'uuid';
 	import { toast } from 'svelte-sonner';
 	import { startResearch } from '$lib/apis/research';
+	import { markChatRunning, markChatDone, clearChatActivity } from '$lib/utils/chatActivity';
+	import {
+		setInflight,
+		getInflight,
+		clearInflight,
+		hasInflight,
+		touchInflight,
+		inflightEpoch
+	} from '$lib/utils/chatInflight';
 	import { PaneGroup, Pane, PaneResizer } from 'paneforge';
 
 	import { getContext, onDestroy, onMount, tick } from 'svelte';
@@ -31,9 +40,12 @@
 		socket,
 		audioQueue,
 		showControls,
+		cadFocus,
+		cadSelection,
 		dockedRunId,
 		workspaceControlsTab,
 		taskHeartbeats,
+		workspaceRunAnswers,
 		chatMode,
 		orchestrateUniformModel,
 		orchestrateRepoPath,
@@ -56,7 +68,8 @@
 		showFileNavPath,
 		showFileNavDir,
 		chatRequestQueues,
-		desktopEvent
+		desktopEvent,
+		researchEnabled
 	} from '$lib/stores';
 
 	import { WEBUI_API_BASE_URL } from '$lib/constants';
@@ -74,6 +87,11 @@
 		displayFileHandler
 	} from '$lib/utils';
 	import { AudioQueue } from '$lib/utils/audio';
+	import {
+		extractSandboxPaths,
+		ensureSandboxArtifacts,
+		sandboxArtifacts
+	} from '$lib/utils/sandbox';
 
 	import {
 		archiveChatById,
@@ -119,6 +137,7 @@
 	import Spinner from '../common/Spinner.svelte';
 	import Tooltip from '../common/Tooltip.svelte';
 	import Sidebar from '../icons/Sidebar.svelte';
+	import ChevronDown from '../icons/ChevronDown.svelte';
 	import Image from '../common/Image.svelte';
 	import { getBanners } from '$lib/apis/configs';
 
@@ -130,10 +149,64 @@
 	let controlPane: Pane | undefined;
 	let controlPaneComponent: ChatControls | undefined;
 
+	// CAD focus workspace. The viewport takes the page and this same chat is pinned to
+	// the right edge as a narrow strip — the pane is repositioned by CSS rather than
+	// remounted, so history, draft and scroll position survive entering and leaving.
+	// (paneforge registers a pane's size constraints once, in its own onMount, so
+	// reactively shrinking the pane would silently do nothing.)
+	let cadChatWidth = 420;
+	// CAD ships as an optional module tree, so this cannot be a static import: a
+	// checkout without $lib/cad would fail the build outright. import.meta.glob
+	// resolves to an empty object when nothing matches, and to a real lazy loader
+	// when the tree is present — the workspace still bundles and behaves exactly as
+	// a direct import would, one tick later.
+	const cadFocusModule = Object.values(
+		import.meta.glob('../../cad/CadFocusWorkspace.svelte')
+	)[0];
+	let CadFocusWorkspace = null;
+	let cadFocusLoading = false;
+	let cadChatCollapsed = false;
+	let cadFocusActive = false;
+	let cadRestore: { sidebar: boolean; controls: boolean } | null = null;
+
+	$: if ($cadFocus && !CadFocusWorkspace && !cadFocusLoading && cadFocusModule) {
+		cadFocusLoading = true;
+		cadFocusModule()
+			.then((m) => (CadFocusWorkspace = m.default))
+			.catch((e) => console.error('CAD workspace failed to load', e));
+	}
+
+	$: {
+		const active = !!$cadFocus;
+		if (active !== cadFocusActive) {
+			cadFocusActive = active;
+			// The global rail lives outside #chat-container, so it takes a body class to
+			// reach. It comes straight back when the workspace closes.
+			if (typeof document !== 'undefined') {
+				document.body.classList.toggle('cad-focus-active', active);
+			}
+			if (active) {
+				// Entering hides the global rail and the controls pane; leaving puts both
+				// back the way the user had them, not the way we'd default them.
+				cadRestore = { sidebar: $showSidebar, controls: $showControls };
+				showSidebar.set(false);
+				showControls.set(false);
+			} else if (cadRestore) {
+				showSidebar.set(cadRestore.sidebar);
+				showControls.set(cadRestore.controls);
+				cadRestore = null;
+			}
+		}
+	}
+
 	let messageInput: MessageInput | undefined;
 	let messagesRef: Messages | undefined;
 
 	let autoScroll = true;
+	let followObserver = null;
+	// The ResizeObserver alone cannot see the column grow (see attachFollowObserver);
+	// this one watches for the DOM actually changing.
+	let followMutationObserver = null;
 	let isNearTop = true;
 	let processing = '';
 	let messagesContainerElement: HTMLDivElement;
@@ -170,6 +243,12 @@
 	let showCommands = false;
 
 	let generating = false;
+
+	// The chat currently on screen, mirrored out of the store. `chatCompletionEventHandler`
+	// takes a `chatId` parameter that shadows the store of the same name, so `$chatId` is
+	// not reachable inside it — this is how that handler asks whether the user is still
+	// looking at the chat it is streaming into.
+	$: _openChatId = $chatId;
 	// Auto-open the artifact preview once per turn when the model produces a
 	// renderable artifact (HTML/SVG). Starts true so loading a chat never auto-pops;
 	// reset to false at the start of each generation.
@@ -185,6 +264,42 @@
 	let history = {
 		messages: {},
 		currentId: null
+	};
+
+	// Remounted Chat adopted an in-flight history: the stream writes through a
+	// closure that cannot invalidate this instance's `history` binding. Bumping
+	// the epoch on each token forces a refresh while we still own that object.
+	$: if (
+		chatIdProp &&
+		$inflightEpoch[chatIdProp] &&
+		getInflight(chatIdProp)?.history === history
+	) {
+		history = history;
+	}
+
+	/**
+	 * Brand a history object with the chat it belongs to.
+	 *
+	 * Every save pairs a chat id with a history object, and during a chat switch those
+	 * two disagree: `$chatId` publishes the INCOMING chat several network round-trips
+	 * before `loadChat` replaces `history` with that chat's messages. Any save landing in
+	 * that window writes the OUTGOING conversation under the INCOMING id and destroys it —
+	 * silently, because the payload has no title, so the row keeps its old name while its
+	 * contents are replaced wholesale. Two chats have been lost this way.
+	 *
+	 * Rather than police every call site (there are six, and the next one added won't
+	 * know), the id travels WITH the history and `saveChatHandler` refuses a mismatch.
+	 * Non-enumerable so it never serializes into the request body or the stored chat.
+	 */
+	const _ownHistory = (h: any, id: string) => {
+		if (!h || !id) return h;
+		Object.defineProperty(h, '_ownerChatId', {
+			value: id,
+			writable: true,
+			configurable: true,
+			enumerable: false
+		});
+		return h;
 	};
 
 	let taskIds = null;
@@ -226,16 +341,20 @@
 	}
 
 	let saveControlsTimer;
+	let navSeq = 0;
 	$: if (!loading && !$temporaryChatEnabled && $chatId && params && chatFiles) {
 		clearTimeout(saveControlsTimer);
 		saveControlsTimer = setTimeout(saveControls, 400);
 	}
 
 	const navigateHandler = async () => {
+		const targetId = chatIdProp;
+		const gen = ++navSeq;
+		const outgoingId = $chatId;
 		// #region agent log
 		debugLog('C,D,E', 'Chat.svelte:navigateHandler:start', 'navigateHandler started', {
-			chatIdProp,
-			currentStoreChatId: $chatId,
+			chatIdProp: targetId,
+			currentStoreChatId: outgoingId,
 			loading,
 			temporaryChatEnabled: $temporaryChatEnabled,
 			selectedModelsCount: selectedModels?.length ?? null,
@@ -243,15 +362,39 @@
 			selectedToolIdsCount: selectedToolIds?.length ?? null
 		});
 		// #endregion
-		// Mark the outgoing chat as read before loading the new one.
-		// $chatId still holds the previous chat here — loadChat() updates it.
-		if ($chatId && $chatId !== chatIdProp && !$temporaryChatEnabled) {
-			updateLastReadAt($chatId);
+		if (outgoingId && outgoingId !== targetId && !$temporaryChatEnabled) {
+			updateLastReadAt(outgoingId);
 		}
 
 		clearTimeout(saveControlsTimer);
-		await saveControls();
-		loading = true;
+
+		// Persist the in-progress turn before the view abandons it. Pin the outgoing
+		// id — `$chatId` can already be the incoming chat if a prior loadChat raced.
+		if (outgoingId && outgoingId !== targetId && !$temporaryChatEnabled) {
+			const outgoingLive = getInflight(outgoingId);
+			if (outgoingLive?.history) {
+				await saveChatHandler(outgoingId, outgoingLive.history);
+				if (gen !== navSeq) return;
+				if (!outgoingLive.done) markChatRunning(outgoingId);
+			} else if (generating && history?.messages) {
+				_ownHistory(history, outgoingId);
+				setInflight(outgoingId, {
+					history,
+					responseMessageId: history.currentId,
+					controller: generationController
+				});
+				await saveChatHandler(outgoingId, history);
+				if (gen !== navSeq) return;
+				markChatRunning(outgoingId);
+			}
+		}
+
+		// Reattaching a live turn: keep Messages mounted so it can adopt the same
+		// history object. A full loading swap remounts it on a DB snapshot instead.
+		const incomingLive = getInflight(targetId);
+		if (!incomingLive) {
+			loading = true;
+		}
 
 		prompt = '';
 		messageInput?.setText('');
@@ -263,26 +406,26 @@
 		imageGenerationEnabled = false;
 
 		const storageChatInput = sessionStorage.getItem(
-			`chat-input${chatIdProp ? `-${chatIdProp}` : ''}`
+			`chat-input${targetId ? `-${targetId}` : ''}`
 		);
 
 		try {
-			if (chatIdProp && (await loadChat())) {
+			if (targetId && (await loadChat(targetId))) {
+				if (gen !== navSeq || chatIdProp !== targetId) return;
 				await tick();
-				window.setTimeout(() => scrollToBottom(), 0);
+				window.setTimeout(() => scrollToBottom('auto', true), 0);
 
 				await tick();
+				if (gen !== navSeq || chatIdProp !== targetId) return;
 
-				// Mark chat read when initially loading it
-				if (chatIdProp && !$temporaryChatEnabled) {
-					updateLastReadAt(chatIdProp);
+				if (targetId && !$temporaryChatEnabled) {
+					updateLastReadAt(targetId);
 				}
 
-				// Process any queued requests if the chat is idle
 				const lastMessage = history.currentId ? history.messages[history.currentId] : null;
 				const isIdle = !lastMessage || lastMessage.role !== 'assistant' || lastMessage.done;
-				if (isIdle) {
-					await processNextInQueue(chatIdProp);
+				if (isIdle && !hasInflight(targetId)) {
+					await processNextInQueue(targetId);
 				}
 
 				if (storageChatInput) {
@@ -305,14 +448,14 @@
 
 				const chatInput = document.getElementById('chat-input');
 				chatInput?.focus();
-			} else {
+			} else if (gen === navSeq) {
 				await goto('/');
 			}
 		} catch (e) {
 			console.error('Failed to open chat:', e);
-			await goto('/');
+			if (gen === navSeq) await goto('/');
 		} finally {
-			loading = false;
+			if (gen === navSeq) loading = false;
 		}
 	};
 
@@ -333,6 +476,33 @@
 	$: if (selectedModels && chatIdProp !== '') {
 		saveSessionSelectedModels();
 	}
+
+	// Remember the last model the user actually picked, across chats AND across
+	// reloads. `sessionStorage.selectedModels` below only survives the new-chat →
+	// /c/<id> remount and is consumed on read, so every new chat used to fall back
+	// to the operator default and the picker had to be set again by hand.
+	const LAST_MODEL_KEY = 'harvis.chat.last_models';
+
+	$: if (selectedModels) rememberLastModels();
+
+	const rememberLastModels = () => {
+		const ids = (selectedModels ?? []).filter((m) => m && m !== '');
+		if (ids.length === 0) return;
+		try {
+			localStorage.setItem(LAST_MODEL_KEY, JSON.stringify(ids));
+		} catch (_) {}
+	};
+
+	const lastUsedModels = (): string[] => {
+		try {
+			const raw = localStorage.getItem(LAST_MODEL_KEY);
+			if (!raw) return [];
+			const parsed = JSON.parse(raw);
+			return Array.isArray(parsed) ? parsed.filter((m) => typeof m === 'string' && m !== '') : [];
+		} catch (_) {
+			return [];
+		}
+	};
 
 	const saveSessionSelectedModels = () => {
 		const selectedModelsString = JSON.stringify(selectedModels);
@@ -468,6 +638,12 @@
 
 	const showMessage = async (message, scroll = true) => {
 		const _chatId = JSON.parse(JSON.stringify($chatId));
+		// Pinned alongside _chatId, and for the same reason chatCompletedHandler pins
+		// `chatHistory`: there are four awaits between here and the save, and loadChat
+		// REASSIGNS `history` rather than mutating it. Holding the reference keeps the
+		// pair intact, so a chat switch mid-await can no longer file this chat's
+		// branch state under whichever chat the user landed on.
+		const _history = history;
 		let _messageId = JSON.parse(JSON.stringify(message.id));
 
 		let messageChildrenIds = [];
@@ -499,7 +675,7 @@
 		await tick();
 		await tick();
 
-		saveChatHandler(_chatId, history);
+		saveChatHandler(_chatId, _history);
 	};
 
 	const updateLastReadAt = (id) => {
@@ -907,16 +1083,48 @@
 			try {
 				clearTimeout(saveControlsTimer);
 				saveControls();
-				if (chatIdProp && !$temporaryChatEnabled) {
-					updateLastReadAt(chatIdProp);
+				// Remount (/ ↔ /c/[id]) must not abort the stream — only Stop does.
+				// Persist whatever is in flight so a fresh loadChat can reattach or,
+				// if the stream finishes while unmounted, the DB already has the turn.
+				const unmountId = chatIdProp || $chatId;
+				if (unmountId && !$temporaryChatEnabled) {
+					const live = getInflight(unmountId);
+					if (live?.history) {
+						saveChatHandler(unmountId, live.history);
+						markChatRunning(unmountId);
+					} else if (generating && history?.messages) {
+						_ownHistory(history, unmountId);
+						setInflight(unmountId, {
+							history,
+							responseMessageId: history.currentId,
+							controller: generationController
+						});
+						saveChatHandler(unmountId, history);
+						markChatRunning(unmountId);
+					}
+					updateLastReadAt(unmountId);
 				}
 				pageSubscribe();
 				showControlsSubscribe();
 				selectedFolderSubscribe();
+				// Leaving the chat page leaves the workspace too — it is a view of this
+				// page, and reviving it on the next mount would be a surprise. The body
+				// class is cleared here as well, because a destroyed component's reactive
+				// statements never run and the rail would stay hidden on the next page.
+				cadFocus.set(null);
+				document.body.classList.remove('cad-focus-active');
 				window.removeEventListener('message', onMessageHandler);
 				$socket?.off('events', chatEventHandler);
 				audioQueueInstance?.destroy();
 				audioQueue.set(null);
+				if (followObserver) {
+					followObserver.disconnect();
+					followObserver = null;
+				}
+				if (followMutationObserver) {
+					followMutationObserver.disconnect();
+					followMutationObserver = null;
+				}
 			} catch (e) {
 				console.error(e);
 			}
@@ -1092,7 +1300,7 @@
 				files = [...files];
 			} catch (e) {
 				files = files.filter((f) => f.name !== url);
-				toast.error(`${e}`);
+				toast.error(errText(e));
 			}
 		}
 	};
@@ -1115,11 +1323,51 @@
 				contentsRAF = null;
 			}, 0);
 		} else {
+			_baseContents = [];
 			artifactContents.set([]);
 		}
 	};
 
 	$: onHistoryChange(history);
+
+	// Sandbox scripts are artifacts too. They live in a container volume rather than in the
+	// message text, so they are fetched once and merged in below — without this they never
+	// reached the Artifacts list, and one opened by hand was wiped by the next token.
+	let _baseContents = [];
+
+	let _lastPublishedCount = 0;
+
+	const publishContents = () => {
+		const merged = [..._baseContents, ...($sandboxArtifacts ?? [])];
+		artifactContents.set(merged);
+
+		// Auto-open the artifact preview the moment the model produces a renderable
+		// artifact (HTML/SVG/script) in its response — so "make me an html" pops the preview
+		// with no click. Once per turn (armed when a prompt is submitted), so loading a
+		// chat never auto-pops and a manual close isn't fought. The trigger is GROWTH, not
+		// a non-empty list: sending a second message must not re-pop the previous answer's
+		// artifact.
+		const grew = merged.length > _lastPublishedCount;
+		_lastPublishedCount = merged.length;
+
+		if (grew && !_artifactPoppedThisTurn) {
+			_artifactPoppedThisTurn = true;
+			showControls.set(true);
+			showArtifacts.set(true);
+			// showControls may already be true with the pane still collapsed — Svelte stores
+			// don't notify on an unchanged value, so the subscriber that normally opens the
+			// pane would never fire. Open it directly.
+			tick().then(() => {
+				if (!$mobile) {
+					try {
+						controlPaneComponent?.openPane();
+					} catch (e) {}
+				}
+			});
+		}
+	};
+
+	$: $sandboxArtifacts, publishContents();
 
 	const getContents = () => {
 		const messages = history ? createMessagesList(history, history.currentId) : [];
@@ -1185,17 +1433,17 @@
 			}
 		});
 
-		artifactContents.set(contents);
+		_baseContents = contents;
 
-		// Auto-open the artifact preview the moment the model produces a renderable
-		// artifact (HTML/SVG) in its response — so "make me an html" pops the preview
-		// with no click. Once per turn (armed when generation starts), so loading a
-		// chat never auto-pops and a manual close isn't fought.
-		if (contents.length > 0 && !_artifactPoppedThisTurn) {
-			_artifactPoppedThisTurn = true;
-			showControls.set(true);
-			showArtifacts.set(true);
-		}
+		const sandboxPaths = [];
+		messages.forEach((message) => {
+			if (message?.role !== 'user' && typeof message?.content === 'string') {
+				for (const path of extractSandboxPaths(message.content)) sandboxPaths.push(path);
+			}
+		});
+		if (sandboxPaths.length) ensureSandboxArtifacts(sandboxPaths);
+
+		publishContents();
 	};
 
 	//////////////////////////
@@ -1242,15 +1490,24 @@
 
 	// Plain-chat progression — honest, non-specific reassurance while the model works toward its
 	// first token (esp. slow/thinking local models). No workspace/engine wording (there's none).
+	// The LAST stage adapts to the model id (same signal as _engineCheck): a provider-prefixed
+	// id ("anthropic/…", "openai/…", "kimi-code/…") is a cloud model that never cold-loads,
+	// so blaming "local models" there would be a lie — the wait is a long think or a busy
+	// provider. Bare ids (hermes3:3b) are local Ollama and keep the cold-load hint.
 	const _QA_STAGES = [
 		'Understanding the request…',
 		'Thinking it through…',
 		'Working through it…',
-		'Still working…',
-		'Still working — local models can take a moment…'
+		'Still working…'
 	];
-	const _qaStage = (stage: number, _m: string): string =>
-		_QA_STAGES[Math.min(Math.max(stage, 0), _QA_STAGES.length - 1)];
+	const _qaStage = (stage: number, m: string): string => {
+		if (stage >= _QA_STAGES.length) {
+			return (m || '').includes('/')
+				? 'Still working — the model is thinking; long answers can take a moment…'
+				: 'Still working — local models can take a moment…';
+		}
+		return _QA_STAGES[Math.min(Math.max(stage, 0), _QA_STAGES.length - 1)];
+	};
 	const _QA_AT = [0, 2000, 5000, 9000, 16000];
 
 	const _setHeartbeat = (messageId: string, text: string) => {
@@ -1269,6 +1526,18 @@
 			delete n[messageId];
 			return n;
 		});
+	};
+
+	/**
+	 * The workspace id of a `workspace_run` marker whose agent is actually under way,
+	 * or null. `needsapproval` means the card is parked on a confirm button — nothing is
+	 * running yet, so nothing should claim to be.
+	 */
+	const _runningWorkspaceId = (content: string | undefined | null): string | null => {
+		const m = /<details type="workspace_run"([^>]*)>/.exec(content ?? '');
+		if (!m) return null;
+		if (/\bneedsapproval="1"/.test(m[1])) return null;
+		return /\bworkspaceid="([^"]+)"/.exec(m[1])?.[1] ?? null;
 	};
 
 	const _startHeartbeat = (messageId: string, userText: string, model: string) => {
@@ -1308,6 +1577,54 @@
 		_taskHeartbeats[messageId].timer = setTimeout(tick, 700);
 	};
 
+	// ── Fold a finished workspace run's answer into the assistant message ──────
+	//
+	// The run card streams the answer and renders it, but the message row it lives
+	// in was saved the moment the run STARTED and never touched again. On this
+	// account that left 110 workspace-run messages with an empty body and exactly
+	// one with text — so the next turn's prompt carried a run marker and no answer,
+	// and the model could truthfully say it had never heard of something it had
+	// just researched.
+	//
+	// The text goes in wrapped in `<details type="workspace_answer">`, which
+	// MarkdownTokens renders as nothing: the card above already shows it, and the
+	// model reads `content` raw, so the wrapper is invisible to the reader and
+	// present for the prompt. Idempotent by workspace id, because the store can
+	// republish on a remount.
+	const _foldedRunAnswers = new Set<string>();
+	const _foldRunAnswer = async (wsId: string, answer: { text: string; label: string }) => {
+		if (!wsId || _foldedRunAnswers.has(wsId) || !answer?.text) return;
+		const marker = `workspaceid="${wsId}"`;
+		const target = Object.values(history?.messages ?? {}).find(
+			(m: any) => m?.role === 'assistant' && (m?.content || '').includes(marker)
+		) as any;
+		if (!target) return;
+		_foldedRunAnswers.add(wsId);
+		if ((target.content || '').includes(`<details type="workspace_answer" workspaceid="${wsId}"`))
+			return;
+		const label = (answer.label || 'workspace task').replace(/"/g, "'");
+		target.content =
+			`${target.content || ''}\n\n<details type="workspace_answer" workspaceid="${wsId}">\n` +
+			`<summary>Result of the ${label}</summary>\n\n${answer.text.trim()}\n</details>\n`;
+		history.messages[target.id] = target;
+		history = history;
+		await tick();
+		await saveOwnChat(history);
+	};
+	// `!loading` is load-bearing, not tidiness. `loading` is true for the whole of a
+	// chat switch (navigateHandler sets it before loadChat and clears it after), and
+	// loadChat publishes the NEW $chatId three network round-trips before it replaces
+	// `history`. Firing in that window, this block finds the marker in the OUTGOING
+	// chat's history, folds into it, and then saves it under the INCOMING chat's id --
+	// which copies one conversation wholesale over another. Two chats on this account
+	// ended up with byte-identical message payloads written a second apart that way.
+	// The controls autosave above already gates on `loading` for the same reason.
+	$: if (!loading && history?.messages && $workspaceRunAnswers) {
+		for (const [wsId, answer] of Object.entries($workspaceRunAnswers)) {
+			if (!_foldedRunAnswers.has(wsId)) _foldRunAnswer(wsId, answer as any);
+		}
+	}
+
 	// Hand off to the WorkspaceRunCard the instant its marker appears in the content.
 	const _heartbeatMaybeHandoff = (message: any) => {
 		if (message?.id && _taskHeartbeats[message.id] && (message.content || '').includes('<details type="workspace_run"')) {
@@ -1321,6 +1638,12 @@
 
 	const initNewChat = async () => {
 		console.log('initNewChat');
+
+		// Deep Research is a property of the conversation you turned it on in. The
+		// store is global and tab-lived, so without this it stayed armed and the
+		// first message of the NEXT chat silently became a research run.
+		researchEnabled.set(false);
+
 		if ($user?.role !== 'admin' && $user?.permissions?.chat?.temporary_enforced) {
 			await temporaryChatEnabled.set(true);
 		}
@@ -1389,7 +1712,15 @@
 					selectedModels = JSON.parse(sessionStorage.selectedModels);
 					sessionStorage.removeItem('selectedModels');
 				} else {
-					if ($settings?.models) {
+					// The last model the user actually picked wins over both defaults —
+					// switching models in the picker is the more recent, more deliberate
+					// choice, and re-picking it on every new chat is the annoyance this
+					// whole branch exists to remove. A URL ?model= and a project's pinned
+					// models both still take precedence (handled above).
+					const remembered = lastUsedModels().filter((id) => availableModels.includes(id));
+					if (remembered.length > 0) {
+						selectedModels = remembered;
+					} else if ($settings?.models) {
 						// Set from user settings
 						selectedModels = $settings?.models;
 					} else {
@@ -1579,8 +1910,9 @@
 		setTimeout(() => chatInput?.focus(), 0);
 	};
 
-	const loadChat = async () => {
-		chatId.set(chatIdProp);
+	const loadChat = async (targetId = chatIdProp) => {
+		if (!targetId) return null;
+		chatId.set(targetId);
 
 		// Enter every chat with the right-rail dock closed — it only re-opens if THIS chat
 		// has a live workspace/artifact run (never carried over sticky from another chat).
@@ -1588,19 +1920,30 @@
 		dockedRunId.set(null);
 		workspaceControlsTab.set(null);
 
+		const live = getInflight(targetId);
+		if (!live) {
+			clearChatActivity(targetId);
+			generating = false;
+			generationController = null;
+		}
+
 		if ($temporaryChatEnabled) {
 			temporaryChatEnabled.set(false);
 		}
 
-		chat = await getChatById(localStorage.token, $chatId).catch(async (error) => {
-			await goto('/');
+		chat = await getChatById(localStorage.token, targetId).catch(async (error) => {
+			if (chatIdProp === targetId) await goto('/');
 			return null;
 		});
 
+		// A newer navigation owns the view — do not clobber `history` with this result.
+		if (chatIdProp !== targetId) return false;
+
 		if (chat) {
-			tags = await getTagsById(localStorage.token, $chatId).catch(async (error) => {
+			tags = await getTagsById(localStorage.token, targetId).catch(async (error) => {
 				return [];
 			});
+			if (chatIdProp !== targetId) return false;
 
 			const chatContent = chat.chat;
 
@@ -1618,6 +1961,32 @@
 
 				oldSelectedModelIds = structuredClone(selectedModels);
 
+				// Mid-stream (or just-finished) return: adopt the live history the stream
+				// wrote. The DB snapshot is often still the previous exchange because the
+				// completion save is fire-and-forget and used to clear this registry first.
+				if (live?.history?.messages && Object.keys(live.history.messages).length > 0) {
+					history = live.history;
+					_ownHistory(history, targetId);
+					chatTitle.set(chatContent.title);
+					params = chatContent?.params ?? {};
+					chatFiles = chatContent?.files ?? [];
+					chatTasks = chat?.tasks ?? [];
+					const liveMsg = live.history.messages[live.responseMessageId];
+					generating = !live.done && liveMsg && liveMsg.done === false;
+					if (live.controller && generating) {
+						generationController = live.controller;
+					} else {
+						generationController = null;
+					}
+					taskIds = null;
+					autoScroll = true;
+					history = history;
+					touchInflight(targetId);
+					if (live.done) clearInflight(targetId);
+					await tick();
+					return true;
+				}
+
 				history =
 					chatContent?.history != null
 						? chatContent.history
@@ -1626,9 +1995,12 @@
 				if (!history?.messages || typeof history.messages !== 'object') {
 					history = { messages: {}, currentId: null };
 				}
+				_ownHistory(history, targetId);
+				generating = false;
+				generationController = null;
 				// #region agent log
 				debugLog('B,D', 'Chat.svelte:loadChat:historyDerived', 'loadChat derived history shape', {
-					chatId: $chatId,
+					chatId: targetId,
 					history: historyDebugShape(history)
 				});
 				// #endregion
@@ -1667,6 +2039,7 @@
 
 				autoScroll = true;
 				await tick();
+				if (chatIdProp !== targetId) return false;
 
 				// Mark all non-current assistant messages as done
 				if (history.currentId) {
@@ -1685,9 +2058,10 @@
 				// Reconcile active tasks with message state:
 				// If the response is already done, remaining tasks are just background
 				// work (follow-ups, title gen) that shouldn't block the input.
-				const pendingTaskIds = await getTaskIdsByChatId(localStorage.token, $chatId)
+				const pendingTaskIds = await getTaskIdsByChatId(localStorage.token, targetId)
 					.then((res) => res?.task_ids ?? [])
 					.catch(() => []);
+				if (chatIdProp !== targetId) return false;
 				const currentMessage = history.currentId ? history.messages[history.currentId] : null;
 				const responseComplete = currentMessage?.role === 'assistant' && currentMessage?.done;
 
@@ -1695,8 +2069,11 @@
 					taskIds = pendingTaskIds;
 				} else {
 					taskIds = null;
-					// No active tasks and message incomplete → generation was interrupted
-					if (currentMessage?.role === 'assistant' && !currentMessage.done) {
+					if (
+						!hasInflight(targetId) &&
+						currentMessage?.role === 'assistant' &&
+						!currentMessage.done
+					) {
 						currentMessage.done = true;
 					}
 				}
@@ -1710,8 +2087,16 @@
 		}
 	};
 
-	const scrollToBottom = async (behavior = 'auto') => {
+	// `force` is for the deliberate jumps only — Jump to latest, a freshly loaded
+	// chat. Everything else is a follow, and a follow must re-check `autoScroll`
+	// AFTER the await below. Every caller already guards on it before calling, but
+	// a streaming reply fires this many times a second, so the moment the user
+	// scrolls up there are always several calls past that guard already sitting in
+	// the tick/rAF queues. They landed anyway and dragged the reader straight back
+	// down — which is why the page felt locked while Harvis was talking.
+	const scrollToBottom = async (behavior = 'auto', force = false) => {
 		await tick();
+		if (!force && !autoScroll) return;
 		if (messagesContainerElement) {
 			messagesContainerElement.scrollTo({
 				top: messagesContainerElement.scrollHeight,
@@ -1725,12 +2110,14 @@
 			// (new sizes reveal more content, triggering further size resolution), so
 			// we re-scroll across two animation frames to land at the true bottom.
 			requestAnimationFrame(() => {
+				if (!force && !autoScroll) return;
 				if (messagesContainerElement) {
 					messagesContainerElement.scrollTo({
 						top: messagesContainerElement.scrollHeight,
 						behavior
 					});
 					requestAnimationFrame(() => {
+						if (!force && !autoScroll) return;
 						if (messagesContainerElement) {
 							messagesContainerElement.scrollTo({
 								top: messagesContainerElement.scrollHeight,
@@ -1743,12 +2130,70 @@
 		}
 	};
 
+	// Errors reach the UI in four shapes: an Error, a FastAPI `{ detail }` body, an
+	// OpenAI-ish `{ error: { message } }` body, and a bare string. The api clients
+	// `throw` the parsed JSON body rather than an Error, so template-stringifying it
+	// printed the literal "[object Object]" — which is the toast Deep Research showed
+	// on every /api/research/start failure, with the real reason thrown away.
+	const errText = (e: any): string => {
+		if (e === null || e === undefined) return 'Unknown error';
+		if (typeof e === 'string') return e;
+		if (typeof e?.detail === 'string') return e.detail;
+		if (typeof e?.error?.message === 'string') return e.error.message;
+		if (typeof e?.error === 'string') return e.error;
+		if (typeof e?.message === 'string') return e.message;
+		try {
+			const s = JSON.stringify(e);
+			if (s && s !== '{}') return s;
+		} catch (_) {}
+		return `${e}`;
+	};
+
 	const scrollToTop = async () => {
 		await messagesRef?.scrollToTop();
 	};
 
+	// Follow-the-stream state. `autoScroll` means "keep the newest text in view";
+	// it is turned off only by the user deliberately scrolling away (see the
+	// wheel/touch/key handlers on #messages-container) and back on when they
+	// return to the bottom.
+	let touchStartY = null;
 	let scrollRAF = null;
 	let contentsRAF = null;
+	let lastKnownScrollTop = 0;
+
+	// 64px, not the 5px this used to allow. Sub-pixel rounding, the composer
+	// resizing as the user types, and markdown re-layout all move the bottom by
+	// more than a few pixels, and anything inside a couple of lines of the end
+	// is still "reading the latest" as far as the reader is concerned.
+	const BOTTOM_SLACK = 64;
+
+	const isAtBottom = () => {
+		if (!messagesContainerElement) return true;
+		return (
+			messagesContainerElement.scrollHeight - messagesContainerElement.scrollTop <=
+			messagesContainerElement.clientHeight + BOTTOM_SLACK
+		);
+	};
+
+	const stopFollowing = () => {
+		if (!autoScroll) return;
+		autoScroll = false;
+		// A scroll we already queued would yank the user straight back down.
+		if (scrollRAF) {
+			cancelAnimationFrame(scrollRAF);
+			scrollRAF = null;
+		}
+	};
+
+	const resumeFollowing = () => {
+		autoScroll = true;
+		scheduleScrollToBottom();
+		// Force it: a mutation landing in the same frame can flip `autoScroll` back
+		// off before the queued scroll runs, and then the button does nothing.
+		scrollToBottom('auto', true);
+	};
+
 	const scheduleScrollToBottom = () => {
 		if (!scrollRAF) {
 			scrollRAF = requestAnimationFrame(async () => {
@@ -1757,6 +2202,63 @@
 			});
 		}
 	};
+
+	// Follow the growing message column while autoScroll is on.
+	//
+	// The ResizeObserver here used to be the whole mechanism, and it never fired once.
+	// It watches `#messages-container`'s first child, and that child is `h-full` — its
+	// border box is pinned to the scroll port's height while the content overflows it.
+	// Measured on a real chat: container scrollHeight 2280, observed child height 996,
+	// constant. Every lane that streams still scrolled, because the SSE loop calls
+	// scrollToBottom() on each chunk itself. A workspace run does not: its chat stream
+	// closes in a few seconds and the run card keeps growing for another minute, with
+	// nothing left to follow it.
+	//
+	// So watch the DOM instead of a box. Any node added or any text changed inside the
+	// column re-arms one rAF-gated scroll, which is exactly what "keep the newest line
+	// in view" means. The ResizeObserver stays for the height changes that arrive with
+	// no mutation at all — an image finishing, a font swapping, the window resizing.
+	const attachFollowObserver = (el) => {
+		if (followObserver) {
+			followObserver.disconnect();
+			followObserver = null;
+		}
+		if (followMutationObserver) {
+			followMutationObserver.disconnect();
+			followMutationObserver = null;
+		}
+		if (!el) return;
+		const follow = () => {
+			if (!autoScroll) return;
+			// Scroll directly, not only through the rAF-gated scheduler. A mutation
+			// callback already runs after the DOM is current, so `scrollHeight` is the
+			// real one and the assignment is correct as-is. It also survives a tab that
+			// gets no frames: there, one queued rAF never runs, `scrollRAF` stays
+			// non-null forever, and the scheduler silently becomes a no-op for the rest
+			// of the page's life. The scheduled call still runs on top of this to catch
+			// the content-visibility re-layout that lands a frame or two later.
+			if (messagesContainerElement) {
+				messagesContainerElement.scrollTop = messagesContainerElement.scrollHeight;
+			}
+			scheduleScrollToBottom();
+		};
+		if (typeof ResizeObserver !== 'undefined') {
+			followObserver = new ResizeObserver(follow);
+			followObserver.observe(el);
+			if (el.firstElementChild) followObserver.observe(el.firstElementChild);
+		}
+		if (typeof MutationObserver !== 'undefined') {
+			followMutationObserver = new MutationObserver(follow);
+			// childList + characterData only. Attributes change constantly during a
+			// stream (hover states, aria flags) and none of them move the bottom.
+			followMutationObserver.observe(el, {
+				childList: true,
+				subtree: true,
+				characterData: true
+			});
+		}
+	};
+	$: if (messagesContainerElement) attachFollowObserver(messagesContainerElement);
 
 	let processingQueueChats = new Set<string>();
 
@@ -1782,50 +2284,23 @@
 		}
 	};
 
-	const chatCompletedHandler = async (_chatId, modelId, responseMessageId, messages) => {
-		// Backend handles outlet filters and persistence inline.
-		// Just refresh the sidebar chat list.
-		if ($chatId == _chatId && !$temporaryChatEnabled) {
+	const chatCompletedHandler = async (
+		_chatId,
+		modelId,
+		responseMessageId,
+		messages,
+		chatHistory = history
+	) => {
+		if (_chatId && !$temporaryChatEnabled) {
 			// HARVIS (facade): native OWUI persists the chat server-side during the
 			// completion; the owui_compat facade does NOT. So persist the full
 			// conversation (incl. the assistant response) from the client here —
 			// otherwise only the user turn (saved at chat-create) survives a reopen.
-			await saveChatHandler(_chatId, history);
+			// `chatHistory` is the turn's own history, so this is still correct after
+			// the user has navigated to a different chat.
+			await saveChatHandler(_chatId, chatHistory);
 
-			// HARVIS (facade): the socket-less facade can't run OWUI's server-side
-			// background title task, so auto-name a brand-new chat client-side via
-			// the title endpoint (LLM-generated) instead of leaving the raw prompt.
-			try {
-				const _msgs = createMessagesList(history, history.currentId).map((m) => ({
-					role: m.role,
-					content: typeof m.content === 'string' ? m.content : (m.content ?? '')
-				}));
-				const _firstExchange = _msgs.filter((m) => m.role === 'user').length === 1;
-				if (_firstExchange && ($settings?.title?.auto ?? true)) {
-					const _gen = await generateTitle(localStorage.token, modelId, _msgs, _chatId).catch(
-						() => null
-					);
-					let _title = typeof _gen === 'string' ? _gen : _gen?.choices?.[0]?.message?.content;
-
-					// The endpoint, the model, or the parse can all come up empty. Leaving
-					// the chat on its raw first prompt is the "the model didn't name it"
-					// symptom, so fall back to a short phrase from that prompt instead.
-					if (!_title) {
-						const _firstUser = _msgs.find((m) => m.role === 'user')?.content ?? '';
-						const _words = _firstUser.replace(/\s+/g, ' ').trim().split(' ').slice(0, 6);
-						if (_words.length) {
-							_title = _words.join(' ') + (_firstUser.trim().split(/\s+/).length > 6 ? '…' : '');
-						}
-					}
-
-					if (_title && $chatId == _chatId) {
-						chatTitle.set(_title);
-						await updateChatById(localStorage.token, _chatId, { title: _title });
-					}
-				}
-			} catch (e) {
-				console.error('HARVIS auto-title failed', e);
-			}
+			// saveChatHandler above already kicked off auto-titling for this chat.
 
 			currentChatPage.set(1);
 			await chats.set(await getChatList(localStorage.token, $currentChatPage));
@@ -1852,7 +2327,7 @@
 			session_id: $socket?.id,
 			id: responseMessageId
 		}).catch((error) => {
-			toast.error(`${error}`);
+			toast.error(errText(error));
 			messages.at(-1).error = { content: error };
 			return null;
 		});
@@ -1956,7 +2431,7 @@
 			if (messages.length === 0) {
 				await initChatHandler(history);
 			} else {
-				await saveChatHandler($chatId, history);
+				await saveOwnChat(history);
 			}
 		}
 	};
@@ -1992,8 +2467,12 @@
 					{ role: 'assistant', content: marker }
 				]
 			});
+			// A research run outlives this view. Flag the chat so the sidebar can keep
+			// showing a spinner after the user navigates away, and a blue dot when the
+			// backend stops reporting the run as active.
+			markChatRunning($chatId, r.session_id);
 		} catch (err) {
-			toast.error(`${err}`);
+			toast.error(errText(err));
 		}
 	};
 
@@ -2053,15 +2532,65 @@
 			scrollToBottom();
 		}
 
-		if (messages.length === 0) {
+		// The test used to be `messages.length === 0`, which is never true — every caller
+		// passes at least one message. So an injected exchange (Deep Research, a workspace
+		// card) started from a brand-new chat fell through to saveChatHandler with an empty
+		// id, which updates nothing: the run happened, the sidebar stayed empty, and the
+		// conversation was gone the moment the user navigated away. What actually decides
+		// this is whether a chat exists yet.
+		if (!$chatId) {
 			await initChatHandler(history);
 		} else {
-			await saveChatHandler($chatId, history);
+			await saveOwnChat(history);
 		}
 	};
 
-	const chatCompletionEventHandler = async (data, message, chatId) => {
-		const { id, done, choices, content, output, sources, selected_model_id, error, usage } = data;
+	// Reasoning models (qwen3.5, DeepSeek R1, QwQ…) stream their thinking on
+	// `delta.reasoning` and send NOTHING on `delta.content` until it's finished — for
+	// a 9b model that's 20-40 seconds of a blank bubble, which reads as the UI being
+	// stuck and then dumping the whole answer at once. The renderer already knows how
+	// to show a live "Thinking..." block: it just needs the text folded into content
+	// as a reasoning <details>. Closing it stamps the duration, so the header settles
+	// on "Thought for N seconds".
+	const openReasoning = (message) => {
+		if (message.reasoningOpen) return;
+		message.reasoningOpen = true;
+		message.reasoningStartedAt = Date.now();
+		message.content += '<details type="reasoning" done="false">\n<summary>Thinking</summary>\n> ';
+	};
+
+	const closeReasoning = (message) => {
+		if (!message.reasoningOpen) return;
+		message.reasoningOpen = false;
+		const duration = Math.max(
+			0,
+			Math.round((Date.now() - (message.reasoningStartedAt ?? Date.now())) / 1000)
+		);
+		message.content =
+			message.content.replace(
+				'<details type="reasoning" done="false">',
+				`<details type="reasoning" done="true" duration="${duration}">`
+			) + '\n</details>\n';
+	};
+
+	// `chatHistory` is the history this turn belongs to. It defaults to the live one, which
+	// is right for a socket event on the open chat; the HTTP stream below passes the history
+	// it captured when the request went out, so a reply that lands after the user navigated
+	// away still writes into the chat that asked for it instead of the one now on screen.
+	const chatCompletionEventHandler = async (data, message, chatId, chatHistory = history) => {
+		// Writing through the component's own `history` binding is what tells Svelte to
+		// re-render — a write straight to the captured object updates the data and leaves
+		// the screen frozen mid-reply. So write through the binding while this is still the
+		// open chat, and through the captured object once it is not, since by then nothing
+		// is rendering it and the only thing that matters is that the save finds it.
+		const put = (m) => {
+			if (chatHistory === history) history.messages[m.id] = m;
+			else chatHistory.messages[m.id] = m;
+			// Wake a remounted viewer that adopted this history object.
+			touchInflight(chatId);
+		};
+		const { id, done, choices, content, output, sources, selected_model_id, error, usage, harvis_metrics } =
+			data;
 
 		// Store raw OR-aligned output items from backend
 		if (output) {
@@ -2083,6 +2612,19 @@
 			} else {
 				// Stream response
 				let value = choices[0]?.delta?.content ?? '';
+				const reasoning =
+					choices[0]?.delta?.reasoning ?? choices[0]?.delta?.reasoning_content ?? '';
+				if (reasoning) {
+					openReasoning(message);
+					// Everything inside the block is a blockquote, so a newline in the
+					// model's thinking has to carry the marker with it.
+					message.content += String(reasoning).replace(/\n/g, '\n> ');
+					put(message);
+				}
+				if (value) {
+					// The first real token means thinking is over.
+					closeReasoning(message);
+				}
 				if (message.content == '' && value == '\n') {
 					console.log('Empty response');
 				} else {
@@ -2163,7 +2705,14 @@
 			message.usage = usage;
 		}
 
-		history.messages[message.id] = message;
+		// Provenance for every number the footer shows. Kept separate from `usage` because
+		// it says HOW each value was obtained, which is what lets the meter print an em
+		// dash instead of inventing a plausible zero.
+		if (harvis_metrics) {
+			message.harvisMetrics = harvis_metrics;
+		}
+
+		put(message);
 
 		// Hand off the task heartbeat to the WorkspaceRunCard the moment its marker arrives.
 		_heartbeatMaybeHandoff(message);
@@ -2175,9 +2724,28 @@
 		}
 
 		if (done) {
+			// A turn that ended while still thinking (stopped, or a model that emits
+			// nothing else) must not leave an unclosed block behind.
+			closeReasoning(message);
 			message.done = true;
+			// Stamp when the turn actually ended. Without it, a reloaded chat computed
+			// elapsed as now-minus-start and showed how long ago the message was sent.
+			message.completedAt = Date.now();
 			// Resolve the heartbeat on completion (plain-chat answer, or post-handoff cleanup).
 			_clearHeartbeat(message.id);
+			if (_openChatId == chatId) {
+				generating = false;
+				generationController = null;
+				clearInflight(chatId);
+			} else {
+				// Keep the finished turn until this chat is opened again. The completion
+				// save is fire-and-forget; clearing here made return load a stale snapshot.
+				setInflight(chatId, {
+					history: chatHistory,
+					responseMessageId: message.id,
+					done: true
+				});
+			}
 
 			if ($settings.responseAutoCopy) {
 				copyToClipboard(message.content);
@@ -2216,7 +2784,7 @@
 				})
 			);
 
-			history.messages[message.id] = message;
+			put(message);
 
 			await tick();
 			if (autoScroll) {
@@ -2226,12 +2794,44 @@
 			// Fire-and-forget: run chatCompletedHandler for background work
 			// (outlet filters, chat save, title gen, follow-ups, tags)
 			// without blocking the user from sending new messages.
-			chatCompletedHandler(
+			const _completed = chatCompletedHandler(
 				chatId,
 				message.model,
 				message.id,
-				createMessagesList(history, message.id)
+				createMessagesList(chatHistory, message.id),
+				chatHistory
 			);
+
+			// The sidebar marker this turn raised: a blue dot if the user is somewhere
+			// else (there is something new to come back to), nothing at all if they
+			// watched it finish.
+			//
+			// A workspace turn is the exception to "the stream ended, so the work is done".
+			// This stream carries ONLY the `<details type="workspace_run">` marker and closes
+			// in a second or two; the agent it launched then works for minutes. Falling
+			// through to `markChatDone` here put a blue "finished — come read it" dot on a
+			// chat that had barely started. Hand the workspace id to the store instead and
+			// let the sidebar poller settle it when the backend stops reporting the run.
+			const _liveWorkspaceId = _runningWorkspaceId(message?.content);
+			if (chatId) {
+				if (_openChatId != chatId && _liveWorkspaceId) {
+					markChatRunning(chatId, undefined, _liveWorkspaceId);
+				} else if (_openChatId == chatId) {
+					clearChatActivity(chatId);
+					// Left and came back mid-stream: `loadChat` re-read this chat from the
+					// database, which at that moment did not yet have the reply, so the view
+					// is a different history object than the one the stream has been filling.
+					// Re-read it once the save lands or the answer stays invisible until the
+					// user reloads the page by hand.
+					if (chatHistory !== history) {
+						_completed.then(() => {
+							if (_openChatId == chatId) loadChat(chatId);
+						});
+					}
+				} else {
+					markChatDone(chatId);
+				}
+			}
 
 			// Process next queued request if any
 			await processNextInQueue(chatId);
@@ -2250,6 +2850,10 @@
 	//////////////////////////
 
 	const submitPrompt = async (inputContent, inputFiles) => {
+		// Arm the artifact auto-pop for this turn. Armed here rather than inside one
+		// streaming lane so every generation path (SSE, socket, MoA) gets it.
+		_artifactPoppedThisTurn = false;
+
 		const _files = structuredClone(inputFiles);
 
 		chatFiles.push(
@@ -2286,6 +2890,7 @@
 		}
 
 		history.currentId = userMessageId;
+		history = history;
 
 		// focus on chat input (skip during voice call to avoid triggering mobile keyboard)
 		if (!$showCallOverlay) {
@@ -2301,6 +2906,8 @@
 			sessionStorage.selectedEffort = selectedEffort;
 		} catch (_) {}
 
+		// Pass the same object reference — sendMessage pins it before any await so a
+		// chat switch cannot redirect the turn onto another conversation's history.
 		await sendMessage(history, userMessageId);
 	};
 
@@ -2385,6 +2992,9 @@
 			}
 		}
 
+		// Follow the new answer unless the user is reading older messages.
+		autoScroll = true;
+
 		// Clear input and submit
 		messageInput?.setText('');
 		prompt = '';
@@ -2410,12 +3020,17 @@
 			regenerationPrompt?: string | null;
 		} = {}
 	) => {
+		// Pin the conversation object THIS turn belongs to before any await.
+		// `history` is reassigned on navigate; writing through the binding after an
+		// await plants the user/assistant turn on whichever chat is now on screen,
+		// and setInflight then stores that wrong object under the initiating chat id —
+		// return shows loading (registry hit) but not the message you sent.
+		const turnHistory = _history;
+		let _chatId = JSON.parse(JSON.stringify($chatId));
+
 		if (autoScroll) {
 			scrollToBottom();
 		}
-
-		let _chatId = JSON.parse(JSON.stringify($chatId));
-		_history = structuredClone(_history);
 
 		const responseMessageIds: Record<PropertyKey, string> = {};
 		// If modelId is provided, use it, else use selected model
@@ -2446,14 +3061,13 @@
 					timestamp: Math.floor(Date.now() / 1000) // Unix epoch
 				};
 
-				// Add message to history and Set currentId to messageId
-				history.messages[responseMessageId] = responseMessage;
-				history.currentId = responseMessageId;
+				// Always mutate the pinned turn history — never the live `history` binding.
+				turnHistory.messages[responseMessageId] = responseMessage;
+				turnHistory.currentId = responseMessageId;
 
-				// Append messageId to childrenIds of parent message
-				if (parentId !== null && history.messages[parentId]) {
-					history.messages[parentId].childrenIds = [
-						...history.messages[parentId].childrenIds,
+				if (parentId !== null && turnHistory.messages[parentId]) {
+					turnHistory.messages[parentId].childrenIds = [
+						...turnHistory.messages[parentId].childrenIds,
 						responseMessageId
 					];
 				}
@@ -2462,7 +3076,30 @@
 				messageIdsMap[modelId] = responseMessageId;
 			}
 		}
-		history = history;
+
+		// Keep the open view in sync when it still owns this object.
+		if (history === turnHistory) {
+			history = turnHistory;
+		}
+
+		const primaryModelId = selectedModelIds[0];
+		const primaryModel = $models.filter((m) => m.id === primaryModelId).at(0);
+		const primaryResponseMessageId = messageIdsMap[primaryModelId];
+
+		// Register before initChat / tick / HTTP so a mid-flight switch persists the
+		// correct object even if those awaits lose the race with navigateHandler.
+		if (_chatId && primaryResponseMessageId) {
+			_ownHistory(turnHistory, _chatId);
+			setInflight(_chatId, {
+				history: turnHistory,
+				responseMessageId: primaryResponseMessageId,
+				controller: null
+			});
+			markChatRunning(_chatId);
+			// Persist the user turn immediately so a return can load it from the DB
+			// even if the stream later clears or the registry is missed.
+			void saveChatHandler(_chatId, turnHistory);
+		}
 
 		// New chat — backend generates the chat_id on first request
 		if (!_chatId) {
@@ -2474,21 +3111,34 @@
 				// the id during the completion (pushed over the socket). The owui_compat
 				// facade streams statelessly and never creates a chat, so create the row
 				// client-side here, adopt its server id, and let the done-path save it.
-				_chatId = await initChatHandler(_history);
+				// Pass the pinned turn (with assistant placeholders), not a stale clone.
+				_chatId = await initChatHandler(turnHistory);
+			}
+			if (_chatId && primaryResponseMessageId) {
+				_ownHistory(turnHistory, _chatId);
+				setInflight(_chatId, {
+					history: turnHistory,
+					responseMessageId: primaryResponseMessageId,
+					controller: null
+				});
+				markChatRunning(_chatId);
+				void saveChatHandler(_chatId, turnHistory);
 			}
 			await tick();
 		}
 
 		await tick();
 
-		// Re-clone history so sendMessageSocket gets the response messages we just added
-		_history = structuredClone(history);
+		// Payload clone for the request only — stream writes stay on turnHistory.
+		let requestHistory = structuredClone(turnHistory);
+		_ownHistory(requestHistory, _chatId);
+		_ownHistory(turnHistory, _chatId);
 
 		// Vision capability check
 		for (const mid of selectedModelIds) {
 			const model = $models.filter((m) => m.id === mid).at(0);
 			if (model) {
-				const hasImages = createMessagesList(_history, parentId).some((message) =>
+				const hasImages = createMessagesList(requestHistory, parentId).some((message) =>
 					message.files?.some(
 						(file) => file.type === 'image' || (file?.content_type ?? '').startsWith('image/')
 					)
@@ -2508,11 +3158,6 @@
 			}
 		}
 
-		// Single request — backend fans out to all models
-		const primaryModelId = selectedModelIds[0];
-		const primaryModel = $models.filter((m) => m.id === primaryModelId).at(0);
-		const primaryResponseMessageId = messageIdsMap[primaryModelId];
-
 		if (primaryModel && primaryResponseMessageId) {
 			const chatEventEmitter = await getChatEventEmitter(primaryModel.id, _chatId);
 
@@ -2520,7 +3165,7 @@
 			// send, before any workspace run/card exists, and hands off when the marker lands.
 			_startHeartbeat(
 				primaryResponseMessageId,
-				_flattenText(history.messages[parentId]?.content),
+				_flattenText(turnHistory.messages[parentId]?.content),
 				primaryModel.id
 			);
 
@@ -2529,8 +3174,8 @@
 				primaryModel,
 				messages && messages.length > 0
 					? messages
-					: createMessagesList(_history, primaryResponseMessageId),
-				_history,
+					: createMessagesList(requestHistory, primaryResponseMessageId),
+				requestHistory,
 				primaryResponseMessageId,
 				_chatId,
 				{
@@ -2611,8 +3256,24 @@
 			continueResponse?: boolean;
 		} = {}
 	) => {
-		const responseMessage = _history.messages[responseMessageId];
-		const userMessage = _history.messages[responseMessage.parentId];
+		// Pin the live history NOW — before any await. `history` is reassigned on
+		// navigate, and reading it after chatCompletion returns would stream into
+		// whichever chat is on screen. Prefer the registry entry sendMessage already
+		// registered; fall back to the component binding for the first tick.
+		const _chatHistory = getInflight(_chatId)?.history ?? history;
+		_ownHistory(_chatHistory, _chatId);
+		setInflight(_chatId, {
+			history: _chatHistory,
+			responseMessageId,
+			controller: null
+		});
+
+		// Prefer the live message object (same reference the UI renders). The `_history`
+		// arg is a structuredClone used to build the request payload.
+		const responseMessage =
+			_chatHistory.messages[responseMessageId] ?? _history.messages[responseMessageId];
+		const userMessage =
+			_chatHistory.messages[responseMessage.parentId] ?? _history.messages[responseMessage.parentId];
 
 		const chatMessageFiles = _messages
 			.filter((message) => message.files)
@@ -2796,6 +3457,17 @@
 				filter_ids: selectedFilterIds.length > 0 ? selectedFilterIds : undefined,
 				tool_ids: toolIds.length > 0 ? toolIds : undefined,
 				skill_ids: allSkillIds.length > 0 ? allSkillIds : undefined,
+				// What the user has selected in the CAD workspace. IDS ONLY, deliberately:
+				// the backend re-reads the label, kind and status from that revision's own
+				// scene manifest (cad_store.resolve_selection) before a model is told
+				// anything, so this page can name a selection but never describe one.
+				harvis_cad_selection: $cadSelection
+					? {
+							project_id: $cadSelection.project_id,
+							revision_id: $cadSelection.revision_id,
+							node_id: $cadSelection.node_id
+						}
+					: undefined,
 				terminal_id: terminalEnabled ? (activeTerminalId ?? undefined) : undefined,
 				tool_servers: [
 					...($toolServers ?? []).filter(
@@ -2862,7 +3534,7 @@
 				errorMessage = $i18n.t(`Uh-oh! There was an issue with the response.`);
 			}
 
-			toast.error(`${errorMessage}`);
+			toast.error(errText(errorMessage));
 			responseMessage.error = {
 				content: error
 			};
@@ -2870,8 +3542,15 @@
 			responseMessage.done = true;
 			_clearHeartbeat(responseMessageId);
 
-			history.messages[responseMessageId] = responseMessage;
-			history.currentId = responseMessageId;
+			_chatHistory.messages[responseMessageId] = responseMessage;
+			_chatHistory.currentId = responseMessageId;
+			if (_chatHistory === history) history = history;
+			setInflight(_chatId, {
+				history: _chatHistory,
+				responseMessageId,
+				done: true
+			});
+			void saveChatHandler(_chatId, _chatHistory);
 
 			return [null, null];
 		});
@@ -2883,40 +3562,71 @@
 		// done-path (save / title / follow-ups) logic. Chat creation + URL are
 		// handled client-side (initChatHandler/createNewChat), so the completion
 		// response carries no chat_id.
+		// `_chatHistory` was pinned at the top of this function (before awaits).
+
 		if (res && res.ok && res.body) {
 			generating = true;
 			_artifactPoppedThisTurn = false; // arm artifact auto-pop for this turn
 			generationController = controller as AbortController;
+			setInflight(_chatId, {
+				history: _chatHistory,
+				responseMessageId,
+				controller: generationController
+			});
+			// Ordinary replies outlive the chat view exactly the way a research run does.
+			// Only Deep Research used to raise this, so walking away from a plain message
+			// left the sidebar showing nothing at all while the answer was on its way.
+			markChatRunning(_chatId);
 			try {
 				const textStream = await createOpenAITextStream(
 					res.body,
 					Boolean($settings?.splitLargeChunks ?? false)
 				);
 				for await (const update of textStream) {
-					if (!generating) break;
-					const { value, done, sources, selectedModelId, usage, error } = update;
+					// Registry is authoritative across remounts: local `generating` dies with
+					// the component that started the stream, while Stop clears the registry
+					// and aborts the shared controller.
+					const live = getInflight(_chatId);
+					if (!live || live.responseMessageId !== responseMessageId) break;
+					const { value, done, sources, selectedModelId, usage, error, reasoning, metrics } =
+						update;
 					const data: Record<string, any> = {};
 					if (error) data.error = error;
 					if (sources) data.sources = sources;
 					if (selectedModelId) data.selected_model_id = selectedModelId;
 					if (usage) data.usage = usage;
-					if (value) data.choices = [{ delta: { content: value } }];
+					if (metrics) data.harvis_metrics = metrics;
+					// A thinking frame carries no content, so it has to be forwarded on its own
+					// or the handler's reasoning branch never runs.
+					if (value || reasoning)
+						data.choices = [{ delta: { content: value ?? '', reasoning } }];
 					if (done) data.done = true;
-					await chatCompletionEventHandler(data, responseMessage, _chatId);
+					await chatCompletionEventHandler(data, responseMessage, _chatId, _chatHistory);
 					if (done || error) break;
 				}
 			} catch (e) {
 				// AbortError = user pressed stop; not a real error.
-				if (generating && (e as any)?.name !== 'AbortError' && !responseMessage.error) {
+				if ((e as any)?.name !== 'AbortError' && !responseMessage.error) {
 					await handleOpenAIError(e, responseMessage);
 				}
 			} finally {
-				generating = false;
-				generationController = null;
+				if ($chatId === _chatId) {
+					generating = false;
+					generationController = null;
+				}
 			}
 			// Defensive: finalize if the stream ended without an explicit done.
 			if (!responseMessage.done) {
-				await chatCompletionEventHandler({ done: true }, responseMessage, _chatId);
+				await chatCompletionEventHandler({ done: true }, responseMessage, _chatId, _chatHistory);
+			}
+			if ($chatId === _chatId) {
+				clearInflight(_chatId);
+			} else {
+				setInflight(_chatId, {
+					history: _chatHistory,
+					responseMessageId,
+					done: true
+				});
 			}
 		} else if (res && !res.ok) {
 			let errBody: any = null;
@@ -2926,6 +3636,17 @@
 				errBody = null;
 			}
 			await handleOpenAIError(errBody?.error ?? errBody ?? 'Request failed', responseMessage);
+			setInflight(_chatId, {
+				history: _chatHistory,
+				responseMessageId,
+				done: true
+			});
+		} else {
+			setInflight(_chatId, {
+				history: _chatHistory,
+				responseMessageId,
+				done: true
+			});
 		}
 
 		await tick();
@@ -2977,16 +3698,23 @@
 	const stopResponse = async (processQueue = true) => {
 		// Resolve any active task heartbeats — the run was stopped, don't leave them spinning.
 		Object.keys(_taskHeartbeats).forEach((id) => _clearHeartbeat(id));
+
+		const stopChatId = $chatId;
+		const live = stopChatId ? getInflight(stopChatId) : undefined;
+		// Prefer the live history the stream owns (survives remount / reattach).
+		const stopHistory = live?.history?.messages ? live.history : history;
+		const stopController = generationController ?? live?.controller ?? null;
+
 		if (taskIds) {
-			if ($chatId) {
-				await stopTasksByChatId(localStorage.token, $chatId).catch((error) => {
-					toast.error(`${error}`);
+			if (stopChatId) {
+				await stopTasksByChatId(localStorage.token, stopChatId).catch((error) => {
+					toast.error(errText(error));
 					return null;
 				});
 			} else {
 				for (const taskId of taskIds) {
 					const res = await stopTask(localStorage.token, taskId).catch((error) => {
-						toast.error(`${error}`);
+						toast.error(errText(error));
 						return null;
 					});
 				}
@@ -2994,29 +3722,51 @@
 
 			taskIds = null;
 
-			const responseMessage = history.messages[history.currentId];
+			const responseMessage = stopHistory.messages[stopHistory.currentId];
 			// Set all response messages to done
-			if (responseMessage.parentId && history.messages[responseMessage.parentId]) {
-				for (const messageId of history.messages[responseMessage.parentId].childrenIds) {
-					history.messages[messageId].done = true;
+			if (responseMessage?.parentId && stopHistory.messages[responseMessage.parentId]) {
+				for (const messageId of stopHistory.messages[responseMessage.parentId].childrenIds) {
+					stopHistory.messages[messageId].done = true;
 				}
 			}
 
-			history.messages[history.currentId] = responseMessage;
+			if (responseMessage) {
+				stopHistory.messages[stopHistory.currentId] = responseMessage;
+			}
 
 			if (autoScroll) {
 				scrollToBottom();
 			}
+		} else if (live && stopHistory.messages?.[live.responseMessageId]) {
+			// HTTP SSE path: no backend task ids — mark the in-flight assistant done.
+			const responseMessage = stopHistory.messages[live.responseMessageId];
+			responseMessage.done = true;
+			if (responseMessage.parentId && stopHistory.messages[responseMessage.parentId]) {
+				for (const messageId of stopHistory.messages[responseMessage.parentId].childrenIds) {
+					stopHistory.messages[messageId].done = true;
+				}
+			}
+			stopHistory.messages[live.responseMessageId] = responseMessage;
+			if (stopHistory === history) history = history;
 		}
 
-		if (generating) {
-			generating = false;
-			generationController?.abort();
-			generationController = null;
+		generating = false;
+		if (stopController) {
+			stopController.abort();
+		}
+		generationController = null;
+		if (stopChatId) {
+			setInflight(stopChatId, {
+				history: stopHistory,
+				responseMessageId: live?.responseMessageId ?? stopHistory.currentId,
+				done: true
+			});
+			await saveChatHandler(stopChatId, stopHistory);
+			clearChatActivity(stopChatId);
 		}
 
 		if (processQueue) {
-			await processNextInQueue($chatId);
+			await processNextInQueue(stopChatId);
 		}
 	};
 
@@ -3114,6 +3864,12 @@
 
 	const mergeResponses = async (messageId, responses, _chatId) => {
 		console.log('mergeResponses', messageId, responses);
+		// Pinned for the save below -- the merge streams for as long as the model takes,
+		// and `history` may be pointing at a different chat by the time it lands. Live
+		// mutations below deliberately stay on `history`: Svelte instruments assignments
+		// by variable name, so writing through `_history` would silently stop the
+		// streaming UI from updating.
+		const _history = history;
 		const message = history.messages[messageId];
 		const mergedResponse = {
 			status: true,
@@ -3158,7 +3914,7 @@
 					}
 				}
 
-				await saveChatHandler(_chatId, history);
+				await saveChatHandler(_chatId, _history);
 			} else {
 				console.error(res);
 			}
@@ -3188,6 +3944,7 @@
 			);
 
 			_chatId = chat.id;
+			_ownHistory(history, _chatId);
 			await chatId.set(_chatId);
 			chatTitle.set(chat.title); // reflect the server-derived title in the title bar
 
@@ -3208,18 +3965,150 @@
 		return _chatId;
 	};
 
-	const saveChatHandler = async (_chatId, history) => {
-		if ($chatId == _chatId) {
-			if (!$temporaryChatEnabled) {
-				chat = await updateChatById(localStorage.token, _chatId, {
-					models: selectedModels,
-					history: history,
-					messages: createMessagesList(history, history.currentId),
-					params: params,
-					files: chatFiles
-				});
-			}
+	// HARVIS (facade): the socket-less facade can't run OWUI's server-side background
+	// title task, so a brand-new chat is named client-side once its first exchange
+	// finishes. The chat already carries an immediate fallback — the backend derives a
+	// name from the first user message at create time — and this replaces it with the
+	// LLM-generated one.
+	//
+	// It lives here, called from saveChatHandler, because every lane that persists a
+	// chat goes through that one function. It used to hang off the streaming-done site
+	// alone, so a non-streaming reply, an injected card or a research run left the chat
+	// wearing the raw prompt forever.
+	let autoTitledChatIds = new Set();
+
+	const autoTitleHandler = async (_chatId, _history = history, _existingTitle = '') => {
+		if (!_chatId || $temporaryChatEnabled) return;
+		if (!($settings?.title?.auto ?? true)) return;
+		if (autoTitledChatIds.has(_chatId)) return;
+
+		// `autoTitledChatIds` only remembers this page load, so a chat that was named in an
+		// earlier session used to get renamed again on its next save — spending a model call
+		// to overwrite a title the user already has. The server's title is the durable
+		// record of "this has been named"; anything but the placeholder means leave it.
+		const _named = (_existingTitle || '').trim();
+		if (_named && _named !== $i18n.t('New Chat')) {
+			autoTitledChatIds.add(_chatId);
+			return;
 		}
+
+		// Same torn pair that corrupts saves: this used to read the LIVE `history`, so a
+		// title requested for the chat being saved was generated from whichever chat the
+		// user had navigated to. That is how a chat ends up named after someone else's
+		// conversation. Title from the history that belongs to `_chatId`, or not at all.
+		if (_history?._ownerChatId && _history._ownerChatId !== _chatId) return;
+
+		const _msgs = createMessagesList(_history, _history.currentId).map((m) => ({
+			role: m.role,
+			content: typeof m.content === 'string' ? m.content : (m.content ?? '')
+		}));
+
+		// Only the first exchange, and only once the assistant has actually said
+		// something — naming a half-streamed reply produces a title about nothing.
+		if (_msgs.filter((m) => m.role === 'user').length !== 1) return;
+		const _last = _msgs.at(-1);
+		if (!_last || _last.role !== 'assistant' || `${_last.content ?? ''}`.trim() === '') return;
+
+		// Claim the chat before awaiting, so two lanes finishing together can't both
+		// spend a model call on the same title.
+		autoTitledChatIds.add(_chatId);
+
+		try {
+			// The backend pins task-gen to a small local model and ignores this one; it
+			// is sent only because the endpoint's schema requires it.
+			const _model = selectedModels?.[0] ?? $models?.[0]?.id ?? '';
+			const _gen = await generateTitle(localStorage.token, _model, _msgs, _chatId).catch(
+				() => null
+			);
+			let _title = typeof _gen === 'string' ? _gen : _gen?.choices?.[0]?.message?.content;
+
+			// The endpoint, the model, or the parse can each come up empty, and the chat
+			// is already claimed in `autoTitledChatIds` so nothing tries again. Falling
+			// back to a short phrase from the first prompt beats leaving the whole prompt
+			// standing in as the title.
+			if (!_title) {
+				const _firstUser = _msgs.find((m) => m.role === 'user')?.content ?? '';
+				const _words = `${_firstUser}`.replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
+				if (_words.length) {
+					_title = _words.slice(0, 6).join(' ') + (_words.length > 6 ? '…' : '');
+				}
+			}
+
+			if (_title && $chatId == _chatId) {
+				chatTitle.set(_title);
+				await updateChatById(localStorage.token, _chatId, { title: _title });
+				currentChatPage.set(1);
+				await chats.set(await getChatList(localStorage.token, $currentChatPage));
+			}
+		} catch (e) {
+			console.error('HARVIS auto-title failed', e);
+			autoTitledChatIds.delete(_chatId);
+		}
+	};
+
+	// `_chatId` is the chat this history belongs to, captured when the turn started — not
+	// necessarily the chat on screen now. The guard here used to be `$chatId == _chatId`,
+	// so sending a message and clicking away threw the reply out: the stream kept running,
+	// the model answered, and the save was skipped because the user had moved on. The
+	// facade does not persist server-side, so a skipped save here is the answer gone.
+	//
+	// A background save sends only the conversation. `models`, `params` and `chatFiles` are
+	// the OPEN chat's settings, and writing them into a chat the user left would copy one
+	// chat's model onto another. The backend merges partial chat objects (`chat || $3`), so
+	// omitting them leaves the stored values alone.
+	/**
+	 * Save a history to the chat it BELONGS to, rather than to whatever chat happens to be
+	 * on screen when the await resolves. Callers that reach for `$chatId` are reading a
+	 * value that has already moved on mid-navigation; the brand on the history has not.
+	 * Falls back to `$chatId` for an unbranded (brand-new) chat.
+	 */
+	const saveOwnChat = (h: any) => saveChatHandler(h?._ownerChatId ?? $chatId, h);
+
+	const saveChatHandler = async (_chatId, history) => {
+		if (!_chatId || $temporaryChatEnabled) return;
+
+		// The one place a cross-chat write can still be stopped. An unbranded history is
+		// allowed through (a brand-new chat has not been stamped yet) — only a history that
+		// KNOWS it belongs elsewhere is refused, so this can reject a save but never
+		// silently drop a legitimate one. Loud on purpose: if this ever fires, the stack
+		// names the call site that still pairs a live id with a stale history.
+		const owner = (history as any)?._ownerChatId;
+		if (owner && owner !== _chatId) {
+			// console.warn, not console.error: vite.config.ts lists console.error (and
+			// .log/.debug) in esbuild's `pure` array, so an error here is DELETED from the
+			// production bundle. The guard would still return, but silently — and a guard
+			// you cannot observe is a guard you cannot trust. Also counted on `window` so
+			// a live session can be checked without a console open at the right moment.
+			console.warn(
+				'[chat save] refused cross-chat write',
+				{ historyBelongsTo: owner, wouldHaveWritten: _chatId },
+				new Error('call site').stack
+			);
+			try {
+				const w = window as any;
+				w.__harvisCrossChatRefusals = (w.__harvisCrossChatRefusals ?? 0) + 1;
+			} catch {}
+			return;
+		}
+
+		const viewing = $chatId == _chatId;
+		const saved = await updateChatById(localStorage.token, _chatId, {
+			history: history,
+			messages: createMessagesList(history, history.currentId),
+			...(viewing ? { models: selectedModels, params: params, files: chatFiles } : {})
+		}).catch((err) => {
+			// warn, not error — see the pure-list note above. A save that fails silently
+			// is the exact shape of "the UI is right but the messages don't exist".
+			console.warn('[chat save] failed', _chatId, err);
+			return null;
+		});
+
+		if (!saved) return;
+		if (viewing) chat = saved;
+
+		// Fire-and-forget: naming must never delay the save or block the UI. The history is
+		// handed over explicitly — reading the live one races every chat switch.
+		autoTitleHandler(_chatId, history, saved?.title);
 	};
 
 	const saveControls = async () => {
@@ -3260,7 +4149,7 @@
 		if (chatId && folderId) {
 			const res = await updateChatFolderIdById(localStorage.token, chatId, folderId).catch(
 				(error) => {
-					toast.error(`${error}`);
+					toast.error(errText(error));
 					return null;
 				}
 			);
@@ -3315,7 +4204,7 @@
 			}
 		} catch (error) {
 			console.error('Error deleting chat:', error);
-			toast.error(`${error}`);
+			toast.error(errText(error));
 		}
 	};
 </script>
@@ -3366,6 +4255,9 @@
 	class="h-screen max-h-[100dvh] transition-width duration-200 ease-in-out {$showSidebar
 		? '  md:max-w-[calc(100%-var(--sidebar-width))]'
 		: ' '} w-full max-w-full flex flex-col"
+	class:cad-focus-on={cadFocusActive}
+	class:cad-chat-collapsed={cadChatCollapsed}
+	style="--cad-chat-w: {cadChatWidth}px"
 	id="chat-container"
 >
 	{#if !loading}
@@ -3392,7 +4284,11 @@
 			{/if}
 
 			<PaneGroup direction="horizontal" class="w-full h-full">
-				<Pane defaultSize={50} minSize={30} class="h-full flex relative max-w-full flex-col">
+				<Pane
+					defaultSize={50}
+					minSize={22}
+					class="chat-main-pane h-full flex relative max-w-full flex-col"
+				>
 					<FilesOverlay show={dragged} />
 					<Navbar
 						bind:this={navbarElement}
@@ -3455,17 +4351,38 @@
 						}}
 					/>
 
-					<div id="chat-pane" class="flex flex-col flex-auto z-10 w-full @container overflow-auto">
+					<div id="chat-pane" class="flex flex-col flex-auto z-10 w-full @container overflow-hidden">
 						{#if ($settings?.landingPageMode === 'chat' && !$selectedFolder) || createMessagesList(history, history.currentId).length > 0}
 							<div
-								class=" pb-2.5 flex flex-col justify-between w-full flex-auto overflow-auto h-0 max-w-full z-10 scrollbar-hidden"
+								class=" pb-2.5 flex flex-col justify-between w-full flex-auto overflow-auto h-0 max-w-full z-10 [scrollbar-gutter:stable]"
 								id="messages-container"
 								bind:this={messagesContainerElement}
-								on:scroll={(e) => {
-									autoScroll =
-										messagesContainerElement.scrollHeight - messagesContainerElement.scrollTop <=
-										messagesContainerElement.clientHeight + 5;
-									isNearTop = messagesContainerElement.scrollTop <= 100;
+								on:wheel={(e) => {
+									if (e.deltaY < 0) stopFollowing();
+								}}
+								on:touchstart={() => {
+									touchStartY = null;
+								}}
+								on:touchmove={(e) => {
+									const y = e.touches?.[0]?.clientY ?? null;
+									// Finger moving DOWN the screen drags content down = scrolling up.
+									if (touchStartY !== null && y !== null && y > touchStartY) stopFollowing();
+									touchStartY = y;
+								}}
+								on:keydown={(e) => {
+									if (['ArrowUp', 'PageUp', 'Home'].includes(e.key)) stopFollowing();
+								}}
+								on:scroll={() => {
+									const currentScrollTop = messagesContainerElement.scrollTop;
+									const movedUp = currentScrollTop < lastKnownScrollTop - 2;
+									const atBottom = isAtBottom();
+									// Scrollbar dragging does not emit wheel/touch events. A meaningful
+									// upward movement away from the bottom therefore suspends following,
+									// while programmatic scroll-to-bottom only moves downward.
+									if (movedUp && !atBottom) stopFollowing();
+									else if (atBottom) autoScroll = true;
+									lastKnownScrollTop = currentScrollTop;
+									isNearTop = currentScrollTop <= 100;
 								}}
 							>
 								<div class=" h-full w-full flex flex-col">
@@ -3494,6 +4411,19 @@
 									/>
 								</div>
 							</div>
+
+							{#if !autoScroll}
+								<div class="pointer-events-none relative z-20 -mt-14 mb-2 flex justify-center px-4">
+									<button
+										type="button"
+										class="pointer-events-auto inline-flex min-h-11 items-center gap-1.5 rounded-full border border-gray-200 bg-white/95 px-3.5 py-2 text-xs font-medium text-gray-700 shadow-lg shadow-black/10 backdrop-blur transition-colors hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:border-white/10 dark:bg-[#17191e]/95 dark:text-gray-200 dark:hover:bg-[#20232a]"
+										on:click={resumeFollowing}
+									>
+										<ChevronDown className="size-3.5" />
+										{$i18n.t('Jump to latest')}
+									</button>
+								</div>
+							{/if}
 
 							<div class=" pb-2 {dragged ? 'z-0' : 'z-10'}">
 								<MessageInput
@@ -3646,6 +4576,26 @@
 					{codeInterpreterEnabled}
 				/>
 			</PaneGroup>
+
+			{#if $cadFocus && CadFocusWorkspace}
+				<!-- One studio, whichever door was used. The CAD session room mounts this same
+					     overlay over the session's own conversation, so the exit has to be told where
+					     to go: dismissing the overlay there would leave a bare chat page and no way
+					     back to where the part was asked for. -->
+				<svelte:component
+					this={CadFocusWorkspace}
+					projectId={$cadFocus.projectId}
+					jobId={$cadFocus.jobId ?? ''}
+					closeLabel={$cadFocus.closeLabel ?? ''}
+					bind:chatWidth={cadChatWidth}
+					bind:chatCollapsed={cadChatCollapsed}
+					onClose={() => {
+						const to = $cadFocus?.closeTo;
+						cadFocus.set(null);
+						if (to) goto(to);
+					}}
+				/>
+			{/if}
 		</div>
 	{:else if loading}
 		<div class=" flex items-center justify-center h-full w-full">
@@ -3660,5 +4610,40 @@
 	::-webkit-scrollbar {
 		height: 0.5rem;
 		width: 0.5rem;
+	}
+
+	/* CAD focus workspace. paneforge writes `flex: X 1 0px` inline on every pane and
+	   registers its size constraints once at mount, so the strip width cannot be
+	   asked for through the component API. Pinning the pane with `!important` gets
+	   the exact width the spec calls for without remounting the chat — the whole
+	   point being that the conversation continues rather than restarts. */
+	:global(#chat-container.cad-focus-on) {
+		position: relative;
+	}
+
+	/* The spec asks for the global rail to go, so the viewport is the whole surface.
+	   Close (or Escape) is the way back; nothing else is needed while in here. */
+	:global(body.cad-focus-active #sidebar) {
+		display: none !important;
+	}
+
+	:global(#chat-container.cad-focus-on .chat-main-pane) {
+		position: absolute !important;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		width: var(--cad-chat-w, 420px) !important;
+		flex: 0 0 auto !important;
+		z-index: 30;
+		border-left: 1px solid rgb(0 0 0 / 0.08);
+	}
+
+	:global(.dark #chat-container.cad-focus-on .chat-main-pane) {
+		border-left-color: rgb(255 255 255 / 0.08);
+	}
+
+	/* Collapsed hides the strip; it does not unmount it, so the draft survives. */
+	:global(#chat-container.cad-focus-on.cad-chat-collapsed .chat-main-pane) {
+		display: none !important;
 	}
 </style>

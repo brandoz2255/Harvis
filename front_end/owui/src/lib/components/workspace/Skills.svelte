@@ -311,7 +311,7 @@
 	</div>
 
 	<div
-		class="py-2 bg-white dark:bg-gray-900 rounded-3xl border border-gray-100/30 dark:border-gray-850/30"
+		class="py-2 bg-white dark:bg-gray-900 rounded-xl border border-gray-100/30 dark:border-gray-850/30"
 	>
 		<div class=" flex w-full space-x-2 py-0.5 px-3.5 pb-2">
 			<div class="flex flex-1">
@@ -327,7 +327,7 @@
 				{#if query}
 					<div class="self-center pl-1.5 translate-y-[0.5px] rounded-l-xl bg-transparent">
 						<button
-							class="p-0.5 rounded-full hover:bg-gray-100 dark:hover:bg-gray-900 transition"
+							class="p-0.5 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-900 transition"
 							aria-label={$i18n.t('Clear search')}
 							on:click={() => {
 								query = '';
@@ -350,7 +350,7 @@
 			}}
 		>
 			<div
-				class="flex gap-0.5 w-fit text-center text-sm rounded-full bg-transparent px-1.5 whitespace-nowrap"
+				class="flex gap-0.5 w-fit text-center text-sm rounded-lg bg-transparent px-1.5 whitespace-nowrap"
 				bind:this={tagsContainerElement}
 			>
 				<ViewSelector

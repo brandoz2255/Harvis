@@ -56,6 +56,17 @@ export const streamResearch = async (
 	}
 };
 
+// Which of this user's research runs are still going. In-memory on the backend, so a
+// restart simply reports none — which reads as "finished" to the sidebar poller, and
+// that is the honest answer: nothing is running any more.
+export const fetchActiveResearch = async (
+	token: string
+): Promise<{ active: { session_id: string; query: string; status: string }[] }> => {
+	const res = await fetch(`${WEBUI_BASE_URL}/api/research/active`, { headers: headers(token) });
+	if (!res.ok) throw new Error(`active HTTP ${res.status}`);
+	return res.json();
+};
+
 export const peekResult = async (
 	token: string,
 	sessionId: string

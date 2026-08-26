@@ -111,17 +111,17 @@
 					<button
 						on:click={deleteProject}
 						disabled={deleting}
-						class="rounded-full border border-gray-200 dark:border-gray-800 px-3 py-1.5 text-sm text-gray-500 hover:text-red-500 hover:border-red-300 dark:hover:border-red-800 transition disabled:opacity-40"
+						class="rounded-lg border border-gray-200 dark:border-gray-800 px-3 py-1.5 text-sm text-gray-500 hover:text-red-500 hover:border-red-300 dark:hover:border-red-800 transition disabled:opacity-40"
 						>{$i18n.t('Delete')}</button
 					>
 					<button
 						on:click={() => (showEdit = true)}
-						class="rounded-full border border-gray-200 dark:border-gray-800 px-3 py-1.5 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-850 transition"
+						class="rounded-lg border border-gray-200 dark:border-gray-800 px-3 py-1.5 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-850 transition"
 						>{$i18n.t('Edit')}</button
 					>
 					<button
 						on:click={newChatInProject}
-						class="inline-flex items-center gap-1.5 rounded-full bg-blue-600 text-white px-3.5 py-1.5 text-sm font-medium hover:bg-blue-700 transition"
+						class="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 text-white px-3.5 py-1.5 text-sm font-medium hover:bg-blue-700 transition"
 					>
 						<svg class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg>
 						{$i18n.t('New chat')}

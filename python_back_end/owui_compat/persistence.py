@@ -178,13 +178,17 @@ def _derive_title(chat_obj: dict) -> Optional[str]:
     return (first[:60].rstrip() + "…") if len(first) > 60 else first
 
 
+def _explicit_title(chat_obj: dict) -> Optional[str]:
+    """The title the client actually sent, if it sent a real one. 'New Chat' is
+    the frontend's placeholder, not a name, so it doesn't count."""
+    t = ((chat_obj or {}).get("title") or "").strip()
+    return t if t and t != "New Chat" else None
+
+
 def _title_for(chat_obj: dict) -> str:
     """Prefer a real client-supplied title; else derive one from the first user
     message; else fall back to 'New Chat'."""
-    t = ((chat_obj or {}).get("title") or "").strip()
-    if t and t != "New Chat":
-        return t
-    return _derive_title(chat_obj) or "New Chat"
+    return _explicit_title(chat_obj) or _derive_title(chat_obj) or "New Chat"
 
 
 def _row_to_owui(row) -> dict:
@@ -269,7 +273,8 @@ async def update_chat(pool, user_id: int, chat_id: str, chat_obj: dict) -> Optio
     cid = _as_uuid(chat_id)
     if cid is None:
         return None
-    title = _title_for(chat_obj)
+    explicit = _explicit_title(chat_obj)
+    derived = _derive_title(chat_obj)
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
@@ -278,16 +283,53 @@ async def update_chat(pool, user_id: int, chat_id: str, chat_obj: dict) -> Optio
             -- saves (e.g. saveControls posts only {params, files}). A full replace
             -- ($3 alone) would clobber messages/history → wiped sessions. Top-level
             -- jsonb merge keeps existing keys and overrides only the ones provided.
-            SET chat = chat || $3::jsonb, title = COALESCE(NULLIF($4, 'New Chat'), title), updated_at = NOW()
+            --
+            -- Title precedence, in order: an explicit client title ($4) always
+            -- wins; otherwise a name already on the row is kept; only a still-
+            -- unnamed chat falls back to the first-message derivation ($5).
+            -- Without that middle step every autosave re-derived the raw prompt
+            -- and overwrote the AI-generated name seconds after it was stored.
+            SET chat = chat || $3::jsonb,
+                title = COALESCE($4, NULLIF(NULLIF(title, 'New Chat'), ''), $5, title),
+                updated_at = NOW()
             WHERE id = $1 AND user_id = $2
             RETURNING *
             """,
             cid,
             user_id,
             json.dumps(chat_obj or {}),
-            title,
+            explicit,
+            derived,
         )
     return _row_to_owui(row) if row else None
+
+
+async def clone_chat(pool, user_id: int, chat_id: str, title: Optional[str] = None) -> Optional[dict]:
+    """Branch: copy an existing chat into a new one owned by the same user.
+
+    The frontend sends 'Clone of {{TITLE}}' as a template; substitute the source
+    title so the branch is recognisable in the sidebar.
+    """
+    src = await get_chat(pool, user_id, chat_id)
+    if src is None:
+        return None
+    chat_obj = dict(src.get("chat") or {})
+    new_title = (title or "").replace("{{TITLE}}", src.get("title") or "New Chat").strip()
+    new_title = new_title or f"Clone of {src.get('title') or 'New Chat'}"
+    chat_obj["title"] = new_title
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO owui_chats (user_id, title, chat, folder_id)
+            VALUES ($1, $2, $3::jsonb, $4)
+            RETURNING *
+            """,
+            user_id,
+            new_title,
+            json.dumps(chat_obj),
+            src.get("folder_id"),
+        )
+    return _row_to_owui(row)
 
 
 async def delete_chat(pool, user_id: int, chat_id: str) -> bool:

@@ -129,7 +129,7 @@
 	<button
 		type="button"
 		on:click={() => openPanel('routines')}
-		class="w-full flex items-center gap-3 rounded-xl px-2.5 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-850 transition outline-none"
+		class="w-full flex items-center gap-3 rounded-xl px-2.5 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition outline-none"
 		aria-label={$i18n.t('Routines')}
 	>
 		<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="size-4.5 shrink-0"><path d="M12 6v6l4 2M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z" /></svg>
@@ -138,7 +138,7 @@
 	<button
 		type="button"
 		on:click={() => openPanel('customize')}
-		class="w-full flex items-center gap-3 rounded-xl px-2.5 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-850 transition outline-none"
+		class="w-full flex items-center gap-3 rounded-xl px-2.5 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition outline-none"
 		aria-label={$i18n.t('Customize')}
 	>
 		<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="size-4.5 shrink-0"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6" /></svg>
@@ -172,8 +172,8 @@
 			{:else}
 				<div
 					class="group relative flex items-center rounded-xl transition {activeSession === s.id
-						? 'bg-gray-100 dark:bg-gray-850'
-						: 'hover:bg-gray-100 dark:hover:bg-gray-850'}"
+						? 'bg-gray-100 dark:bg-gray-850 ring-1 ring-inset ring-gray-300 dark:ring-gray-700'
+						: 'hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)]'}"
 				>
 					<button
 						type="button"

@@ -107,8 +107,40 @@ _HERMES_OLLAMA_URL = os.getenv("HARVIS_HERMES_OLLAMA_URL") or (
 # E4B's own default model (decoupled from E4-native's HARVIS_HERMES_DEFAULT_MODEL): the
 # Hermes Agent app runs any local Ollama model — a capable coder (qwen3:4b) is the default.
 _HERMES_DEFAULT_MODEL = os.getenv("HARVIS_HERMES_AGENT_DEFAULT_MODEL", "qwen3:4b")
-_TIMEOUT_S = int(os.getenv("HARVIS_OPENCODE_TIMEOUT_S", "900") or "900")
+# A run dies from SILENCE, not from length. This used to be a total-run deadline: a
+# healthy build that was still streaming tool calls got killed at 15 minutes purely for
+# taking a while, and the user saw "timed out" on work that was going fine. What actually
+# identifies a wedged engine is producing no output at all, so the clock below resets on
+# every line the engine emits.
+#
+# HARVIS_OPENCODE_TIMEOUT_S is still read so existing deployments keep a knob that means
+# "how long before we give up on a quiet engine" — its original intent.
+_IDLE_TIMEOUT_S = int(
+    os.getenv("HARVIS_ENGINE_IDLE_TIMEOUT_S", "")
+    or os.getenv("HARVIS_OPENCODE_TIMEOUT_S", "")
+    or 600
+)
+# Absolute backstop. An engine stuck in a chatty loop never goes idle, so the watchdog
+# alone can't stop it. This is the seatbelt, not the speed limit — keep it generous.
+_MAX_RUN_S = int(os.getenv("HARVIS_ENGINE_MAX_RUN_S", "") or 14400)
 _STREAM_LIMIT = 8 * 1024 * 1024  # engine JSON lines can carry large file contents
+
+
+def _timeout_event(label: str, kind: str) -> dict:
+    """Say which clock ran out. "Took too long" and "stopped responding" are different
+    failures with different fixes, and reporting both as the same one sent people off
+    shrinking tasks that were never too big."""
+    if kind == "max":
+        return {
+            "message": f"{label} hit the {_MAX_RUN_S}s maximum run time and was stopped.",
+            "fix_hint": "The engine kept producing output but never finished — narrow the "
+                        "task, or raise HARVIS_ENGINE_MAX_RUN_S.",
+        }
+    return {
+        "message": f"{label} stopped responding — no output for {_IDLE_TIMEOUT_S}s.",
+        "fix_hint": "The engine went silent rather than running long. Check the sidecar is "
+                    "healthy, or raise HARVIS_ENGINE_IDLE_TIMEOUT_S.",
+    }
 
 
 def _under_session_root(path: str) -> bool:
@@ -120,6 +152,170 @@ def _under_session_root(path: str) -> bool:
         return target == root or str(target).startswith(str(root) + os.sep)
     except Exception:
         return False
+
+
+async def _stage_attachments(
+    task_brief: str,
+    attachments: Optional[list[dict]],
+    workdir: str,
+    owner_id: Optional[int] = None,
+) -> tuple[str, str]:
+    """Write the turn's attachments into `workdir` and put their REAL paths at the
+    top of the brief. Returns (brief, status_line); status_line is "" when there
+    was nothing to stage.
+
+    Why this exists: an external CLI runs inside a sidecar that mounts /data/artifacts
+    and nothing else — no route to the Harvis API, no uploads volume, often no curl.
+    Handed only the file's URL (which is what the generic attachment block carries),
+    it spends the whole run hunting for a file it can never reach and then reports
+    itself blocked. Staging the bytes next to its working tree is what makes an
+    attached screenshot work on EVERY engine, not just the lanes that can take a
+    multimodal image part.
+    """
+    if not attachments or not workdir:
+        return task_brief, ""
+    try:
+        from vision_to_code.attachments import materialize_attachments, staged_attachment_brief
+    except Exception as exc:
+        logger.warning("engine_adapter: attachment staging unavailable: %s", exc)
+        return task_brief, ""
+    try:
+        staged, skipped = await materialize_attachments(
+            attachments, workdir, owner_id=owner_id
+        )
+    except Exception as exc:
+        logger.exception("engine_adapter: attachment staging failed")
+        return task_brief, f"Attachments could not be staged ({exc}) — the engine will not see them."
+    block = staged_attachment_brief(staged, skipped)
+    if not block:
+        return task_brief, ""
+    names = ", ".join(str(s["name"]) for s in staged)
+    status = (
+        f"Staged {len(staged)} attachment{'' if len(staged) == 1 else 's'} in the workspace: {names}"
+        if staged else "No attachment could be staged"
+    )
+    if skipped:
+        # Say WHY, not just how many. A bare count sent me looking at the CLI's behaviour
+        # when the real cause — the bytes lived in the other upload store — was already
+        # known here and thrown away.
+        status += " · could not stage: " + "; ".join(skipped)
+    return block + task_brief, status
+
+
+# Prior-turn context. The implementation moved to `conversation.py` when the native
+# runner turned out to need the identical block — this lane was not the only one whose
+# model starts each turn with an empty head. Aliased rather than renamed at the two call
+# sites below so the diff stays about the move.
+from .conversation import conversation_prefix as _conversation_prefix
+
+
+def _sidecar_mcp_args(user_id, *, artifact_run_id=None, **context) -> list[str]:
+    """One `--mcp-config` carrying every Harvis MCP server this run should see.
+
+    A single config holds many servers, so the CAD tools and the brokered artifact
+    door travel together in one argument rather than fighting over the flag — the
+    CLI keeps only the last `--mcp-config` it is given.
+
+    ``artifact_run_id`` opens :mod:`artifact_mcp` for that run. Pass it wherever the
+    sidecar runs with ``Write`` withheld, because otherwise a model that composed a
+    finished HTML page has no way to hand it over and the run ends with nothing to
+    preview. Omit it and the tool is not registered at all, which is right for a lane
+    that already writes into a real workspace clone.
+    """
+    servers: dict = {}
+    try:
+        from owui_compat.cad_mcp import sidecar_mcp_config
+        cfg = sidecar_mcp_config(user_id, **context)
+        if cfg:
+            servers.update(cfg.get("mcpServers") or {})
+    except Exception:
+        # A run that could have had CAD and did not is worth far less than a run that
+        # refused to start, so this never raises into the launch path.
+        logger.debug("cad mcp config unavailable for this run", exc_info=True)
+
+    try:
+        # Whatever this user connected themselves — Higgsfield, GitHub, an MCP
+        # server they added by URL. Without this a sidecar sees only the two
+        # servers Harvis authors, and a model asked to use a connector correctly
+        # reports that it has no such tool.
+        from plugins.mcp.sidecar_bridge import sidecar_bridge_config
+        # The run id rides along so a connector's image can be saved against
+        # THIS run — without it the bridge can fetch the bytes but has nowhere
+        # to put them, and the model gets back a Docker-only URL.
+        cfg = sidecar_bridge_config(user_id, run_id=artifact_run_id or "")
+        if cfg:
+            servers.update(cfg)
+    except Exception:
+        logger.debug("connector mcp config unavailable for this run", exc_info=True)
+
+    if artifact_run_id:
+        try:
+            from .artifact_mcp import sidecar_artifact_mcp_server
+            entry = sidecar_artifact_mcp_server(user_id, artifact_run_id)
+            if entry:
+                servers.update(entry)
+        except Exception:
+            logger.debug("artifact mcp config unavailable for this run", exc_info=True)
+
+    return ["--mcp-config", json.dumps({"mcpServers": servers})] if servers else []
+
+
+def _artifact_delivery_note(mcp_args: list[str]) -> list[str]:
+    """`--append-system-prompt` describing the delivery door, or nothing at all.
+
+    Registering the tool is not the same as the model knowing it exists. Without this
+    note the first move is `Write`, which the auto lane refuses, and the tool is only
+    found by searching afterwards — a wasted turn on every run, observed live.
+    """
+    try:
+        from .artifact_mcp import SERVER_NAME, TOOL_NAME
+    except Exception:
+        return []
+    if not any(SERVER_NAME in arg for arg in mcp_args):
+        return []
+    return ["--append-system-prompt", (
+        "File delivery: this run has no durable filesystem, and `Write` is refused. "
+        f"Hand a finished file back by calling `mcp__{SERVER_NAME}__{TOOL_NAME}` with a "
+        "relative path, the complete content, and its media type. A file named "
+        "`index.html` becomes a preview the user can open, so inline all CSS and "
+        "JavaScript into that single file rather than delivering siblings."
+    )]
+
+
+def _cad_mcp_args(user_id, **context) -> list[str]:
+    """`--mcp-config` for the CAD tools, or nothing at all.
+
+    A Claude Code sidecar is not part of a Harvis chat turn, so it never receives the
+    native tool definitions the chat lanes hand their models. MCP is the only door it
+    has, and without these two arguments the CAD tools do not exist for it — which is
+    exactly what was true until now.
+
+    ``context`` is the server-side truth the sidecar cannot know and the model may not
+    claim — the conversation, the user's own words, which model is driving. See
+    :func:`owui_compat.cad_mcp.sidecar_mcp_config`. A launch site that has none of it
+    passes none, which is the behaviour every caller had before.
+
+    Deliberately NOT `--strict-mcp-config`: that flag ignores every other MCP server
+    the sidecar is configured with, so adding CAD would silently take away whatever
+    the user had already connected. Adding one server should add one server.
+    """
+    return _sidecar_mcp_args(user_id, **context)
+
+
+def _cad_write_tool_names() -> list[str]:
+    """The CAD tools that change something, spelled the way the CLI names them.
+
+    Derived from the registry rather than listed here, so a tool added later is
+    withheld from read-only runs by default instead of being quietly allowed —
+    the failure that a hardcoded list produces is the dangerous direction.
+    """
+    try:
+        from owui_compat import cad_tools
+        return [f"mcp__harvis-cad__{n}" for n in cad_tools.TOOL_NAMES
+                if n not in cad_tools.READ_ONLY_TOOLS]
+    except Exception:
+        logger.debug("cad tool registry unavailable", exc_info=True)
+        return []
 
 
 # ── Per-engine command builders ─────────────────────────────────────────────
@@ -164,6 +360,7 @@ def _build_claude_command(container, workspace_path, task_brief, model_name, api
            "claude", "-p", task_brief,
            "--output-format", "stream-json", "--verbose",
            "--add-dir", workspace_path, "--dangerously-skip-permissions"]
+    cmd += _cad_mcp_args(user_id)
     if _CLAUDE_DEFAULT_MODEL:
         cmd += ["--model", _CLAUDE_DEFAULT_MODEL]
     return cmd, (_CLAUDE_DEFAULT_MODEL or "claude/default")
@@ -210,6 +407,9 @@ def _build_kimi_code_command(container, workspace_path, task_brief, model_name, 
            "--output-format", "stream-json", "--verbose",
            "--add-dir", workspace_path, "--dangerously-skip-permissions",
            "--model", model]
+    # Same CLI, same door: Kimi Code reads MCP exactly as claude-code does, and the
+    # tools are Harvis's, not Anthropic's — nothing about them is provider-specific.
+    cmd += _cad_mcp_args(user_id)
     return cmd, f"kimi-code/{model}"
 
 
@@ -318,7 +518,10 @@ def _map_claude_line(obj, root_ev):
         if obj.get("is_error"):
             yield root_ev("log", {"message": "Claude: " + str(obj.get("result") or obj.get("subtype") or "error")[:300]})
         elif obj.get("subtype") == "success" and obj.get("result"):
-            yield root_ev("token", {"content": str(obj["result"])})
+            # `final` marks this as the CLI's own answer, not one more streamed chunk. The
+            # assistant blocks above already carried this exact text, so a caller that
+            # appends it prints the answer twice with the between-tool narration in front.
+            yield root_ev("token", {"content": str(obj["result"]), "final": True})
     # system/init → drop
 
 
@@ -433,7 +636,7 @@ async def _ensure_hermes_home(container: str, user_id: int) -> None:
 
 async def run_external_engine_adapter(
     task_brief: str,
-    chat_history: list,  # Option A: unused — the clone (working tree) is the memory.
+    chat_history: list,  # prior turns — the clone is file memory, this is intent memory.
     *,
     model_name: str = "",
     pool=None,
@@ -447,6 +650,7 @@ async def run_external_engine_adapter(
     engine: str = "opencode",
     api_key: Optional[str] = None,  # decrypted per-user credential for cloud engines (NEVER logged)
     auth_mode: str = "api_key",     # E4B: 'api_key' → ANTHROPIC_API_KEY; 'oauth_token' → CLAUDE_CODE_OAUTH_TOKEN
+    attachments: Optional[list[dict]] = None,  # staged into the clone so the CLI can READ them
 ) -> AsyncGenerator[OpenClawEvent, None]:
     from ..workspace_router import (
         _db_create_run,
@@ -505,6 +709,20 @@ async def run_external_engine_adapter(
             model_name = await resolve_hermes_model(pool, user_id)
         except Exception:
             pass  # fail-soft: _build_hermes_command falls back to _HERMES_DEFAULT_MODEL
+
+    # Attachments become REAL FILES in the clone before the CLI starts — the sidecar
+    # cannot fetch a URL, so bytes-on-disk is the only delivery that works here.
+    task_brief, _stage_status = await _stage_attachments(
+        task_brief, attachments, workspace_path, user_id or None
+    )
+    if _stage_status:
+        yield root_ev("log", {"message": _stage_status})
+
+    # The clone carries what the files look like; only the transcript carries what the user
+    # meant. A follow-up that names neither a file nor a symbol ("make it viewable", "now do
+    # the other one") is unreadable without it, so the prompt carries both.
+    task_brief = _conversation_prefix(task_brief, chat_history)
+
     cmd, model_id = _BUILDERS[engine](container, workspace_path, task_brief, model_name, api_key, user_id=user_id, auth_mode=auth_mode)
     # Credit-safety: tag THIS run's docker-exec env so Stop/timeout can hard-kill its process
     # subtree (children inherit the env) even when argv/cwd matching misses. All builders emit
@@ -525,6 +743,7 @@ async def run_external_engine_adapter(
     usage_p = 0  # captured input tokens (cloud engines: the result line's `usage`) — for the meter
     usage_c = 0  # captured output tokens
     final_text_parts: list[str] = []
+    streamed_text = False
     is_text_engine = engine in _TEXT_ENGINES   # plain-text stdout (Hermes) → log lines + tail summary
     text_tail: list[str] = []
     timed_out = False
@@ -553,11 +772,14 @@ async def run_external_engine_adapter(
             return
 
         stderr_task = asyncio.create_task(_drain_stderr(proc))
-        deadline = time.monotonic() + _TIMEOUT_S
+        hard_deadline = time.monotonic() + _MAX_RUN_S
+        idle_deadline = time.monotonic() + _IDLE_TIMEOUT_S
         while True:
-            remaining = deadline - time.monotonic()
+            now = time.monotonic()
+            hit_hard = hard_deadline <= idle_deadline
+            remaining = (hard_deadline if hit_hard else idle_deadline) - now
             if remaining <= 0:
-                timed_out = True
+                timed_out = "max" if hit_hard else "idle"
                 break
             try:
                 raw = await asyncio.wait_for(proc.stdout.readline(), timeout=remaining)  # type: ignore[union-attr]
@@ -565,6 +787,8 @@ async def run_external_engine_adapter(
                 continue
             if not raw:
                 break
+            # The engine is alive: push the idle deadline out. The hard ceiling does not move.
+            idle_deadline = time.monotonic() + _IDLE_TIMEOUT_S
             line = raw.decode("utf-8", "replace").strip()
             if not line:
                 continue
@@ -591,7 +815,14 @@ async def run_external_engine_adapter(
                     if ev.type == "tool_call":
                         tool_calls += 1
                     elif ev.type == "token":
-                        final_text_parts.append(str((ev.data or {}).get("content") or ""))
+                        text = str((ev.data or {}).get("content") or "")
+                        if (ev.data or {}).get("final"):
+                            final_text_parts = [text]
+                            if streamed_text:
+                                continue  # already shown live; don't render it a second time
+                        else:
+                            streamed_text = True
+                            final_text_parts.append(text)
                     yield ev
             except Exception:
                 yield root_ev("log", {"message": line[:300]})
@@ -644,7 +875,7 @@ async def run_external_engine_adapter(
                 parent_workspace_id, engine, model_id, tool_calls, n, time.monotonic() - started)
 
     if timed_out:
-        yield root_ev("error", {"message": f"{label} timed out after {_TIMEOUT_S}s.", "fix_hint": "Try a smaller task."})
+        yield root_ev("error", _timeout_event(label, timed_out))
         return
     # `n == 0` alone can't distinguish the three ways a run ends with nothing changed:
     # the engine ran and had nothing to do (fine), the sidecar was never there (install gap),
@@ -688,9 +919,19 @@ async def run_external_engine_adapter(
     yield root_ev("done", {"summary": summary, "changed_files": files})
 
 
+# Baseline marker for the per-run artifact sweep. Hidden so it stays out of the model's way,
+# and a fixed name so it never accumulates: each run re-touches it, and `find -newer` on a file
+# never matches that file itself.
+_RUN_MARK = ".harvis-runmark"
+
+
+class _NoBaseline(Exception):
+    """No artifact baseline for this run — capture nothing instead of guessing."""
+
+
 async def run_claude_chat_workspace(
     task_brief: str,
-    chat_history: list,  # unused — `claude -p` is one-shot; the brief carries the ask.
+    chat_history: list,  # `claude -p` is one-shot, so prior turns ride in the prompt.
     *,
     model_name: str = "",
     pool=None,
@@ -699,6 +940,7 @@ async def run_claude_chat_workspace(
     session_id: str = "",
     launch_mode: str = "user",
     engine: str = "claude-code",
+    attachments: Optional[list[dict]] = None,  # staged into the scratch workdir so the CLI can READ them
 ) -> AsyncGenerator[OpenClawEvent, None]:
     """Run a CHAT workspace task through a cloud model's OWN agentic loop — ``claude -p``
     with its built-in tools (web_search, exec, file ops). No repo clone: a scratch workdir
@@ -752,16 +994,61 @@ async def run_claude_chat_workspace(
         return
     secret, auth_mode = auth
 
-    # Scratch workdir in the shared artifact volume (the sidecar mounts /data/artifacts).
-    workdir = f"/data/artifacts/claude-chat/{run_id or 'run'}"
+    # Persistent per-user sandbox on the artifact volume (notes.md survives turns).
+    # Fall back to a per-run dir only when we have no user id.
+    if user_id:
+        workdir = f"/data/artifacts/harvis-chat/u{int(user_id)}"
+    else:
+        workdir = f"/data/artifacts/claude-chat/{run_id or 'run'}"
     try:
         mk = await asyncio.create_subprocess_exec(
             "docker", "exec", "-u", "1001", container, "mkdir", "-p", workdir,
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
         )
         await asyncio.wait_for(mk.wait(), timeout=10)
+        try:
+            from owui_compat.chat_files import seed_sandbox
+            await seed_sandbox(workdir)
+        except Exception:
+            logger.debug("claude chat sandbox seed skipped", exc_info=True)
     except Exception:
         pass
+
+    # Same reason as the Build lane: nothing hands the CLI the bytes, so an attached
+    # screenshot only exists for it if we write it into the workdir. (The sidecar CAN
+    # reach the Harvis API over the Docker network — that is how `_cad_mcp_args` works
+    # — but it has no route to a stored attachment and no credential of its own.)
+    task_brief, _stage_status = await _stage_attachments(
+        task_brief, attachments, workdir, user_id or None
+    )
+    if _stage_status:
+        yield root_ev("log", {"message": _stage_status})
+
+    # Baseline for the end-of-run artifact sweep. The workdir is PERSISTENT per user, so a
+    # bare `find` there returns every file the sandbox has ever held — and the narrator then
+    # tells the user this run "created" eleven files it never touched. Touching a marker now
+    # gives the sweep something to compare against; `find -newer` on it returns only what
+    # this run actually wrote. It goes AFTER attachment staging on purpose: a file the user
+    # attached is an input, not something the run produced.
+    _mark_ok = False
+    try:
+        _mk2 = await asyncio.create_subprocess_exec(
+            "docker", "exec", "-u", "1001", container, "touch", f"{workdir}/{_RUN_MARK}",
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+        _mark_ok = (await asyncio.wait_for(_mk2.wait(), timeout=10)) == 0
+    except Exception:
+        _mark_ok = False
+    if not _mark_ok:
+        logger.warning(
+            "claude chat workspace: could not set the artifact baseline in %s — "
+            "skipping file capture rather than reporting stale sandbox files as new",
+            workdir,
+        )
+
+    # The prompt carries the recent conversation, not just this turn's ask. Staging runs
+    # first so an attachment note stays attached to the task, not buried in the transcript.
+    task_brief = _conversation_prefix(task_brief, chat_history)
 
     claude_model = (model_name or "").split("/", 1)[-1].strip()  # strip 'anthropic/'|'kimi/' prefix
     if is_kimi:
@@ -798,6 +1085,19 @@ async def run_claude_chat_workspace(
            "claude", "-p", task_brief,
            "--output-format", "stream-json", "--verbose",
            "--add-dir", workdir, "--dangerously-skip-permissions"]
+    # Persistent per-user sandbox on the artifact volume. Auto/read-only still
+    # withholds Write; user-initiated runs can write notes and scripts here.
+    _mcp_args = _sidecar_mcp_args(user_id, artifact_run_id=parent_workspace_id)
+    cmd += _mcp_args
+    # Only lie about Write when this run really cannot write (auto / read-only).
+    if launch_mode == "auto":
+        cmd += _artifact_delivery_note(_mcp_args)
+    else:
+        cmd += ["--append-system-prompt", (
+            "This directory persists across turns. Read SANDBOX.md. You can write files "
+            "(notes.md, scripts). Run them with python3 / node / bash, then "
+            "`bash harvis-check.sh`. Answer in Markdown with fenced code blocks."
+        )]
     if claude_model:
         cmd += ["--model", claude_model]
     if launch_mode == "auto":
@@ -806,12 +1106,17 @@ async def run_claude_chat_workspace(
         # offer-time withholding. Read/search tools (WebSearch, WebFetch, Read, Grep, Glob)
         # stay. NOTE: verify the exact --disallowedTools spelling against the connected
         # Claude Code CLI version; the tool NAMES are stable.
-        cmd += ["--disallowedTools", "Bash", "Edit", "Write", "MultiEdit", "NotebookEdit"]
+        cmd += ["--disallowedTools", "Bash", "Edit", "Write", "MultiEdit", "NotebookEdit",
+                # The CAD tools obey the same rule. Reading a project or a build is fine;
+                # creating a revision or taking a build slot is a write the user never
+                # asked for, and it would land in their project history all the same.
+                *_cad_write_tool_names()]
 
     yield root_ev("log", {"message": f"Connected to {label} ({claude_model or 'subscription'}) — workspace tools active…"})
 
     proc: asyncio.subprocess.Process | None = None
     final_text_parts: list[str] = []
+    streamed_text = False
     tool_calls = 0
     timed_out = False
     stderr_buf: list[str] = []
@@ -841,11 +1146,14 @@ async def run_claude_chat_workspace(
                                     "fix_hint": f"Is the {container} sidecar running?"})
             return
         stderr_task = asyncio.create_task(_drain(proc))
-        deadline = time.monotonic() + _TIMEOUT_S
+        hard_deadline = time.monotonic() + _MAX_RUN_S
+        idle_deadline = time.monotonic() + _IDLE_TIMEOUT_S
         while True:
-            remaining = deadline - time.monotonic()
+            now = time.monotonic()
+            hit_hard = hard_deadline <= idle_deadline
+            remaining = (hard_deadline if hit_hard else idle_deadline) - now
             if remaining <= 0:
-                timed_out = True
+                timed_out = "max" if hit_hard else "idle"
                 break
             try:
                 raw = await asyncio.wait_for(proc.stdout.readline(), timeout=remaining)
@@ -853,6 +1161,8 @@ async def run_claude_chat_workspace(
                 continue
             if not raw:
                 break
+            # The engine is alive: push the idle deadline out. The hard ceiling does not move.
+            idle_deadline = time.monotonic() + _IDLE_TIMEOUT_S
             line = raw.decode("utf-8", "replace").strip()
             if not line:
                 continue
@@ -872,7 +1182,14 @@ async def run_claude_chat_workspace(
                     if ev.type == "tool_call":
                         tool_calls += 1
                     elif ev.type == "token":
-                        final_text_parts.append(str((ev.data or {}).get("content") or ""))
+                        text = str((ev.data or {}).get("content") or "")
+                        if (ev.data or {}).get("final"):
+                            final_text_parts = [text]
+                            if streamed_text:
+                                continue  # already shown live; don't render it a second time
+                        else:
+                            streamed_text = True
+                            final_text_parts.append(text)
                     yield ev
             except Exception:
                 yield root_ev("log", {"message": line[:300]})
@@ -891,17 +1208,23 @@ async def run_claude_chat_workspace(
         if run_id:
             kill_run_by_marker(container, run_id)
 
-    # Capture any files Claude wrote (e.g. index.html) as artifacts BEFORE 'done' so the
-    # workspace Artifacts tab auto-pops with a preview. Text files only, secret-named skipped.
+    # Capture the files Claude wrote THIS RUN as artifacts BEFORE 'done' so the workspace
+    # Artifacts tab auto-pops with a preview. Text files only, secret-named skipped, and
+    # scoped by `-newer` to the baseline marker — without that scope the persistent per-user
+    # sandbox hands back every file it has ever held. No baseline (the touch failed) means we
+    # cannot tell this run's output from last week's, so capture nothing rather than guess.
     try:
+        if not _mark_ok:
+            raise _NoBaseline()
         lp = await asyncio.create_subprocess_exec(
             "docker", "exec", "-u", "1001", container, "sh", "-c",
-            f"cd {workdir} 2>/dev/null && find . -type f -size -524288c 2>/dev/null | head -20",
+            f"cd {workdir} 2>/dev/null && find . -type f -size -524288c "
+            f"-newer ./{_RUN_MARK} 2>/dev/null | head -20",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
         )
         out, _ = await asyncio.wait_for(lp.communicate(), timeout=15)
         for rel in (r.strip().lstrip("./") for r in out.decode("utf-8", "replace").splitlines()):
-            if not rel or _is_secret_artifact(rel):
+            if not rel or rel == _RUN_MARK or _is_secret_artifact(rel):
                 continue
             cp = await asyncio.create_subprocess_exec(
                 "docker", "exec", "-u", "1001", container, "cat", f"{workdir}/{rel}",
@@ -910,12 +1233,13 @@ async def run_claude_chat_workspace(
             cout, _ = await asyncio.wait_for(cp.communicate(), timeout=15)
             await _db_save_artifact(pool, parent_workspace_id, "file", path=rel,
                                     content=cout.decode("utf-8", "replace"))
+    except _NoBaseline:
+        pass
     except Exception as exc:
         logger.warning("claude chat workspace: artifact capture failed: %s", exc)
 
     if timed_out:
-        yield root_ev("error", {"message": f"{label} timed out after {_TIMEOUT_S}s.",
-                                "fix_hint": "Try a narrower task."})
+        yield root_ev("error", _timeout_event(label, timed_out))
         return
 
     summary = " ".join(p for p in final_text_parts if p).strip()

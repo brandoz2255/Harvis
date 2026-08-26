@@ -1,9 +1,13 @@
 <script lang="ts">
-	// Harvis Notebook-mode sidebar. Actions (New notebook · Sources · Ask & Search ·
-	// Transformations · Customize) + the user's Recent notebooks. The onb sub-nav items
-	// drive the /harvis/notebooks iframe via the `?onb=` query param; Customize routes to
-	// the Agent Studio Customize surface. Recents open the notebook in the iframe
+	// Harvis Notebook-mode sidebar: Sources · Ask & Search · Transformations, then the
+	// user's recent notebooks. The onb sub-nav items drive the /harvis/notebooks iframe
+	// via the `?onb=` query param; recents open a notebook in the same iframe
 	// (?onb=/notebooks/{id}). Colors are Harvis theme tokens.
+	//
+	// This block renders directly beneath the app's own nav (…Engines, CAD Studio), so it
+	// opens with a rule and a section label — without them "New notebook" read as another
+	// top-level destination sitting under CAD Studio. New notebook now lives on the
+	// Recents header, next to the list it adds to.
 	import { getContext, onMount, onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { listNotebooksDetailed, type Notebook } from '$lib/apis/notebooks';
@@ -67,32 +71,12 @@
 	const isNotebookActive = (id: string) => activeOnb === '/notebooks/' + id;
 </script>
 
-<div class="flex flex-col px-[0.4375rem]">
-	<!-- New notebook -->
-	<button
-		type="button"
-		on:click={() => open('/notebooks')}
-		class="group flex items-center gap-3 rounded-xl px-2.5 py-2 text-blue-600 dark:text-blue-400 font-medium hover:bg-blue-500/10 transition outline-none"
-		aria-label={$i18n.t('New notebook')}
+<div class="flex flex-col px-[0.4375rem] mt-2 pt-2 border-t border-gray-200 dark:border-gray-800">
+	<div
+		class="px-2.5 pb-1 text-[0.625rem] font-medium uppercase tracking-wide text-gray-400 dark:text-gray-500"
 	>
-		<div class="self-center">
-			<svg
-				xmlns="http://www.w3.org/2000/svg"
-				viewBox="0 0 24 24"
-				fill="none"
-				stroke="currentColor"
-				stroke-width="2"
-				stroke-linecap="round"
-				stroke-linejoin="round"
-				class="size-4.5"
-			>
-				<path d="M12 5v14M5 12h14" />
-			</svg>
-		</div>
-		<div class="flex flex-1 self-center translate-y-[0.5px]">
-			<div class="self-center text-sm font-primary">{$i18n.t('New notebook')}</div>
-		</div>
-	</button>
+		{$i18n.t('Notebooks')}
+	</div>
 
 	<!-- Sources · Ask & Search · Transformations (onb iframe) -->
 	{#each ONB as item}
@@ -104,7 +88,7 @@
 				item.href
 			)
 				? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 font-medium'
-				: 'text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-850'}"
+				: 'text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)]'}"
 		>
 			<svg
 				xmlns="http://www.w3.org/2000/svg"
@@ -123,10 +107,33 @@
 	{/each}
 
 	<!-- Recent notebooks -->
-	<div
-		class="px-2.5 pt-3 pb-1 text-[0.625rem] font-medium uppercase tracking-wide text-gray-400 dark:text-gray-500"
-	>
-		{$i18n.t('Recents')}
+	<div class="flex items-center justify-between pt-3 pb-1 pr-1">
+		<div
+			class="px-2.5 text-[0.625rem] font-medium uppercase tracking-wide text-gray-400 dark:text-gray-500"
+		>
+			{$i18n.t('Recents')}
+		</div>
+		<button
+			type="button"
+			on:click={() => open('/notebooks')}
+			title={$i18n.t('New notebook')}
+			aria-label={$i18n.t('New notebook')}
+			class="flex items-center gap-1 rounded-lg px-1.5 py-0.5 text-[0.6875rem] font-medium text-blue-600 dark:text-blue-400 hover:bg-blue-500/10 transition outline-none"
+		>
+			<svg
+				xmlns="http://www.w3.org/2000/svg"
+				viewBox="0 0 24 24"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="2.2"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+				class="size-3.5"
+			>
+				<path d="M12 5v14M5 12h14" />
+			</svg>
+			{$i18n.t('New')}
+		</button>
 	</div>
 	{#if recentsError}
 		<div class="px-2.5 py-1 text-xs text-gray-500 dark:text-gray-400">
@@ -151,7 +158,7 @@
 					nb.id
 				)
 					? 'bg-gray-100 dark:bg-gray-850 text-gray-900 dark:text-gray-50 font-medium'
-					: 'text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-850'}"
+					: 'text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)]'}"
 			>
 				<span class="shrink-0 w-4 text-center">{nb.emoji || '📓'}</span>
 				<span class="flex-1 overflow-hidden whitespace-nowrap name-fade text-left translate-y-[0.5px]"

@@ -32,6 +32,9 @@
 
 	export let token = '';
 	export let onBack: () => void = () => {};
+	// Mounts that already provide their own way back (the Skills surface's
+	// Your skills | Directory tabs) hide this to avoid duplicate navigation.
+	export let showBack = true;
 	export let onInstalled: (skill: any) => void = () => {};
 
 	const i18n: any = getContext('i18n');
@@ -539,15 +542,17 @@
 {:else}
 	<!-- ── Browse list ── -->
 	<div class="pt-1">
-		<button
-			class="-ml-1.5 inline-flex items-center gap-1 rounded-lg px-1.5 py-1 text-sm text-gray-500 hover:text-gray-800 dark:hover:text-gray-100 hover:bg-gray-50 dark:hover:bg-gray-900 transition"
-			on:click={onBack}
-		>
-			<ChevronLeft className="size-4" strokeWidth="2" />
-			{$i18n.t('Skills')}
-		</button>
+		{#if showBack}
+			<button
+				class="-ml-1.5 inline-flex items-center gap-1 rounded-lg px-1.5 py-1 text-sm text-gray-500 hover:text-gray-800 dark:hover:text-gray-100 hover:bg-gray-50 dark:hover:bg-gray-900 transition"
+				on:click={onBack}
+			>
+				<ChevronLeft className="size-4" strokeWidth="2" />
+				{$i18n.t('Skills')}
+			</button>
+		{/if}
 
-		<div class="mt-2 flex items-center gap-2">
+		<div class="{showBack ? 'mt-2' : ''} flex items-center gap-2">
 			<h3 class="text-xl font-semibold text-gray-800 dark:text-gray-100">
 				{$i18n.t('Browse skills')}
 			</h3>
@@ -570,7 +575,7 @@
 				/>
 				{#if searchQuery}
 					<button
-						class="rounded-full p-0.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition"
+						class="rounded-lg p-0.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition"
 						aria-label={$i18n.t('Clear filter')}
 						on:click={() => (searchQuery = '')}
 					>

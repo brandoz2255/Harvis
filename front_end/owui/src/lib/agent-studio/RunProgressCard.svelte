@@ -30,6 +30,10 @@
 	$: if (!compact) expanded = true;
 
 	$: stages = computeStages(events || [], { phase, engineLabel, modelLabel, errorMessage, artifactCount, elapsedMs });
+	// Same cloud test as runStages: a provider-prefixed model id ("anthropic/…") or a
+	// cloud engine label. A stalled Opus/Kimi run must not blame "local models".
+	$: cloudRun =
+		/\//.test((modelLabel || '').trim()) || /^(claude|kimi|codex|gpt|openai)/i.test((engineLabel || '').trim());
 	$: cur = activeStage(stages);
 	$: last = stages[stages.length - 1];
 	$: terminal = phase === 'done' || phase === 'error' || phase === 'cancelled';
@@ -127,7 +131,11 @@
 	{#if stalled && !terminal}
 		<div class="mt-2 flex items-center gap-2 text-amber-600 dark:text-amber-400">
 			<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="size-3.5 shrink-0"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
-			<span>{t('Still working — this can take a minute on local models.')}</span>
+			<span
+				>{cloudRun
+					? t('Still working — the model is thinking; long tasks can take a while.')
+					: t('Still working — this can take a minute on local models.')}</span
+			>
 			{#if onRetry}
 				<button type="button" class="underline hover:no-underline" on:click={onRetry}>{t('Reconnect')}</button>
 			{/if}

@@ -91,6 +91,11 @@ export const chatRequestQueues: Writable<
 export const sidebarWidth = writable(260);
 
 export const showSidebar = writable(false);
+/** Suppress the collapsed sidebar's icon strip entirely. A closed sidebar still draws a
+ *  narrow rail so it can be reopened; a full-screen room like the CAD session is supposed
+ *  to have no global chrome at all, and its own header carries the way out. Set by the
+ *  route that owns the whole viewport, cleared when it unmounts. */
+export const hideNavRail = writable(false);
 export const showSearch = writable(false);
 export const showSettings = writable(false);
 export const showShortcuts = writable(false);
@@ -102,6 +107,28 @@ export const showControls = writable(false);
 export const workspaceControlsTab = writable<string | null>(null);
 // The workspace id the chat right-rail dock is currently showing (compact RunView).
 export const dockedRunId = writable<string | null>(null);
+// Token/throughput metrics for a workspace run, keyed by workspace id.
+//
+// The assistant message that hosts a run card carries only the `<details
+// type="workspace_run">` marker as its content — the run's own numbers arrive on the
+// card's event stream, long after the chat SSE that created the message has closed.
+// That is why the message footer read "— tok/s" on every workspace run. The card
+// publishes here; ResponseMessage reads it back for the message holding that id.
+// Shaped like the `harvis_metrics` chunk field so `messageTokenStats` needs no
+// special case.
+export const workspaceRunMetrics = writable<Record<string, Record<string, any>>>({});
+// The finished answer of a workspace run, keyed by workspace id.
+//
+// The run card renders this itself and always has — but nothing ever wrote it
+// back into the chat message, so of 110 workspace-run assistant messages on
+// this account exactly ONE had any body text. The answer survived a reload only
+// because the card replays the persisted event stream; it never reached the
+// model on the following turn, which is why a chat could answer a question in a
+// run card and then, one message later, say it had never heard of the subject.
+// Chat.svelte watches this and folds the text into `message.content`.
+export const workspaceRunAnswers = writable<Record<string, { text: string; label: string }>>(
+	{}
+);
 // A workspace run launched from Discord that is currently running for this user.
 // Drives the top-bar "Harvis on Discord is running" indicator (polled app-wide).
 export const activeDiscordRun = writable<{ id: string; task_brief?: string } | null>(null);
@@ -172,6 +199,35 @@ if (typeof localStorage !== 'undefined') {
 // Agent Studio template gallery (one-click launch); Chat.svelte consumes it
 // once on '/' and clears it. NOT persisted — purely a hand-off between routes.
 export const pendingComposerPrompt = writable<string>('');
+
+// CAD focus workspace. Set while a CAD project has the main surface of the chat
+// page: the viewport takes the canvas and the SAME conversation moves into a
+// narrow right strip. Null means normal chat. It is deliberately not persisted —
+// a reload should land you back in the conversation, not in a workspace you have
+// no memory of opening.
+// `closeTo` is where the workspace's exit leads when simply dismissing the overlay
+// would strand the reader: the CAD session room mounts this same overlay over the
+// session's own conversation, and there is no page underneath it to fall back to.
+export const cadFocus: Writable<{
+	projectId: string;
+	jobId?: string;
+	closeTo?: string;
+	closeLabel?: string;
+} | null> = writable(null);
+
+// What the user has selected in the CAD workspace, published so the composer can
+// show it and the next message can carry it. Only the three ids are sent with a
+// message: the server re-reads the label from that revision's scene manifest
+// before any model sees it (cad_store.resolve_selection), so what is held here is
+// for the chip to render, never the account the model is given. Not persisted — a
+// selection belongs to the workspace that is open right now.
+export const cadSelection: Writable<{
+	project_id: string;
+	revision_id: string;
+	node_id: string;
+	label: string;
+	kind: string;
+} | null> = writable(null);
 
 export const showOverview = writable(false);
 export const showArtifacts = writable(false);

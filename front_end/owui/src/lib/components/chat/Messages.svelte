@@ -103,18 +103,23 @@
 	};
 
 	// Throttle message list rebuilds to once per animation frame during streaming.
-	// Structural changes (currentId change) always rebuild immediately.
-	const handleHistoryChange = (currentId, _messages) => {
+	// Structural changes (currentId change OR a different history object — e.g. reattach
+	// after a chat switch) always rebuild immediately.
+	let lastHistoryRef = null;
+	const handleHistoryChange = (currentId, _messages, historyRef) => {
 		if (!currentId) {
 			messages = [];
+			lastHistoryRef = historyRef;
 			return;
 		}
 
 		const currentIdChanged = currentId !== lastCurrentId;
+		const historyRefChanged = historyRef !== lastHistoryRef;
 		lastCurrentId = currentId;
+		lastHistoryRef = historyRef;
 
-		if (currentIdChanged) {
-			// Structural change: new chat, navigation, new message — rebuild immediately
+		if (currentIdChanged || historyRefChanged) {
+			// Structural change: new chat, navigation, reattach, new message — rebuild now
 			cancelAnimationFrame(pendingRebuild);
 			pendingRebuild = null;
 			buildMessages();
@@ -129,7 +134,7 @@
 		}
 	};
 
-	$: handleHistoryChange(history.currentId, history.messages);
+	$: handleHistoryChange(history.currentId, history.messages, history);
 
 	$: if (autoScroll && bottomPadding) {
 		(async () => {
@@ -166,6 +171,25 @@
 
 	const updateChat = async () => {
 		if (!$temporaryChatEnabled) {
+			// `chatId` is a plain prop fed from `$chatId`, so it flips to the incoming chat
+			// the instant the user navigates, while `history` is still the outgoing chat's
+			// until `loadChat` swaps it in. Saving that pair overwrites one conversation
+			// with another. Chat.svelte brands each history with its owner for exactly this;
+			// an unbranded one is allowed through, a mismatched one never is.
+			const owner = (history as any)?._ownerChatId;
+			if (owner && owner !== chatId) {
+				// warn, not error: vite.config.ts marks console.error `pure`, so an error
+				// here is deleted from the production bundle and this guard goes silent.
+				console.warn('[messages save] refused cross-chat write', {
+					historyBelongsTo: owner,
+					wouldHaveWritten: chatId
+				});
+				try {
+					const w = window as any;
+					w.__harvisCrossChatRefusals = (w.__harvisCrossChatRefusals ?? 0) + 1;
+				} catch {}
+				return;
+			}
 			history = history;
 			await tick();
 			const res = await updateChatById(localStorage.token, chatId, {
@@ -468,11 +492,9 @@
 
 	const triggerScroll = () => {
 		if (autoScroll) {
-			const element = document.getElementById('messages-container');
-			autoScroll = element.scrollHeight - element.scrollTop <= element.clientHeight + 50;
 			setTimeout(() => {
 				scrollToBottom();
-			}, 100);
+			}, 50);
 		}
 	};
 </script>

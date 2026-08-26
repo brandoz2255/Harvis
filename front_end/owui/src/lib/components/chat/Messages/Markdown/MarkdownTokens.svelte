@@ -20,6 +20,8 @@
 	import ToolCallDisplay from '$lib/components/common/ToolCallDisplay.svelte';
 	import WorkspaceRunCard from '$lib/components/chat/Messages/WorkspaceRunCard.svelte';
 	import ResearchRunCard from '$lib/components/chat/Messages/ResearchRunCard.svelte';
+	import CadResultCard from '$lib/components/chat/Messages/CadResultCard.svelte';
+	import SandboxFilesCard from '$lib/components/chat/Messages/SandboxFilesCard.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import Download from '$lib/components/icons/Download.svelte';
 	import ConsecutiveDetailsGroup from './ConsecutiveDetailsGroup.svelte';
@@ -65,6 +67,12 @@
 	const getDisplayTokens = (tokenList: Token[] = []) => {
 		const displayTokens = [];
 		let detailGroup = [];
+		// Blank lines seen while a run of detail cards is still open. The details
+		// tokenizer stops at `</details>`, so the newlines that follow it come back
+		// as their own `space` token. Treating that as a real token used to end the
+		// run after every single card, which is why consecutive tool calls never
+		// collapsed into one "Explored …" line.
+		let pendingSpace = [];
 
 		const flushDetailGroup = () => {
 			if (detailGroup.length > 1) {
@@ -77,11 +85,16 @@
 			}
 
 			detailGroup = [];
+			displayTokens.push(...pendingSpace);
+			pendingSpace = [];
 		};
 
 		for (const token of tokenList) {
 			if (isGroupableDetailToken(token)) {
+				pendingSpace = [];
 				detailGroup.push(token);
+			} else if (token?.type === 'space' && detailGroup.length > 0) {
+				pendingSpace.push(token);
 			} else {
 				flushDetailGroup();
 				displayTokens.push(token);
@@ -165,8 +178,8 @@
 				{attributes}
 				{save}
 				{preview}
+				{done}
 				edit={editCodeBlock}
-				stickyButtonsClassName={topPadding ? 'top-10' : 'top-0'}
 				onSave={(value) => {
 					onSave({
 						raw: token.raw,
@@ -428,7 +441,14 @@
 	{:else if token.type === 'details'}
 		{@const textContent = getDetailTextContent(token)}
 
-		{#if token?.attributes?.type === 'workspace_run'}
+		{#if token?.attributes?.type === 'workspace_answer'}
+			<!--
+				A workspace run's finished answer, folded into the message so it reaches
+				the model on the next turn. Renders NOTHING: the run card immediately
+				above it already shows this text, and drawing it twice was the reason
+				the answer was never written back in the first place.
+			-->
+		{:else if token?.attributes?.type === 'workspace_run'}
 			<!-- Harvis live workspace run card (consumes /api/workspace/stream/{id}) -->
 			<WorkspaceRunCard
 				id={`${id}-${tokenIdx}-wr`}
@@ -438,6 +458,16 @@
 		{:else if token?.attributes?.type === 'research_run'}
 			<!-- Harvis Deep Research card (consumes /api/research/stream/{id}) -->
 			<ResearchRunCard id={`${id}-${tokenIdx}-rr`} attributes={token.attributes} />
+		{:else if token?.attributes?.type === 'sandbox_files'}
+			<!-- Files this run wrote in the chat sandbox, viewable in place -->
+			<SandboxFilesCard id={`${id}-${tokenIdx}-sf`} attributes={token.attributes} />
+		{:else if token?.attributes?.type === 'cad_build'}
+			<!-- Harvis local CAD build card (polls /api/cad/builds/{id}) -->
+			<CadResultCard
+				id={`${id}-${tokenIdx}-cad`}
+				attributes={token.attributes}
+				className="w-full"
+			/>
 		{:else if token?.attributes?.type === 'tool_calls'}
 			<!-- Tool calls have dedicated handling with ToolCallDisplay component -->
 			<ToolCallDisplay

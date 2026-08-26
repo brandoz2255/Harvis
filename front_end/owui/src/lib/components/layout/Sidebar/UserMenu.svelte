@@ -277,6 +277,40 @@
 				<div class=" self-center truncate">{$i18n.t('Settings')}</div>
 			</button>
 
+			<!-- Customize opens the Settings modal's Customize group (Skills management lives
+			     there). It used to sit in the sidebar footer; the user asked for both it and
+			     Settings to live in this menu instead (2026-08-19). -->
+			<button
+				class="flex rounded-xl py-1.5 px-3 w-full hover:bg-gray-50 dark:hover:bg-gray-800 transition cursor-pointer select-none"
+				type="button"
+				on:click={async () => {
+					show = false;
+
+					await showSettings.set('skills');
+
+					if ($mobile) {
+						await tick();
+						showSidebar.set(false);
+					}
+				}}
+			>
+				<div class=" self-center mr-3">
+					<svg
+						xmlns="http://www.w3.org/2000/svg"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						stroke-width="1.5"
+						stroke-linecap="round"
+						stroke-linejoin="round"
+						class="w-5 h-5"
+					>
+						<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6" />
+					</svg>
+				</div>
+				<div class=" self-center truncate">{$i18n.t('Customize')}</div>
+			</button>
+
 			<!-- svelte-ignore a11y-no-static-element-interactions -->
 			<div
 				on:keydown={(e) => {

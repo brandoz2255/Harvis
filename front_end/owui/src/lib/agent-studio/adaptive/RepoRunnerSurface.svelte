@@ -327,15 +327,15 @@
 			<div class="mt-2.5 space-y-2">
 				<div class="flex items-center gap-2 text-[11px]">
 					<span class="shrink-0 w-20 text-[9px] uppercase tracking-widest text-gray-500">{$i18n.t('Runtime')}</span>
-					<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-cyan-400/25 text-cyan-100 bg-cyan-400/5 text-[10px] font-mono">{reqs.runtime || 'unknown'}</span>
-					{#if reqs.package_manager}<span class="inline-flex items-center px-2 py-0.5 rounded-full border border-white/10 text-gray-400 text-[10px] font-mono">{reqs.package_manager}</span>{/if}
+					<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-cyan-400/25 text-cyan-100 bg-cyan-400/5 text-[10px] font-mono">{reqs.runtime || 'unknown'}</span>
+					{#if reqs.package_manager}<span class="inline-flex items-center px-2 py-0.5 rounded-md border border-white/10 text-gray-400 text-[10px] font-mono">{reqs.package_manager}</span>{/if}
 				</div>
 				{#if (reqs.frameworks ?? []).length}
 					<div class="flex items-start gap-2 text-[11px]">
 						<span class="shrink-0 w-20 mt-0.5 text-[9px] uppercase tracking-widest text-gray-500">{$i18n.t('Frameworks')}</span>
 						<div class="flex flex-wrap gap-1">
 							{#each reqs.frameworks as f (f)}
-								<span class="inline-flex items-center px-2 py-0.5 rounded-full border border-cyan-400/20 text-cyan-200/90 text-[10px] font-mono">{f}</span>
+								<span class="inline-flex items-center px-2 py-0.5 rounded-md border border-cyan-400/20 text-cyan-200/90 text-[10px] font-mono">{f}</span>
 							{/each}
 						</div>
 					</div>
@@ -345,7 +345,7 @@
 						<span class="shrink-0 w-20 mt-0.5 text-[9px] uppercase tracking-widest text-gray-500">{$i18n.t('Services')}</span>
 						<div class="flex flex-wrap gap-1">
 							{#each reqs.services as s (s.name)}
-								<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-amber-400/30 text-amber-100 bg-amber-400/5 text-[10px] font-mono" title={s.why || ''}>
+								<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-amber-400/30 text-amber-100 bg-amber-400/5 text-[10px] font-mono" title={s.why || ''}>
 									<span class="size-1.5 rounded-full bg-amber-400/80"></span>{s.name}
 								</span>
 							{/each}
@@ -357,7 +357,7 @@
 						<span class="shrink-0 w-20 mt-0.5 text-[9px] uppercase tracking-widest text-gray-500">{$i18n.t('Processes')}</span>
 						<div class="flex flex-wrap gap-1">
 							{#each reqs.processes as p (p.name)}
-								<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-white/12 text-gray-300 text-[10px] font-mono" title={p.cmd || ''}>
+								<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-white/12 text-gray-300 text-[10px] font-mono" title={p.cmd || ''}>
 									{p.name}{#if p.role}<span class="text-gray-500">· {p.role}</span>{/if}
 								</span>
 							{/each}
@@ -369,7 +369,7 @@
 						<span class="shrink-0 w-20 mt-0.5 text-[9px] uppercase tracking-widest text-gray-500">{$i18n.t('Config')}</span>
 						<div class="flex flex-wrap gap-1">
 							{#each reqs.env_required as v (v)}
-								<span class="inline-flex items-center px-2 py-0.5 rounded-full border border-white/12 text-gray-300 text-[10px] font-mono">{v}</span>
+								<span class="inline-flex items-center px-2 py-0.5 rounded-md border border-white/12 text-gray-300 text-[10px] font-mono">{v}</span>
 							{/each}
 						</div>
 					</div>
@@ -416,7 +416,7 @@
 				{#each _steps as s, i (s.key)}
 					{#if i > 0}<span class="w-4 h-px shrink-0 {i <= stepIdx && !isBlocked && !isStopped ? 'bg-cyan-400/40' : 'bg-white/10'}"></span>{/if}
 					<span
-						class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[10px] {i === stepIdx && !isBlocked && !isStopped
+						class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[10px] {i === stepIdx && !isBlocked && !isStopped
 							? i === 3
 								? 'border-emerald-400/50 text-emerald-100 bg-emerald-400/10'
 								: 'border-cyan-400/50 text-cyan-100 bg-cyan-400/10'
@@ -429,11 +429,11 @@
 					</span>
 				{/each}
 				{#if isBlocked}
-					<span class="ml-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-red-400/40 text-red-200 bg-red-400/10 text-[10px]">
+					<span class="ml-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-red-400/40 text-red-200 bg-red-400/10 text-[10px]">
 						<span class="size-1.5 rounded-full bg-red-400"></span>{$i18n.t('Blocked')}
 					</span>
 				{:else if isStopped}
-					<span class="ml-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-white/15 text-gray-300 bg-white/5 text-[10px]">
+					<span class="ml-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-white/15 text-gray-300 bg-white/5 text-[10px]">
 						<span class="size-1.5 rounded-full bg-gray-400"></span>{$i18n.t('Stopped')}
 					</span>
 				{/if}
@@ -450,7 +450,7 @@
 					<div class="min-w-0">
 						<div class="flex flex-wrap gap-1">
 							{#each reqs.env_required as v (v)}
-								<span class="inline-flex items-center px-2 py-0.5 rounded-full border border-white/12 text-gray-300 text-[10px] font-mono">{v}</span>
+								<span class="inline-flex items-center px-2 py-0.5 rounded-md border border-white/12 text-gray-300 text-[10px] font-mono">{v}</span>
 							{/each}
 						</div>
 						<p class="mt-1 text-[10px] text-gray-500 leading-relaxed">{$i18n.t('This app may expect these variables. The sandbox starts without them, so if the run fails it is likely config-related.')}</p>

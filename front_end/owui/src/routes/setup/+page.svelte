@@ -627,7 +627,7 @@
 					{/if}
 					<button
 						type="button"
-						class="mt-4 w-full rounded-full bg-gray-900 text-white dark:bg-white dark:text-black py-2.5 text-sm font-medium disabled:opacity-50"
+						class="mt-4 w-full rounded-lg bg-gray-900 text-white dark:bg-white dark:text-black py-2.5 text-sm font-medium disabled:opacity-50"
 						disabled={claiming}
 						on:click={claimAdmin}
 					>
@@ -667,7 +667,7 @@
 							{#if !browsingMore}
 								<button
 									type="button"
-									class="w-full rounded-full border border-gray-300 dark:border-gray-600 py-2 text-sm"
+									class="w-full rounded-lg border border-gray-300 dark:border-gray-600 py-2 text-sm"
 									on:click={browseMoreModels}
 								>
 									{$i18n.t('Want a different model? Browse and pull one')}
@@ -765,7 +765,7 @@
 							{/if}
 							<button
 								type="button"
-								class="w-full rounded-full border border-gray-300 dark:border-gray-600 py-2 text-sm disabled:opacity-50"
+								class="w-full rounded-lg border border-gray-300 dark:border-gray-600 py-2 text-sm disabled:opacity-50"
 								disabled={pulling || !pullTag}
 								on:click={pullSelected}
 							>
@@ -851,7 +851,7 @@
 								</div>
 								<button
 									type="button"
-									class="w-full rounded-full bg-gray-900 text-white dark:bg-white dark:text-black py-2 text-sm disabled:opacity-50"
+									class="w-full rounded-lg bg-gray-900 text-white dark:bg-white dark:text-black py-2 text-sm disabled:opacity-50"
 									disabled={savingKey || !apiKey.trim()}
 									on:click={connectKey}
 								>
@@ -913,7 +913,7 @@
 							</p>
 							<button
 								type="button"
-								class="w-full rounded-full border border-gray-300 dark:border-gray-600 py-2 text-sm"
+								class="w-full rounded-lg border border-gray-300 dark:border-gray-600 py-2 text-sm"
 								on:click={probeModelStep}
 							>
 								{$i18n.t('Re-check')}
@@ -952,7 +952,7 @@
 
 					<button
 						type="button"
-						class="w-full rounded-full {modelState === 'none'
+						class="w-full rounded-lg {modelState === 'none'
 							? 'border border-gray-300 dark:border-gray-600'
 							: 'bg-gray-900 text-white dark:bg-white dark:text-black'} py-2 text-sm"
 						on:click={() => (step = 2)}
@@ -980,7 +980,7 @@
 					</label>
 					<button
 						type="button"
-						class="w-full rounded-full bg-gray-900 text-white dark:bg-white dark:text-black py-2.5 text-sm font-medium disabled:opacity-50"
+						class="w-full rounded-lg bg-gray-900 text-white dark:bg-white dark:text-black py-2.5 text-sm font-medium disabled:opacity-50"
 						disabled={savingPrefs}
 						on:click={saveExposure}
 					>
@@ -991,7 +991,7 @@
 				<div class="space-y-4">
 					<button
 						type="button"
-						class="rounded-full border border-gray-300 dark:border-gray-600 px-4 py-2 text-sm disabled:opacity-50"
+						class="rounded-lg border border-gray-300 dark:border-gray-600 px-4 py-2 text-sm disabled:opacity-50"
 						disabled={verifying}
 						on:click={runVerify}
 					>
@@ -1042,7 +1042,7 @@
 													{#if e.can_probe}
 														<button
 															type="button"
-															class="shrink-0 rounded-full border border-gray-300 dark:border-gray-600 px-2 py-0.5 disabled:opacity-50"
+															class="shrink-0 rounded-md border border-gray-300 dark:border-gray-600 px-2 py-0.5 disabled:opacity-50"
 															disabled={!!probingEngine}
 															on:click={() => probeEngine(e.id, e.label)}
 														>
@@ -1067,7 +1067,7 @@
 						<p class="text-sm font-medium">{$i18n.t('Test model (real generation)')}</p>
 						<button
 							type="button"
-							class="rounded-full border border-gray-300 dark:border-gray-600 px-4 py-2 text-sm disabled:opacity-50"
+							class="rounded-lg border border-gray-300 dark:border-gray-600 px-4 py-2 text-sm disabled:opacity-50"
 							disabled={testingModel || !selectedModel}
 							on:click={runTestChat}
 						>
@@ -1080,7 +1080,7 @@
 					</div>
 					<button
 						type="button"
-						class="w-full rounded-full bg-gray-900 text-white dark:bg-white dark:text-black py-2.5 text-sm font-medium disabled:opacity-50"
+						class="w-full rounded-lg bg-gray-900 text-white dark:bg-white dark:text-black py-2.5 text-sm font-medium disabled:opacity-50"
 						disabled={completing}
 						on:click={finish}
 					>
@@ -1092,7 +1092,7 @@
 					<div class="font-medium">{$i18n.t("You're ready.")}</div>
 					<button
 						type="button"
-						class="w-full rounded-full bg-gray-900 text-white dark:bg-white dark:text-black py-2.5 text-sm font-medium"
+						class="w-full rounded-lg bg-gray-900 text-white dark:bg-white dark:text-black py-2.5 text-sm font-medium"
 						on:click={() => goto('/')}
 					>
 						{$i18n.t('Open Harvis')}

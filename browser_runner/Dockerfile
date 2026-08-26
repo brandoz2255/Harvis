@@ -22,6 +22,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   curl \
   && rm -rf /var/lib/apt/lists/*
 
+# Bake geckodriver into the image so first browse does not egress to GitHub
+# (DNS-blocked campus clusters, offline labs). Falls back to webdriver-manager
+# only if this download fails at build time.
+ARG GECKODRIVER_VERSION=v0.36.0
+RUN set -eux; \
+  arch="$(dpkg --print-architecture)"; \
+  case "$arch" in \
+    amd64) gd_arch=linux64 ;; \
+    arm64) gd_arch=linux-aarch64 ;; \
+    *) gd_arch=linux64 ;; \
+  esac; \
+  curl -fsSL -o /tmp/gd.tgz \
+    "https://github.com/mozilla/geckodriver/releases/download/${GECKODRIVER_VERSION}/geckodriver-${GECKODRIVER_VERSION}-${gd_arch}.tar.gz" \
+  && tar -xzf /tmp/gd.tgz -C /usr/local/bin geckodriver \
+  && chmod +x /usr/local/bin/geckodriver \
+  && rm -f /tmp/gd.tgz
+
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
@@ -33,13 +50,13 @@ COPY app.py .
 # design. Nothing here wants root: uvicorn binds 8765 (unprivileged) and
 # Firefox actively prefers not to be root.
 #
-# The -m matters. app.py:70 calls GeckoDriverManager().install(), which writes
-# the driver under ~/.wdm at first use; without a real home that fails at the
-# first browse rather than at boot.
+# The -m matters. Without a real home, any residual webdriver-manager fallback
+# that writes under ~/.wdm fails at the first browse rather than at boot.
 RUN useradd -m -u 1001 -s /bin/bash runner \
   && chown -R runner:runner /app
 USER runner
 ENV HOME=/home/runner
+ENV GECKODRIVER_PATH=/usr/local/bin/geckodriver
 
 EXPOSE 8765
 

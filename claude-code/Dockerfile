@@ -7,7 +7,10 @@
 FROM node:20-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git ca-certificates procps \
+    && apt-get install -y --no-install-recommends \
+        git ca-certificates procps \
+        python3 python3-pip python3-venv \
+        bash \
     && rm -rf /var/lib/apt/lists/* \
     && npm install -g @anthropic-ai/claude-code@latest
 
@@ -18,6 +21,8 @@ ENV HOME=/home/claude
 ENV CLAUDE_CODE_SIMPLE=1
 
 COPY --chown=1001:1001 entrypoint.sh /home/claude/entrypoint.sh
+COPY --chown=1001:1001 sandbox/ /home/claude/harvis-sandbox/
+RUN chmod +x /home/claude/entrypoint.sh /home/claude/harvis-sandbox/harvis-check.sh
 
 WORKDIR /data/artifacts
 ENTRYPOINT ["/bin/bash", "/home/claude/entrypoint.sh"]

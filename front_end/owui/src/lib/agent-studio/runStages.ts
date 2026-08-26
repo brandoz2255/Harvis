@@ -89,6 +89,10 @@ export function computeStages(events: RunEventLike[], opts: StageOpts): StageSta
 
 	const eng = (opts.engineLabel || '').trim();
 	const model = shortModel(opts.modelLabel);
+	// Cloud runs never cold-load a model — a provider-prefixed model id ("anthropic/…",
+	// "openai/…", "kimi-code/…") or a cloud engine label means the wait is on the
+	// provider's side, so the "local models" hint would be a lie there.
+	const cloud = /\//.test((opts.modelLabel || '').trim()) || /^(claude|kimi|codex|gpt|openai)/i.test(eng);
 	const agentReached = sawAgentStart || sawConnect || sawWorking || terminal;
 	const slow = !terminal && !sawWorking && (opts.elapsedMs || 0) > COLD_LOAD_MS;
 
@@ -126,7 +130,10 @@ export function computeStages(events: RunEventLike[], opts: StageOpts): StageSta
 		waitLabel = 'Model responded';
 	} else if (agentReached) {
 		waitStatus = 'active';
-		if (slow) {
+		if (slow && cloud) {
+			waitLabel = model ? `Waiting for ${model}` : 'Waiting for the model';
+			waitDetail = eng ? `${eng} is thinking — long tasks can take a while` : 'long tasks can take a while';
+		} else if (slow) {
 			waitLabel = model ? `${model} may be loading` : 'The model may be loading';
 			waitDetail = 'local models can take a minute';
 		} else {

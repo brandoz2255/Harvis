@@ -45,7 +45,8 @@ If you need to see a file first, call `read` to read it.
 | Research / web lookups | `/app/skills/harvis-research/SKILL.md` |
 | Write DOCX/PDF documents | `/app/skills/harvis-document/SKILL.md` |
 | GitHub PRs / commits | `/app/skills/harvis-github/SKILL.md` |
-| Coding / vibe coding | `/app/skills/harvis-vibecoding/SKILL.md` |
+| Coding / Build (vibecode) | `/app/skills/harvis-build/SKILL.md` |
+| Coding / vibe coding (legacy OpenClaw tools) | `/app/skills/harvis-vibecoding/SKILL.md` |
 | Search local codebase | use `local_rag` tool directly (no skill needed) |
 
 **Never use `local_rag` for web research** — it only searches the local vector DB.

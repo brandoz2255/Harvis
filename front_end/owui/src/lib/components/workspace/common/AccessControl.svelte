@@ -448,7 +448,7 @@
 	<div class="py-2">
 		<div class="flex gap-2.5 items-center">
 			<div>
-				<div class=" p-2 bg-black/5 dark:bg-white/5 rounded-full">
+				<div class=" p-2 bg-black/5 dark:bg-white/5 rounded-lg">
 					{#if !hasPublicReadGrant(accessGrants ?? [])}
 						<svg
 							xmlns="http://www.w3.org/2000/svg"
@@ -586,7 +586,7 @@
 						</button>
 
 						<button
-							class=" rounded-full p-1 hover:bg-gray-100 dark:hover:bg-gray-850 transition"
+							class=" rounded-lg p-1 hover:bg-gray-100 dark:hover:bg-gray-850 transition"
 							type="button"
 							on:click={() => {
 								removePrincipal('group', group.id);
@@ -634,7 +634,7 @@
 							</button>
 
 							<button
-								class=" rounded-full p-1 hover:bg-gray-100 dark:hover:bg-gray-850 transition"
+								class=" rounded-lg p-1 hover:bg-gray-100 dark:hover:bg-gray-850 transition"
 								type="button"
 								on:click={() => {
 									removePrincipal('user', user.id);

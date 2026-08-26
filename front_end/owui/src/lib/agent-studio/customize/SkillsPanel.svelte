@@ -4,6 +4,7 @@
 	// and any future mount share ONE implementation. Skills → /api/v1/skills.
 	import { getContext, onMount } from 'svelte';
 	import { toast } from 'svelte-sonner';
+	import { fly } from 'svelte/transition';
 	import {
 		getSkills,
 		createNewSkill,
@@ -16,10 +17,41 @@
 		getSkillSyncPreview,
 		applySkillSync
 	} from '$lib/apis/skills';
+	// The directory half of this surface. Entirely client-side (GitHub API +
+	// raw.githubusercontent.com), and it imports ONLY SKILL.md text as an
+	// unaudited draft — no scripts are downloaded or executed.
+	import SkillsBrowse from '$lib/components/chat/Settings/Skills/SkillsBrowse.svelte';
 
 	export let token = '';
+	// 'full' = the /harvis/agent-studio/skills page (storefront header + Plugins|Skills
+	// switch + browse view). 'dock' = embedded in Customize/Settings, compact header.
+	export let mode: 'full' | 'dock' = 'dock';
 
 	const i18n: any = getContext('i18n');
+
+	// full-page only: which half of the surface is showing
+	let view: 'yours' | 'browse' = 'yours';
+	let skillQuery = '';
+
+	// Row identity — an emoji if the skill has one, else a lettermark tile whose
+	// color is derived from the name so the same skill always looks the same.
+	const TILES = [
+		'bg-blue-500',
+		'bg-emerald-500',
+		'bg-violet-500',
+		'bg-amber-500',
+		'bg-rose-500',
+		'bg-cyan-600',
+		'bg-indigo-500'
+	];
+	const tileOf = (name: string) => {
+		let h = 0;
+		for (const ch of name ?? '') h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+		return TILES[h % TILES.length];
+	};
+	const initialOf = (name: string) => (name ?? '').trim().charAt(0).toUpperCase() || '?';
+
+	let menuOpenId: string | null = null; // one row overflow menu at a time
 
 	// ── Skills ──────────────────────────────────────────────────────────────
 	let skills: any[] = [];
@@ -93,6 +125,24 @@
 			toast.error(`${e}`);
 		}
 	};
+
+	// Header search. `skills` and `skillQuery` are read directly inside the reactive
+	// statement so Svelte tracks them — routing this through a helper would leave the
+	// list stale after a keystroke or a refresh.
+	$: visibleSkills = (() => {
+		const q = skillQuery.trim().toLowerCase();
+		if (!q) return skills;
+		return skills.filter((s) => `${s.name ?? ''} ${s.description ?? ''}`.toLowerCase().includes(q));
+	})();
+	// Two honest groups: what's live for your agents, and what isn't.
+	$: installedSkills = visibleSkills.filter((s) => s.enabled);
+	$: offSkills = visibleSkills.filter((s) => !s.enabled);
+	// Empty groups drop out entirely, so a fresh install shows one "Installed" heading
+	// rather than a "Turned off (0)" stub.
+	$: skillSections = [
+		{ id: 'installed', label: $i18n.t('Installed'), items: installedSkills },
+		{ id: 'off', label: $i18n.t('Turned off'), items: offSkills }
+	].filter((s) => s.items.length);
 
 	// ── Skill governance (Exec Core C2) — audit → human verdict → engine sync ──
 	// Only a human 'supported' verdict lets a skill inject into chats / publish.
@@ -241,27 +291,97 @@
 	});
 </script>
 
-<div class="w-full">
-	<div class="flex items-center justify-between gap-2 mb-1">
-		<div class="flex items-center gap-2">
-			<svg class="size-5 text-blue-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.8H20l-4.9 3.6 1.9 5.8L12 14.6 7 18.2l1.9-5.8L4 8.8h6.1L12 3z" /></svg>
-			<h2 class="text-lg font-semibold text-gray-800 dark:text-gray-100">{$i18n.t('Skills')}</h2>
+<div class="w-full {mode === 'full' ? 'max-w-4xl mx-auto' : ''}">
+	{#if mode === 'full'}
+		<!-- Plugins | Skills — the two halves of "what your agents can do". Same switch
+		     as ConnectorsPanel, so the pair reads as one surface with two tabs. -->
+		<div class="flex justify-center mb-5">
+			<div class="inline-flex items-center rounded-lg bg-gray-100 dark:bg-gray-850 p-0.5 text-sm">
+				<a href="/harvis/agent-studio/mcp-shop" class="px-4 py-1.5 rounded-lg font-medium text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 transition">{$i18n.t('Plugins')}</a>
+				<span class="px-4 py-1.5 rounded-lg font-medium bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-50 shadow-sm" aria-current="page">{$i18n.t('Skills')}</span>
+			</div>
 		</div>
-		<button
-			on:click={() => {
-				if (showSkillForm) resetSkillForm();
-				else {
-					resetSkillForm();
-					showSkillForm = true;
-				}
+
+		<div class="flex flex-wrap items-start justify-between gap-3 mb-1">
+			<div class="min-w-[15rem] flex-1">
+				<h1 class="text-2xl font-semibold text-gray-900 dark:text-gray-50">{$i18n.t('Skills')}</h1>
+				<p class="text-sm text-gray-500 mt-1">{$i18n.t('Instructions that extend what Harvis and its agents can do.')}</p>
+			</div>
+			<div class="flex items-center gap-1 shrink-0">
+				{#if view === 'yours'}
+					<div class="relative">
+						<svg class="size-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" /></svg>
+						<input
+							bind:value={skillQuery}
+							placeholder={$i18n.t('Search skills')}
+							aria-label={$i18n.t('Search skills')}
+							class="w-52 sm:w-60 h-9 rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-950 pl-9 pr-3 text-sm outline-none focus:border-gray-400 dark:focus:border-gray-600 transition"
+						/>
+					</div>
+					<button type="button" on:click={loadSkills} title={$i18n.t('Refresh')} class="size-8 grid place-items-center rounded-lg text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-850 transition">
+						<svg class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6" /></svg>
+					</button>
+				{/if}
+				<button
+					type="button"
+					title={$i18n.t('New skill')}
+					aria-label={$i18n.t('New skill')}
+					on:click={() => {
+						view = 'yours';
+						if (showSkillForm) resetSkillForm();
+						else {
+							resetSkillForm();
+							showSkillForm = true;
+						}
+					}}
+					class="size-9 grid place-items-center rounded-full border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-850 transition"
+				>
+					<svg class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg>
+				</button>
+			</div>
+		</div>
+
+		<!-- your skills ↔ the community directory -->
+		<div class="inline-flex items-center rounded-lg bg-gray-100 dark:bg-gray-850 p-0.5 text-sm mt-5 mb-4">
+			<button type="button" on:click={() => (view = 'yours')} class="px-3.5 py-1.5 rounded-lg font-medium transition {view === 'yours' ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-50 shadow-sm' : 'text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200'}">{$i18n.t('Your skills')}</button>
+			<button type="button" on:click={() => (view = 'browse')} class="px-3.5 py-1.5 rounded-lg font-medium transition {view === 'browse' ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-50 shadow-sm' : 'text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200'}">{$i18n.t('Directory')}</button>
+		</div>
+	{:else}
+		<div class="flex items-center justify-between gap-2 mb-1">
+			<div class="flex items-center gap-2">
+				<svg class="size-5 text-blue-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.8H20l-4.9 3.6 1.9 5.8L12 14.6 7 18.2l1.9-5.8L4 8.8h6.1L12 3z" /></svg>
+				<h2 class="text-lg font-semibold text-gray-800 dark:text-gray-100">{$i18n.t('Skills')}</h2>
+			</div>
+			<button
+				on:click={() => {
+					if (showSkillForm) resetSkillForm();
+					else {
+						resetSkillForm();
+						showSkillForm = true;
+					}
+				}}
+				class="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 text-white px-3 py-1.5 text-xs font-medium hover:bg-blue-700 transition"
+			>
+				<svg class="size-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg>
+				{$i18n.t('New skill')}
+			</button>
+		</div>
+		<p class="text-sm text-gray-500 mb-3">{$i18n.t('A skill is a capability with instructions your agent can apply.')}</p>
+	{/if}
+
+	{#if mode === 'full' && view === 'browse'}
+		<!-- Directory: GitHub collections + URL import. Its own "← Skills" button
+		     returns here rather than to a route, so the tab state stays truthful. -->
+		<SkillsBrowse
+			{token}
+			showBack={false}
+			onBack={() => (view = 'yours')}
+			onInstalled={() => {
+				view = 'yours';
+				loadSkills();
 			}}
-			class="inline-flex items-center gap-1.5 rounded-full bg-blue-600 text-white px-3 py-1.5 text-xs font-medium hover:bg-blue-700 transition"
-		>
-			<svg class="size-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg>
-			{$i18n.t('New skill')}
-		</button>
-	</div>
-	<p class="text-sm text-gray-500 mb-3">{$i18n.t('A skill is a capability with instructions your agent can apply.')}</p>
+		/>
+	{:else}
 
 	{#if showSkillForm}
 		<div class="rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-950 p-3 mb-3 space-y-2">
@@ -275,31 +395,41 @@
 		</div>
 	{/if}
 
-	{#if skills.length}
-		<div class="space-y-1.5">
-			{#each skills as s (s.id)}
+	{#if visibleSkills.length}
+		{#each skillSections as sec (sec.id)}
+			<div class="text-xs font-semibold text-gray-500 dark:text-gray-400 mt-4 mb-1.5 first:mt-0">{sec.label}</div>
+			<div class="space-y-1.5">
+			{#each sec.items as s (s.id)}
 				<div class="rounded-xl border border-gray-100 dark:border-gray-850 bg-white dark:bg-gray-950">
-					<div class="group px-3 py-2.5 flex items-center gap-3">
+					<div class="px-3 py-2.5 flex items-center gap-3">
+						<!-- identity tile: the skill's emoji, else a lettermark keyed off its name -->
+						<div class="size-9 shrink-0 rounded-lg grid place-items-center {s.emoji ? 'bg-gray-100 dark:bg-gray-850 text-base' : `${tileOf(s.name)} text-white text-sm font-semibold`}">
+							{s.emoji ? s.emoji : initialOf(s.name)}
+						</div>
 						<div class="min-w-0 flex-1">
 							<div class="flex items-center gap-1.5 min-w-0">
-								<div class="truncate text-sm font-medium text-gray-800 dark:text-gray-100">{s.emoji ? s.emoji + ' ' : ''}{s.name}</div>
+								<div class="truncate text-sm font-medium text-gray-800 dark:text-gray-100">{s.name}</div>
 								<!-- Governance badge: reads meta.audit.verdict; only 'supported' publishes -->
-								<span class="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full border {verdictBadgeClass(verdictOf(s))}" title={$i18n.t('Human audit verdict — only "supported" lets this skill inject/publish')}>{verdictOf(s) ?? $i18n.t('unaudited')}</span>
+								<span class="shrink-0 text-[10px] px-1.5 py-0.5 rounded-md border {verdictBadgeClass(verdictOf(s))}" title={$i18n.t('Human audit verdict — only "supported" lets this skill inject/publish')}>{verdictOf(s) ?? $i18n.t('unaudited')}</span>
 							</div>
 							{#if s.description}<div class="truncate text-xs text-gray-500">{s.description}</div>{/if}
 						</div>
-						<button on:click={() => toggleGov(s)} title={$i18n.t('Audit & verdict')} class="shrink-0 inline-flex items-center gap-1 text-[11px] {govOpenId === s.id ? 'text-blue-600 dark:text-blue-400' : 'text-gray-400 hover:text-blue-500'} transition">
-							<svg class="size-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 4 5.5v5.2c0 4.9 3.4 9.5 8 10.8 4.6-1.3 8-5.9 8-10.8V5.5L12 2z" /></svg>
-							{$i18n.t('Audit')}
-							<svg class="size-3 transition-transform {govOpenId === s.id ? 'rotate-180' : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6" /></svg>
-						</button>
-						<button on:click={() => editSkill(s)} title={$i18n.t('Edit')} class="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-blue-500 transition shrink-0">
-							<svg class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" /></svg>
-						</button>
-						<button on:click={() => toggleSkill(s.id)} title={s.enabled ? $i18n.t('Enabled') : $i18n.t('Disabled')} class="shrink-0 text-[11px] {s.enabled ? 'text-green-600 dark:text-green-400' : 'text-gray-400'}">● {s.enabled ? $i18n.t('On') : $i18n.t('Off')}</button>
-						<button on:click={() => removeSkill(s.id)} title={$i18n.t('Delete')} class="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-500 transition shrink-0">
-							<svg class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m2 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /></svg>
-						</button>
+						<button on:click={() => toggleSkill(s.id)} title={s.enabled ? $i18n.t('Enabled — this skill is available to your agents') : $i18n.t('Disabled')} class="shrink-0 rounded-md border px-2 py-0.5 text-[11px] font-medium transition {s.enabled ? 'border-green-200 dark:border-green-900 text-green-600 dark:text-green-400 bg-green-50 dark:bg-green-950/40' : 'border-gray-200 dark:border-gray-800 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300'}">{s.enabled ? $i18n.t('On') : $i18n.t('Off')}</button>
+						<!-- Row actions live in one menu instead of hover-only icons — hover
+						     affordances are unreachable on touch. -->
+						<div class="relative shrink-0">
+							<button type="button" on:click={() => (menuOpenId = menuOpenId === s.id ? null : s.id)} title={$i18n.t('More')} aria-label={$i18n.t('More')} class="size-8 grid place-items-center rounded-lg text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-850 transition">
+								<svg class="size-4" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="19" cy="12" r="1.7" /></svg>
+							</button>
+							{#if menuOpenId === s.id}
+								<button type="button" class="fixed inset-0 z-40 cursor-default" on:click={() => (menuOpenId = null)} tabindex="-1" aria-hidden="true"></button>
+								<div class="absolute right-0 top-9 z-50 w-48 rounded-xl border border-gray-100 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-lg p-1" transition:fly={{ y: -6, duration: 120 }}>
+									<button type="button" on:click={() => { menuOpenId = null; editSkill(s); }} class="w-full text-left px-3 py-1.5 rounded-lg text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-850 transition">{$i18n.t('Edit')}</button>
+									<button type="button" on:click={() => { menuOpenId = null; toggleGov(s); }} class="w-full text-left px-3 py-1.5 rounded-lg text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-850 transition">{govOpenId === s.id ? $i18n.t('Hide audit & verdict') : $i18n.t('Audit & verdict')}</button>
+									<button type="button" on:click={() => { menuOpenId = null; removeSkill(s.id); }} class="w-full text-left px-3 py-1.5 rounded-lg text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 transition">{$i18n.t('Delete')}</button>
+								</div>
+							{/if}
+						</div>
 					</div>
 
 					{#if govOpenId === s.id}
@@ -317,7 +447,7 @@
 								{@const a = auditResults[s.id]}
 								<div class="rounded-lg border border-gray-100 dark:border-gray-850 bg-gray-50 dark:bg-gray-900 p-2.5 space-y-1.5">
 									<div class="flex items-center gap-2 text-[11px]">
-										<span class="px-1.5 py-0.5 rounded-full border {a.runnable ? 'border-green-200 dark:border-green-900 text-green-600 dark:text-green-400' : 'border-amber-200 dark:border-amber-900 text-amber-600 dark:text-amber-400'}">{a.runnable ? $i18n.t('runnable here') : $i18n.t('not runnable here')}</span>
+										<span class="px-1.5 py-0.5 rounded-md border {a.runnable ? 'border-green-200 dark:border-green-900 text-green-600 dark:text-green-400' : 'border-amber-200 dark:border-amber-900 text-amber-600 dark:text-amber-400'}">{a.runnable ? $i18n.t('runnable here') : $i18n.t('not runnable here')}</span>
 										{#if a.run_id}<code class="font-mono text-gray-400">run {a.run_id}</code>{/if}
 									</div>
 									{#if a.analysis_md}
@@ -345,7 +475,8 @@
 					{/if}
 				</div>
 			{/each}
-		</div>
+			</div>
+		{/each}
 	{:else if loadError}
 		<div class="rounded-xl border border-gray-100 dark:border-gray-850 px-3 py-6 text-center text-sm text-gray-500">
 			{$i18n.t('Could not load skills')} — {loadError}
@@ -353,8 +484,22 @@
 		</div>
 	{:else if !showSkillForm && !skillsLoaded}
 		<div class="text-xs text-gray-500 py-1">{$i18n.t('Loading skills…')}</div>
+	{:else if skills.length}
+		<!-- skills exist, the search just matched none of them -->
+		<div class="rounded-xl border border-gray-100 dark:border-gray-850 px-3 py-8 text-center text-sm text-gray-500">
+			{$i18n.t('No skills match your search.')}
+			<button class="ml-2 text-blue-600 dark:text-blue-400 hover:underline" on:click={() => (skillQuery = '')}>{$i18n.t('Clear')}</button>
+		</div>
 	{:else if !showSkillForm}
-		<div class="text-xs text-gray-500 py-1">{$i18n.t('No skills yet. Create one to get started.')}</div>
+		<div class="rounded-xl border border-gray-100 dark:border-gray-850 px-3 py-8 text-center text-sm text-gray-500">
+			{$i18n.t('No skills yet.')}
+			{#if mode === 'full'}
+				<button class="ml-1 text-blue-600 dark:text-blue-400 hover:underline" on:click={() => (view = 'browse')}>{$i18n.t('Browse the directory')}</button>
+				{$i18n.t('or create one.')}
+			{:else}
+				{$i18n.t('Create one to get started.')}
+			{/if}
+		</div>
 	{/if}
 
 	<!-- Engine sync (C2): dry-run preview + explicit apply of human-verified skills -->
@@ -380,7 +525,7 @@
 					{#if (syncPreview.skills?.items ?? []).length}
 						<div class="flex flex-wrap gap-1">
 							{#each syncPreview.skills.items as it (it.id)}
-								<span class="px-1.5 py-0.5 rounded-full border border-green-200 dark:border-green-900 text-green-600 dark:text-green-400">{it.name}</span>
+								<span class="px-1.5 py-0.5 rounded-md border border-green-200 dark:border-green-900 text-green-600 dark:text-green-400">{it.name}</span>
 							{/each}
 						</div>
 					{:else}
@@ -392,7 +537,7 @@
 						<div class="font-semibold uppercase tracking-wide text-[10px] text-gray-400 mb-1">{$i18n.t('Skipped — not human-verified')}</div>
 						<div class="flex flex-wrap gap-1">
 							{#each syncSkipped as name}
-								<span class="px-1.5 py-0.5 rounded-full border border-amber-200 dark:border-amber-900 text-amber-600 dark:text-amber-400" title={$i18n.t('No "supported" audit verdict — audit the skill and record a verdict to publish it')}>{name}</span>
+								<span class="px-1.5 py-0.5 rounded-md border border-amber-200 dark:border-amber-900 text-amber-600 dark:text-amber-400" title={$i18n.t('No "supported" audit verdict — audit the skill and record a verdict to publish it')}>{name}</span>
 							{/each}
 						</div>
 					</div>
@@ -429,4 +574,5 @@
 			</div>
 		{/if}
 	</div>
+	{/if}
 </div>

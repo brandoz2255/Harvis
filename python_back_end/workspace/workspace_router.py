@@ -38,7 +38,7 @@ from typing import Optional
 
 import httpx as _httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from auth_optimized import get_current_user_optimized
@@ -52,6 +52,8 @@ from .openclaw_client import (
     _build_device_params,
 )
 from .openclaw_resolver import resolve_openclaw_config
+from .orchestration import artifact_mcp as _artifact_mcp
+from .secret_redaction import redact_payload
 from .kimi_workspace import (
     stream_kimi_workspace,
     stream_ollama_cloud_workspace,
@@ -873,6 +875,11 @@ async def _db_save_event(pool, workspace_id: str, seq: int, event: OpenClawEvent
             # agent_message (review loop): which persona is speaking (coder|reviewer);
             # label/content/run_id are already whitelisted above.
             "role",
+            # The run's output files. `changed_files` is what the chat run card gates
+            # its artifact list on, and `files` is the same list on a failed agent_end.
+            # Both were being enriched onto the live event and then dropped here, so a
+            # reload replayed a run with its files missing — the card showed prose only.
+            "changed_files", "files",
         ):
             val = event.data.get(key)
             if val is not None:
@@ -882,6 +889,13 @@ async def _db_save_event(pool, workspace_id: str, seq: int, event: OpenClawEvent
             payload["run_id"] = event.run_id
         if event.agent_label and "agent_label" not in payload:
             payload["agent_label"] = event.agent_label
+
+        # Last stop before the payload becomes a durable row. A Build run that ran
+        # `env` once put a live API key into workspace_events in plaintext, where it
+        # outlived the session and was readable by anything that reads run history.
+        # The live stream still shows the operator their own output; only the stored
+        # copy is scrubbed.
+        payload = redact_payload(payload)
 
         async with pool.acquire() as conn:
             await conn.execute(
@@ -1185,14 +1199,21 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
     # ── Select the event stream based on agent_id ────────────────────────────
     event_stream = None
     use_parallel = ws.get("parallel", True)
+    # The turn's raw attachment refs. Every lane below gets them: the API lanes turn
+    # images into real multimodal parts, the CLI lanes stage them as files. A lane
+    # that silently drops them is how "the model ignored my screenshot" happens.
+    _attachments = ws.get("attachments") or []
 
     if agent_id == "local":
         if use_parallel:
             event_stream = stream_parallel_workspace(
                 task_brief, chat_history, model=model_name, provider="local",
+                attachments=_attachments, user_id=ws["user_id"],
             )
         else:
-            event_stream = stream_local_ollama_workspace(task_brief, chat_history, model=model_name)
+            event_stream = stream_local_ollama_workspace(
+                task_brief, chat_history, model=model_name, attachments=_attachments, user_id=ws["user_id"],
+            )
 
     elif agent_id == "kimi":
         api_key, kimi_url = await _get_kimi_credentials(pool, ws["user_id"])
@@ -1200,11 +1221,12 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
             if use_parallel:
                 event_stream = stream_parallel_workspace(
                     task_brief, chat_history, api_key=api_key, model=model_name, provider="kimi",
-                    api_url=kimi_url,
+                    api_url=kimi_url, attachments=_attachments, user_id=ws["user_id"],
                 )
             else:
                 event_stream = stream_kimi_workspace(
                     task_brief, chat_history, api_key, model=model_name, api_url=kimi_url,
+                    attachments=_attachments, user_id=ws["user_id"],
                 )
         else:
             logger.warning("No Kimi API key for user %s — falling back to local Ollama", ws["user_id"])
@@ -1218,9 +1240,12 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
             if use_parallel:
                 event_stream = stream_parallel_workspace(
                     task_brief, chat_history, model=model_name, provider="local",
+                    attachments=_attachments, user_id=ws["user_id"],
                 )
             else:
-                event_stream = stream_local_ollama_workspace(task_brief, chat_history, model=model_name)
+                event_stream = stream_local_ollama_workspace(
+                    task_brief, chat_history, model=model_name, attachments=_attachments, user_id=ws["user_id"],
+                )
 
     elif agent_id == "claude":
         # Cloud Claude as a workspace engine — `claude -p` (the user's verified subscription
@@ -1233,6 +1258,9 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
             parent_workspace_id=workspace_id, user_id=ws["user_id"],
             session_id=ws.get("session_id", ""),
             launch_mode=ws.get("launch_mode", "user"),  # Phase D: auto → Claude sidecar read-only
+            # Attachments are staged into the sidecar's workdir — the CLI reads files,
+            # it cannot be handed a multimodal image part.
+            attachments=ws.get("attachments") or [],
         )
 
     elif agent_id == "kimi-code":
@@ -1249,6 +1277,7 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
             session_id=ws.get("session_id", ""),
             launch_mode=ws.get("launch_mode", "user"),
             engine="kimi-code",
+            attachments=ws.get("attachments") or [],
         )
 
     elif agent_id == "nvidia-kimi":
@@ -1258,11 +1287,13 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
                 event_stream = stream_parallel_workspace(
                     task_brief, chat_history, api_key=nvidia_key,
                     api_url="https://integrate.api.nvidia.com/v1", provider="kimi",
+                    attachments=_attachments, user_id=ws["user_id"],
                 )
             else:
                 event_stream = stream_kimi_workspace(
                     task_brief, chat_history, nvidia_key,
                     api_url="https://integrate.api.nvidia.com/v1",
+                    attachments=_attachments, user_id=ws["user_id"],
                 )
         else:
             logger.warning("No NVIDIA API key — falling back to local Ollama")
@@ -1273,15 +1304,20 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
             await _db_save_event(pool, workspace_id, seq, fallback_event)
             await broadcaster.put((seq, fallback_event))
             event_count += 1
-            event_stream = stream_local_ollama_workspace(task_brief, chat_history, model=model_name)
+            event_stream = stream_local_ollama_workspace(
+                task_brief, chat_history, model=model_name, attachments=_attachments, user_id=ws["user_id"],
+            )
 
     elif agent_id in ("cloud-ollama", "gpt-oss"):
         if use_parallel:
             event_stream = stream_parallel_workspace(
                 task_brief, chat_history, model=model_name or "gpt-oss:120b", provider="cloud-ollama",
+                attachments=_attachments, user_id=ws["user_id"],
             )
         else:
-            event_stream = stream_ollama_cloud_workspace(task_brief, chat_history, model=model_name or "gpt-oss:120b")
+            event_stream = stream_ollama_cloud_workspace(
+                task_brief, chat_history, model=model_name or "gpt-oss:120b", attachments=_attachments, user_id=ws["user_id"],
+            )
 
     elif agent_id == "orchestrated":
         # P5: Harvis-native multi-agent orchestrator — parent → isolated sub-agent(s)
@@ -1316,6 +1352,28 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
             launch_mode=ws.get("launch_mode", "user"),
         )
 
+    elif agent_id == "agent-native":
+        # Agent pill on a model whose lane does NOT bring its own tool-loop: run ONE
+        # Harvis agent through the native runner. This is the only lane that offers
+        # WIRE_TOOL_SCHEMA — Agent Reach (web_read / gh_view / rss_read / yt_transcript)
+        # included — so routing here is what makes "Agent" mean the same thing on an
+        # Ollama tag as it does on a CLI engine. The previous default was OpenClaw,
+        # which has no reach tools and deliberately never will (no outbound internet).
+        # Escape hatch: HARVIS_OWUI_WORKSPACE_AGENT=main puts it back on OpenClaw.
+        from .orchestration.orchestrator import run_orchestrated
+        _repo_path = ws.get("repo_path")
+        event_stream = run_orchestrated(
+            task_brief, chat_history,
+            model_name=model_name, pool=pool,
+            parent_workspace_id=workspace_id, user_id=ws["user_id"],
+            session_id=ws.get("session_id") or f"ws-{workspace_id}",
+            uniform_model=True,          # one agent, on the model the user picked
+            single_agent=True,           # skip the planner — nothing to delegate
+            isolation_mode="attached" if _repo_path else "scratch",
+            repo_config={"repo_path": _repo_path} if _repo_path else None,
+            launch_mode=ws.get("launch_mode", "user"),
+        )
+
     elif agent_id == "vibecode-turn":
         # VibeCode cumulative-session turn: ONE agent on the session's PERSISTENT
         # working clone (clone-mode). Each follow-up builds on prior turns' edits;
@@ -1337,6 +1395,9 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
             persona_engine=ws.get("vibecode_persona_engine") or "",
             # Offer-time tool policy: auto-detected launches get heavy tools withheld.
             launch_mode=ws.get("launch_mode", "user"),
+            # Image attachments become real multimodal parts on the first user
+            # message — a screenshot the model can actually look at.
+            attachments=ws.get("attachments") or [],
         )
 
     elif agent_id == "vibecode-review":
@@ -1381,6 +1442,9 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
             engine=ws.get("engine") or "opencode",
             api_key=ws.get("engine_key"),  # decrypted per-user credential for cloud engines; None for opencode
             auth_mode=ws.get("engine_auth_mode") or "api_key",  # E4B: api_key vs subscription oauth_token
+            # Staged into the clone before the CLI launches — an external engine reads
+            # files, so this is the only way an attached screenshot reaches it.
+            attachments=ws.get("attachments") or [],
         )
 
     else:
@@ -1517,6 +1581,20 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
                 elif event.type == "error":
                     final_error = event.data.get("message")
 
+                # A terminal 'done' whose agents all failed is not a success. The
+                # orchestrator now says so in the payload; without this the run row
+                # was written 'done' and the narrator headline read "Build complete"
+                # over a run the user watched error out. The event type stays 'done'
+                # so the summary still renders — only the verdict changes.
+                _agents_failed = (
+                    event.type == "done" and event.data.get("success") is False
+                )
+                if _agents_failed:
+                    terminal_status = "error"
+                    ws["status"] = "error"
+                    if not final_error:
+                        final_error = "The agent did not finish the task."
+
                 # ── Build Result Narrator: compose the full written analysis as the assistant
                 #    message. Scoped to Build-like runs (a git diff exists OR a VibeCode turn);
                 #    skips CTF (no diff) + research/document (structured source-card output).
@@ -1534,10 +1612,12 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
                         )
                         if event.type == "done" and _build_like and structured is None:
                             final_analysis_md = await _compose_run_analysis(
-                                pool, ws, agent_id, model_name, status="done",
+                                pool, ws, agent_id, model_name,
+                                status="error" if _agents_failed else "done",
                                 raw_summary=final_summary or "", changed_files=_bn_changed,
                                 diff_text=_bn_diff, file_count=_bn_fc,
                                 tool_calls=executing_tool_call_count, started_epoch=started_epoch,
+                                error_message=final_error or "" if _agents_failed else "",
                             )
                         elif event.type in ("error", "cancelled") and ws.get("vibecode_session_id"):
                             final_analysis_md = await _compose_run_analysis(
@@ -1552,6 +1632,23 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
                             event.data["analysis_md"] = final_analysis_md
                 except Exception as exc:
                     logger.warning("[workspace:%s] Build narrator failed: %s", workspace_id, exc)
+
+                # The files the run produced, on the terminal event itself. The chat run
+                # card gates its artifact list on `done.changed_files`, and nothing was
+                # ever putting that key there — so a run that wrote a real file showed the
+                # user prose and no file at all. The artifacts were already in the
+                # database; only the pointer was missing. Computed here rather than inside
+                # the narrator block above because the narrator is flag-gated and the file
+                # list is not optional.
+                if event.type == "done" and not event.data.get("changed_files"):
+                    try:
+                        _cf, _, _ = await _load_run_diff_summary(pool, workspace_id)
+                        if _cf:
+                            event.data["changed_files"] = _cf
+                    except Exception as exc:
+                        logger.warning(
+                            "[workspace:%s] changed_files lookup failed: %s", workspace_id, exc
+                        )
 
                 # Harvis Execution Trace: additionally emit the final answer as a typed
                 # 'final_message' envelope BEFORE the 'done' event below (the shared
@@ -2250,24 +2347,50 @@ def _is_image_like(name: str, mime: str) -> bool:
 async def _download_text_attachment(url: str) -> Optional[str]:
     """Fetch up to _ATTACH_DOWNLOAD_HARD_CAP bytes from `url`, return decoded text.
 
-    Returns None on any error (network, decode, oversize). The caller falls back
-    to the URL-only behavior so the agent can still try to fetch it itself.
+    Returns None on any error (network, decode, oversize, blocked). The caller
+    falls back to the URL-only behavior so the agent can still try to fetch it.
+
+    The URL comes from the client and whatever comes back is inlined verbatim
+    into the model's context, so an unrestricted GET here was a read primitive
+    for anything the backend can reach — ``http://ollama:11434``,
+    ``http://pgsql:5432``, a cloud metadata endpoint. Two rules close it:
+
+    * the host must be on the same allowlist ``vision_to_code/attachments.py``
+      uses, which in practice means the Discord CDN — the only producer of an
+      absolute attachment URL anywhere in Harvis;
+    * the fetch goes through Agent Reach's hardened GET, which refuses
+      private/loopback/link-local addresses, re-validates scheme, host and DNS
+      on every redirect hop rather than following blindly, and pins the TCP
+      target to the address it resolved, so a rebind between check and connect
+      lands nowhere.
+
+    Web-composer uploads are unaffected: they arrive as a relative
+    ``/api/v1/files/<id>/content`` path, which was never fetchable here anyway.
     """
     try:
-        async with _httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-            resp = await client.get(url)
-            if resp.status_code != 200:
-                logger.warning(
-                    "_download_text_attachment: HTTP %s for %s", resp.status_code, url[:120]
-                )
-                return None
-            data = resp.content
-            if len(data) > _ATTACH_DOWNLOAD_HARD_CAP:
-                logger.warning(
-                    "_download_text_attachment: %d bytes exceeds hard cap %d, skipping inline",
-                    len(data), _ATTACH_DOWNLOAD_HARD_CAP,
-                )
-                return None
+        from urllib.parse import urlparse
+
+        from agent_reach.tools import _safe_get
+        from vision_to_code.attachments import REMOTE_ATTACHMENT_HOSTS
+
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            logger.info(
+                "_download_text_attachment: not an absolute http(s) URL, no inline: %s",
+                url[:120],
+            )
+            return None
+
+        resp = await _safe_get(
+            url, timeout=10.0, host_allowlist=REMOTE_ATTACHMENT_HOSTS
+        )
+        data = resp.content
+        if len(data) > _ATTACH_DOWNLOAD_HARD_CAP:
+            logger.warning(
+                "_download_text_attachment: %d bytes exceeds hard cap %d, skipping inline",
+                len(data), _ATTACH_DOWNLOAD_HARD_CAP,
+            )
+            return None
         # Try utf-8 first, fall back to latin-1 (lossless single-byte mapping).
         try:
             return data.decode("utf-8")
@@ -2369,7 +2492,24 @@ async def _prepend_attachments(brief: str, attachments: list[dict]) -> str:
     lines.append("- ALWAYS reply in English unless the user explicitly writes to you in another language.")
     lines.append("- Attached files are part of the task. Inspect them before answering.")
     if image_like:
-        lines.append("- At least one attached file is an image. Read `/skills-shared/harvis-image/SKILL.md` first, then use tools to inspect the image.")
+        # The skills-shared mount only exists in the sandbox/OpenClaw runtime — the engine
+        # sidecars mount /data/artifacts and nothing else. Phrase it as an "if present"
+        # lookup so a missing skill file is a no-op rather than the start of a hunt.
+        lines.append(
+            "- At least one attached file is an image. If `/skills-shared/harvis-image/SKILL.md` "
+            "exists, read it first. Then inspect the image with your file-read tool — prefer a "
+            "local path over any URL listed above."
+        )
+        # Screenshot-to-code method pack (Build session shape) — additive rules when
+        # the brief looks like UI replication. See vision_to_code/method_pack.py.
+        try:
+            from vision_to_code.method_pack import screenshot_to_code_brief_addon
+
+            addon = screenshot_to_code_brief_addon(brief, has_image=True)
+            if addon:
+                lines.append(addon.strip())
+        except Exception:
+            pass
     if text_like and any_inlined:
         lines.append(
             "- THE FILE CONTENT IS ALREADY HERE. The text between `<<<FILE_BEGIN name>>>` and "
@@ -2413,6 +2553,7 @@ async def _start_workspace(
     vibecode_review_base: str = "",
     vibecode_reviewer_ids: Optional[list[str]] = None,
     launch_mode: str = "user",
+    attachments: Optional[list[dict]] = None,
 ) -> OpenClawClient:
     """
     Register a workspace in memory, create its queue, and start the background task.
@@ -2479,6 +2620,10 @@ async def _start_workspace(
         # Fail-CLOSED for unrecognized non-empty values (a bad/typo signal → restricted);
         # absent callers still get the param default "user" (legacy-compatible).
         "launch_mode": launch_mode if launch_mode in ("user", "auto") else "auto",
+        # The user's raw attachment refs. _prepend_attachments already described
+        # them in the brief; this keeps the refs themselves so image attachments
+        # can be sent to the model as real multimodal parts rather than a filename.
+        "attachments": attachments or [],
         # Two-mode tracking
         "mode": config.mode,
         "allowed_capabilities": config.allowed_capabilities,
@@ -2582,6 +2727,7 @@ async def launch_workspace_internal(
         live_web=live_web,
         interactive_context=interactive_context,
         uniform_model=uniform_model,
+        attachments=attachments or [],
     )
 
     try:
@@ -2660,7 +2806,7 @@ async def launch_workspace(
     if agent_id == "qwen3":
         agent_id = "cloud-ollama"
     if agent_id not in ("main", "kimi", "kimi-code", "claude", "nvidia-kimi", "local",
-                        "cloud-ollama", "gpt-oss", "orchestrated"):
+                        "cloud-ollama", "gpt-oss", "orchestrated", "agent-native"):
         logger.warning(
             "workspace launch: unknown agent_id %r — falling back to local Ollama", agent_id,
         )
@@ -3126,11 +3272,20 @@ _ARTIFACT_MIME = {
     "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "zip": "application/zip", "tar": "application/x-tar", "gz": "application/gzip",
+    # A connector that renders video (ComfyUI's SaveVideo/SaveWEBM) produced files that fell
+    # through to octet-stream and, worse, to is_binary=False — so the frontend tried to read
+    # a megabyte of h264 as text.
+    "mp4": "video/mp4", "m4v": "video/mp4", "webm": "video/webm", "mov": "video/quicktime",
+    "mkv": "video/x-matroska", "ogv": "video/ogg",
+    "mp3": "audio/mpeg", "wav": "audio/wav", "ogg": "audio/ogg", "m4a": "audio/mp4",
+    "flac": "audio/flac",
 }
 _ARTIFACT_CATEGORY = {
     "html": "html", "htm": "html", "pdf": "pdf",
     "png": "image", "jpg": "image", "jpeg": "image", "gif": "image", "webp": "image",
     "bmp": "image", "ico": "image", "tiff": "image", "svg": "image",
+    "mp4": "video", "m4v": "video", "webm": "video", "mov": "video", "mkv": "video", "ogv": "video",
+    "mp3": "audio", "wav": "audio", "ogg": "audio", "m4a": "audio", "flac": "audio",
     "md": "markdown", "markdown": "markdown", "txt": "text", "log": "text",
     "csv": "data", "tsv": "data", "json": "data", "yaml": "data", "yml": "data", "xml": "data",
     "docx": "office", "pptx": "office", "xlsx": "office", "doc": "office", "ppt": "office", "xls": "office",
@@ -3140,12 +3295,13 @@ _ARTIFACT_SECRET_HINTS = (".env", "credential", "secret", ".key", ".pem", "id_rs
 
 
 def _artifact_meta(path) -> dict:
-    """Classify an artifact by filename: category (html/pdf/image/markdown/text/data/office/archive/
-    unknown), mime, and whether its stored content is base64 (binary). svg is an image but TEXT."""
+    """Classify an artifact by filename: category (html/pdf/image/video/audio/markdown/text/data/
+    office/archive/unknown), mime, and whether its stored content is base64 (binary). svg is an
+    image but TEXT."""
     p = (path or "")
     ext = p.rsplit(".", 1)[-1].lower() if "." in p else ""
     category = _ARTIFACT_CATEGORY.get(ext, "unknown")
-    is_binary = category in ("image", "pdf", "office", "archive") and ext != "svg"
+    is_binary = category in ("image", "video", "audio", "pdf", "office", "archive") and ext != "svg"
     return {"category": category, "mime": _ARTIFACT_MIME.get(ext, "application/octet-stream"),
             "is_binary": is_binary, "ext": ext}
 
@@ -3315,6 +3471,57 @@ async def download_artifact_file(
         content=data, media_type="application/octet-stream",
         headers={"Content-Disposition": f'attachment; filename="{fname}"', "X-Content-Type-Options": "nosniff"},
     )
+
+
+@workspace_router.post("/artifact-mcp")
+async def artifact_mcp(request: Request, current_user: dict = Depends(get_current_user_optimized)):
+    """The brokered file-delivery door for sidecar engines. See `orchestration.artifact_mcp`.
+
+    An auto-launched sidecar runs with ``Write`` withheld, so this is the only way it
+    can hand a finished file back. The run it writes to comes from a header Harvis
+    wrote at launch — never from the tool arguments — and is then checked against the
+    caller's own token, so a leaked token still cannot reach another user's run.
+    """
+    raw = await request.body()
+    if len(raw) > _artifact_mcp.MAX_FILE_BYTES + 64 * 1024:
+        return JSONResponse(
+            _artifact_mcp.error_response(None, _artifact_mcp.INVALID_REQUEST,
+                                         "the request body is too large"),
+            status_code=413)
+    try:
+        message = json.loads(raw or b"{}")
+    except ValueError:
+        return JSONResponse(
+            _artifact_mcp.error_response(None, _artifact_mcp.PARSE_ERROR, "invalid JSON"),
+            status_code=400)
+
+    pool = getattr(request.app.state, "pg_pool", None)
+    workspace_id = _artifact_mcp.injected_workspace_id(
+        request.headers.get(_artifact_mcp.CONTEXT_HEADER))
+    if workspace_id and pool is not None:
+        async with pool.acquire() as conn:
+            owner = await conn.fetchval(
+                "SELECT user_id FROM workspace_runs WHERE id = $1", workspace_id)
+        if owner is None or owner != current_user.get("id"):
+            # Not something the model can fix, and naming the mismatch would confirm a
+            # run id it should never have held. As far as it is told, it has no run.
+            workspace_id = None
+
+    try:
+        response = await _artifact_mcp.handle_jsonrpc(
+            message, pool=pool, workspace_id=workspace_id, save_artifact=_db_save_artifact)
+    except Exception:
+        logger.exception("artifact mcp request failed")
+        rid = message.get("id") if isinstance(message, dict) else None
+        return JSONResponse(
+            _artifact_mcp.error_response(rid, _artifact_mcp.INTERNAL_ERROR, "the request failed"),
+            status_code=500)
+
+    if response is None:
+        # A notification gets 202 and no body — what an MCP client over HTTP expects
+        # for a message it is not waiting on.
+        return JSONResponse(None, status_code=202)
+    return JSONResponse(response)
 
 
 @workspace_router.get("/artifacts")
@@ -4293,6 +4500,7 @@ async def start_vibecode_turn(
             engine_key=_engine_key,
             engine_auth_mode=_engine_auth_mode,
             vibecode_persona_engine="hermes-native" if _use_hermes else "",
+            attachments=req.attachments or [],
         )
 
     logger.info(
@@ -5465,6 +5673,60 @@ async def get_active_workspace(
     except Exception as exc:
         logger.error("DB: failed to fetch active workspace: %s", exc)
         return {"active": None}
+
+
+@workspace_router.get("/active-runs")
+async def get_active_runs(
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """Every workspace run still live for this user, as ``{id, session_id}``.
+
+    The sidebar polls this so a chat whose agent is still working keeps its spinner
+    while the user reads a different chat. ``/active`` cannot serve that: it returns
+    at most ONE run, and it marks every candidate it walks past as orphaned on the
+    way. Polling that endpoint would quietly kill the very runs this is meant to
+    report, so this one is strictly read-only.
+
+    ``session_id`` IS the chat id -- that is the join the caller needs.
+
+    A row with no entry in ``_workspaces`` is a leftover from a backend restart, not a
+    live run; it is dropped here so the sidebar stops spinning on it. Writing that fact
+    back to the DB stays ``/active``'s job -- a poll should not mutate.
+    """
+    pool = getattr(request.app.state, "pg_pool", None)
+    if pool is None:
+        return {"runs": []}
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, session_id
+                FROM workspace_runs
+                WHERE user_id = $1
+                  AND status = 'running'
+                ORDER BY started_at DESC
+                LIMIT 50
+                """,
+                current_user["id"],
+            )
+    except Exception as exc:
+        logger.error("DB: failed to fetch active runs: %s", exc)
+        return {"runs": []}
+    # `session_id` is the OWUI chat id ONLY when the request carried one; the bridge
+    # falls back to a synthetic `owui-<workspace_id>` (and Discord launches use
+    # `discord-…`). Those are not chats the sidebar can key on, and marking them would
+    # write rows into its localStorage that no chat will ever come along and clear.
+    synthetic = ("owui-", "discord-", "sess-")
+    return {
+        "runs": [
+            {"id": r["id"], "session_id": r["session_id"]}
+            for r in rows
+            if r["id"] in _workspaces
+            and r["session_id"]
+            and not r["session_id"].startswith(synthetic)
+        ]
+    }
 
 
 @workspace_router.get("/active-discord")

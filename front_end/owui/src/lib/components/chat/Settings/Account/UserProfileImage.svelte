@@ -82,7 +82,7 @@
 <div class="flex flex-col self-start group">
 	<div class="self-center flex">
 		<button
-			class="relative rounded-full dark:bg-gray-700"
+			class="relative rounded-lg dark:bg-gray-700"
 			type="button"
 			on:click={() => {
 				profileImageInputElement.click();
@@ -95,7 +95,7 @@
 			/>
 
 			<div class="absolute bottom-0 right-0 opacity-0 group-hover:opacity-100 transition">
-				<div class="p-1 rounded-full bg-white text-black border-gray-100 shadow">
+				<div class="p-1 rounded-lg bg-white text-black border-gray-100 shadow">
 					<svg
 						xmlns="http://www.w3.org/2000/svg"
 						viewBox="0 0 20 20"

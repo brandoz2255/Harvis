@@ -122,11 +122,25 @@ def build_config(onboarding: bool = False) -> dict:
             # the deploy flips this env once a local provider (ComfyUI/A1111) is
             # confirmed ready. Gates POST /api/harvis/image/generate too.
             "enable_image_generation": _env_bool("HARVIS_OWUI_IMAGE_GENERATION", False),
+            # "Attach Knowledge" in the chat + menu. Parked with CAD: the
+            # knowledge collections behind it are not part of the shipping
+            # story yet, so the row is hidden rather than removed — the picker
+            # component and its routes stay in the tree and this flag brings
+            # them back. The `#` command picker is unaffected.
+            "enable_knowledge_attach": _env_bool("HARVIS_OWUI_KNOWLEDGE_ATTACH", False),
+            # The sidebar footer's "More" popover. Its three entries are Agent
+            # Studio, Neural Map (both still carrying `wip` chips) and Model
+            # Comparison — internal surfaces, not part of what a deployed user
+            # should be handed. Hidden rather than deleted: SidebarMore.svelte
+            # and its routes stay in the tree and this flag brings them back.
+            "enable_sidebar_more": _env_bool("HARVIS_OWUI_SIDEBAR_MORE", False),
             "enable_admin_export": False,
             "enable_admin_chat_access": False,
             "enable_community_sharing": False,
             "enable_autocomplete_generation": False,
-            "enable_message_rating": False,
+            # 👍/👎 under a reply. Off while the endpoints behind it 404'd; the
+            # evaluations facade backs them now (owui_compat/evaluations.py).
+            "enable_message_rating": True,
             "enable_direct_connections": False,
             # Memories / Personalization tab — not wired in the Harvis facade yet.
             "enable_memories": False,
@@ -157,6 +171,26 @@ def build_config(onboarding: bool = False) -> dict:
             # SESSION's runner container (never the host). Default OFF pending the
             # user's explicit enable (stop-gate). Backend WS enforces the same flag.
             "enable_harvis_build_shell": _env_bool("HARVIS_BUILD_SHELL", False),
+            # ── surfaces the facade does not back yet ──────────────────
+            # Every one of these panes is inherited OWUI markup whose endpoints
+            # return 404 here (verified against the live route table). They are
+            # flagged off rather than deleted so the pages stay in the tree and
+            # a single flag re-enables each one the day its routes land.
+            #
+            # Admin Panel: only Evaluations is backed (owui_compat/evaluations.py),
+            # so /admin redirects there while these stay off.
+            #   Users      → /api/v1/users/, /api/v1/groups/*, /api/v1/auths/add
+            #   Analytics  → /api/v1/analytics/*  (nothing implemented)
+            #   Functions  → list 200s, but create/export/toggle/delete 404
+            #   Settings   → 11 of 13 tabs unbacked (Audio and Evaluations aside)
+            "enable_admin_users": _env_bool("HARVIS_OWUI_ADMIN_USERS", False),
+            "enable_admin_analytics": _env_bool("HARVIS_OWUI_ADMIN_ANALYTICS", False),
+            "enable_admin_functions": _env_bool("HARVIS_OWUI_ADMIN_FUNCTIONS", False),
+            "enable_admin_settings": _env_bool("HARVIS_OWUI_ADMIN_SETTINGS", False),
+            # Workspace tabs. Knowledge, Skills and Tools are backed; these two
+            # are not (/api/v1/models/* and /api/v1/prompts/* both 404).
+            "enable_workspace_models": _env_bool("HARVIS_OWUI_WORKSPACE_MODELS", False),
+            "enable_workspace_prompts": _env_bool("HARVIS_OWUI_WORKSPACE_PROMPTS", False),
             "enable_version_update_check": False,
             "enable_google_drive_integration": False,
             "enable_onedrive_integration": False,

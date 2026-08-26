@@ -125,7 +125,7 @@
 		</div>
 	{:else}
 		<div
-			class="py-1 flex dark:text-gray-100 bg-white dark:bg-gray-850 border border-gray-100 dark:border-gray-800 w-72 rounded-full shadow-xl"
+			class="py-1 flex dark:text-gray-100 bg-white dark:bg-gray-850 border border-gray-100 dark:border-gray-800 w-72 rounded-lg shadow-xl"
 		>
 			<input
 				type="text"
@@ -146,7 +146,7 @@
 					aria-label={$i18n.t('Submit question')}
 					class="{floatingInputValue !== ''
 						? 'bg-black text-white hover:bg-gray-900 dark:bg-white dark:text-black dark:hover:bg-gray-100 '
-						: 'text-white bg-gray-200 dark:text-gray-900 dark:bg-gray-700 disabled'} transition rounded-full p-1.5 m-0.5 self-center"
+						: 'text-white bg-gray-200 dark:text-gray-900 dark:bg-gray-700 disabled'} transition rounded-lg p-1.5 m-0.5 self-center"
 					on:click={() => {
 						actionHandler(selectedAction?.id);
 					}}

@@ -92,7 +92,7 @@
 			{#each hiddenCards as c (c.key)}
 				<button
 					type="button"
-					class="text-[11px] px-2 py-0.5 rounded-full border border-gray-200 dark:border-gray-700 text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition"
+					class="text-[11px] px-2 py-0.5 rounded-md border border-gray-200 dark:border-gray-700 text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition"
 					on:click={() => show(c.key)}>+ {$i18n.t(c.label)}</button
 				>
 			{/each}

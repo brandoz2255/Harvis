@@ -25,7 +25,11 @@ export const NORM_META: Record<NormStatus, { label: string; dot: string; text: s
 export const ENGINE_READINESS_KEY: Record<string, string> = {
 	'claude-code': 'claude-code',
 	'codex-app': 'codex',
-	'kimi-code': 'kimi-code',
+	// The merged Kimi tile reads its status from the MEMBERSHIP variant's engine row — that's the
+	// one Build actually runs. The platform (Moonshot key) variant has no readiness signal at all
+	// today, so a platform-only user sees "Needs setup", exactly as the old separate tile did.
+	kimi: 'kimi-code',
+	opencode: 'opencode',
 	openclaw: 'openclaw',
 	'hermes-agent': 'hermes-agent'
 };
@@ -102,13 +106,14 @@ const GROUP_OF: Record<string, GroupKey> = {
 	openclaw: 'engines',
 	'claude-code': 'engines',
 	'codex-app': 'engines',
-	'kimi-code': 'engines',
+	kimi: 'engines',
 	'hermes-agent': 'engines',
 	ollama: 'models',
 	'groq-api': 'models',
 	'cerebras-api': 'models',
 	'gemini-api': 'models',
 	'nvidia-api': 'models',
+	'openrouter-api': 'models',
 	'mistral-api': 'models',
 	github: 'repos',
 	mcp: 'tools',
@@ -161,18 +166,20 @@ const SECTION_OF: Record<string, SectionKey> = {
 	openclaw: 'agent_engines',
 	'claude-code': 'agent_engines',
 	'codex-app': 'agent_engines',
-	// Kimi Code EXECUTES (the Claude Code sidecar drives its tool loop), so it belongs with the
-	// engines — unlike the 'kimi-api' tile below, which is only a chat/model credential.
-	'kimi-code': 'agent_engines',
+	// One Kimi tile, homed with the engines: in membership mode it EXECUTES (the Claude Code
+	// sidecar drives its tool loop). The platform-key mode is a cloud credential, but splitting
+	// the brand across two sections is what made the two old tiles read as duplicates.
+	kimi: 'agent_engines',
 	'hermes-agent': 'agent_engines',
 	'anthropic-api': 'cloud_apis',
 	'openai-api': 'cloud_apis',
-	'kimi-api': 'cloud_apis',
-	// Free-tier BYO-key chat providers (see free_providers.py — ids must stay in sync).
+	// Free-tier BYO-key chat providers. These ids must stay in sync with free_providers.py —
+	// a card whose id drifts from its backend row still renders, but its status never resolves.
 	'groq-api': 'cloud_apis',
 	'cerebras-api': 'cloud_apis',
 	'gemini-api': 'cloud_apis',
 	'nvidia-api': 'cloud_apis',
+	'openrouter-api': 'cloud_apis',
 	'mistral-api': 'cloud_apis',
 	mcp: 'mcp_servers',
 	ssh: 'ssh_remote'
@@ -180,6 +187,32 @@ const SECTION_OF: Record<string, SectionKey> = {
 
 export function sectionOf(def: IntegrationDefinition): SectionKey {
 	return SECTION_OF[def.id] ?? 'voice_other';
+}
+
+// ── Icon-tile tint (directory look, 2026-07-29) ───────────────────────────────────────────
+// Keyed by brandKey, biased toward each vendor's own colour so a row is recognizable before
+// the name is read. Vendored logos are full-colour images and sit on the tint unchanged; the
+// inline glyphs inherit the text colour. Kept as static class strings so Tailwind's scanner
+// sees them (a template-built `bg-${hue}-50` would be purged).
+export const TILE_TINT: Record<string, string> = {
+	claude: 'bg-orange-50 dark:bg-orange-500/10 text-orange-600 dark:text-orange-400',
+	openai: 'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
+	kimi: 'bg-purple-50 dark:bg-purple-500/10 text-purple-600 dark:text-purple-400',
+	openclaw: 'bg-blue-50 dark:bg-blue-500/10 text-blue-600 dark:text-blue-400',
+	hermes: 'bg-violet-50 dark:bg-violet-500/10 text-violet-600 dark:text-violet-400',
+	opencode: 'bg-cyan-50 dark:bg-cyan-500/10 text-cyan-600 dark:text-cyan-400',
+	ollama: 'bg-slate-100 dark:bg-slate-500/10 text-slate-600 dark:text-slate-300',
+	github: 'bg-gray-100 dark:bg-gray-500/10 text-gray-700 dark:text-gray-300',
+	mcp: 'bg-amber-50 dark:bg-amber-500/10 text-amber-600 dark:text-amber-400',
+	discord: 'bg-indigo-50 dark:bg-indigo-500/10 text-indigo-600 dark:text-indigo-400',
+	ssh: 'bg-teal-50 dark:bg-teal-500/10 text-teal-600 dark:text-teal-400',
+	pack: 'bg-rose-50 dark:bg-rose-500/10 text-rose-600 dark:text-rose-400'
+};
+
+export const TILE_TINT_FALLBACK = 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300';
+
+export function tileTint(def: IntegrationDefinition): string {
+	return TILE_TINT[def.brandKey ?? ''] ?? TILE_TINT_FALLBACK;
 }
 
 // ── Connect vs Default ───────────────────────────────────────────────────────────────────

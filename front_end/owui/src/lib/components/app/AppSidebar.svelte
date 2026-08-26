@@ -20,7 +20,7 @@
 		<Tooltip content="Home" placement="right">
 			<button
 				aria-label="Home"
-				class=" cursor-pointer {selected === 'home' ? 'rounded-2xl' : 'rounded-full'}"
+				class=" cursor-pointer {selected === 'home' ? 'rounded-2xl' : 'rounded-lg'}"
 				on:click={() => {
 					selected = 'home';
 

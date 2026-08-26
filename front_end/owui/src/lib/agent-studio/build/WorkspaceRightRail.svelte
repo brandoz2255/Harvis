@@ -294,7 +294,7 @@
 			{#each hiddenSections as section (section.key)}
 				<button
 					type="button"
-					class="px-2 py-0.5 rounded-full text-[10px] text-gray-500 border border-gray-100 dark:border-gray-850 hover:bg-gray-100 dark:hover:bg-gray-850 hover:text-gray-700 dark:hover:text-gray-200 transition"
+					class="px-2 py-0.5 rounded-md text-[10px] text-gray-500 border border-gray-100 dark:border-gray-850 hover:bg-gray-100 dark:hover:bg-gray-850 hover:text-gray-700 dark:hover:text-gray-200 transition"
 					on:click={() => restore(section.key)}>+ {section.title()}</button
 				>
 			{/each}

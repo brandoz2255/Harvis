@@ -74,7 +74,7 @@
 		<span class="ml-auto flex items-center gap-1">
 			{#if ports.length > 0}
 				<span
-					class="text-[10px] px-1.5 py-0.5 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400"
+					class="text-[10px] px-1.5 py-0.5 rounded-md bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400"
 				>
 					{ports.length}
 				</span>

@@ -178,7 +178,7 @@
 			>
 				<div class="mb-1 flex items-center gap-1.5">
 					<span
-						class="shrink-0 rounded-full border px-1.5 py-px text-[10px] uppercase tracking-wide {b.role ===
+						class="shrink-0 rounded-md border px-1.5 py-px text-[10px] uppercase tracking-wide {b.role ===
 						'reviewer'
 							? 'border-amber-500/30 text-amber-400'
 							: 'border-gray-500/30 text-gray-400'}">{b.role}</span
@@ -188,7 +188,7 @@
 					{/if}
 					{#if b.verdict}
 						<span
-							class="shrink-0 rounded-full px-1.5 py-px text-[9px] uppercase tracking-wide font-bold {b.verdict ===
+							class="shrink-0 rounded-md px-1.5 py-px text-[9px] uppercase tracking-wide font-bold {b.verdict ===
 							'approved'
 								? 'bg-emerald-500/15 text-emerald-400'
 								: b.verdict === 'comment'
@@ -207,7 +207,7 @@
 							href={b.prUrl}
 							target="_blank"
 							rel="noopener noreferrer"
-							class="ml-auto shrink-0 rounded-full border border-gray-500/30 px-1.5 py-px text-[10px] text-gray-400 hover:text-gray-300 hover:border-gray-500/50 transition"
+							class="ml-auto shrink-0 rounded-md border border-gray-500/30 px-1.5 py-px text-[10px] text-gray-400 hover:text-gray-300 hover:border-gray-500/50 transition"
 						>{$i18n.t('on GitHub PR')} ↗</a>
 					{/if}
 				</div>
@@ -267,7 +267,7 @@
 				</div>
 			</div>
 		{:else if b.kind === 'artifact'}
-			<div class="inline-flex max-w-full items-center gap-1.5 rounded-full border border-indigo-500/30 bg-indigo-500/10 px-2.5 py-1 text-xs text-indigo-300">
+			<div class="inline-flex max-w-full items-center gap-1.5 rounded-lg border border-indigo-500/30 bg-indigo-500/10 px-2.5 py-1 text-xs text-indigo-300">
 				<span class="shrink-0">◆</span>
 				<span class="truncate" title={b.path}>{b.label}</span>
 			</div>
@@ -281,7 +281,7 @@
 					<span class="shrink-0">⌕</span>
 					<span class="truncate" title={b.query}>{$i18n.t('Searched')}: {b.query}</span>
 					<span
-						class="shrink-0 rounded-full bg-gray-500/20 px-1.5 py-0.5 text-[10px] text-gray-400"
+						class="shrink-0 rounded-md bg-gray-500/20 px-1.5 py-0.5 text-[10px] text-gray-400"
 						title={b.provider}>{b.count}</span
 					>
 				</div>

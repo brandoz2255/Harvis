@@ -147,15 +147,42 @@ def harvis_models_to_owui(native_payload: dict) -> list[dict]:
         name = m.get("name")
         if not name:
             continue
-        out.append(
-            {
-                "id": name,
-                "name": m.get("displayName") or name,
-                "object": "model",
-                "owned_by": m.get("provider") or "harvis",
-                "info": {"meta": {"capabilities": {}}, "params": {}},
-            }
-        )
+        meta: dict = {
+            # capabilities.usage is what makes the chat ASK for token counts:
+            # Chat.svelte only adds `stream_options: {include_usage: true}` when
+            # the model declares it, so without this the composer's usage meter
+            # sits empty for every local model. Declared for all native entries
+            # because model_proxy retries once without the field if an upstream
+            # rejects it — so a server that doesn't know it loses the counts,
+            # never the answer.
+            "capabilities": {"usage": True},
+        }
+        # The window the frontend measures a conversation against. Only set when the
+        # backend actually knows it: a missing key leaves the meter on its own default
+        # rather than asserting a size nobody measured.
+        _ctx = m.get("contextLength")
+        if isinstance(_ctx, int) and _ctx > 0:
+            meta["context_length"] = _ctx
+        entry: dict = {
+            "id": name,
+            "name": m.get("displayName") or name,
+            "object": "model",
+            "owned_by": m.get("provider") or "harvis",
+            "info": {"meta": meta, "params": {}},
+        }
+        # A model whose host is down travels with its state rather than being dropped.
+        # `harvis` is our own namespace on the entry: OWUI ignores keys it doesn't know,
+        # and keeping it off `owned_by` means provider routing — which reads `owned_by`
+        # — never sees a value it has no case for.
+        status = m.get("status") or "available"
+        host = m.get("host")
+        if status != "available":
+            reason = m.get("description") or "this model's host is not answering"
+            meta["description"] = reason
+            entry["harvis"] = {"status": status, "host": host, "reason": reason}
+        elif host:
+            entry["harvis"] = {"status": "available", "host": host}
+        out.append(entry)
     return out
 
 

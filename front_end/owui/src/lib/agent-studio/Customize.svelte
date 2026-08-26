@@ -128,7 +128,7 @@
 		] as chip (chip.id)}
 			<button
 				type="button"
-				class="text-[11px] px-2.5 py-1 rounded-full border border-gray-200 dark:border-gray-800 text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-100 hover:border-gray-300 dark:hover:border-gray-700 transition"
+				class="text-[11px] px-2.5 py-1 rounded-lg border border-gray-200 dark:border-gray-800 text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-100 hover:border-gray-300 dark:hover:border-gray-700 transition"
 				on:click={() => document.getElementById(chip.id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
 				>{chip.label}</button
 			>
@@ -227,7 +227,7 @@
 				<div class="flex flex-wrap gap-1.5">
 					{#each poolModels as m (m)}
 						<span
-							class="inline-flex items-center gap-1.5 rounded-full border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-950 pl-3 pr-1.5 py-1 text-xs text-gray-700 dark:text-gray-200"
+							class="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-950 pl-3 pr-1.5 py-1 text-xs text-gray-700 dark:text-gray-200"
 						>
 							<code class="font-mono">{m}</code>
 							<button

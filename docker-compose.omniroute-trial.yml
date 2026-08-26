@@ -1,0 +1,82 @@
+# OmniRoute — LOCAL TRIAL ONLY. Not part of the default service set, never referenced by
+# docker-compose.yaml, never pulled by install.sh. Delete this file and the volume to remove
+# every trace.
+#
+#   docker compose -f docker-compose.omniroute-trial.yml --env-file .env.omniroute-trial up -d
+#   docker compose -f docker-compose.omniroute-trial.yml --env-file .env.omniroute-trial down -v
+#
+# WRITTEN FROM SCRATCH, NOT ADAPTED FROM UPSTREAM. Upstream's own docker-compose.yml offers a
+# `cli` profile that bind-mounts /var/run/docker.sock (host root inside the container) and a
+# `host` profile that bind-mounts ~/.claude, ~/.codex and ~/.cursor read-write. Neither is
+# acceptable here, so none of their compose is reused. See docs/research/2026-07-30-omniroute.md §7.
+#
+# Hardening applied, and why each one is here:
+#   • image pinned to a digest — the tag moves; this is the 2.63 GB build measured 2026-07-31
+#   • ports bound to 127.0.0.1 — the dashboard is NOT exposed on the LAN
+#   • STORAGE_ENCRYPTION_KEY + API_KEY_SECRET both set — without them OmniRoute writes every
+#     provider key, access token and refresh token to SQLite as CLEARTEXT (passthrough mode)
+#   • named volume, never ./data — a host bind mount makes SQLite pathologically slow and
+#     lock-prone over the WSL2 9p bridge on Windows
+#   • REDIS_URL explicitly empty — upstream defaults it to redis://redis:6379, and pointing at a
+#     Redis that isn't running makes ioredis flood the log. Empty selects the in-memory limiter.
+#   • no Redis / Qdrant / Bifrost / CLIProxyAPI sidecars — all optional, none needed
+#   • NOT attached to openclaw-internal — that network is `internal: true` and OmniRoute needs
+#     egress to reach provider endpoints. It goes on the shared network only.
+#
+# DO NOT enable any `web-cookie` provider (chatgpt-web, gemini-web, grok-web, perplexity-web and
+# 27 others) or anything in OmniRoute's own docs/reference/FREE_TIERS.md "ToS attention" table.
+# Those replay a consumer subscription session as an API and the realistic outcome is a banned
+# personal account, not a rate-limit warning.
+
+# Its own Compose project. Without this the trial inherits the `harvis` project name from the
+# directory, every command warns about 28 "orphan containers", and a `down --remove-orphans`
+# here would tear down the entire main stack.
+name: omniroute-trial
+
+services:
+  omniroute-trial:
+    image: diegosouzapw/omniroute@sha256:92c768c56e2de32c51a0621ef182835018b00b288c9bb235c5c5e4514658c1a1
+    container_name: omniroute-trial
+    restart: unless-stopped
+    stop_grace_period: 40s
+    ports:
+      - "127.0.0.1:20128:20128" # dashboard — localhost only
+      - "127.0.0.1:20129:20129" # OpenAI-compatible API — localhost only
+    environment:
+      DATA_DIR: /app/data
+      DASHBOARD_PORT: "20128"
+      PORT: "20128"
+      API_PORT: "20129"
+      API_HOST: 0.0.0.0
+      LIVE_WS_PORT: "20132"
+      LIVE_WS_HOST: 0.0.0.0
+      LIVE_WS_ALLOWED_ORIGINS: http://localhost:20128,http://127.0.0.1:20128
+      REDIS_URL: "" # in-memory rate limiter; see note above
+      STORAGE_ENCRYPTION_KEY_VERSION: v1
+      DISABLE_SQLITE_AUTO_BACKUP: "false"
+      JWT_SECRET: ${OMNIROUTE_JWT_SECRET:?set in .env.omniroute-trial}
+      API_KEY_SECRET: ${OMNIROUTE_API_KEY_SECRET:?set in .env.omniroute-trial}
+      STORAGE_ENCRYPTION_KEY: ${OMNIROUTE_STORAGE_ENCRYPTION_KEY:?set in .env.omniroute-trial}
+      INITIAL_PASSWORD: ${OMNIROUTE_INITIAL_PASSWORD:?set in .env.omniroute-trial}
+    volumes:
+      - omniroute-trial-data:/app/data
+    networks:
+      - ollama-n8n-network
+    healthcheck:
+      test: ["CMD", "node", "healthcheck.mjs"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "1.5"
+
+volumes:
+  omniroute-trial-data: {}
+
+networks:
+  ollama-n8n-network:
+    external: true

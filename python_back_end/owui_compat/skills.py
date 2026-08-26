@@ -13,13 +13,157 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
 import uuid
+from pathlib import Path
 from typing import Callable, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
+
+# Bundled filesystem skills that seed into owui_skills with a server-side
+# 'supported' verdict (never forgeable via CRUD). Paths are relative to the
+# repo skills/Harvis tree (also synced into openclaw/skills by the pipeline).
+_BUNDLED_SKILL_SPECS = (
+    {
+        "name": "harvis-build",
+        "relpath": "harvis-build/SKILL.md",
+        "emoji": "🛠️",
+        "description": (
+            "Default Harvis Build / Vibe Code coding skill — str_replace discipline, "
+            "screenshot_preview loop, lane rules."
+        ),
+    },
+)
+
+
+def _skills_harvis_root() -> Path:
+    """Resolve skills/Harvis — env override, then walk up from this file."""
+    override = (os.getenv("HARVIS_SKILLS_DIR") or "").strip()
+    if override:
+        return Path(override)
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        candidate = parent / "skills" / "Harvis"
+        if candidate.is_dir():
+            return candidate
+    return here.parents[2] / "skills" / "Harvis"
+
+
+def _parse_skill_md(raw: str) -> tuple[str, str, str]:
+    """Return (description, body_without_frontmatter, emoji) from a SKILL.md."""
+    description = ""
+    emoji = ""
+    body = raw
+    if raw.startswith("---"):
+        end = raw.find("\n---", 3)
+        if end != -1:
+            fm = raw[3:end]
+            body = raw[end + 4 :].lstrip("\n")
+            for line in fm.splitlines():
+                if line.startswith("description:"):
+                    # may be multiline YAML `>` — take remainder of block naively
+                    rest = line[len("description:") :].strip()
+                    if rest and rest not in (">", "|"):
+                        description = rest.strip("'\"")
+                if "emoji" in line and ":" in line:
+                    m = re.search(r'["\']([^"\']+)["\']', line)
+                    if m:
+                        emoji = m.group(1)
+            if not description:
+                # fold `description: >` block
+                collecting = False
+                parts: list[str] = []
+                for line in fm.splitlines():
+                    if line.startswith("description:"):
+                        collecting = True
+                        cont = line[len("description:") :].strip()
+                        if cont not in (">", "|", ""):
+                            parts.append(cont.strip("'\""))
+                        continue
+                    if collecting:
+                        if line and not line[0].isspace() and not line.startswith(" "):
+                            break
+                        parts.append(line.strip())
+                description = " ".join(p for p in parts if p).strip()
+    return description, body.strip(), emoji
+
+
+def load_bundled_skill_body(name: str = "harvis-build") -> str | None:
+    """Load markdown body (no frontmatter) for a bundled skill, or None."""
+    spec = next((s for s in _BUNDLED_SKILL_SPECS if s["name"] == name), None)
+    if not spec:
+        return None
+    path = _skills_harvis_root() / spec["relpath"]
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    _desc, body, _emoji = _parse_skill_md(raw)
+    return body or None
+
+
+async def seed_bundled_skills_if_missing(pool, user_id: int) -> list[str]:
+    """Insert bundled SKILL.md rows for ``user_id`` when missing.
+
+    Server-sets ``meta.audit.verdict='supported'`` and ``meta.bundled=true``.
+    Returns names that were newly inserted. Never raises.
+    """
+    if pool is None or user_id is None:
+        return []
+    inserted: list[str] = []
+    root = _skills_harvis_root()
+    for spec in _BUNDLED_SKILL_SPECS:
+        path = root / spec["relpath"]
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError:
+            logger.warning("bundled skill missing on disk: %s", path)
+            continue
+        desc_fm, body, emoji_fm = _parse_skill_md(raw)
+        description = desc_fm or spec.get("description") or ""
+        emoji = emoji_fm or spec.get("emoji")
+        meta = {
+            "bundled": True,
+            "source": "filesystem",
+            "audit": {
+                "verdict": "supported",
+                "by": "harvis-bundled",
+                "note": "Seeded from skills/Harvis; re-audit after body edits.",
+            },
+        }
+        sid = str(uuid.uuid4())
+        try:
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT id FROM owui_skills WHERE user_id=$1 AND name=$2",
+                    int(user_id),
+                    spec["name"],
+                )
+                if row:
+                    continue
+                await conn.execute(
+                    "INSERT INTO owui_skills "
+                    "(id, user_id, name, description, content, emoji, meta, enabled) "
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, TRUE)",
+                    sid,
+                    int(user_id),
+                    spec["name"],
+                    description,
+                    body,
+                    emoji,
+                    json.dumps(meta),
+                )
+            inserted.append(spec["name"])
+        except Exception:
+            logger.exception(
+                "seed_bundled_skills failed for user=%s skill=%s", user_id, spec["name"]
+            )
+    return inserted
+
 
 CREATE_OWUI_SKILLS_SQL = """
 CREATE TABLE IF NOT EXISTS owui_skills (
@@ -182,6 +326,10 @@ def register_skill_routes(router: APIRouter, get_current_user: Callable) -> None
 
     async def _list(request: Request, user) -> list:
         pool = _pool(request)
+        try:
+            await seed_bundled_skills_if_missing(pool, int(user.id))
+        except Exception:
+            logger.exception("bundled skill seed skipped")
         async with pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT * FROM owui_skills WHERE user_id=$1 ORDER BY updated_at DESC",

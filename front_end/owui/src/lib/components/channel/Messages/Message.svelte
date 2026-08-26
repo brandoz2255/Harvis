@@ -297,7 +297,7 @@
 
 			{#if message?.is_pinned}
 				<div class="flex {showUserProfile ? 'mb-0.5' : 'mt-0.5'}">
-					<div class="ml-8.5 flex items-center gap-1 px-1 rounded-full text-xs">
+					<div class="ml-8.5 flex items-center gap-1 px-1 rounded-lg text-xs">
 						<Pin className="size-3 text-yellow-500 dark:text-yellow-300" />
 						<span class="text-gray-500">{$i18n.t('Pinned')}</span>
 					</div>
@@ -496,7 +496,7 @@
 								<div class="flex space-x-1.5">
 									<button
 										id="close-edit-message-button"
-										class="px-3.5 py-1.5 bg-white dark:bg-gray-900 hover:bg-gray-100 text-gray-800 dark:text-gray-100 transition rounded-3xl"
+										class="px-3.5 py-1.5 bg-white dark:bg-gray-900 hover:bg-gray-100 text-gray-800 dark:text-gray-100 transition rounded-xl"
 										on:click={() => {
 											edit = false;
 											editedContent = null;
@@ -507,7 +507,7 @@
 
 									<button
 										id="confirm-edit-message-button"
-										class="px-3.5 py-1.5 bg-gray-900 dark:bg-white hover:bg-gray-850 text-gray-100 dark:text-gray-800 transition rounded-3xl"
+										class="px-3.5 py-1.5 bg-gray-900 dark:bg-white hover:bg-gray-850 text-gray-100 dark:text-gray-800 transition rounded-xl"
 										on:click={async () => {
 											onEdit(editedContent);
 											edit = false;

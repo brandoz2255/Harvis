@@ -49,14 +49,19 @@
 	export let preview = false;
 	export let collapsed = false;
 
-	export let token;
+	export let token = null;
 	export let lang = '';
 	export let code = '';
 	export let attributes = {};
+	export let done = true;
+	export let filename = '';
+// The artifact panel supplies its own chrome and wants the block flush against the
+// pane edge, so it borrows this block's body without a second header or a card border.
+export let header = true;
+export let flush = false;
 
 	export let className = '';
 	export let editorClassName = '';
-	export let stickyButtonsClassName = 'top-0';
 
 	let localPyodideWorker = null;
 
@@ -364,6 +369,73 @@
 		};
 	};
 
+	const executeJavaScript = async (src) => {
+		result = null;
+		stdout = null;
+		stderr = null;
+		files = null;
+		executing = true;
+
+		const blob = new Blob(
+			[
+				`
+self.console = {
+  log: (...a) => self.postMessage({ type: 'stdout', data: a.map(String).join(' ') }),
+  info: (...a) => self.postMessage({ type: 'stdout', data: a.map(String).join(' ') }),
+  warn: (...a) => self.postMessage({ type: 'stderr', data: a.map(String).join(' ') }),
+  error: (...a) => self.postMessage({ type: 'stderr', data: a.map(String).join(' ') })
+};
+try {
+  const result = (0, eval)(${JSON.stringify(src)});
+  if (result !== undefined) {
+    self.postMessage({ type: 'result', data: typeof result === 'string' ? result : JSON.stringify(result) });
+  }
+} catch (e) {
+  self.postMessage({ type: 'stderr', data: String(e && e.stack ? e.stack : e) });
+}
+self.postMessage({ type: 'done' });
+`
+			],
+			{ type: 'text/javascript' }
+		);
+		const url = URL.createObjectURL(blob);
+		const worker = new Worker(url);
+		const timeoutId = setTimeout(() => {
+			worker.terminate();
+			URL.revokeObjectURL(url);
+			if (executing) {
+				executing = false;
+				stderr = 'Execution Time Limit Exceeded';
+			}
+		}, 15000);
+		worker.onmessage = (event) => {
+			const msg = event.data || {};
+			if (msg.type === 'stdout') stdout = (stdout ? stdout + '\n' : '') + (msg.data || '');
+			if (msg.type === 'stderr') stderr = (stderr ? stderr + '\n' : '') + (msg.data || '');
+			if (msg.type === 'result') result = msg.data;
+			if (msg.type === 'done') {
+				clearTimeout(timeoutId);
+				worker.terminate();
+				URL.revokeObjectURL(url);
+				executing = false;
+			}
+		};
+		worker.onerror = (event) => {
+			stderr = event.message || 'JavaScript worker failed';
+			clearTimeout(timeoutId);
+			worker.terminate();
+			URL.revokeObjectURL(url);
+			executing = false;
+		};
+	};
+
+	const isPythonLang = () =>
+		lang.toLowerCase() === 'python' ||
+		lang.toLowerCase() === 'py' ||
+		(lang === '' && checkPythonCode(code));
+
+	const isJsLang = () => ['javascript', 'js', 'nodejs'].includes(lang.toLowerCase());
+
 	let mermaid = null;
 	const renderMermaid = async (code) => {
 		if (!mermaid) {
@@ -460,7 +532,9 @@
 
 <div>
 	<div
-		class="relative {className} flex flex-col rounded-2xl border border-gray-100/30 dark:border-gray-850/30 my-0.5"
+		class="relative {className} flex flex-col {flush
+			? ''
+			: 'rounded-lg border border-gray-200/80 dark:border-white/10 my-1'} overflow-hidden lms-codeblock"
 		dir="ltr"
 	>
 		{#if canvasReady}
@@ -485,45 +559,50 @@
 				</div>
 			{/if}
 		{:else}
+			{#if header}
 			<div
-				class="sticky {stickyButtonsClassName} left-0 right-0 py-1.5 px-3.5 gap-2 flex items-center justify-end w-full z-10 text-xs text-black dark:text-white bg-white dark:bg-black rounded-t-2xl"
+				class="py-1 px-3 gap-2 flex items-center justify-end w-full z-10 text-[11px] tracking-wide text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-[#1a1a1a] border-b border-gray-200/80 dark:border-white/10"
 			>
-				<div class="flex-1 truncate">
+				<div class="flex-1 truncate font-mono {filename ? 'normal-case' : 'uppercase'}">
 					<Tooltip content={lang} placement="top-start">
-						<span class=" truncate text-ellipsis">
-							{lang}
+						<span class="truncate text-ellipsis">
+							{filename || lang || 'code'}
 						</span>
 					</Tooltip>
 				</div>
 
 				<div class="flex items-center gap-0.5 shrink-0">
-					<button
-						class="flex gap-1 items-center bg-none border-none transition rounded-md px-1.5 py-0.5 bg-white dark:bg-black"
-						on:click={collapseCodeBlock}
-					>
-						<div class=" -translate-y-[0.5px]">
-							<ChevronUpDown className="size-3" />
-						</div>
+					<!-- The Collapse control is gone by request. The Expand half stays, but only
+					     when something already collapsed the block — the `collapseCodeBlocks`
+					     setting does that on load, and without this there'd be no way back out. -->
+					{#if collapsed}
+						<button
+							class="flex gap-1 items-center bg-none border-none transition rounded px-1.5 py-0.5 hover:text-gray-800 dark:hover:text-gray-100"
+							on:click={collapseCodeBlock}
+						>
+							<div class=" -translate-y-[0.5px]">
+								<ChevronUpDown className="size-3" />
+							</div>
 
-						<div>
-							{collapsed ? $i18n.t('Expand') : $i18n.t('Collapse')}
-						</div>
-					</button>
+							<div>
+								{$i18n.t('Expand')}
+							</div>
+						</button>
+					{/if}
 
-					{#if ($config?.features?.enable_code_execution ?? true) && (lang.toLowerCase() === 'python' || lang.toLowerCase() === 'py' || (lang === '' && checkPythonCode(code)))}
+					{#if ($config?.features?.enable_code_execution ?? true) && (isPythonLang() || isJsLang())}
 						{#if executing}
-							<div
-								class="run-code-button bg-none border-none p-0.5 cursor-not-allowed bg-white dark:bg-black"
-							>
+							<div class="run-code-button bg-none border-none p-0.5 cursor-not-allowed">
 								{$i18n.t('Running')}
 							</div>
 						{:else if run}
 							<button
-								class="flex gap-1 items-center run-code-button bg-none border-none transition rounded-md px-1.5 py-0.5 bg-white dark:bg-black"
+								class="flex gap-1 items-center run-code-button bg-none border-none transition rounded px-1.5 py-0.5 hover:text-gray-800 dark:hover:text-gray-100"
 								on:click={async () => {
 									code = _code;
 									await tick();
-									executePython(code);
+									if (isJsLang()) await executeJavaScript(code);
+									else await executePython(code);
 								}}
 							>
 								<div>
@@ -535,7 +614,7 @@
 
 					{#if save}
 						<button
-							class="save-code-button bg-none border-none transition rounded-md px-1.5 py-0.5 bg-white dark:bg-black"
+							class="save-code-button bg-none border-none transition rounded px-1.5 py-0.5 hover:text-gray-800 dark:hover:text-gray-100"
 							on:click={saveCode}
 						>
 							{saved ? $i18n.t('Saved') : $i18n.t('Save')}
@@ -543,13 +622,13 @@
 					{/if}
 
 					<button
-						class="copy-code-button bg-none border-none transition rounded-md px-1.5 py-0.5 bg-white dark:bg-black"
+						class="copy-code-button bg-none border-none transition rounded px-1.5 py-0.5 hover:text-gray-800 dark:hover:text-gray-100"
 						on:click={copyCode}>{copied ? $i18n.t('Copied') : $i18n.t('Copy')}</button
 					>
 
 					{#if preview && ['html', 'svg'].includes(lang)}
 						<button
-							class="flex gap-1 items-center run-code-button bg-none border-none transition rounded-md px-1.5 py-0.5 bg-white dark:bg-black"
+							class="flex gap-1 items-center run-code-button bg-none border-none transition rounded px-1.5 py-0.5 hover:text-gray-800 dark:hover:text-gray-100"
 							on:click={previewCode}
 						>
 							<div>
@@ -559,16 +638,13 @@
 					{/if}
 				</div>
 			</div>
+			{/if}
 
 			<div
-				class="language-{lang} rounded-t-2xl -mt-8 {editorClassName
+				class="language-{lang} {editorClassName
 					? editorClassName
-					: executing || stdout || stderr || result
-						? ''
-						: 'rounded-b-2xl'} overflow-hidden"
+					: ''} overflow-hidden bg-gray-50 dark:bg-[#1e1e1e]"
 			>
-				<div class=" pt-6.5 bg-white dark:bg-black"></div>
-
 				{#if !collapsed}
 					{#if edit}
 						<CodeEditor
@@ -584,20 +660,16 @@
 						/>
 					{:else}
 						<pre
-							class=" hljs p-4 px-5 overflow-x-auto"
-							style="border-top-left-radius: 0px; border-top-right-radius: 0px; {(executing ||
-								stdout ||
-								stderr ||
-								result) &&
-								'border-bottom-left-radius: 0px; border-bottom-right-radius: 0px;'}"><code
-								class="language-{lang} rounded-t-none whitespace-pre text-sm"
+							class="hljs lms-code-pre p-3.5 px-4 overflow-x-auto mb-0"
+							style="border-radius: 0; background: transparent;"><code
+								class="language-{lang} rounded-none whitespace-pre text-[13px] leading-6"
 								>{@html hljs.highlightAuto(code, hljs.getLanguage(lang)?.aliases).value ||
 									code}</code
-							></pre>
+							>{#if !done}<span class="lms-caret" aria-hidden="true"></span>{/if}</pre>
 					{/if}
 				{:else}
 					<div
-						class="bg-white dark:bg-black dark:text-white rounded-b-2xl! pt-1 pb-2 px-4 flex flex-col gap-2 text-xs"
+						class="bg-gray-50 dark:bg-[#1e1e1e] dark:text-white pt-1 pb-2 px-4 flex flex-col gap-2 text-xs"
 					>
 						<span class="text-gray-500 italic">
 							{$i18n.t('{{COUNT}} hidden lines', {
@@ -616,7 +688,7 @@
 
 				{#if executing || stdout || stderr || result || files}
 					<div
-						class="bg-gray-50 dark:bg-black dark:text-white rounded-b-2xl! pt-2 pb-3 px-3.5 flex flex-col gap-2"
+						class="bg-gray-50 dark:bg-[#161616] dark:text-white border-t border-gray-200/80 dark:border-white/10 pt-2 pb-3 px-3.5 flex flex-col gap-2"
 					>
 						{#if executing}
 							<div class=" ">

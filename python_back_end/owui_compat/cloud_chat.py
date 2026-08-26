@@ -28,6 +28,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from typing import Optional
@@ -66,6 +67,10 @@ def _api_model(facade_id: str) -> str:
 # still appears (via _CLAUDE_META_DEFAULT) so the list is genuinely self-updating — only its price
 # is unknown until added. `max_thinking` > 0 ⇒ the model supports the reasoning-effort control.
 _CLAUDE_META: dict[str, dict] = {
+    # `pin`/`pout` here are the Opus-line rate, not a separately confirmed Opus 5 price. They feed the
+    # cost ESTIMATE only; a wrong number is visibly wrong, whereas leaving them None would silently
+    # blank the meter for the flagship model, which reads as "this model is free".
+    "claude-opus-5":              {"name": "Claude Opus 5",    "ctx": 200000, "pin": 15.0, "pout": 75.0, "max_thinking": 32000},
     "claude-opus-4-8":            {"name": "Claude Opus 4.8",  "ctx": 200000, "pin": 15.0, "pout": 75.0, "max_thinking": 32000},
     "claude-opus-4-7":            {"name": "Claude Opus 4.7",  "ctx": 200000, "pin": 15.0, "pout": 75.0, "max_thinking": 32000},
     "claude-opus-4-6":            {"name": "Claude Opus 4.6",  "ctx": 200000, "pin": 15.0, "pout": 75.0, "max_thinking": 32000},
@@ -80,7 +85,7 @@ _CLAUDE_META: dict[str, dict] = {
 
 # The current-generation flagship 4 — the picker shows ONLY these by default; the rest of the live
 # catalog is revealed by a per-user "show all Claude models" setting. `meta.primary` carries this.
-_CLAUDE_PRIMARY = {"claude-opus-4-8", "claude-sonnet-5", "claude-fable-5", "claude-haiku-4-5-20251001"}
+_CLAUDE_PRIMARY = {"claude-opus-5", "claude-sonnet-5", "claude-fable-5", "claude-haiku-4-5-20251001"}
 _CLAUDE_META_DEFAULT = {"name": None, "ctx": 200000, "pin": None, "pout": None, "max_thinking": 16000}
 
 
@@ -92,8 +97,8 @@ def _claude_spec(model_id: str) -> dict:
 
 # Static FALLBACK id lists — used ONLY when the live /v1/models fetch fails (network down / rate
 # limit) so the picker never goes empty. When the fetch works, the LIVE list is the source of truth.
-_CLAUDE_API_FALLBACK = ["claude-opus-4-8", "claude-sonnet-5", "claude-haiku-4-5-20251001"]
-_CLAUDE_SUB_FALLBACK = ["claude-opus-4-8", "claude-sonnet-5", "claude-fable-5", "claude-haiku-4-5-20251001"]
+_CLAUDE_API_FALLBACK = ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"]
+_CLAUDE_SUB_FALLBACK = ["claude-opus-5", "claude-sonnet-5", "claude-fable-5", "claude-haiku-4-5-20251001"]
 
 _DEFAULT_CLAUDE_MODEL = "anthropic/claude-sonnet-5"
 
@@ -687,6 +692,40 @@ def _retry_without_thinking(payload: dict, resp) -> Optional[dict]:
     return None
 
 
+def _anthropic_openai_usage(u: dict) -> dict:
+    """Anthropic-shaped counts → the OpenAI shape the chat footer reads."""
+    if not u:
+        return {}
+    pt = (int(u.get("input_tokens") or 0) + int(u.get("cache_read_input_tokens") or 0)
+          + int(u.get("cache_creation_input_tokens") or 0))
+    ct = int(u.get("output_tokens") or 0)
+    if not (pt or ct):
+        return {}
+    return {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": pt + ct}
+
+
+def _anthropic_metrics(u: dict, gen_start, gen_end) -> dict:
+    """Same provenance envelope the other lanes emit, for the BYO-key Claude path."""
+    oa = _anthropic_openai_usage(u)
+    if not oa:
+        return {}
+    m: dict = {"engine": "anthropic_messages", "source": "provider",
+               "context_tokens": {"value": oa["prompt_tokens"], "quality": "confirmed",
+                                  "source": "provider", "final": True, "scope": "model_request"}}
+    if oa["completion_tokens"]:
+        m["output_tokens"] = {"value": oa["completion_tokens"], "quality": "confirmed",
+                              "source": "provider", "final": True, "scope": "run"}
+    if gen_start is not None and gen_end is not None and gen_end > gen_start:
+        gen_ms = int((gen_end - gen_start) * 1000)
+        m["generation_ms"] = {"value": gen_ms, "quality": "measured", "source": "harvis",
+                              "final": True, "scope": "model_generation"}
+        if oa["completion_tokens"] and gen_ms > 150:
+            m["tokens_per_sec"] = {"value": round(oa["completion_tokens"] / (gen_ms / 1000.0), 2),
+                                   "quality": "measured", "source": "derived", "final": True,
+                                   "scope": "model_generation"}
+    return m
+
+
 async def _stream_anthropic(headers: dict, payload: dict, model_id: str, owui_body: dict,
                             url: str = ""):
     """Stream the Anthropic SSE and convert to OpenAI chat.completion.chunk SSE.
@@ -694,8 +733,20 @@ async def _stream_anthropic(headers: dict, payload: dict, model_id: str, owui_bo
     base = {"id": f"chatcmpl-{int(time.time())}", "object": "chat.completion.chunk",
             "created": int(time.time()), "model": model_id}
 
-    def _chunk(delta: dict, finish=None) -> bytes:
-        return ("data: " + json.dumps({**base, "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}) + "\n\n").encode()
+    def _chunk(delta: dict, finish=None, usage=None, metrics=None) -> bytes:
+        body = {**base, "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+        if usage:
+            body["usage"] = usage
+        if metrics:
+            body["harvis_metrics"] = metrics
+        return ("data: " + json.dumps(body) + "\n\n").encode()
+
+    # Anthropic reports input tokens once on `message_start` and the running output count
+    # on each `message_delta`; nothing else in the stream carries a count. Anything the
+    # lane does not see here stays absent rather than becoming a zero.
+    a_usage: dict = {}
+    gen_start = None
+    gen_end = None
 
     # Surface reasoning only when this request actually asked for it. Anthropic
     # emits thinking blocks only under `payload["thinking"]`, but Kimi Code's k3
@@ -743,6 +794,14 @@ async def _stream_anthropic(headers: dict, payload: dict, model_id: str, owui_bo
                     except Exception:
                         continue
                     etype = ev.get("type")
+                    if etype == "message_start":
+                        u = ((ev.get("message") or {}).get("usage")) or {}
+                        if isinstance(u, dict):
+                            a_usage.update({k: v for k, v in u.items() if isinstance(v, int)})
+                    elif etype == "message_delta":
+                        u = ev.get("usage") or {}
+                        if isinstance(u, dict):
+                            a_usage.update({k: v for k, v in u.items() if isinstance(v, int)})
                     if etype == "content_block_delta":
                         d = ev.get("delta") or {}
                         if d.get("type") == "text_delta":
@@ -752,6 +811,9 @@ async def _stream_anthropic(headers: dict, payload: dict, model_id: str, owui_bo
                             txt = d.get("text") or ""
                             if txt:
                                 saw_text = True
+                                if gen_start is None:
+                                    gen_start = time.monotonic()
+                                gen_end = time.monotonic()
                                 yield _chunk({"content": txt})
                         elif d.get("type") == "thinking_delta":
                             t = d.get("thinking") or ""
@@ -763,6 +825,9 @@ async def _stream_anthropic(headers: dict, payload: dict, model_id: str, owui_bo
                                 yield _chunk({"content": "<think>"})
                                 think_open = True
                             if t:
+                                if gen_start is None:
+                                    gen_start = time.monotonic()
+                                gen_end = time.monotonic()
                                 yield _chunk({"content": t})
                     elif etype == "message_stop":
                         break
@@ -773,7 +838,11 @@ async def _stream_anthropic(headers: dict, payload: dict, model_id: str, owui_bo
                     logger.info("cloud_chat: %s emitted only a thinking block; "
                                 "surfacing it as the answer", model_id)
                     yield _chunk({"content": "<think>" + "".join(dropped_thinking) + "</think>\n\n"})
-                yield _chunk({}, "stop")
+                yield _chunk(
+                    {}, "stop",
+                    usage=_anthropic_openai_usage(a_usage) or None,
+                    metrics=_anthropic_metrics(a_usage, gen_start, gen_end) or None,
+                )
                 yield b"data: [DONE]\n\n"
     except Exception as exc:
         logger.warning("cloud_chat: claude stream dropped: %s", type(exc).__name__)
@@ -972,6 +1041,27 @@ def _safe_moonshot_error(resp) -> str:
 
 
 # ── Claude CLI path (subscription / oauth_token) ────────────────────────────────────────
+_DETAILS_BLOCK = re.compile(r"<details\b([^>]*)>.*?</details>", re.S | re.I)
+_NAME_ATTR = re.compile(r'name="([^"]*)"', re.I)
+
+
+def _strip_tool_cards(text: str) -> str:
+    """Replace a rendered tool card with a one-line note before replaying it to the CLI.
+
+    `claude -p` takes the whole conversation as one string, so every earlier turn is
+    re-sent on every turn. A tool card carries up to 4000 characters of raw command
+    output the model has already acted on; re-reading all of it each turn is what walked
+    a short chat from ~5k prompt tokens into six figures. The note keeps the fact that a
+    tool ran, which is the part the next turn actually needs.
+    """
+
+    def _note(m):
+        name = _NAME_ATTR.search(m.group(1) or "")
+        return f"[ran {name.group(1)}]" if name else "[tool output omitted]"
+
+    return _DETAILS_BLOCK.sub(_note, text)
+
+
 def _flatten_to_prompt(owui_body: dict) -> str:
     """Render the conversation into a single prompt for `claude -p` (the CLI takes one string)."""
     lines: list[str] = []
@@ -985,135 +1075,471 @@ def _flatten_to_prompt(owui_body: dict) -> str:
         elif role == "user":
             lines.append(f"User: {text}")
         elif role == "assistant":
-            lines.append(f"Assistant: {text}")
+            lines.append(f"Assistant: {_strip_tool_cards(text)}")
     return "\n\n".join(lines).strip() or "Hello"
 
 
+def _attr(v: str) -> str:
+    """Escape a value for an HTML attribute the markdown details extension can read.
+
+    Its attribute regex stops at the first literal quote and the renderer runs the value
+    back through an html-entities decode, so quotes have to ride across as entities.
+    """
+    return (
+        str(v)
+        .replace("&", "&amp;")
+        .replace('"', "&quot;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace("\n", " ")
+    )
+
+
+def _sandbox_files_card(paths: list[str]) -> str:
+    """Render the run's new sandbox files as a card the user can actually read from.
+
+    The old version of this appended a markdown bullet list of container paths, on the
+    theory that the frontend linkified them. It had stopped doing that when the sandbox
+    moved off /tmp, so every path was dead text — and a path is a poor deliverable even
+    when it is clickable, because the file lives in a container the user has no shell on.
+    The card carries the paths as data; the frontend fetches and renders each file.
+    """
+    return (
+        "\n\n<details type=\"sandbox_files\" paths=\""
+        + _attr(json.dumps(list(paths)))
+        + "\">\n\n</details>\n\n"
+    )
+
+
+def _tool_card(name: str, args: dict, result: str, is_error: bool = False) -> str:
+    """Render one tool call as the chat's own collapsed tool card.
+
+    Tool activity used to be spliced into the answer as fenced code, which the chat then
+    lifted back out as an "attached file" card — so asking Claude to say hello produced a
+    `script.sh` card holding an `ls -la` the user never asked for. A `tool_calls` details
+    block is what ToolCallDisplay already renders: named, collapsed, out of the prose.
+    """
+    body = (result or "").strip()
+    if is_error and body:
+        body = "error: " + body
+    if len(body) > 4000:
+        body = body[:4000] + "\n…[truncated]"
+    return (
+        f'\n\n<details type="tool_calls" done="true" name="{_attr(name or "tool")}" '
+        f'arguments="{_attr(json.dumps(args or {}, ensure_ascii=False))}">\n'
+        f"{body}\n</details>\n\n"
+    )
+
+
+class _CliStream:
+    """Turns Claude Code ``stream-json`` lines into the markdown the user should see.
+
+    Assistant text streams straight through. A tool call is held until its result lands so
+    the pair can be emitted as one finished card; whatever is still pending at the end gets
+    flushed without one. The CLI's own token counts are captured on the way past — the lane
+    used to report zeros, which left the chat footer with nothing but a character estimate.
+    """
+
+    def __init__(self) -> None:
+        self._pending: dict[str, tuple[str, dict]] = {}
+        self.usage: dict = {}
+        # A run can finish having emitted only tool cards. Those render collapsed, so the
+        # message reads as an empty bubble unless we notice and say something.
+        self.saw_text = False
+        # Claude Code is an AGENTIC loop: one chat turn is several real API calls, and the
+        # `result` event's usage is the SUM across all of them. Summing that into
+        # prompt_tokens is what made a fresh one-line request report ~100k "context" — it
+        # is the total billed input for the run, not the size of any prompt. The context
+        # the last model call actually saw is the LAST turn's own numbers, so keep the two
+        # apart and label which is which.
+        self.last_turn_usage: dict = {}
+        self.timing: dict = {}
+
+    def _note_usage(self, u) -> None:
+        if isinstance(u, dict) and (u.get("input_tokens") or u.get("output_tokens")):
+            self.usage = u
+
+    def _note_turn_usage(self, u) -> None:
+        """Per-turn snapshot. It repeats on EVERY block of a turn, so overwrite, never add."""
+        if isinstance(u, dict) and (u.get("input_tokens") or u.get("cache_read_input_tokens")):
+            self.last_turn_usage = u
+
+    def feed(self, obj: dict) -> str:
+        etype = obj.get("type")
+        if etype == "assistant":
+            msg = obj.get("message") or {}
+            parts: list[str] = []
+            for block in (msg.get("content") or []):
+                bt = block.get("type")
+                if bt == "text" and block.get("text"):
+                    parts.append(str(block["text"]))
+                    self.saw_text = True
+                elif bt == "tool_use":
+                    name = str(block.get("name") or "tool")
+                    args = block.get("input")
+                    self._pending[str(block.get("id") or name)] = (
+                        name,
+                        args if isinstance(args, dict) else {},
+                    )
+            self._note_usage(msg.get("usage"))
+            self._note_turn_usage(msg.get("usage"))
+            return "".join(parts)
+        if etype == "user":
+            parts = []
+            for block in ((obj.get("message") or {}).get("content") or []):
+                if block.get("type") != "tool_result":
+                    continue
+                name, args = self._pending.pop(
+                    str(block.get("tool_use_id") or ""), ("tool", {})
+                )
+                c = block.get("content")
+                txt = c if isinstance(c, str) else _extract_text(c)
+                parts.append(_tool_card(name, args, txt, bool(block.get("is_error"))))
+            return "".join(parts)
+        if etype == "result":
+            self._note_usage(obj.get("usage"))
+            # The only place the CLI reports how long it was actually TALKING to the model.
+            # Wall-clock includes tool execution, container start and queueing, so a
+            # tok/s computed from it is not a generation rate.
+            self.timing = {
+                k: obj[k]
+                for k in ("duration_ms", "duration_api_ms", "ttft_ms", "num_turns",
+                          "total_cost_usd")
+                if isinstance(obj.get(k), (int, float))
+            }
+        return ""
+
+    def flush(self) -> str:
+        out = "".join(_tool_card(n, a, "") for n, a in self._pending.values())
+        self._pending.clear()
+        return out
+
+    def openai_usage(self) -> dict:
+        """The CLI reports Anthropic-shaped counts; the chat reads OpenAI-shaped ones.
+
+        ``prompt_tokens`` is the context of the FINAL model call — what the user means by
+        "how full is this conversation". The run's total billed input is a different,
+        larger number and is reported separately under ``harvis_metrics``.
+        """
+        ct = int((self.usage or {}).get("output_tokens") or 0)
+        pt = self.context_tokens()
+        if not (pt or ct):
+            return {}
+        return {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": pt + ct}
+
+    def context_tokens(self) -> int:
+        """Everything the last model call had in its window: fresh + cached + newly cached."""
+        u = self.last_turn_usage or self.usage or {}
+        return (
+            int(u.get("input_tokens") or 0)
+            + int(u.get("cache_read_input_tokens") or 0)
+            + int(u.get("cache_creation_input_tokens") or 0)
+        )
+
+    def harvis_metrics(self) -> dict:
+        """Every number the footer may show, each tagged with where it came from.
+
+        The rule this encodes: a value is only ``confirmed`` when the provider reported it.
+        Anything we would have had to guess is simply absent, so the UI can render an em
+        dash rather than a plausible-looking zero.
+        """
+        run = self.usage or {}
+        out = int(run.get("output_tokens") or 0)
+        ctx = self.context_tokens()
+        billed_in = (
+            int(run.get("input_tokens") or 0)
+            + int(run.get("cache_read_input_tokens") or 0)
+            + int(run.get("cache_creation_input_tokens") or 0)
+        )
+        gen_ms = self.timing.get("duration_api_ms")
+
+        m: dict = {"engine": "claude_code_cli", "source": "provider"}
+        if ctx:
+            m["context_tokens"] = {
+                "value": ctx, "quality": "confirmed", "source": "provider",
+                "final": True, "scope": "model_request",
+            }
+        if out:
+            m["output_tokens"] = {
+                "value": out, "quality": "confirmed", "source": "provider",
+                "final": True, "scope": "run",
+            }
+        if billed_in:
+            m["billed_input_tokens"] = {
+                "value": billed_in, "quality": "confirmed", "source": "provider",
+                "final": True, "scope": "run",
+            }
+        if isinstance(gen_ms, (int, float)) and gen_ms > 0:
+            m["generation_ms"] = {
+                "value": int(gen_ms), "quality": "confirmed", "source": "provider",
+                "final": True, "scope": "model_generation",
+            }
+            if out:
+                # Output tokens over time spent talking to the model — NOT over the wall
+                # clock, which also covers writing files and running them.
+                m["tokens_per_sec"] = {
+                    "value": round(out / (gen_ms / 1000.0), 2), "quality": "confirmed",
+                    "source": "derived", "final": True, "scope": "model_generation",
+                }
+        for key, src in (("duration_ms", "wall_ms"), ("ttft_ms", "ttft_ms"),
+                         ("num_turns", "model_calls")):
+            v = self.timing.get(key)
+            if isinstance(v, (int, float)):
+                m[src] = {"value": int(v), "quality": "confirmed", "source": "provider",
+                          "final": True, "scope": "run"}
+        cost = self.timing.get("total_cost_usd")
+        if isinstance(cost, (int, float)) and cost > 0:
+            m["cost_usd"] = {"value": round(float(cost), 6), "quality": "confirmed",
+                             "source": "provider", "final": True, "scope": "run"}
+        return m if len(m) > 2 else {}
+
+
 _CHAT_SANDBOX_SYSTEM = (
-    "You are running inside Harvis, a chat assistant, in a DOCKERIZED SANDBOX. Environment facts you "
-    "must respect:\n"
-    "- The user CANNOT access this container's filesystem or open files on their own computer.\n"
-    "- When you create a file (HTML, SVG, image, document, …), save it in the CURRENT working "
-    "directory with a short descriptive filename, then state its FULL path. Harvis turns that path "
-    "into a clickable live preview rendered right here — the user does NOT (and can NOT) open it in a "
-    "browser or download it.\n"
-    "- NEVER tell the user to 'open the file in a browser', run a shell command, or navigate to a "
-    "local path. Just create the file and give its path.\n"
-    "- For very short snippets you may answer inline in a fenced code block instead. Be concise."
+    "You are Harvis, a direct assistant, running in a DOCKERIZED SANDBOX.\n"
+    "Match the length of your answer to the question. A greeting or a one-line question "
+    "gets a one-line reply. Do not introduce yourself, list your capabilities, or offer a "
+    "menu of things you could do unless you were asked.\n"
+    "Do not touch the workspace unless the task needs files. A greeting, a definition or an "
+    "opinion needs no tool call at all — just answer it.\n"
+    "When a task DOES need files:\n"
+    "- This directory PERSISTS across turns and you CAN write to it. SANDBOX.md and "
+    "README.md here are your project docs — read them when the task involves this "
+    "workspace, not before.\n"
+    "- Interpreters: python3, node, bash. After you write a script, RUN it "
+    "(python3 / node / bash). Then run `bash harvis-check.sh` to see if you broke syntax.\n"
+    "- The user cannot open files on their own computer, and a container path is not "
+    "something they can act on. Save artifacts here with a short filename; Harvis "
+    "surfaces every file you create as a readable card under your answer, so say what "
+    "you built and why, not where it lives on disk.\n"
+    "- NEVER tell the user to open a local path or run a command on their machine.\n"
+    "- Do not browse the public web from this sandbox.\n"
+    "Answer in Markdown. Do not narrate what you are about to do, and do not summarise what "
+    "you just said."
 )
 
 
 async def _proxy_claude_cli(owui_body: dict, model_id: str, token: str, user_id=None):
-    """Run `claude -p` in the sidecar on the user's subscription OAuth token. Captures the final
-    text (no fragile stream-json parse) and returns it as a completion / SSE-wrapped single chunk.
+    """Run `claude -p` in the sidecar on the user's subscription OAuth token.
 
-    Files the model creates land in a PER-USER / PER-RUN sandbox dir inside the sidecar; the
-    response gets a clickable 'preview' footer (served by /api/owui/chat-file) so the user can view
-    them without the file ever leaving the container."""
-    from .chat_files import chat_workdir, mkdir_workdir, list_new_files
+    Streams Claude Code ``stream-json`` as OpenAI SSE deltas so the UI types the
+    answer (and any file it writes) instead of dumping the whole blob at the end.
+    Files land in the persistent per-user sandbox; the preview footer still lists
+    new files via /api/owui/chat-file.
+    """
+    from .chat_files import mkdir_workdir, list_new_files
 
     prompt = _flatten_to_prompt(owui_body)
     run_id = uuid.uuid4().hex  # credit-safety: lets us hard-kill THIS run's subtree by env marker
-    # A sandboxed working dir for anything the model writes (isolated per user + per run).
     workdir = "/tmp"
     if user_id:
         workdir = (await mkdir_workdir(user_id, run_id)) or "/tmp"
     argv = [
         "docker", "exec",
-        # Credit-safety kill marker — children inherit it, so a Stop/timeout/disconnect can SIGKILL
-        # the whole `claude` subtree in the sidecar. Without this, proc.kill() only kills the host
-        # docker-exec client and the in-container `claude` keeps billing the subscription.
         "-e", f"HARVIS_RUN_ID={run_id}",
-        # E4B dual-auth: subscription token MUST disable the baked CLAUDE_CODE_SIMPLE=1 (which
-        # ignores the OAuth token). The token is passed only to `docker exec -e` and never logged.
         "-e", f"CLAUDE_CODE_OAUTH_TOKEN={token}",
         "-e", "CLAUDE_CODE_SIMPLE=",
         "-u", "1001", "-w", workdir, _CLAUDE_CODE_CONTAINER,
         "claude", "-p", prompt,
-        "--output-format", "text", "--dangerously-skip-permissions",
-        # Chat, not build: allow FILE tools (so it can create the artifact the user previews) but
-        # NOT Bash/exec/web. It writes into `workdir` (its cwd); the response footer links each file.
-        "--allowedTools", "Read,Write,Edit,MultiEdit",
+        "--output-format", "stream-json", "--verbose",
+        "--dangerously-skip-permissions",
+        "--add-dir", workdir,
+        # File tools + Bash so it can run python3/node/harvis-check. No web from chat.
+        "--allowedTools", "Read,Write,Edit,MultiEdit,Bash,Glob,Grep",
         "--append-system-prompt", _CHAT_SANDBOX_SYSTEM,
         "--model", _api_model(model_id),
     ]
     want_stream = bool(owui_body.get("stream"))
-    timeout_s = int(os.getenv("HARVIS_CLOUD_CHAT_TIMEOUT_S", "180") or "180")
-    proc = None
-    out = b""
-    err = b""
+    # Not a cap on how long a turn may take — the subscription CLI is reliable and a real
+    # agentic turn (read files, run code, revise) legitimately runs for many minutes. This is
+    # an idle watchdog only: it fires when the process has emitted nothing at all, which means
+    # wedged, not thinking. Set HARVIS_CLOUD_CHAT_TIMEOUT_S=0 to remove even that.
+    idle_timeout_s = int(os.getenv("HARVIS_CLOUD_CHAT_TIMEOUT_S", "900") or "900")
+
+    def _chunk(content=None, role=None, finish=None, usage=None, metrics=None) -> bytes:
+        delta: dict = {}
+        if role:
+            delta["role"] = role
+        if content:
+            delta["content"] = content
+        body = {
+            "id": f"chatcmpl-{int(time.time())}",
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": model_id,
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+        }
+        if usage:
+            body["usage"] = usage
+        if metrics:
+            body["harvis_metrics"] = metrics
+        return ("data: " + json.dumps(body) + "\n\n").encode()
+
+    render = _CliStream()
+
+    async def _iter_text():
+        proc = None
+        stderr_buf: list[str] = []
+        parts: list[str] = []
+        try:
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                    limit=1024 * 1024,
+                )
+            except FileNotFoundError:
+                raise RuntimeError("Claude subscription chat unavailable (docker CLI missing).")
+
+            async def _drain_err():
+                try:
+                    async for raw in proc.stderr:
+                        s = raw.decode("utf-8", "replace").rstrip()
+                        if s:
+                            stderr_buf.append(s)
+                            if len(stderr_buf) > 40:
+                                del stderr_buf[: len(stderr_buf) - 40]
+                except Exception:
+                    pass
+
+            err_task = asyncio.create_task(_drain_err())
+            try:
+                while True:
+                    try:
+                        if idle_timeout_s > 0:
+                            raw = await asyncio.wait_for(
+                                proc.stdout.readline(), timeout=idle_timeout_s
+                            )
+                        else:
+                            raw = await proc.stdout.readline()
+                    except asyncio.TimeoutError:
+                        # Every line resets this, so reaching here means total silence.
+                        _hard_kill_claude(proc, run_id)
+                        raise TimeoutError(
+                            f"Claude (subscription) sent nothing for {idle_timeout_s}s."
+                        )
+                    if not raw:
+                        break
+                    line = raw.decode("utf-8", "replace").strip()
+                    if not line:
+                        continue
+                    if line[0] != "{":
+                        stderr_buf.append(line[:400])
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        continue
+                    delta = render.feed(obj)
+                    if delta:
+                        parts.append(delta)
+                        yield delta
+            except asyncio.CancelledError:
+                _hard_kill_claude(proc, run_id)
+                raise
+            finally:
+                err_task.cancel()
+                if proc is not None and proc.returncode is None:
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=8)
+                    except Exception:
+                        _hard_kill_claude(proc, run_id)
+
+            tail = render.flush()
+            if tail:
+                parts.append(tail)
+                yield tail
+
+            if parts and not render.saw_text:
+                # Tool cards only. Without this the bubble looks empty, because every card
+                # renders collapsed.
+                note = "\n\nDone \u2014 the steps above are all it did; it returned no summary."
+                parts.append(note)
+                yield note
+
+            detail = ("\n".join(stderr_buf) + "\n" + "".join(parts)).strip()
+            if _looks_like_auth_failure(detail):
+                raise PermissionError(
+                    "Your Claude subscription isn't connected (or the session expired). Reconnect it in "
+                    "Integrations → Claude Code (run `claude setup-token` and paste the token)."
+                )
+            if proc.returncode not in (0, None) and not parts:
+                raise RuntimeError(f"Claude (subscription) error: {_clip(detail)}")
+
+            if user_id and workdir != "/tmp":
+                try:
+                    files = await list_new_files(user_id, run_id)
+                    if files:
+                        card = _sandbox_files_card(files)
+                        parts.append(card)
+                        yield card
+                except Exception:
+                    logger.debug("cloud_chat: sandbox files card failed", exc_info=True)
+
+            if not parts:
+                raise RuntimeError("Claude (subscription) returned no output.")
+        finally:
+            if proc is not None and proc.returncode is None:
+                _hard_kill_claude(proc, run_id)
+
     try:
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        if want_stream:
+            async def _gen():
+                said_anything = False
+                try:
+                    yield _chunk(role="assistant")
+                    async for delta in _iter_text():
+                        said_anything = said_anything or bool(delta)
+                        yield _chunk(content=delta)
+                    if not said_anything:
+                        # Never end a turn on silence. An empty bubble reads as a broken UI;
+                        # saying the run produced nothing is at least true.
+                        yield _chunk(content="The run finished without producing any output.")
+                    yield _chunk(
+                        finish="stop",
+                        usage=render.openai_usage() or None,
+                        metrics=render.harvis_metrics() or None,
+                    )
+                    yield b"data: [DONE]\n\n"
+                except (PermissionError, TimeoutError, RuntimeError) as exc:
+                    yield _chunk(content=str(exc))
+                    yield _chunk(finish="stop", metrics=render.harvis_metrics() or None)
+                    yield b"data: [DONE]\n\n"
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    # Anything unforeseen used to escape this generator, which ended the SSE
+                    # with no content, no finish_reason and no [DONE] — the frontend kept an
+                    # empty bubble open forever. That is the blank-response failure.
+                    logger.exception("cloud_chat: claude CLI stream failed")
+                    yield _chunk(content=f"Claude (subscription) stream failed: {_clip(str(exc))}")
+                    yield _chunk(finish="stop")
+                    yield b"data: [DONE]\n\n"
+
+            return StreamingResponse(
+                _gen(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
-        except FileNotFoundError:
-            return _err_response(owui_body, 502, "Claude subscription chat unavailable (docker CLI missing).")
-        try:
-            out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
-        except asyncio.TimeoutError:
-            _hard_kill_claude(proc, run_id)   # in-container claude survives proc.kill() → reap it
-            return _err_response(owui_body, 504, "Claude (subscription) timed out.")
-        except asyncio.CancelledError:
-            _hard_kill_claude(proc, run_id)   # client disconnected → stop billing immediately
-            raise
-        except Exception as exc:
-            _hard_kill_claude(proc, run_id)
-            logger.warning("cloud_chat: claude CLI failed: %s", type(exc).__name__)
-            return _err_response(owui_body, 502, "Claude (subscription) is unavailable right now.")
-    finally:
-        # Belt-and-suspenders: never leave the in-container `claude` alive (credit safety).
-        if proc is not None and proc.returncode is None:
-            _hard_kill_claude(proc, run_id)
 
-    detail = ((out or b"") + b"\n" + (err or b"")).decode("utf-8", "replace").strip()
-    text = (out or b"").decode("utf-8", "replace").strip()
-    # The CLI prints "Not logged in · Please run /login" but EXITS 0 — so a missing/expired
-    # subscription would otherwise be returned as the assistant's ANSWER. Surface it as a clean 401.
-    if _looks_like_auth_failure(detail):
-        logger.info("cloud_chat: claude subscription not authenticated (re-auth needed)")
-        return _err_response(
-            owui_body, 401,
-            "Your Claude subscription isn't connected (or the session expired). Reconnect it in "
-            "Integrations → Claude Code (run `claude setup-token` and paste the token).",
-        )
-    if proc.returncode != 0:
-        logger.warning("cloud_chat: claude CLI exit=%s detail=%s", proc.returncode, _clip(detail))
-        return _err_response(owui_body, 502, f"Claude (subscription) error: {_clip(detail)}")
-    if not text:
-        return _err_response(owui_body, 502, "Claude (subscription) returned no output.")
-
-    # Clickable preview footer: any file the model created in the sandbox → a path Harvis linkifies
-    # to a live preview (served by /api/owui/chat-file). Skipped if it already named them all.
-    if user_id and workdir != "/tmp":
-        try:
-            files = await list_new_files(user_id, run_id)
-            missing = [f for f in files if f not in text]
-            if missing:
-                lines = "\n".join(f"- `{f}`" for f in missing)
-                text = f"{text}\n\n**Preview** — click to open here:\n{lines}"
-        except Exception:
-            logger.debug("cloud_chat: preview footer failed", exc_info=True)
-
-    if not want_stream:
+        collected: list[str] = []
+        async for delta in _iter_text():
+            collected.append(delta)
+        text = "".join(collected)
         return JSONResponse(status_code=200, content={
             "id": f"chatcmpl-{int(time.time())}", "object": "chat.completion",
             "created": int(time.time()), "model": model_id,
             "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            "usage": render.openai_usage()
+            or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            "harvis_metrics": render.harvis_metrics(),
         })
-
-    async def _gen():
-        base = {"id": f"chatcmpl-{int(time.time())}", "object": "chat.completion.chunk",
-                "created": int(time.time()), "model": model_id}
-        yield ("data: " + json.dumps({**base, "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]}) + "\n\n").encode()
-        if text:
-            yield ("data: " + json.dumps({**base, "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}]}) + "\n\n").encode()
-        yield ("data: " + json.dumps({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}) + "\n\n").encode()
-        yield b"data: [DONE]\n\n"
-
-    return StreamingResponse(_gen(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    except TimeoutError as exc:
+        return _err_response(owui_body, 504, str(exc))
+    except PermissionError as exc:
+        logger.info("cloud_chat: claude subscription not authenticated (re-auth needed)")
+        return _err_response(owui_body, 401, str(exc))
+    except RuntimeError as exc:
+        logger.warning("cloud_chat: claude CLI failed: %s", _clip(str(exc)))
+        return _err_response(owui_body, 502, str(exc))
 
 
 # ── Shared helpers ──────────────────────────────────────────────────────────────────────

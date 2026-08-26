@@ -130,11 +130,11 @@
 				>
 				<div class="flex items-center gap-2">
 					<button
-						class="text-xs px-3 py-1.5 rounded-full border border-gray-200 dark:border-gray-800 text-gray-600 dark:text-gray-300 hover:border-blue-500/50 hover:text-blue-600 dark:hover:text-blue-400 transition"
+						class="text-xs px-3 py-1.5 rounded-lg border border-gray-200 dark:border-gray-800 text-gray-600 dark:text-gray-300 hover:border-blue-500/50 hover:text-blue-600 dark:hover:text-blue-400 transition"
 						on:click={customize}>{$i18n.t('Customize')}</button
 					>
 					<button
-						class="text-xs px-3 py-1.5 rounded-full bg-blue-600 hover:bg-blue-500 text-white transition"
+						class="text-xs px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white transition"
 						on:click={() => soon('Create capability')}>{$i18n.t('Create capability')}</button
 					>
 				</div>
@@ -142,7 +142,7 @@
 			<h1 class="text-2xl font-semibold text-gray-800 dark:text-gray-100 mt-2 flex items-center gap-2.5">
 				{$i18n.t('Agent Studio')}
 				<span
-					class="text-[10px] font-medium px-2 py-0.5 rounded-full border border-amber-300 dark:border-amber-800 text-amber-700 dark:text-amber-400 align-middle"
+					class="text-[10px] font-medium px-2 py-0.5 rounded-md border border-amber-300 dark:border-amber-800 text-amber-700 dark:text-amber-400 align-middle"
 					>{$i18n.t('WIP')}</span
 				>
 			</h1>
@@ -241,7 +241,7 @@
 								{$i18n.t(c.label)}
 								{#if c.soon}
 									<span
-										class="text-[10px] uppercase tracking-wide text-gray-400 border border-gray-200 dark:border-gray-700 rounded-full px-1.5 py-0.5"
+										class="text-[10px] uppercase tracking-wide text-gray-400 border border-gray-200 dark:border-gray-700 rounded-md px-1.5 py-0.5"
 										>{$i18n.t('Soon')}</span
 									>
 								{/if}
@@ -267,7 +267,7 @@
 				{#each stack as s (s.label)}
 					<a
 						href="/harvis/integrations"
-						class="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border border-gray-100 dark:border-gray-850 bg-gray-50 dark:bg-gray-900 text-gray-600 dark:text-gray-300 hover:border-blue-500/40 transition"
+						class="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border border-gray-100 dark:border-gray-850 bg-gray-50 dark:bg-gray-900 text-gray-600 dark:text-gray-300 hover:border-blue-500/40 transition"
 					>
 						<span class="size-1.5 rounded-full {s.on ? 'bg-green-500' : 'bg-gray-400 dark:bg-gray-600'}"
 						></span>{s.label}

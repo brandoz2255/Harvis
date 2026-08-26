@@ -14,6 +14,7 @@
 		tags,
 		folders as _folders,
 		showSidebar,
+		hideNavRail,
 		showSearch,
 		mobile,
 		showArchivedChats,
@@ -51,6 +52,15 @@
 	import { createNewNote, getPinnedNoteList, toggleNotePinnedStatusById } from '$lib/apis/notes';
 	import { updateUserSettings } from '$lib/apis/users';
 	import { checkActiveChats } from '$lib/apis/tasks';
+	import { getCadCapability } from '$lib/apis/cad';
+	import { fetchActiveResearch } from '$lib/apis/research';
+	import {
+		chatActivity,
+		markChatRunning,
+		markChatDone,
+		clearChatActivity,
+		runningChats
+	} from '$lib/utils/chatActivity';
 	import { createNoteHandler } from '$lib/components/notes/utils';
 	import { WEBUI_API_BASE_URL, WEBUI_BASE_URL } from '$lib/constants';
 
@@ -121,19 +131,91 @@
 
 	$: pinnedItems = $settings?.pinnedMenuItems ?? DEFAULT_PINNED_ITEMS;
 
+	// CAD Studio nav. Probed once, not reactive: the lane is a server-side flag read
+	// at container create, so it cannot change under a running tab. A failed probe
+	// means no entry — an operator who switched CAD off must not be left with a link
+	// to a route whose every action 404s.
+	let showCadNav = false;
+	if (typeof window !== 'undefined') {
+		getCadCapability()
+			.then((c) => (showCadNav = !!c?.enabled))
+			.catch(() => (showCadNav = false));
+	}
+
 	// Claude-Desktop-style mode switcher (Chat / Notebook / Code). Route-based: the
 	// active mode is derived from the URL; the chat-specific sidebar sections show
 	// only in Chat mode. Gated by a feature flag (off ⇒ behaves exactly as before).
 	$: modeSwitcherEnabled = $config?.features?.enable_harvis_mode_switcher ?? true;
+	// Notebooks used to be a third segment in the switcher. It is a destination, not a mode —
+	// so it now sits under Projects and the notebooks route counts as chat mode, which keeps
+	// New Chat / Projects / Notebooks on screen while you are in there.
+	$: onNotebooksRoute = ($page?.url?.pathname ?? '/').startsWith('/harvis/notebooks');
 	$: activeMode = modeSwitcherEnabled
-		? (($page?.url?.pathname ?? '/').startsWith('/harvis/notebooks')
-				? 'notebook'
-				: ['/harvis/vibecode', '/harvis/build', '/harvis/agent-studio/run'].some((p) =>
-							($page?.url?.pathname ?? '/').startsWith(p)
-					  )
-					? 'code'
-					: 'chat')
+		? (['/harvis/vibecode', '/harvis/build', '/harvis/agent-studio/run'].some((p) =>
+				($page?.url?.pathname ?? '/').startsWith(p)
+			)
+				? 'code'
+				: 'chat')
 		: 'chat';
+
+	// ── Chat-mode tool nav — ONE source of truth ────────────────────────────────────────
+	// The expanded sidebar and the collapsed icon rail used to hardcode their own lists.
+	// They drifted: the rail kept drawing the old `pinnedMenuItems` set (Agent Studio,
+	// Notes, Library…) long after the expanded sidebar had moved to Cookbook → Schedules
+	// → Artifacts → Connectors → Engines → CAD Studio. Both now render from this array,
+	// so a new entry shows up in both or in neither. Icons are single-path 24×24 strokes.
+	$: chatTools = [
+		{
+			id: 'sidebar-cookbook-button',
+			href: '/harvis/agent-studio/cookbook',
+			label: 'Cookbook',
+			d: 'M4 19.5A2.5 2.5 0 0 1 6.5 17H20M4 19.5A2.5 2.5 0 0 0 6.5 22H20V2H6.5A2.5 2.5 0 0 0 4 4.5v15z'
+		},
+		{
+			id: 'sidebar-schedules-button',
+			href: '/harvis/agent-studio/schedules',
+			label: 'Schedules',
+			title: 'Schedules run a prompt on a timer and post the reply into a chat.',
+			d: 'M12 6v6l4 2M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z'
+		},
+		{
+			id: 'sidebar-artifacts-button',
+			href: '/harvis/agent-studio/activity',
+			label: 'Artifacts',
+			d: 'M12 2 2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5'
+		},
+		{
+			id: 'sidebar-connectors-button',
+			href: '/harvis/agent-studio/mcp-shop',
+			label: 'Connectors',
+			d: 'M9 2v6M15 2v6M6 8h12v2.5a6 6 0 0 1-12 0V8zM12 16.5V22'
+		},
+		{
+			id: 'sidebar-integrations-button',
+			href: '/harvis/integrations',
+			label: 'Engines',
+			d: 'm7 11 2-2-2-2M11 13h4M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z'
+		},
+		// CAD Studio appears only when the server says the lane is on — `/api/cad/capability`
+		// reads the same flag every /api/cad route enforces, so the entry can never outlive
+		// the feature.
+		...(showCadNav
+			? [
+					{
+						id: 'sidebar-cad-button',
+						href: '/harvis/cad',
+						label: 'CAD Studio',
+						d: 'M12 2.5 20.5 7v10L12 21.5 3.5 17V7L12 2.5zM3.5 7l8.5 4.6L20.5 7M12 11.6v9.9'
+					}
+				]
+			: [])
+	];
+
+	// The two entries that sit above the tools cluster in both layouts.
+	const chatDestinations = [
+		{ id: 'sidebar-projects-button', href: '/harvis/projects', label: 'Projects', icon: 'folder' },
+		{ id: 'sidebar-notebooks-button', href: '/harvis/notebooks', label: 'Notebooks', icon: 'note' }
+	];
 
 	const isMenuItemVisible = (id) => {
 		switch (id) {
@@ -558,6 +640,88 @@
 		document.documentElement.style.setProperty('--sidebar-width', `${newSidebarWidth}px`);
 	};
 
+	// ── background-run poller ───────────────────────────────────────────────────────────
+	// A Deep Research or workspace run keeps going after its chat view unmounts, and nothing
+	// else in the app is watching once that happens. `chatActivity` remembers which chats are
+	// waiting; this asks the backend which runs are still alive and flips the rest to "done",
+	// which is what turns the row's spinner into a blue dot.
+	let activityTimer: ReturnType<typeof setInterval> | null = null;
+
+	/**
+	 * Workspace runs the backend still considers live, as chatId → workspaceId.
+	 *
+	 * Deliberately NOT `/api/workspace/active`: that returns at most one run and marks
+	 * every candidate it walks past as orphaned, so polling it would kill the runs we are
+	 * trying to report. `/active-runs` is the read-only list. Returns null (not an empty
+	 * map) when the poll itself failed, so a network blip can't be read as "all finished".
+	 */
+	const fetchLiveWorkspaceRuns = async (): Promise<Map<string, string> | null> => {
+		try {
+			const res = await fetch(`${WEBUI_BASE_URL}/api/workspace/active-runs`, {
+				headers: { Authorization: `Bearer ${localStorage.token}` }
+			});
+			if (!res.ok) return null;
+			const data = await res.json();
+			return new Map((data?.runs ?? []).map((r: any) => [r.session_id, r.id]));
+		} catch (e) {
+			return null;
+		}
+	};
+
+	const pollChatActivity = async () => {
+		const waiting = runningChats();
+		const [research, workspaces] = await Promise.all([
+			waiting.some(([, v]) => v.research)
+				? fetchActiveResearch(localStorage.token)
+						.then((r) => new Set((r?.active ?? []).map((a) => a.session_id)))
+						// A failed poll says nothing about the run — leave those spinners alone.
+						.catch(() => null)
+				: Promise.resolve(new Set<string>()),
+			fetchLiveWorkspaceRuns()
+		]);
+
+		// A run the user launched and then walked away from: the chat view that started it
+		// is unmounted, so the backend is the only thing that still knows. Raise the spinner
+		// here rather than waiting for that chat to be reopened. The chat currently on screen
+		// is skipped on purpose — its own run card is already showing the state, and a
+		// spinner on the row you are reading is noise.
+		if (workspaces) {
+			const known = $chatActivity;
+			for (const [sessionId, workspaceId] of workspaces) {
+				if (sessionId === $chatId) continue;
+				// Re-marking an unchanged entry every 8s would rewrite localStorage and wake
+				// every sidebar row for nothing.
+				const cur = known[sessionId];
+				if (cur?.state === 'running' && cur.workspace === workspaceId) continue;
+				markChatRunning(sessionId, undefined, workspaceId);
+			}
+		}
+
+		for (const [cid, v] of waiting) {
+			// Unknown (poll failed) is not the same as absent (run finished).
+			if (v.research) {
+				if (research === null) continue;
+				if (research.has(v.research)) continue;
+			} else if (v.workspace) {
+				if (workspaces === null) continue;
+				// `has`, not an id comparison: a chat that started a SECOND run since this
+				// entry was written is still running, and the loop above has already moved
+				// it onto the new id.
+				if (workspaces.has(cid)) continue;
+			} else {
+				// An ordinary reply; its own stream settles it.
+				continue;
+			}
+			// Finished while the user was looking at it: no notification needed.
+			if (cid === $chatId) clearChatActivity(cid);
+			else markChatDone(cid);
+		}
+	};
+
+	// Leaving a chat mid-run is exactly when the spinner needs to appear, so don't make the
+	// user wait out the interval for it.
+	$: if ($chatId !== undefined && activityTimer !== null) pollChatActivity();
+
 	onMount(async () => {
 		try {
 			const width = Number(localStorage.getItem('sidebarWidth'));
@@ -634,6 +798,9 @@
 			})
 		];
 
+		pollChatActivity();
+		activityTimer = setInterval(pollChatActivity, 8000);
+
 		window.addEventListener('keydown', onKeyDown);
 		window.addEventListener('keyup', onKeyUp);
 
@@ -657,6 +824,7 @@
 		initPinnedMenuSortable();
 
 		return () => {
+			if (activityTimer) clearInterval(activityTimer);
 			unsubscribers.forEach((unsubscriber) => unsubscriber());
 
 			window.removeEventListener('keydown', onKeyDown);
@@ -833,7 +1001,11 @@
 	}}
 />
 
-{#if !$mobile && !$showSidebar}
+<!-- The collapsed sidebar still draws a narrow icon strip, which is how it gets reopened.
+     A route that owns the whole viewport can ask for even that to go away by setting
+     `hideNavRail`; it then has to provide its own way out, which the CAD session's header
+     back button does. -->
+{#if !$mobile && !$showSidebar && !$hideNavRail}
 	<div
 		class=" pt-[7px] pb-2 px-2 flex flex-col justify-between text-black dark:text-white hover:bg-gray-50/30 dark:hover:bg-gray-950/30 h-full z-10 transition-all border-e-[0.5px] border-gray-50 dark:border-gray-850/30"
 		id="sidebar"
@@ -850,7 +1022,7 @@
 					placement="right"
 				>
 					<button
-						class="flex rounded-xl hover:bg-gray-100 dark:hover:bg-gray-850 transition group {isWindows
+						class="flex rounded-xl hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition group {isWindows
 							? 'cursor-pointer'
 							: 'cursor-[e-resize]'}"
 						aria-label={$showSidebar ? $i18n.t('Close Sidebar') : $i18n.t('Open Sidebar')}
@@ -870,7 +1042,7 @@
 				<div class="">
 					<Tooltip content={$i18n.t('New Chat')} placement="right">
 						<a
-							class=" cursor-pointer flex rounded-xl hover:bg-gray-100 dark:hover:bg-gray-850 transition group"
+							class=" cursor-pointer flex rounded-xl hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition group"
 							href="/"
 							draggable="false"
 							on:click={async (e) => {
@@ -892,7 +1064,7 @@
 				<div>
 					<Tooltip content={$i18n.t('Search')} placement="right">
 						<button
-							class=" cursor-pointer flex rounded-xl hover:bg-gray-100 dark:hover:bg-gray-850 transition group"
+							class=" cursor-pointer flex rounded-xl hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition group"
 							on:click={(e) => {
 								e.stopImmediatePropagation();
 								e.preventDefault();
@@ -909,87 +1081,146 @@
 					</Tooltip>
 				</div>
 
-				{#each pinnedItems as itemId (itemId)}
-					{@const meta = getMenuItemMeta(itemId)}
-					{#if meta && isMenuItemVisible(itemId)}
-						<div class="">
-							<Tooltip content={$i18n.t(meta.label)} placement="right">
+				<!-- The collapsed rail mirrors the expanded sidebar exactly: same destinations,
+				     same icons, same order — icon-only. Before this it still drew the legacy
+				     `pinnedMenuItems` set, which the expanded sidebar stopped rendering once the
+				     mode switcher shipped, so collapsing the sidebar swapped in a different and
+				     older set of icons. -->
+				{#if modeSwitcherEnabled && activeMode === 'chat'}
+					{#each chatDestinations as dest (dest.id)}
+						<div>
+							<Tooltip content={$i18n.t(dest.label)} placement="right">
 								<a
-									class=" cursor-pointer flex rounded-xl hover:bg-gray-100 dark:hover:bg-gray-850 transition group"
-									href={meta.href}
+									id={dest.id}
+									class=" cursor-pointer flex rounded-xl hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition group"
+									href={dest.href}
 									on:click={async (e) => {
 										e.stopImmediatePropagation();
 										e.preventDefault();
-										navMenuItem(meta.href);
+										navMenuItem(dest.href);
 										itemClickHandler();
 									}}
 									draggable="false"
-									aria-label={$i18n.t(meta.label)}
+									aria-label={$i18n.t(dest.label)}
 								>
 									<div class=" self-center flex items-center justify-center size-9">
-										{#if itemId === 'notes'}
+										{#if dest.icon === 'folder'}
+											<FolderIcon className="size-4.5" />
+										{:else}
 											<Note className="size-4.5" />
-										{:else if itemId === 'workspace'}
-											<svg
-												xmlns="http://www.w3.org/2000/svg"
-												fill="none"
-												viewBox="0 0 24 24"
-												stroke-width="1.5"
-												stroke="currentColor"
-												class="size-4.5"
-											>
-												<path
-													stroke-linecap="round"
-													stroke-linejoin="round"
-													d="M13.5 16.875h3.375m0 0h3.375m-3.375 0V13.5m0 3.375v3.375M6 10.5h2.25a2.25 2.25 0 0 0 2.25-2.25V6a2.25 2.25 0 0 0-2.25-2.25H6A2.25 2.25 0 0 0 3.75 6v2.25A2.25 2.25 0 0 0 6 10.5Zm0 9.75h2.25A2.25 2.25 0 0 0 10.5 18v-2.25a2.25 2.25 0 0 0-2.25-2.25H6a2.25 2.25 0 0 0-2.25 2.25V18A2.25 2.25 0 0 0 6 20.25Zm9.75-9.75H18a2.25 2.25 0 0 0 2.25-2.25V6A2.25 2.25 0 0 0 18 3.75h-2.25A2.25 2.25 0 0 0 13.5 6v2.25a2.25 2.25 0 0 0 2.25 2.25Z"
-												/>
-											</svg>
-										{:else if itemId === 'automations'}
-											<svg
-												xmlns="http://www.w3.org/2000/svg"
-												fill="none"
-												viewBox="0 0 24 24"
-												stroke-width="1.5"
-												stroke="currentColor"
-												class="size-4.5"
-											>
-												<path
-													stroke-linecap="round"
-													stroke-linejoin="round"
-													d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"
-												/>
-											</svg>
-										{:else if itemId === 'calendar'}
-											<svg
-												xmlns="http://www.w3.org/2000/svg"
-												fill="none"
-												viewBox="0 0 24 24"
-												stroke-width="1.5"
-												stroke="currentColor"
-												class="size-4.5"
-											>
-												<path
-													stroke-linecap="round"
-													stroke-linejoin="round"
-													d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 0 1 2.25-2.25h13.5A2.25 2.25 0 0 1 21 7.5v11.25m-18 0A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75m-18 0v-7.5A2.25 2.25 0 0 1 5.25 9h13.5A2.25 2.25 0 0 1 21 11.25v7.5"
-												/>
-											</svg>
-										{:else if itemId === 'playground'}
-											<Code className="size-4.5" />
-										{:else if itemId === 'agent-studio'}
-											<Sparkles className="size-4.5" />
-										{:else if itemId === 'vibecode'}
-											<Code className="size-4.5" />
-										{:else if itemId === 'open-notebook'}
-											<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" class="size-4.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6.042A8.967 8.967 0 0 0 6 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 0 1 6 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 0 1 6-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0 0 18 18a8.967 8.967 0 0 0-6 2.292m0-14.25v14.25" /></svg>
-										{:else if itemId === 'artifacts'}
-											<ArchiveBox className="size-4.5" />										{/if}
+										{/if}
 									</div>
 								</a>
 							</Tooltip>
 						</div>
-					{/if}
-				{/each}
+					{/each}
+
+					{#each chatTools as tool (tool.id)}
+						<div>
+							<Tooltip content={$i18n.t(tool.label)} placement="right">
+								<a
+									id="rail-{tool.id}"
+									class=" cursor-pointer flex rounded-xl hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition group"
+									href={tool.href}
+									on:click={async (e) => {
+										e.stopImmediatePropagation();
+										e.preventDefault();
+										navMenuItem(tool.href);
+										itemClickHandler();
+									}}
+									draggable="false"
+									aria-label={$i18n.t(tool.label)}
+								>
+									<div class=" self-center flex items-center justify-center size-9">
+										<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" class="size-4.5"><path d={tool.d} /></svg>
+									</div>
+								</a>
+							</Tooltip>
+						</div>
+					{/each}
+				{:else}
+					{#each pinnedItems as itemId (itemId)}
+						{@const meta = getMenuItemMeta(itemId)}
+						{#if meta && isMenuItemVisible(itemId)}
+							<div class="">
+								<Tooltip content={$i18n.t(meta.label)} placement="right">
+									<a
+										class=" cursor-pointer flex rounded-xl hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition group"
+										href={meta.href}
+										on:click={async (e) => {
+											e.stopImmediatePropagation();
+											e.preventDefault();
+											navMenuItem(meta.href);
+											itemClickHandler();
+										}}
+										draggable="false"
+										aria-label={$i18n.t(meta.label)}
+									>
+										<div class=" self-center flex items-center justify-center size-9">
+											{#if itemId === 'notes'}
+												<Note className="size-4.5" />
+											{:else if itemId === 'workspace'}
+												<svg
+													xmlns="http://www.w3.org/2000/svg"
+													fill="none"
+													viewBox="0 0 24 24"
+													stroke-width="1.5"
+													stroke="currentColor"
+													class="size-4.5"
+												>
+													<path
+														stroke-linecap="round"
+														stroke-linejoin="round"
+														d="M13.5 16.875h3.375m0 0h3.375m-3.375 0V13.5m0 3.375v3.375M6 10.5h2.25a2.25 2.25 0 0 0 2.25-2.25V6a2.25 2.25 0 0 0-2.25-2.25H6A2.25 2.25 0 0 0 3.75 6v2.25A2.25 2.25 0 0 0 6 10.5Zm0 9.75h2.25A2.25 2.25 0 0 0 10.5 18v-2.25a2.25 2.25 0 0 0-2.25-2.25H6a2.25 2.25 0 0 0-2.25 2.25V18A2.25 2.25 0 0 0 6 20.25Zm9.75-9.75H18a2.25 2.25 0 0 0 2.25-2.25V6A2.25 2.25 0 0 0 18 3.75h-2.25A2.25 2.25 0 0 0 13.5 6v2.25a2.25 2.25 0 0 0 2.25 2.25Z"
+													/>
+												</svg>
+											{:else if itemId === 'automations'}
+												<svg
+													xmlns="http://www.w3.org/2000/svg"
+													fill="none"
+													viewBox="0 0 24 24"
+													stroke-width="1.5"
+													stroke="currentColor"
+													class="size-4.5"
+												>
+													<path
+														stroke-linecap="round"
+														stroke-linejoin="round"
+														d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"
+													/>
+												</svg>
+											{:else if itemId === 'calendar'}
+												<svg
+													xmlns="http://www.w3.org/2000/svg"
+													fill="none"
+													viewBox="0 0 24 24"
+													stroke-width="1.5"
+													stroke="currentColor"
+													class="size-4.5"
+												>
+													<path
+														stroke-linecap="round"
+														stroke-linejoin="round"
+														d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 0 1 2.25-2.25h13.5A2.25 2.25 0 0 1 21 7.5v11.25m-18 0A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75m-18 0v-7.5A2.25 2.25 0 0 1 5.25 9h13.5A2.25 2.25 0 0 1 21 11.25v7.5"
+													/>
+												</svg>
+											{:else if itemId === 'playground'}
+												<Code className="size-4.5" />
+											{:else if itemId === 'agent-studio'}
+												<Sparkles className="size-4.5" />
+											{:else if itemId === 'vibecode'}
+												<Code className="size-4.5" />
+											{:else if itemId === 'open-notebook'}
+												<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.8" stroke="currentColor" class="size-4.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6.042A8.967 8.967 0 0 0 6 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 0 1 6 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 0 1 6-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0 0 18 18a8.967 8.967 0 0 0-6 2.292m0-14.25v14.25" /></svg>
+											{:else if itemId === 'artifacts'}
+												<ArchiveBox className="size-4.5" />										{/if}
+										</div>
+									</a>
+								</Tooltip>
+							</div>
+						{/if}
+					{/each}
+				{/if}
 			</div>
 		</button>
 
@@ -1008,7 +1239,7 @@
 							}}
 						>
 							<div
-								class=" cursor-pointer flex rounded-xl hover:bg-gray-100 dark:hover:bg-gray-850 transition group"
+								class=" cursor-pointer flex rounded-xl hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition group"
 							>
 								<div class="self-center relative">
 									<img
@@ -1056,7 +1287,7 @@
 		data-state={$showSidebar}
 	>
 		<div
-			class=" my-auto flex flex-col justify-between h-screen max-h-[100dvh] w-[var(--sidebar-width)] overflow-x-hidden scrollbar-hidden z-50 {$showSidebar
+			class=" my-auto flex flex-col justify-between h-screen max-h-[100dvh] w-[var(--sidebar-width)] overflow-x-hidden scrollbar-hidden z-50 border-r border-gray-200/70 dark:border-gray-850 {$showSidebar
 				? ''
 				: 'invisible'}"
 		>
@@ -1064,7 +1295,7 @@
 				class="sidebar px-[0.5625rem] pt-2 pb-1.5 flex justify-between space-x-1 text-gray-600 dark:text-gray-400 sticky top-0 z-10 -mb-3"
 			>
 				<a
-					class="flex items-center rounded-xl size-8.5 h-full justify-center hover:bg-gray-100/50 dark:hover:bg-gray-850/50 transition no-drag-region"
+					class="flex items-center rounded-xl size-8.5 h-full justify-center hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition no-drag-region"
 					href="/"
 					draggable="false"
 					on:click={newChatHandler}
@@ -1085,7 +1316,7 @@
 					placement="bottom"
 				>
 					<button
-						class="flex rounded-xl size-8.5 justify-center items-center hover:bg-gray-100/50 dark:hover:bg-gray-850/50 transition {isWindows
+						class="flex rounded-xl size-8.5 justify-center items-center hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition {isWindows
 							? 'cursor-pointer'
 							: 'cursor-[w-resize]'}"
 						on:click={() => {
@@ -1150,7 +1381,7 @@
 						<a
 							id="sidebar-projects-button"
 							href="/harvis/projects"
-							class="group grow flex items-center gap-3 rounded-xl px-2.5 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-850 transition outline-none"
+							class="group grow flex items-center gap-3 rounded-xl px-2.5 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition outline-none"
 							draggable="false"
 							aria-label={$i18n.t('Projects')}
 						>
@@ -1164,7 +1395,7 @@
 						</a>
 						<button
 							id="sidebar-search-button"
-							class="shrink-0 rounded-xl p-2 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-850 transition outline-none"
+							class="shrink-0 rounded-xl p-2 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition outline-none"
 							on:click={() => {
 								showSearch.set(true);
 							}}
@@ -1175,50 +1406,55 @@
 						</button>
 					</div>
 
-						{#if modeSwitcherEnabled}
-							<!-- Chat-mode tools: Schedules + Artifacts (Customize lives in the footer bottom-nav cluster) -->
-							<!-- Schedules — the chat lens over the cron store (VibeCodeNav's
-							     Routines button is the coding lens of the same store). -->
-							<div class="px-[0.4375rem]">
-							<a
-								href="/harvis/agent-studio/schedules"
-								class="group flex items-center gap-3 rounded-xl px-2.5 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-850 transition outline-none {($page.url.pathname ?? '').startsWith('/harvis/agent-studio/schedules') ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 font-medium' : ''}"
-								draggable="false"
-								aria-label={$i18n.t('Schedules')}
-								title={$i18n.t(
-									'Schedules run a prompt on a timer and post the reply into a chat.'
-								)}
-							>
-								<div class="self-center">
-									<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="size-4.5"><path d="M12 6v6l4 2M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z" /></svg>
-								</div>
-								<div class="flex flex-1 self-center translate-y-[0.5px]">
-									<div class=" self-center text-sm font-primary">{$i18n.t('Schedules')}</div>
-								</div>
-							</a>
-							<a
-								href="/harvis/agent-studio/activity"
-								class="group flex items-center gap-3 rounded-xl px-2.5 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-850 transition outline-none {($page.url.pathname ?? '').startsWith('/harvis/agent-studio/activity') ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 font-medium' : ''}"
-								draggable="false"
-								aria-label={$i18n.t('Artifacts')}
-							>
-								<div class="self-center">
-									<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="size-4.5"><path d="M12 2 2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" /></svg>
-								</div>
-								<div class="flex flex-1 self-center translate-y-[0.5px]">
-									<div class=" self-center text-sm font-primary">{$i18n.t('Artifacts')}</div>
-								</div>
-							</a>
+					<div class="px-[0.4375rem] flex justify-center text-gray-800 dark:text-gray-200">
+						<a
+							id="sidebar-notebooks-button"
+							href="/harvis/notebooks"
+							class="group grow flex items-center gap-3 rounded-xl px-2.5 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition outline-none {onNotebooksRoute
+								? 'bg-gray-200 dark:bg-[oklch(0.29_0.024_258)]'
+								: ''}"
+							draggable="false"
+							aria-label={$i18n.t('Notebooks')}
+						>
+							<div class="self-center">
+								<Note strokeWidth="2" className="size-4.5" />
 							</div>
-							<!-- Adaptive Space hidden for the deployment cut (2026-07-12) — the
-							     feature isn't ready; the /harvis/adaptive route shows a "coming
-							     soon" placeholder. Re-add this nav link + restore the route's
-							     <AdaptiveSpaceShell/> mount to bring it back. -->
-							<!-- More (bold) moved to the footer bottom-nav cluster. -->
+
+							<div class="flex flex-1 self-center translate-y-[0.5px]">
+								<div class=" self-center text-sm font-primary">{$i18n.t('Notebooks')}</div>
+							</div>
+						</a>
+					</div>
+
+						{#if modeSwitcherEnabled}
+							<!-- Chat-mode tools, in the order the user asked for (2026-08-19):
+							     Cookbook, then Schedules → Artifacts → Connectors → Engines → CAD
+							     Studio. Cookbook, Customize and Settings used to live in the footer;
+							     Cookbook came up here and the other two moved into the user menu. -->
+							<div class="px-[0.4375rem]">
+							{#each chatTools as tool (tool.id)}
+								<a
+									id={tool.id}
+									href={tool.href}
+									class="group flex items-center gap-3 rounded-xl px-2.5 py-2 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition outline-none {($page.url.pathname ?? '').startsWith(tool.href) ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 font-medium' : ''}"
+									draggable="false"
+									aria-label={$i18n.t(tool.label)}
+									title={tool.title ? $i18n.t(tool.title) : null}
+								>
+									<div class="self-center">
+										<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="size-4.5"><path d={tool.d} /></svg>
+									</div>
+									<div class="flex flex-1 self-center translate-y-[0.5px]">
+										<div class=" self-center text-sm font-primary">{$i18n.t(tool.label)}</div>
+									</div>
+								</a>
+							{/each}
+							</div>
+							<!-- More (bold) stays in the footer bottom-nav cluster. -->
 						{/if}
 					{/if}
 
-					{#if modeSwitcherEnabled && activeMode === 'notebook'}
+					{#if modeSwitcherEnabled && onNotebooksRoute}
 						<NotebookNav activeOnb={$page?.url?.searchParams?.get('onb') ?? ''} />
 					{/if}
 
@@ -1238,7 +1474,7 @@
 								>
 									<a
 										id="sidebar-{itemId}-button"
-										class="grow flex items-center space-x-3 rounded-2xl px-2.5 py-2 hover:bg-gray-100 dark:hover:bg-gray-900 transition"
+										class="grow flex items-center space-x-3 rounded-2xl px-2.5 py-2 hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition"
 										href={meta.href}
 										on:click={itemClickHandler}
 										draggable="false"
@@ -1347,7 +1583,7 @@
 						<div class="mt-0.5 pb-1.5">
 							{#each $pinnedNotes as note (note.id)}
 								<a
-									class="w-full flex items-center gap-3 rounded-xl px-2.5 py-1.5 hover:bg-gray-100 dark:hover:bg-gray-850 transition group text-sm"
+									class="w-full flex items-center gap-3 rounded-xl px-2.5 py-1.5 hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition group text-sm"
 									href={`/notes/${note.id}`}
 									on:click={() => {
 										itemClickHandler();
@@ -1464,6 +1700,51 @@
 									}}
 								/>
 							{/each}
+						</div>
+					</Folder>
+				{/if}
+
+				<!-- Projects — sits above Recents and below Pinned, per the user's ask
+				     (2026-08-19). Each project is a real folder; opening it lists the chats
+				     attached to it, which is what Folders/RecursiveFolder already do. The
+				     component was imported here for months but never mounted, so projects were
+				     only reachable through the /harvis/projects page. -->
+				{#if ($config?.features?.enable_folders ?? true) !== false}
+					<Folder
+						id="sidebar-projects"
+						bind:open={showFolders}
+						className="px-2 mt-0.5"
+						name={$i18n.t('Projects')}
+						chevron={false}
+						dragAndDrop={false}
+						onAdd={async () => {
+							await tick();
+							setTimeout(() => {
+								showCreateFolderModal = true;
+							}, 0);
+						}}
+						onAddLabel={$i18n.t('New Project')}
+					>
+						<div class="flex flex-col mt-0.5">
+							<Folders
+								bind:folderRegistry
+								{folders}
+								{shiftKey}
+								onDelete={async () => {
+									await initFolders();
+									await initChatList();
+								}}
+								on:import={(e) => {
+									const { folderId, items } = e.detail ?? {};
+									importChatHandler(items, false, folderId);
+								}}
+								on:update={async () => {
+									await initFolders();
+								}}
+								on:change={async () => {
+									await initChatList();
+								}}
+							/>
 						</div>
 					</Folder>
 				{/if}
@@ -1599,97 +1880,12 @@
 					class=" sidebar-bg-gradient-to-t bg-linear-to-t from-gray-50 dark:from-gray-950 to-transparent from-50% pointer-events-none absolute inset-0 -z-10 -mt-6"
 				></div>
 				<div class="flex flex-col font-primary">
-					{#if modeSwitcherEnabled}
-						<!-- Footer: bottom-nav cluster (Cookbook · Providers · Customize · Settings · More). -->
+					{#if modeSwitcherEnabled && ($config?.features?.enable_sidebar_more ?? false)}
+						<!-- Footer: bottom-nav cluster (More only). Cookbook moved up into the
+						     chat-tools cluster, and Customize + Settings moved into the user menu
+						     (2026-08-19). Flag-gated off for deployment: the whole cluster goes,
+						     divider included, so no orphaned rule sits above the user menu. -->
 						<div class="px-[0.4375rem] pt-2 mt-1 border-t border-gray-100 dark:border-gray-850">
-							<a
-								href="/harvis/agent-studio/cookbook"
-								class="group flex items-center gap-3 rounded-xl px-2.5 py-2 text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-850 hover:text-gray-900 dark:hover:text-gray-100 transition outline-none {($page.url.pathname ?? '').startsWith('/harvis/agent-studio/cookbook')
-									? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 font-medium'
-									: ''}"
-								draggable="false"
-								aria-label={$i18n.t('Cookbook')}
-							>
-								<svg
-									xmlns="http://www.w3.org/2000/svg"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="currentColor"
-									stroke-width="1.8"
-									stroke-linecap="round"
-									stroke-linejoin="round"
-									class="size-4.5 shrink-0"
-								>
-									<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20M4 19.5A2.5 2.5 0 0 0 6.5 22H20V2H6.5A2.5 2.5 0 0 0 4 4.5v15z" />
-								</svg>
-								<span class="flex-1 self-center translate-y-[0.5px]">{$i18n.t('Cookbook')}</span>
-							</a>
-							<a
-								id="sidebar-integrations-button"
-								href="/harvis/integrations"
-								class="group flex items-center gap-3 rounded-xl px-2.5 py-2 text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-850 hover:text-gray-900 dark:hover:text-gray-100 transition outline-none {($page.url.pathname ?? '').startsWith('/harvis/integrations')
-									? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 font-medium'
-									: ''}"
-								draggable="false"
-								aria-label={$i18n.t('Providers')}
-							>
-								<svg
-									xmlns="http://www.w3.org/2000/svg"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="currentColor"
-									stroke-width="1.8"
-									stroke-linecap="round"
-									stroke-linejoin="round"
-									class="size-4.5 shrink-0"
-								>
-									<path d="m7 11 2-2-2-2M11 13h4M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z" />
-								</svg>
-								<span class="flex-1 self-center translate-y-[0.5px]">{$i18n.t('Providers')}</span>
-							</a>
-							<!-- Customize — opens the Settings modal's Customize group (Skills management
-							     lives there now); modal trigger, so no route-active state. -->
-							<button
-								type="button"
-								on:click={() => showSettings.set('skills')}
-								class="group w-full text-left flex items-center gap-3 rounded-xl px-2.5 py-2 text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-850 hover:text-gray-900 dark:hover:text-gray-100 transition outline-none"
-								aria-label={$i18n.t('Customize')}
-							>
-								<svg
-									xmlns="http://www.w3.org/2000/svg"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="currentColor"
-									stroke-width="1.8"
-									stroke-linecap="round"
-									stroke-linejoin="round"
-									class="size-4.5 shrink-0"
-								>
-									<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6" />
-								</svg>
-								<span class="flex-1 self-center translate-y-[0.5px]">{$i18n.t('Customize')}</span>
-							</button>
-							<button
-								type="button"
-								on:click={() => showSettings.set(true)}
-								class="group w-full text-left flex items-center gap-3 rounded-xl px-2.5 py-2 text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-850 hover:text-gray-900 dark:hover:text-gray-100 transition outline-none"
-								aria-label={$i18n.t('Settings')}
-							>
-								<svg
-									xmlns="http://www.w3.org/2000/svg"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="currentColor"
-									stroke-width="1.8"
-									stroke-linecap="round"
-									stroke-linejoin="round"
-									class="size-4.5 shrink-0"
-								>
-									<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
-									<circle cx="12" cy="12" r="3" />
-								</svg>
-								<span class="flex-1 self-center translate-y-[0.5px]">{$i18n.t('Settings')}</span>
-							</button>
 							<!-- More (bold) — tools, last item of the bottom cluster. -->
 							<div class="-mx-[0.4375rem]">
 								<SidebarMore activePath={$page.url.pathname} bold />
@@ -1709,7 +1905,7 @@
 							}}
 						>
 							<div
-								class=" flex items-center rounded-2xl py-2 px-1.5 w-full hover:bg-gray-100/50 dark:hover:bg-gray-900/50 transition"
+								class=" flex items-center rounded-2xl py-2 px-1.5 w-full hover:bg-gray-200 dark:hover:bg-[oklch(0.29_0.024_258)] transition"
 							>
 								<div class=" self-center mr-3 relative">
 									<img

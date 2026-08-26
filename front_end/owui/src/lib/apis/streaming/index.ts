@@ -10,6 +10,11 @@ type TextStreamUpdate = {
 	selectedModelId?: any;
 	error?: any;
 	usage?: ResponseUsage;
+	/** Per-metric provenance from the backend: what was reported vs measured vs unknown. */
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	metrics?: any;
+	/** Reasoning models stream their thinking here; `value` stays empty until it ends. */
+	reasoning?: string;
 };
 
 type ResponseUsage = {
@@ -77,14 +82,27 @@ async function* openAIStreamToIterator(
 				continue;
 			}
 
-			if (parsedData.usage) {
-				yield { done: false, value: '', usage: parsedData.usage };
+			if (parsedData.usage || parsedData.harvis_metrics) {
+				yield {
+					done: false,
+					value: '',
+					usage: parsedData.usage,
+					...(parsedData.harvis_metrics ? { metrics: parsedData.harvis_metrics } : {})
+				};
 				continue;
 			}
 
+			// A reasoning model (qwen3.5, DeepSeek R1, QwQ…) sends its thinking on a
+			// separate delta field and NOTHING on `content` until it is finished. Reading
+			// only `content` threw those frames away — measured 2026-08-19, 287 of 319
+			// chunks for a one-line answer — which is what made the reply look like dead
+			// air followed by a dump.
+			const delta = parsedData.choices?.[0]?.delta ?? {};
+			const reasoning = delta.reasoning ?? delta.reasoning_content ?? '';
 			yield {
 				done: false,
-				value: parsedData.choices?.[0]?.delta?.content ?? ''
+				value: delta.content ?? '',
+				...(reasoning ? { reasoning } : {})
 			};
 		} catch (e) {
 			console.error('Error extracting delta from SSE event:', e);
@@ -115,7 +133,12 @@ async function* streamLargeDeltasAsRandomChunks(
 			yield textStreamUpdate;
 			continue;
 		}
-		if (textStreamUpdate.usage) {
+		if (textStreamUpdate.usage || textStreamUpdate.metrics) {
+			yield textStreamUpdate;
+			continue;
+		}
+
+		if (textStreamUpdate.reasoning) {
 			yield textStreamUpdate;
 			continue;
 		}

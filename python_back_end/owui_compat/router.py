@@ -211,6 +211,15 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
                 invalidate_models_cache(getattr(user, "id", None))
             except Exception:
                 logger.warning("owui /api/models refresh: cloud cache reset failed", exc_info=True)
+            try:
+                # …and the per-host Ollama probe (10s TTL), which sits underneath the native
+                # cache. Without this an explicit refresh could clear the outer cache and then
+                # rebuild it from a stale probe, so a rig that just came back would still read
+                # as unreachable.
+                from . import ollama_hosts
+                ollama_hosts.invalidate()
+            except Exception:
+                logger.warning("owui /api/models refresh: host probe reset failed", exc_info=True)
         native = await deps.list_models(request, user)
         data = harvis_models_to_owui(native)
         # Phase E4B: surface the Hermes-Agent chat model when its engine flag is on AND a Hermes
@@ -255,7 +264,21 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
     @router.post("/api/chat/completions")
     async def owui_chat_completions(request: Request, user=Depends(get_current_user)):
         owui_body = await request.json()
-        # Image generation first ("+ → Create Image" flag, or "generate an image
+        # CAD first — it is the narrowest detector of the three (an explicit
+        # "🧊 create cad <recipe>" marker, never natural language), so it can only
+        # ever claim a turn that was unambiguously meant for it. CAD is an optional
+        # module tree (see the registration block below), so a deployment without it
+        # simply never claims the turn.
+        try:
+            from .cad_bridge import maybe_handle_cad_build
+        except ImportError:
+            maybe_handle_cad_build = None
+
+        if maybe_handle_cad_build is not None:
+            cad = await maybe_handle_cad_build(request, owui_body, user)
+            if cad is not None:
+                return cad
+        # Image generation next ("+ → Create Image" flag, or "generate an image
         # of X" NL): launches a gated txt2img workspace run + returns the same
         # run-card marker. Falls through when it's not an image request.
         from .image_bridge import maybe_handle_image_generation
@@ -339,9 +362,9 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
         model = os.getenv("HARVIS_TITLE_MODEL", "llama3.1:8b")
         ollama_url = os.getenv("OLLAMA_URL", "http://ollama:11434")
         prompt = (
-            "You name chat conversations. Reply with ONLY a concise, descriptive "
-            "title of 3-5 words — no quotes, no 'Title:' prefix, no trailing "
-            "punctuation. Summarize what the conversation is about.\n\n"
+            "Generate a concise title for this conversation. Use 3-6 words. "
+            "Capture the main task or topic. No quotes. No punctuation at the end. "
+            "Reply with the title only — no 'Title:' prefix, no explanation.\n\n"
             "Conversation:\n" + transcript[:4000] + "\n\nTitle:"
         )
         title = fallback
@@ -584,6 +607,21 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
             raise HTTPException(status_code=404, detail="Chat not found")
         return chat
 
+    @router.post("/api/v1/chats/{chat_id}/clone")
+    async def owui_chat_clone(chat_id: str, request: Request, user=Depends(get_current_user)):
+        # Backs the "Branch" action under every response. The frontend posts
+        # {title: "Clone of {{TITLE}}"} and navigates to the returned id.
+        pool = _require_pool(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        title = (body or {}).get("title") if isinstance(body, dict) else None
+        chat = await persistence.clone_chat(pool, user.id, chat_id, title)
+        if chat is None:
+            raise HTTPException(status_code=404, detail="Chat not found")
+        return chat
+
     @router.post("/api/v1/chats/{chat_id}/pin")
     async def owui_chat_toggle_pin(chat_id: str, request: Request, user=Depends(get_current_user)):
         pool = _require_pool(request)
@@ -728,6 +766,28 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
     register_integrations_status_routes(router, get_current_user)
     register_integration_logs_routes(router, get_current_user)
     register_adaptive_space_routes(router, get_current_user)
+    # Gate 3 and Gate 7C-3: the CAD REST routes, and the same tools over MCP for
+    # Claude Code and Kimi Code. Same gate, same auth, same dispatcher.
+    #
+    # CAD is an optional module tree. Where it is present these register
+    # unconditionally and every route inside is gated on HARVIS_ADAPTIVE_CAD_ENABLED
+    # at request time, so flipping the flag needs no code path that only exists at
+    # import. Where the tree is absent the app serves everything else rather than
+    # failing to start.
+    try:
+        from .cad_router import register_cad_routes
+        from .cad_mcp import register_cad_mcp_routes
+    except ImportError as exc:
+        logger.info("CAD routes not registered — module tree absent (%s)", exc)
+    else:
+        register_cad_routes(router, get_current_user)
+        register_cad_mcp_routes(router, get_current_user)
+
+    # The same door, for whatever the user has connected themselves. Registered
+    # unconditionally: unlike CAD this has no feature flag of its own, and a
+    # deployment with no connectors simply serves an empty tool list.
+    from plugins.mcp.sidecar_bridge import register_connector_mcp_routes
+    register_connector_mcp_routes(router, get_current_user)
     register_capabilities_routes(router, get_current_user)
     register_engine_auth_routes(router, get_current_user)
     from .hermes_connect import register_hermes_connect_routes
@@ -741,6 +801,10 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
     from .chat_files import register_chat_file_routes
     register_chat_file_routes(router, get_current_user)
     register_subagent_routes(router, get_current_user)
+    from .evaluations import register_evaluation_routes
+    register_evaluation_routes(router, get_current_user)
+    from .account import register_account_routes
+    register_account_routes(router, get_current_user, deps.verify_password)
 
     @router.get("/api/v1/chats/{chat_id}")
     async def owui_chat_get(chat_id: str, request: Request, user=Depends(get_current_user)):

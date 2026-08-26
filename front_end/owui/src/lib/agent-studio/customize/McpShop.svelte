@@ -3,8 +3,10 @@
 	// over the EXISTING MCP endpoints (the protocol IS MCP; only the vocabulary
 	// changed): GET /api/owui/mcp/templates (catalog) + /api/owui/mcp/connections
 	// CRUD (mcp_servers table). One-click connect writes a connection row;
-	// connectors flagged needs_secret connect as 'limited' (the pending_review
-	// credential hard gate stands — no key is ever collected or stored here).
+	// connectors flagged needs_secret collect their key on the card and send it
+	// under `credentials`, which the backend seals with the house Fernet cipher
+	// (plugins/mcp/credentials.py) and unseals only when the sandbox container
+	// starts. A GET never returns the value — only a mask and the key names.
 	// Connecting does NOT make a connector live in OpenClaw: the honesty banner
 	// below links the explicit, flag-gated sync preview/apply. Cards carry the
 	// catalog's `publisher` tier and group under "Anthropic & Partners"
@@ -33,6 +35,8 @@
 	// per-card inline config (templates with required fields can't one-click)
 	let expandedId: string | null = null;
 	let fieldValues: Record<string, string> = {};
+	// Secret values for the open card. Posted once, never read back.
+	let credValues: Record<string, string> = {};
 	let attachingId: string | null = null;
 	let busyConnId: string | null = null;
 	// Registry "Add" prefill — overrides the BYO card's connection name/transport
@@ -152,8 +156,14 @@
 	].filter((g) => g.items.length > 0);
 
 	const requiredFields = (t: any) => (t.fields ?? []).filter((f: any) => f.required);
+	const credsFor = (t: any) => t.credentials ?? [];
+	// A connector that needs a key is not ready without it — connecting anyway
+	// just produces a row that fails at spawn.
+	const credsReady = (t: any) =>
+		credsFor(t).every((c: any) => (credValues[c.key] ?? '').trim());
+	const needsForm = (t: any) => requiredFields(t).length > 0 || credsFor(t).length > 0;
 	const fieldsReady = (t: any) =>
-		requiredFields(t).every((f: any) => (fieldValues[f.key] ?? '').trim());
+		requiredFields(t).every((f: any) => (fieldValues[f.key] ?? '').trim()) && credsReady(t);
 
 	const buildBody = (t: any) => {
 		const transport = prefillTransport ?? t.transport ?? 'stdio';
@@ -166,6 +176,12 @@
 		} else {
 			body.url = (fieldValues['url'] ?? '').trim();
 		}
+		const credentials: Record<string, string> = {};
+		for (const c of credsFor(t)) {
+			const v = (credValues[c.key] ?? '').trim();
+			if (v) credentials[c.key] = v;
+		}
+		if (Object.keys(credentials).length) body.credentials = credentials;
 		return body;
 	};
 
@@ -176,10 +192,11 @@
 			// prefill — otherwise an abandoned registry "Add" would rename an
 			// unrelated one-click connect (buildBody reads prefillName).
 			fieldValues = {};
+			credValues = {};
 			prefillName = null;
 			prefillTransport = null;
 		}
-		if (requiredFields(t).length && (expandedId !== t.id || !fieldsReady(t))) {
+		if (needsForm(t) && (expandedId !== t.id || !fieldsReady(t))) {
 			// needs config → open the card's inline form first
 			expandedId = t.id;
 			return;
@@ -203,11 +220,12 @@
 		if (res) {
 			expandedId = null;
 			fieldValues = {};
+			credValues = {};
 			prefillName = null;
 			prefillTransport = null;
 			toast.success(
 				t.needs_secret
-					? $i18n.t('"{{name}}" connected (limited — no credentials stored).', { name: savedName })
+					? $i18n.t('"{{name}}" connected — key stored encrypted.', { name: savedName })
 					: $i18n.t('"{{name}}" connected.', { name: savedName })
 			);
 			await loadConns();
@@ -286,7 +304,7 @@
 					type="button"
 					aria-pressed={activeCat === cat.id}
 					on:click={() => (activeCat = cat.id)}
-					class="min-h-[44px] px-3 rounded-full text-xs font-medium border transition {focusRing} {activeCat === cat.id
+					class="min-h-[44px] px-3 rounded-lg text-xs font-medium border transition {focusRing} {activeCat === cat.id
 						? 'border-gray-300 dark:border-gray-600 bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-50'
 						: 'border-gray-200 dark:border-gray-800 text-gray-500 dark:text-gray-400 hover:border-gray-300 dark:hover:border-gray-700'}"
 					>{$i18n.t(cat.label)}</button
@@ -379,7 +397,7 @@
 				{#if t.needs_secret}
 					<div class="flex items-center gap-1.5 text-[11px] text-amber-600 dark:text-amber-400">
 						<svg class="size-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" /></svg>
-						{$i18n.t('Needs an API key — connects limited, no key stored (pending review).')}
+						{$i18n.t('Needs an API key — you enter it here; it is encrypted at rest.')}
 					</div>
 				{/if}
 
@@ -398,6 +416,27 @@
 								{#if f.help}<div class="text-[10px] text-gray-400 mt-0.5">{f.help}</div>{/if}
 							</div>
 						{/each}
+						{#each credsFor(t) as c (c.key)}
+							<div>
+								<label class="text-[11px] text-gray-500" for={`mcpshop-${t.id}-cred-${c.key}`}
+									>{c.label} <code class="text-[10px] font-mono text-gray-400">{c.key}</code></label
+								>
+								<input
+									id={`mcpshop-${t.id}-cred-${c.key}`}
+									type="password"
+									autocomplete="new-password"
+									spellcheck="false"
+									bind:value={credValues[c.key]}
+									placeholder={$i18n.t('Paste the value')}
+									class="w-full min-h-[44px] rounded-lg border border-gray-200 dark:border-gray-800 bg-transparent px-3 text-sm outline-none focus:border-gray-400 dark:focus:border-gray-500 font-mono {focusRing}"
+								/>
+							</div>
+						{/each}
+						{#if credsFor(t).length}
+							<div class="text-[10px] text-gray-400">
+								{$i18n.t('Encrypted before storage and decrypted only when the server starts.')}
+							</div>
+						{/if}
 					</div>
 				{/if}
 
@@ -436,8 +475,8 @@
 						>
 							{#if attachingId === t.id}{$i18n.t('Connecting…')}
 							{:else if expandedId === t.id}{$i18n.t('Confirm connect')}
-							{:else if t.needs_secret}{$i18n.t('Connect (limited)')}
-							{:else if requiredFields(t).length}{$i18n.t('Configure & connect')}
+							{:else if t.needs_secret}{$i18n.t('Add key & connect')}
+							{:else if needsForm(t)}{$i18n.t('Configure & connect')}
 							{:else}{$i18n.t('Connect')}{/if}
 						</button>
 					{/if}

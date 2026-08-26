@@ -427,7 +427,7 @@
 						<div class="flex flex-col items-start gap-2 mt-3">
 							{#each STARTERS as s}
 								<button
-									class="px-4 py-2 rounded-full border border-gray-200 dark:border-gray-800 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-850 transition"
+									class="px-4 py-2 rounded-lg border border-gray-200 dark:border-gray-800 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-850 transition"
 									on:click={() => starter(s.prefix)}>{$i18n.t(s.label)}</button
 								>
 							{/each}

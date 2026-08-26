@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import re
+import time
 
 import asyncpg
 import httpx
@@ -1370,8 +1371,12 @@ async def execute_chat_completion(request: Request, body: dict):
             )
 
     if is_streaming:
-        # Ask Kimi/NVIDIA to include usage in the final SSE chunk
-        if is_kimi or is_nvidia:
+        # Ask for a usage frame on EVERY streamed lane, not just Kimi/NVIDIA. Without
+        # it the chat footer never receives real token counts and has to fall back to
+        # a character estimate for the whole turn — measured 2026-08-19: a streamed
+        # Ollama reply produced 48 chunks and zero usage frames. An upstream that
+        # rejects the field is caught by _stream_from_upstream's retry.
+        if "stream_options" not in body:
             body = {**body, "stream_options": {"include_usage": True}}
         return StreamingResponse(
             _stream_from_upstream(
@@ -1635,6 +1640,71 @@ async def _stream_from_upstream(
     is_kimi: bool = False,
     is_nvidia: bool = False,
 ):
+    """Forward an upstream SSE stream, retrying once without ``stream_options``.
+
+    A streamed OpenAI-compatible response carries no usage object unless the
+    request asks for one, so the chat's token meter needs ``stream_options``.
+    But an upstream that has never heard of the field rejects the WHOLE request
+    with a 4xx — and OpenAI-compatible servers are not uniform here (Ollama
+    honours it, some llama.cpp / vLLM builds do not). Dropping it and trying
+    again costs one round-trip and only in the failure case; the alternative is
+    a broken chat on somebody's local server for the sake of a token count.
+
+    Safe to retry at this point: a non-200 means nothing has been yielded yet.
+    """
+    state: dict = {}
+    async for event in _stream_from_upstream_once(
+        url, headers, body, model_name, is_kimi, is_nvidia, state
+    ):
+        yield event
+    if state.get("retry_without_stream_options"):
+        logger.info(
+            "model_proxy: upstream rejected stream_options — retrying without it (%s)",
+            model_name or url,
+        )
+        retry_body = {k: v for k, v in body.items() if k != "stream_options"}
+        async for event in _stream_from_upstream_once(
+            url, headers, retry_body, model_name, is_kimi, is_nvidia, None
+        ):
+            yield event
+
+
+def _harvis_stream_metrics(usage: dict, first_tok, last_tok) -> dict:
+    """Metrics envelope for a streamed OpenAI-compatible lane.
+
+    Only values that were actually reported or actually measured go in. Nothing here
+    falls back to a zero — a missing key is how the UI knows to render an em dash
+    instead of a number nobody counted.
+    """
+    m: dict = {"engine": "openai_stream", "source": "provider"}
+    pt = usage.get("prompt_tokens")
+    ct = usage.get("completion_tokens")
+    if isinstance(pt, int) and pt:
+        m["context_tokens"] = {"value": pt, "quality": "confirmed", "source": "provider",
+                               "final": True, "scope": "model_request"}
+    if isinstance(ct, int) and ct:
+        m["output_tokens"] = {"value": ct, "quality": "confirmed", "source": "provider",
+                              "final": True, "scope": "run"}
+    if first_tok is not None and last_tok is not None and last_tok > first_tok:
+        gen_ms = int((last_tok - first_tok) * 1000)
+        m["generation_ms"] = {"value": gen_ms, "quality": "measured", "source": "harvis",
+                              "final": True, "scope": "model_generation"}
+        if isinstance(ct, int) and ct and gen_ms > 150:
+            m["tokens_per_sec"] = {"value": round(ct / (gen_ms / 1000.0), 2),
+                                   "quality": "measured", "source": "derived",
+                                   "final": True, "scope": "model_generation"}
+    return m if len(m) > 2 else {}
+
+
+async def _stream_from_upstream_once(
+    url: str,
+    headers: dict,
+    body: dict,
+    model_name: str = "",
+    is_kimi: bool = False,
+    is_nvidia: bool = False,
+    state: dict | None = None,
+):
     """Async generator that forwards the SSE stream from any upstream to OpenClaw.
 
     For NVIDIA NIM with thinking enabled, the model emits two delta fields:
@@ -1657,6 +1727,17 @@ async def _stream_from_upstream(
                         resp.status_code,
                         error_msg,
                     )
+                    # Hand the retry decision to the wrapper instead of surfacing the
+                    # error, but ONLY when stream_options is the plausible cause —
+                    # a 4xx on a request that never carried it is a real failure and
+                    # must still reach the user.
+                    if (
+                        state is not None
+                        and "stream_options" in body
+                        and 400 <= resp.status_code < 500
+                    ):
+                        state["retry_without_stream_options"] = True
+                        return
                     error_event = json.dumps(
                         {
                             "error": {
@@ -1673,11 +1754,25 @@ async def _stream_from_upstream(
                 _stream_content_delta_count = 0
                 _stream_reasoning_delta_count = 0
                 _stream_tool_call_count = 0
+                # Generation window, measured here: first visible token → last visible
+                # token. Everything before the first token (queueing, model load, prompt
+                # processing) is deliberately outside it, so completion_tokens divided by
+                # this window is a generation rate rather than a whole-request average.
+                _first_tok = None
+                _last_tok = None
                 async for line in resp.aiter_lines():
                     _stream_line_count += 1
                     if line.startswith("data: ") and line != "data: [DONE]":
                         try:
                             chunk = json.loads(line[6:])
+
+                            for _ch in chunk.get("choices") or []:
+                                _d = _ch.get("delta") or {}
+                                if _d.get("content") or _d.get("reasoning"):
+                                    _now = time.monotonic()
+                                    if _first_tok is None:
+                                        _first_tok = _now
+                                    _last_tok = _now
 
                             # Log usage when available
                             usage = chunk.get("usage") or {}
@@ -1715,6 +1810,16 @@ async def _stream_from_upstream(
                                         break
                                 if skip:
                                     continue  # silently drop thinking chunk
+
+                            if usage.get("completion_tokens") is not None:
+                                # Ride the metrics along on the usage frame the upstream
+                                # already sends. A separate frame of our own would reach
+                                # every OpenAI-SDK client on this path (Discord included)
+                                # as a chunk with no choices.
+                                m = _harvis_stream_metrics(usage, _first_tok, _last_tok)
+                                if m:
+                                    chunk["harvis_metrics"] = m
+                                    line = "data: " + json.dumps(chunk)
 
                         except Exception:
                             pass

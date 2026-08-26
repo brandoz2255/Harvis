@@ -1,17 +1,30 @@
 <script lang="ts">
 	// In-app "Browse and verify" browser panel for the Build dock. Self-contained: a URL bar +
 	// sandboxed iframe + back/forward/reload/open-in-new-tab, so you can preview a running dev
-	// server, the Harvis app, or any site without leaving Build. No backend port-proxy required.
+	// server, the Harvis app, or any site without leaving Build. Also shows live
+	// screenshot_preview frames (desktop + mobile) from the screenshot-to-code verify loop.
 	import { getContext } from 'svelte';
 	const i18n: any = getContext('i18n');
 
 	export let initialUrl = '';
+	/** Latest verify_preview payload from the Build run stream (live only). */
+	export let verifyFrames: {
+		path?: string;
+		desktop_b64?: string;
+		mobile_b64?: string;
+		iteration?: number;
+	} | null = null;
 
 	let url = initialUrl; // committed iframe src
 	let urlInput = initialUrl; // the URL bar text
 	let iframeKey = 0;
 	let history: string[] = [];
 	let historyIndex = -1;
+	let mode: 'browse' | 'verify' = 'browse';
+
+	$: hasVerify =
+		!!(verifyFrames?.desktop_b64 || verifyFrames?.mobile_b64);
+	$: if (hasVerify) mode = 'verify';
 
 	const normalize = (u: string): string => {
 		let s = (u || '').trim();
@@ -22,6 +35,7 @@
 	const go = (raw?: string) => {
 		const s = normalize(raw ?? urlInput);
 		if (!s) return;
+		mode = 'browse';
 		url = s;
 		urlInput = s;
 		history = [...history.slice(0, historyIndex + 1), s];
@@ -96,6 +110,17 @@
 			class="shrink-0 px-2 py-1 text-[11px] rounded-md bg-blue-600 text-white hover:bg-blue-500 transition"
 			on:click={() => go()}>{$i18n.t('Go')}</button
 		>
+		{#if hasVerify}
+			<button
+				class="shrink-0 px-2 py-1 text-[11px] rounded-md border border-gray-200 dark:border-white/10 {mode === 'verify'
+					? 'bg-amber-500/15 text-amber-700 dark:text-amber-300'
+					: 'text-gray-500'} transition"
+				on:click={() => (mode = 'verify')}
+				title={$i18n.t('Screenshot verify frames')}
+			>
+				{$i18n.t('Verify')}
+			</button>
+		{/if}
 		<button
 			class="shrink-0 p-1 rounded text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 disabled:opacity-30"
 			disabled={!url}
@@ -107,8 +132,43 @@
 	</div>
 
 	<!-- body -->
-	<div class="flex-1 min-h-0">
-		{#if url}
+	<div class="flex-1 min-h-0 overflow-auto">
+		{#if mode === 'verify' && hasVerify}
+			<div class="p-3 space-y-3">
+				<div class="text-[11px] text-gray-500 dark:text-gray-400">
+					{$i18n.t('Live verify renders')}{#if verifyFrames?.path}
+						— {verifyFrames.path}{/if}{#if verifyFrames?.iteration}
+						· iter {verifyFrames.iteration}{/if}
+					· {$i18n.t('for seeing, not kept as artifacts')}
+				</div>
+				<div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+					{#if verifyFrames?.desktop_b64}
+						<figure class="space-y-1">
+							<figcaption class="text-[11px] font-medium text-gray-600 dark:text-gray-300">
+								{$i18n.t('Desktop')}
+							</figcaption>
+							<img
+								src={`data:image/png;base64,${verifyFrames.desktop_b64}`}
+								alt="desktop verify"
+								class="w-full border border-gray-200 dark:border-white/10 rounded bg-white"
+							/>
+						</figure>
+					{/if}
+					{#if verifyFrames?.mobile_b64}
+						<figure class="space-y-1">
+							<figcaption class="text-[11px] font-medium text-gray-600 dark:text-gray-300">
+								{$i18n.t('Mobile')}
+							</figcaption>
+							<img
+								src={`data:image/png;base64,${verifyFrames.mobile_b64}`}
+								alt="mobile verify"
+								class="w-full max-w-[390px] border border-gray-200 dark:border-white/10 rounded bg-white"
+							/>
+						</figure>
+					{/if}
+				</div>
+			</div>
+		{:else if url}
 			{#key iframeKey}
 				<iframe
 					title="preview"
@@ -122,7 +182,7 @@
 				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="size-8 text-gray-400 dark:text-gray-600"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M3 9h18" stroke-linecap="round" /><circle cx="6.5" cy="6.5" r=".6" fill="currentColor" /><circle cx="9" cy="6.5" r=".6" fill="currentColor" /></svg>
 				<div class="text-sm font-medium text-gray-500 dark:text-gray-300">{$i18n.t('Browse and verify')}</div>
 				<div class="text-[11px] max-w-xs leading-relaxed">
-					{$i18n.t('Enter a URL above to preview a running app — your dev server, the Harvis app, or any site.')}
+					{$i18n.t('Enter a URL above to preview a running app — or attach a screenshot in chat and the agent will fill verify frames here.')}
 				</div>
 				<div class="flex flex-wrap items-center justify-center gap-1.5 pt-1">
 					{#each quick as q}

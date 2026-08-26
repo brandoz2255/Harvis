@@ -51,8 +51,13 @@
 	import Sparkles from '$lib/components/icons/Sparkles.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import { generateTitle } from '$lib/apis';
+	import { chatActivity } from '$lib/utils/chatActivity';
 
 	export let className = '';
+
+	// Background activity for THIS chat: a Deep Research run the user walked away from.
+	// See $lib/utils/chatActivity — the sidebar polls, this row just renders the state.
+	$: activity = $chatActivity[id];
 
 	export let id;
 	export let title;
@@ -413,19 +418,18 @@
 	{#if confirmEdit}
 		<div
 			id="sidebar-chat-item"
-			class=" w-full flex justify-between rounded-xl px-[11px] py-[6px] {id === $chatId ||
-			confirmEdit
-				? 'bg-gray-100 dark:bg-gray-900 selected'
-				: selected
-					? 'bg-gray-100 dark:bg-gray-950 selected'
-					: 'group-hover:bg-gray-100 dark:group-hover:bg-gray-950'}  whitespace-nowrap relative {generating
+			class=" w-full flex justify-between px-[11px] py-[6px] {id === $chatId ||
+			confirmEdit ||
+			selected
+				? 'rounded-xl bg-gray-200 dark:bg-[oklch(0.29_0.024_258)] selected'
+				: 'rounded-xl group-hover:bg-gray-200 dark:group-hover:bg-[oklch(0.29_0.024_258)]'}  whitespace-nowrap relative {generating
 				? 'cursor-not-allowed'
 				: ''}"
 		>
 			<input
 				id="chat-title-input-{id}"
 				bind:value={chatTitle}
-				class=" bg-transparent w-full outline-hidden mr-10"
+				class=" bg-transparent w-full outline-hidden mr-10 text-gray-900 dark:text-gray-100 placeholder:text-gray-500 dark:placeholder:text-gray-400"
 				placeholder={generating ? $i18n.t('Generating...') : ''}
 				disabled={generating}
 				on:keydown={chatTitleInputKeydownHandler}
@@ -449,12 +453,11 @@
 	{:else}
 		<a
 			id="sidebar-chat-item"
-			class=" w-full flex justify-between rounded-xl px-[11px] py-[6px] {id === $chatId ||
-			confirmEdit
-				? 'bg-gray-100 dark:bg-gray-900 selected'
-				: selected
-					? 'bg-gray-100 dark:bg-gray-950 selected'
-					: ' group-hover:bg-gray-100 dark:group-hover:bg-gray-950'}  whitespace-nowrap"
+			class=" w-full flex justify-between px-[11px] py-[6px] {id === $chatId ||
+			confirmEdit ||
+			selected
+				? 'rounded-xl bg-gray-200 dark:bg-[oklch(0.29_0.024_258)] selected'
+				: 'rounded-xl group-hover:bg-gray-200 dark:group-hover:bg-[oklch(0.29_0.024_258)]'}  whitespace-nowrap"
 			href="/c/{id}"
 			on:click={() => {
 				dispatch('select');
@@ -497,13 +500,29 @@
 			<div class="flex self-center flex-1 w-full min-w-0">
 				<div
 					dir="auto"
-					class="text-left self-center overflow-hidden whitespace-nowrap name-fade w-full h-[20px] text-[13px] font-normal {unread
-						? 'text-gray-700 dark:text-gray-200'
-						: 'text-gray-500 dark:text-gray-400'}"
+					class="text-left self-center overflow-hidden whitespace-nowrap name-fade w-full h-[20px] text-[13px] font-normal {id === $chatId
+						? 'text-gray-900 dark:text-gray-100'
+						: unread
+							? 'text-gray-700 dark:text-gray-200'
+							: 'text-gray-500 dark:text-gray-400'}"
 				>
 					{title}
 				</div>
 			</div>
+
+			<!-- Background run started in this chat: still going (spinner), or finished while
+			     the user was somewhere else (blue dot). Cleared the moment the chat is opened.
+			     The hover menu covers this corner, which is fine — a row you are pointing at
+			     is a row you are about to open anyway. -->
+			{#if activity?.state === 'running'}
+				<div class="shrink-0 self-center pl-2" title={$i18n.t('Still working on this chat')}>
+					<Spinner className="size-3" />
+				</div>
+			{:else if activity?.state === 'done'}
+				<div class="shrink-0 self-center pl-2" title={$i18n.t('Finished — open to read it')}>
+					<span class="block size-2 rounded-full bg-blue-500"></span>
+				</div>
+			{/if}
 		</a>
 	{/if}
 
@@ -511,11 +530,9 @@
 	<div
 		id="sidebar-chat-item-menu"
 		class="
-        {id === $chatId || confirmEdit
-			? 'from-gray-100 dark:from-gray-900 selected'
-			: selected
-				? 'from-gray-100 dark:from-gray-950 selected'
-				: 'invisible group-hover:visible from-gray-100 dark:from-gray-950'}
+        {id === $chatId || confirmEdit || selected
+			? 'from-gray-200 dark:from-[oklch(0.29_0.024_258)] selected'
+			: 'invisible group-hover:visible from-gray-200 dark:from-[oklch(0.29_0.024_258)]'}
             absolute {className === 'pr-2'
 			? 'right-[8px]'
 			: 'right-1'} top-[4px] py-1 pr-0.5 mr-1.5 pl-5 bg-linear-to-l from-80%

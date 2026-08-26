@@ -94,13 +94,13 @@
 			<svg class="size-6 text-blue-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="14" rx="2" /><path d="M8 21h8M9 8l3 3-3 3M14 14h3" /></svg>
 			<div>
 				<h1 class="text-xl font-semibold text-gray-800 dark:text-gray-100">{$i18n.t('Dev Console')}</h1>
-				<p class="text-xs text-gray-500">{$i18n.t('Providers, background jobs and recent runs — one operator view.')}</p>
+				<p class="text-xs text-gray-500">{$i18n.t('Engines, background jobs and recent runs — one operator view.')}</p>
 			</div>
 		</div>
 		<button
 			on:click={load}
 			disabled={refreshing}
-			class="inline-flex items-center gap-1.5 rounded-full border border-gray-200 dark:border-gray-800 px-3 py-2 text-xs font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-850 disabled:opacity-40 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+			class="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 dark:border-gray-800 px-3 py-2 text-xs font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-850 disabled:opacity-40 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
 		>
 			<svg class="size-3.5 {refreshing ? 'animate-spin' : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6" /></svg>
 			{$i18n.t('Refresh')}

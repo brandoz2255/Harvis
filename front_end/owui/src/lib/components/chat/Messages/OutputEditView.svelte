@@ -235,7 +235,7 @@
 				: $i18n.t('Switch to visual editor')}
 		>
 			<button
-				class="text-xs px-2 py-0.5 rounded-full transition-all text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-200/50 dark:hover:bg-gray-700/50"
+				class="text-xs px-2 py-0.5 rounded-md transition-all text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-200/50 dark:hover:bg-gray-700/50"
 				on:click={() => (viewMode === 'visual' ? switchToJson() : switchToVisual())}
 			>
 				{viewMode === 'visual' ? $i18n.t('Visual') : 'JSON'}

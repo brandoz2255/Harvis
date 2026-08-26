@@ -474,28 +474,28 @@
 								<div class="flex flex-wrap items-center gap-1.5 mt-2">
 									{#if col.run.status === 'streaming'}
 										<span
-											class="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-500"
+											class="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-md bg-blue-500/10 text-blue-500"
 											><span class="size-1.5 rounded-full bg-blue-500 animate-ping"></span>{$i18n.t(
 												'Streaming'
 											)}</span
 										>
 									{:else if col.run.status === 'done'}
 										<span
-											class="text-[11px] px-2 py-0.5 rounded-full bg-green-500/10 text-green-600 dark:text-green-400"
+											class="text-[11px] px-2 py-0.5 rounded-md bg-green-500/10 text-green-600 dark:text-green-400"
 											>✓</span
 										>
 									{:else if col.run.status === 'error'}
-										<span class="text-[11px] px-2 py-0.5 rounded-full bg-red-500/10 text-red-500"
+										<span class="text-[11px] px-2 py-0.5 rounded-md bg-red-500/10 text-red-500"
 											>{$i18n.t('Error')}</span
 										>
 									{:else if col.run.status === 'stopped'}
-										<span class="text-[11px] px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-500"
+										<span class="text-[11px] px-2 py-0.5 rounded-md bg-amber-500/10 text-amber-500"
 											>{$i18n.t('Stopped')}</span
 										>
 									{/if}
 									{#if col.run.judgeScore != null}
 										<span
-											class="text-[11px] px-2 py-0.5 rounded-full bg-purple-500/10 text-purple-500"
+											class="text-[11px] px-2 py-0.5 rounded-md bg-purple-500/10 text-purple-500"
 											title={$i18n.t('Judge score')}>★ {fmtScore(col.run.judgeScore)}</span
 										>
 									{/if}

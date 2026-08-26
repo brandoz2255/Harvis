@@ -29,7 +29,6 @@
 	import AttachWebpageModal from './AttachWebpageModal.svelte';
 	import GlobeAlt from '$lib/components/icons/GlobeAlt.svelte';
 	import Search from '$lib/components/icons/Search.svelte';
-	import Photo from '$lib/components/icons/Photo.svelte';
 
 	const i18n = getContext('i18n');
 
@@ -44,8 +43,6 @@
 
 	export let uploadGoogleDriveHandler: Function;
 	export let uploadOneDriveHandler: Function;
-
-	export let onCreateImage: Function;
 
 	// Force web search. The pill next to the input only appears when EVERY selected
 	// model advertises the web_search capability, so on a model that doesn't there was
@@ -201,19 +198,6 @@
 								{$i18n.t('On')}
 							</div>
 						{/if}
-					</button>
-
-					<!-- Always shown — the backend gates generation honestly (flag + provider readiness). -->
-					<button
-						class="flex w-full gap-2 items-center px-3 py-1.5 text-sm select-none cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50 rounded-xl"
-						type="button"
-						on:click={() => {
-							onCreateImage();
-							show = false;
-						}}
-					>
-						<Photo />
-						<div class="line-clamp-1">{$i18n.t('Create Image')}</div>
 					</button>
 
 					<!-- Connectors — submenu with saved connections (quick toggles) + manage/browse. -->
@@ -382,35 +366,40 @@
 						</Tooltip>
 					{/if}
 
-					<Tooltip
-						content={fileUploadCapableModels.length !== selectedModels.length
-							? $i18n.t('Model(s) do not support file upload')
-							: !fileUploadEnabled
-								? $i18n.t('You do not have permission to upload files.')
-								: ''}
-						className="w-full"
-					>
-						<button
-							class="flex gap-2 w-full items-center px-3 py-1.5 text-sm cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50 rounded-xl {!fileUploadEnabled
-								? 'opacity-50'
-								: ''}"
-							on:click={() => {
-								tab = 'knowledge';
-							}}
+					<!-- Parked with CAD: hidden behind enable_knowledge_attach
+					     (HARVIS_OWUI_KNOWLEDGE_ATTACH) rather than removed, so the
+					     picker below and its routes stay wired. -->
+					{#if $config?.features?.enable_knowledge_attach ?? false}
+						<Tooltip
+							content={fileUploadCapableModels.length !== selectedModels.length
+								? $i18n.t('Model(s) do not support file upload')
+								: !fileUploadEnabled
+									? $i18n.t('You do not have permission to upload files.')
+									: ''}
+							className="w-full"
 						>
-							<Database />
+							<button
+								class="flex gap-2 w-full items-center px-3 py-1.5 text-sm cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50 rounded-xl {!fileUploadEnabled
+									? 'opacity-50'
+									: ''}"
+								on:click={() => {
+									tab = 'knowledge';
+								}}
+							>
+								<Database />
 
-							<div class="flex items-center w-full justify-between">
-								<div class=" line-clamp-1">
-									{$i18n.t('Attach Knowledge')}
-								</div>
+								<div class="flex items-center w-full justify-between">
+									<div class=" line-clamp-1">
+										{$i18n.t('Attach Knowledge')}
+									</div>
 
-								<div class="text-gray-500">
-									<ChevronRight />
+									<div class="text-gray-500">
+										<ChevronRight />
+									</div>
 								</div>
-							</div>
-						</button>
-					</Tooltip>
+							</button>
+						</Tooltip>
+					{/if}
 
 					<Tooltip
 						content={fileUploadCapableModels.length !== selectedModels.length

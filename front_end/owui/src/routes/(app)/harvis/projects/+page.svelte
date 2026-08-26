@@ -110,7 +110,7 @@
 			</div>
 			<button
 				on:click={() => (showCreate = true)}
-				class="inline-flex items-center gap-1.5 rounded-full bg-blue-600 text-white px-3.5 py-2 text-sm font-medium hover:bg-blue-700 transition shrink-0"
+				class="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 text-white px-3.5 py-2 text-sm font-medium hover:bg-blue-700 transition shrink-0"
 			>
 				<svg class="size-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg>
 				{$i18n.t('New Project')}

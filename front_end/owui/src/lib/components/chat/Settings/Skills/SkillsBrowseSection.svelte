@@ -96,7 +96,7 @@
 										)}
 									>
 										<span
-											class="shrink-0 rounded-full border border-gray-200 dark:border-gray-800 px-1.5 py-px text-[10px] text-gray-500"
+											class="shrink-0 rounded-md border border-gray-200 dark:border-gray-800 px-1.5 py-px text-[10px] text-gray-500"
 											>{$i18n.t('scripts')}</span
 										>
 									</Tooltip>

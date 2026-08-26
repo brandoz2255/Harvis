@@ -11,6 +11,7 @@
 		artifactCode,
 		artifactContents
 	} from '$lib/stores';
+	import { isNoiseSandboxPath, sandboxSelectPath } from '$lib/utils/sandbox';
 	import Search from '$lib/components/icons/Search.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 
@@ -88,19 +89,34 @@
 				status: lib.status
 			}));
 
-	// Code / HTML / SVG artifacts produced in this chat (already aggregated by OWUI).
-	$: artifacts = (($artifactContents ?? []) as Array<{ type: string; content: string }>).map(
-		(a, i) => ({
+	// Code / HTML / SVG artifacts produced in this chat (already aggregated by OWUI), plus
+	// the scripts written into the chat sandbox. A file that arrived with a name is listed
+	// BY that name — "Code artifact" told you nothing about which of six scripts it was.
+	const typeLabel = (type: string) =>
+		type === 'iframe'
+			? $i18n.t('Web page')
+			: type === 'svg'
+				? $i18n.t('SVG image')
+				: type === 'canvas'
+					? $i18n.t('Canvas')
+					: $i18n.t('Code artifact');
+
+	$: artifacts = (
+		($artifactContents ?? []) as Array<{
+			type: string;
+			content: string;
+			name?: string;
+			path?: string;
+		}>
+	)
+		.map((a, i) => ({
 			idx: i,
 			content: a.content,
-			label:
-				a.type === 'iframe'
-					? $i18n.t('Web page')
-					: a.type === 'svg'
-						? $i18n.t('SVG image')
-						: $i18n.t('Code artifact')
-		})
-	);
+			path: a.path ?? null,
+			label: a.name || typeLabel(a.type),
+			sub: a.name ? typeLabel(a.type) : $i18n.t('Open in viewer')
+		}))
+		.filter((a) => !(a.path && isNoiseSandboxPath(a.path)));
 
 	$: isEmpty = reports.length === 0 && artifacts.length === 0;
 
@@ -117,8 +133,11 @@
 		showControls.set(true);
 	};
 
-	const openArtifact = (content: string) => {
-		artifactCode.set(content);
+	const openArtifact = (a: { content: string; path: string | null }) => {
+		// A sandbox file is addressed by path — two scripts can share a first line, and
+		// matching on content picked whichever one came first.
+		if (a.path) sandboxSelectPath.set(a.path);
+		else artifactCode.set(a.content);
 		showArtifacts.set(true);
 		showControls.set(true);
 	};
@@ -191,7 +210,7 @@
 				{#each artifacts as a (a.idx)}
 					<button
 						class="flex items-center gap-3 w-full text-left rounded-xl border border-gray-100 dark:border-gray-850 hover:border-gray-300 dark:hover:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-850/50 px-3 py-2.5 transition"
-						on:click={() => openArtifact(a.content)}
+						on:click={() => openArtifact(a)}
 					>
 						<div
 							class="size-8 rounded-lg bg-gray-100 dark:bg-gray-800 flex items-center justify-center shrink-0"
@@ -211,7 +230,7 @@
 							<div class="text-sm font-medium text-gray-800 dark:text-gray-100 truncate">
 								{a.label}
 							</div>
-							<div class="text-[11px] text-gray-400">{$i18n.t('Open in viewer')}</div>
+							<div class="text-[11px] text-gray-400">{a.sub}</div>
 						</div>
 						<svg
 							class="size-4 text-gray-400 shrink-0"

@@ -129,7 +129,7 @@
 			icon: `<svg xmlns="http://www.w3.org/2000/svg" ${_capAttrs}><path d="M9.94 14.06A2 2 0 0 0 8.5 12.6l-5.9-1.5 5.9-1.53A2 2 0 0 0 9.94 8.1L11.47 2.2 13 8.1a2 2 0 0 0 1.44 1.44l5.9 1.53-5.9 1.5A2 2 0 0 0 13 15.94L11.47 21.8z"/></svg>`
 		},
 		{
-			title: 'Connect Providers',
+			title: 'Engines & Connectors',
 			desc: 'Wire up GitHub, Discord, ComfyUI, SSH and more — all local-first.',
 			icon: `<svg xmlns="http://www.w3.org/2000/svg" ${_capAttrs}><path d="M12 22v-5M9 8V2M15 8V2M18 8v4a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8z"/></svg>`
 		},
@@ -168,7 +168,7 @@
 
 <div class="grid grid-rows-[1fr_auto] w-full h-full min-h-full px-5 pt-6 pb-6 text-center">
 	<!-- ROW 1: hero + composer (+ attached connect tray), centered. -->
-	<div class="launch-main flex flex-col items-center justify-center gap-[22px] w-full max-w-[760px] mx-auto">
+	<div class="launch-main flex flex-col items-center justify-center gap-[22px] w-full max-w-[780px] mx-auto">
 		{#if $temporaryChatEnabled}
 			<Tooltip
 				content={$i18n.t("This chat won't appear in history and your messages will not be saved.")}
@@ -208,7 +208,7 @@
 		</div>
 
 		<!-- Launch composer: card on top (z-10), connect tray tucked under it (z-0). -->
-		<div class="relative w-full max-w-[760px] {atSelectedModel ? 'mt-2' : ''}">
+		<div class="relative w-full max-w-[780px] {atSelectedModel ? 'mt-2' : ''}">
 			<div class="relative z-10 w-full text-base font-normal">
 				<MessageInput
 					bind:this={messageInput}

@@ -22,6 +22,10 @@ class McpServerRegistry:
     def __init__(self, pool: asyncpg.Pool) -> None:
         self._pool = pool
 
+    @property
+    def pool(self) -> asyncpg.Pool:
+        return self._pool
+
     async def list_for_user(self, user_id: int, *, include_disabled: bool = True) -> list[McpServerConfig]:
         try:
             async with self._pool.acquire() as conn:
@@ -132,16 +136,49 @@ def _row_to_config(row) -> McpServerConfig:
     return McpServerConfig(
         user_id=row["user_id"],
         server_name=row["server_name"],
-        transport=Transport(row["transport"]),
+        transport=_coerce_transport(row["transport"]),
         url=row["url"],
         command=row["command"],
         args=_load_jsonb(row["args"], default=[]),
         env=_load_jsonb(row["env"], default={}),
-        auth_method=AuthMethod(row["auth_method"]),
+        auth_method=_coerce_auth(row["auth_method"]),
         enabled=row["enabled"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
+
+
+# The connections form accepts "http" as a friendlier spelling of the
+# streamable transport, and a row written before a value was validated can hold
+# anything at all. Coerce rather than raise: one malformed row must not take out
+# the whole list and with it every other server the user has.
+_TRANSPORT_ALIASES = {
+    "http": Transport.STREAMABLE_HTTP,
+    "streamable_http": Transport.STREAMABLE_HTTP,
+    "streamablehttp": Transport.STREAMABLE_HTTP,
+    "https": Transport.STREAMABLE_HTTP,
+}
+
+
+def _coerce_transport(value) -> Transport:
+    raw = str(value or "stdio").strip().lower()
+    try:
+        return Transport(raw)
+    except ValueError:
+        pass
+    if raw in _TRANSPORT_ALIASES:
+        return _TRANSPORT_ALIASES[raw]
+    logger.warning("mcp: unknown transport %r — treating it as stdio", value)
+    return Transport.STDIO
+
+
+def _coerce_auth(value) -> AuthMethod:
+    raw = str(value or "none").strip().lower()
+    try:
+        return AuthMethod(raw)
+    except ValueError:
+        logger.warning("mcp: unknown auth_method %r — treating it as none", value)
+        return AuthMethod.NONE
 
 
 def _load_jsonb(value, *, default):

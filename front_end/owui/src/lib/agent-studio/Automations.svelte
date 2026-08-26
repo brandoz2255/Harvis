@@ -316,7 +316,7 @@
 				<div class="flex items-center gap-1.5 flex-wrap flex-1 min-w-0">
 					{#each suggestionChips as chip}
 						<button
-							class="text-xs px-2.5 py-1 rounded-full border border-gray-200 dark:border-gray-800 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-850 transition"
+							class="text-xs px-2.5 py-1 rounded-lg border border-gray-200 dark:border-gray-800 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-850 transition"
 							on:click={() => (draft = chip)}>{$i18n.t(chip)}</button
 						>
 					{/each}
@@ -332,7 +332,7 @@
 		<div class="flex items-center justify-between gap-2 flex-wrap">
 			<div class="flex items-center gap-1 text-sm">
 				<button
-					class="px-3 py-1 rounded-full transition {statusFilter === 'all'
+					class="px-3 py-1 rounded-lg transition {statusFilter === 'all'
 						? 'bg-gray-100 dark:bg-gray-850 text-gray-800 dark:text-gray-100 font-medium'
 						: 'text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'}"
 					on:click={() => (statusFilter = 'all')}
@@ -341,7 +341,7 @@
 					<span class="text-xs text-gray-400">{loaded ? total : 0}</span>
 				</button>
 				<button
-					class="px-3 py-1 rounded-full transition {statusFilter === 'paused'
+					class="px-3 py-1 rounded-lg transition {statusFilter === 'paused'
 						? 'bg-gray-100 dark:bg-gray-850 text-gray-800 dark:text-gray-100 font-medium'
 						: 'text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'}"
 					on:click={() => (statusFilter = 'paused')}
@@ -425,7 +425,7 @@
 									>
 									{#if j.status !== 'scheduled'}
 										<span
-											class="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded-full shrink-0 {statusColor(
+											class="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded-md shrink-0 {statusColor(
 												j.status
 											)}">{j.status}</span
 										>
@@ -452,11 +452,11 @@
 								<!-- Badges derived from real fields: cadence ← schedule_type/expr, lens ← metadata.context -->
 								<div class="flex items-center gap-1">
 									<span
-										class="text-[10px] px-1.5 py-0.5 rounded-full border border-gray-200 dark:border-gray-800 text-gray-500 dark:text-gray-400"
+										class="text-[10px] px-1.5 py-0.5 rounded-md border border-gray-200 dark:border-gray-800 text-gray-500 dark:text-gray-400"
 										>{cadenceBadge(j)}</span
 									>
 									<span
-										class="text-[10px] px-1.5 py-0.5 rounded-full bg-gray-100 dark:bg-gray-850 text-gray-500 dark:text-gray-400"
+										class="text-[10px] px-1.5 py-0.5 rounded-md bg-gray-100 dark:bg-gray-850 text-gray-500 dark:text-gray-400"
 										>{$i18n.t(lensBadge)}</span
 									>
 								</div>
@@ -565,7 +565,7 @@
 				<div class="flex items-center gap-1 flex-wrap mb-3 text-sm">
 					{#each TEMPLATE_TABS as t}
 						<button
-							class="px-3 py-1 rounded-full transition {templateTab === t
+							class="px-3 py-1 rounded-lg transition {templateTab === t
 								? 'bg-gray-100 dark:bg-gray-850 text-gray-800 dark:text-gray-100 font-medium'
 								: 'text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'}"
 							on:click={() => (templateTab = t)}>{$i18n.t(t)}</button
