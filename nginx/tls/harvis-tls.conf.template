@@ -1,0 +1,38 @@
+# Harvis HTTPS listener.
+#
+# `scripts/enable-https.sh` copies this file to harvis-tls.conf in the same
+# directory once a certificate exists. Until that copy is made, nginx.conf's
+# `include /etc/nginx/tls/*.conf` matches nothing and Harvis serves plain HTTP
+# exactly as before — the .template suffix is what keeps it inert.
+#
+# Why HTTPS matters here even on a home LAN: browsers only hand out the
+# microphone, the camera, and the clipboard to a "secure context". http://localhost
+# counts as one, which is why voice has always worked on the machine running
+# Docker and nowhere else. Every other device on the network reaches Harvis at
+# http://<ip>:9000, which is not a secure context, so the mic button fails there
+# no matter how the app is written. This listener is the fix.
+
+server {
+    listen 443 ssl;
+    http2 on;
+
+    ssl_certificate     /etc/nginx/tls/harvis.crt;
+    ssl_certificate_key /etc/nginx/tls/harvis.key;
+
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers off;
+
+    ssl_session_cache   shared:harvis_tls:10m;
+    ssl_session_timeout 1h;
+    ssl_session_tickets off;
+
+    # No HSTS. A self-signed certificate plus HSTS would pin this browser to
+    # HTTPS for this host permanently, and there is no way for the user to click
+    # past it afterwards — on a LAN address that is a trap, not a hardening step.
+    # Add HSTS only alongside a certificate a browser actually trusts.
+
+    # Same routes as the HTTP listener, from the same file, so the two can
+    # never drift apart.
+    include /etc/nginx/harvis.conf;
+}

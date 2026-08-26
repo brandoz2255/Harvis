@@ -457,10 +457,30 @@ write_env() {
     printf 'FERNET_KEY=%s\n' "$fkey" >> .env
     echo "✓ Generated a FERNET_KEY (GitHub OAuth token encryption)"
   fi
-  # HARVIS_SETUP_CODE — one-time first-signup gate: the first (admin) account can
-  # only be created by whoever holds this code.
-  setup_code="$(rand_hex 6 | sed 's/\(....\)/\1-/g; s/-$//')"
-  ensure_env_secret HARVIS_SETUP_CODE "$setup_code" "a HARVIS_SETUP_CODE (first-admin signup gate)"
+  # No HARVIS_SETUP_CODE is generated. The first signup claims admin outright,
+  # the way OpenWebUI and Jellyfin do it — making every fresh install pay a
+  # code-hunt to protect a race that only exists on an exposed, unclaimed box
+  # was a bad trade. An operator who IS exposing one adds HARVIS_SETUP_CODE to
+  # .env by hand; the backend and the signup form both pick it up from there.
+  # POSTGRES_PASSWORD — the database ships with a well-known default that is
+  # published in this repo, so every install used to share one credential. It
+  # is only settable at initdb time: once a data volume exists, Postgres
+  # ignores this variable and the old password is what the cluster still
+  # expects. So generate one ONLY when there is no volume yet — rotating it
+  # under a live database would lock the backend out of its own data.
+  compose_project="$(sed -n 's/^name:[[:space:]]*//p' docker-compose.yaml | head -1)"
+  compose_project="${compose_project:-${COMPOSE_PROJECT_NAME:-harvis}}"
+  if docker volume inspect "${compose_project}_pgsql_data" >/dev/null 2>&1; then
+    if ! grep -q '^POSTGRES_PASSWORD=' .env; then
+      echo "• Keeping the default database password — ${compose_project}_pgsql_data"
+      echo "  already exists, and the password is fixed at database creation."
+      echo "  To rotate it: ALTER USER pguser WITH PASSWORD '<new>'; then put the"
+      echo "  same value in .env as POSTGRES_PASSWORD."
+    fi
+  else
+    ensure_env_secret POSTGRES_PASSWORD "$(rand_hex 24)" "a POSTGRES_PASSWORD"
+  fi
+
   # OPENCLAW_GATEWAY_TOKEN — SHARED across backend/openclaw/harvis-mcp; a running
   # stack authenticated with the old value breaks if this ever regenerates.
   ensure_env_secret OPENCLAW_GATEWAY_TOKEN "$(rand_hex 32)" "an OPENCLAW_GATEWAY_TOKEN"
@@ -481,23 +501,27 @@ ensure_network() {
 }
 
 # ── Startup poll — report what was OBSERVED, not what was hoped ─────────────
-print_setup_code() {
-  # The setup code must never land in captured output (tee'd logs, CI transcripts),
-  # so it is written to the terminal directly; with no terminal, point at .env.
-  local code_line="HARVIS_SETUP_CODE is in .env — view it with:  grep '^HARVIS_SETUP_CODE=' .env"
+print_first_admin() {
+  # Normally there is nothing to hunt for: sign up and you are the admin. The
+  # only exception is an operator who set HARVIS_SETUP_CODE by hand, and that
+  # code must never land in captured output (tee'd logs, CI transcripts) — so
+  # it is written to the terminal directly, and .env is the fallback pointer.
   local code=""
   # `|| true`: no such key in .env means grep exits 1, and under `set -e` that
   # would end the installer on its very last useful line.
   code="$(grep '^HARVIS_SETUP_CODE=' .env | head -1 | cut -d= -f2- || true)"
   if [ -z "$code" ]; then
-    echo "  No HARVIS_SETUP_CODE found in .env — the first signup will ask for one."
+    echo "  No admin yet — the first account you sign up with becomes the admin."
   # `-w /dev/tty` only checks permission bits; actually opening it is the real
   # "do we have a controlling terminal" probe.
   elif ( : > /dev/tty ) 2>/dev/null; then
-    printf '  First-admin setup code: %s\n' "$code" > /dev/tty
-    echo "  (setup code printed to your terminal only — it is also in .env)"
+    echo "  No admin yet. This instance sets HARVIS_SETUP_CODE, so the first"
+    echo "  signup will ask for it:"
+    printf '    setup code: %s\n' "$code" > /dev/tty
+    echo "  (printed to your terminal only — it is also in .env)"
   else
-    echo "  $code_line"
+    echo "  No admin yet. This instance sets HARVIS_SETUP_CODE, so the first"
+    echo "  signup will ask for it — view it with:  grep '^HARVIS_SETUP_CODE=' .env"
   fi
 }
 
@@ -616,7 +640,7 @@ poll_health() {
   # command substitution in an assignment ends the script — so on a fresh install
   # this printed "✓ Harvis is up" and then died silently with status 1, never
   # reaching the `*)` branch written for exactly this case and never printing the
-  # setup code the first signup needs. Measured on a clean VM: backend container
+  # first-admin line the operator needs. Measured on a clean VM: backend container
   # started 03:00:34, installer exited 03:00:40.
   #
   # That timing is the other half of it. The poll above breaks out the moment the
@@ -631,19 +655,30 @@ poll_health() {
     sleep 2
   done
   case "$needs" in
-    true)  print_setup_code ;;
-    false) echo "  Instance already has an admin — no setup code needed." ;;
+    true)  print_first_admin ;;
+    false) echo "  Instance already has an admin — sign in as usual." ;;
     *)     if [ -z "$setup_body" ]; then
              echo "  Could not reach ${SETUP_URL} — if this is a fresh install, the first"
-             echo "  signup will ask for the setup code from .env (HARVIS_SETUP_CODE)."
+             echo "  account you sign up with becomes the admin."
            else
              echo "  ${SETUP_URL} answered but its state was unrecognised — if this is a"
-             echo "  fresh install, the first signup will ask for the setup code from .env."
+             echo "  fresh install, the first account you sign up with becomes the admin."
            fi ;;
   esac
   echo ""
-  echo "  Auth cookie: HARVIS_COOKIE_SECURE defaults to false (localhost/LAN HTTP)."
-  echo "  Behind HTTPS, set HARVIS_COOKIE_SECURE=true in .env and recreate the backend."
+  echo "  Using Harvis from a phone, tablet or another computer? Turn on HTTPS:"
+  echo ""
+  echo "      ./scripts/enable-https.sh"
+  echo ""
+  echo "  Browsers hand out the microphone only over https (or on this machine at"
+  echo "  localhost), so voice will not work from other devices until you do. The"
+  echo "  script makes its own certificate, so the first visit shows a warning you"
+  echo "  click past once. Plain http on :9000 keeps working either way."
+  echo ""
+  echo "  Auth cookie: HARVIS_COOKIE_SECURE defaults to false, which is what lets"
+  echo "  the http lane log in. Set it to true in .env only if you have switched to"
+  echo "  https for everyone — a Secure cookie is not sent over http at all, so"
+  echo "  turning it on while anyone still uses :9000 locks them out."
   # Provider status is informational, never pass/fail: with none configured,
   # report_models below says what to do. Configured-but-unreachable gets its own
   # pointer, because chat will fail until that server answers — but the install

@@ -141,9 +141,13 @@ services:
     group_add:
       - "${HARVIS_DOCKER_GID:-984}"
     ports:
-      - "8000:8000"
+      # Backend API. Bound to the host loopback by default: the browser never
+      # talks to it directly (nginx on :9000 proxies /api/), and containers
+      # reach it as http://backend:8000 over the Docker network. Set
+      # HARVIS_BIND_ADDR=0.0.0.0 in .env only if you need it from another machine.
+      - "${HARVIS_BIND_ADDR:-127.0.0.1}:8000:8000"
     environment:
-      DATABASE_URL: "postgresql://pguser:pgpassword@pgsql:5432/database"
+      DATABASE_URL: "postgresql://pguser:${POSTGRES_PASSWORD:-pgpassword}@pgsql:5432/database"
       JWT_SECRET: "${JWT_SECRET:?JWT_SECRET must be set in .env}"
       # Let PyTorch reuse fragmented/reserved VRAM instead of OOMing on the
       # TTS generation's ~774MB activation alloc. Critical on the 8GB laptop GPU
@@ -304,6 +308,13 @@ services:
       # (bind-mounted below). Used by /model Discord command to propagate
       # model selection to the native BYO OpenClaw gateway.
       HOST_OPENCLAW_CONFIG: "${HOST_OPENCLAW_CONFIG:-/host-openclaw/openclaw.json}"
+      # Engine sync (Agent Studio → Skills → Engine sync). ONE published SKILL.md
+      # tree, written here by the backend and mounted read-only into every engine
+      # sidecar at /skills — a verified skill should reach whichever engine runs
+      # the task, not just OpenClaw. Gated by HARVIS_ENGINE_SYNC; nothing is ever
+      # written without an explicit apply from the UI.
+      HARVIS_ENGINE_SKILLS_DIR: "${HARVIS_ENGINE_SKILLS_DIR:-/app/engine_skills}"
+      HARVIS_ENGINE_SYNC: "${HARVIS_ENGINE_SYNC:-${HARVIS_OPENCLAW_SYNC:-0}}"
       # Cloud AI providers (loaded from .env — never hardcode here)
       MOONSHOT_API_KEY: "${MOONSHOT_API_KEY:-}"
       MOONSHOT_BASE_URL: "${MOONSHOT_BASE_URL:-https://api.moonshot.ai/v1}"
@@ -346,15 +357,16 @@ services:
       # a verified Claude/OpenAI credential makes those Build engines runnable (the picker
       # already lists their models); still overridable via the env var.
       HARVIS_OWUI_EXTERNAL_ENGINES: "${HARVIS_OWUI_EXTERNAL_ENGINES:-true}"
-      # First-signup gate: the first account (the admin) can only be created
-      # with this code in the X-Setup-Code header. GENERATED into .env by the
-      # installer — never hard-code it.
+      # OPTIONAL first-signup gate, empty by default: the first account claims
+      # admin with no code. Set this in .env only when an UNCLAIMED instance is
+      # reachable from a network you don't trust — then the first signup must
+      # send it in the X-Setup-Code header. Never hard-code it here.
       HARVIS_SETUP_CODE: "${HARVIS_SETUP_CODE:-}"
       # Server-enforced (main.py signup gate) AND read by the frontend config.
       # Default ON so a fresh deploy has a working "Don't have an account?
-      # Sign up" front door. The instance still can't be hijacked: the FIRST
-      # signup (the one that becomes admin) also needs HARVIS_SETUP_CODE.
-      # Set false for a closed, invite-only instance.
+      # Sign up" front door. Set false for a closed, invite-only instance —
+      # worth doing on anything internet-facing, since this is what lets
+      # strangers self-register ordinary accounts.
       HARVIS_OWUI_ENABLE_SIGNUP: "${HARVIS_OWUI_ENABLE_SIGNUP:-true}"
       # Set true behind HTTPS so the auth cookie gets the Secure flag.
       # Leave false for localhost / plain HTTP LAN installs.
@@ -474,6 +486,10 @@ services:
       - ./python_back_end/onb_compat:/app/onb_compat:ro
       - ./python_back_end/open_notebook:/app/open_notebook:ro
       - ./openclaw/config:/app/openclaw_config
+      # Shared engine skills tree — RW here (the backend publishes into it), :ro in
+      # every engine sidecar. Same host path OpenClaw already mounted at /skills, so
+      # existing published skills carry over untouched.
+      - ./openclaw/skills/${OPENCLAW_CONFIG_SET:-bundled}:/app/engine_skills:rw
       - ./python_back_end/notebooks:/app/notebooks:ro
       - ./python_back_end/vibecoding:/app/vibecoding:ro
       # SSH scaffold (marathon P7) — main.py imports remote.ssh_manager; without
@@ -519,11 +535,15 @@ services:
       # Browsed folders are clone-mode by default; flip HARVIS_INPLACE_ON_BROWSED only once the
       # permission ladder + an exec sandbox are verified.
       - ${HARVIS_FS_BROWSE_ROOT_RW_HOST:-./harvis-fs-browse}:/data/host-fs-rw:rw
-      # Write-through to host's native OpenClaw config so Discord /model
-      # propagates to the BYO gateway. Set HOST_OPENCLAW_CONFIG_HOST_PATH
-      # in .env to override. Requires file to be writable by UID 1001 (appuser)
-      # — chmod 664 and chgrp to a shared group if needed.
-      - "${HOST_OPENCLAW_CONFIG_HOST_PATH:-/home/user/.openclaw}:/host-openclaw:rw"
+      # Write-through to a host-native OpenClaw config, so Discord /model
+      # propagates to a BYO gateway. Defaults to a repo-local directory: a
+      # fresh install has no native OpenClaw, and Docker CREATES a missing
+      # bind-mount source — an absolute default would plant a root-owned
+      # directory on every installer's machine. Point
+      # HOST_OPENCLAW_CONFIG_HOST_PATH at ~/.openclaw in .env if you run one.
+      # Requires the file to be writable by UID 1001 (appuser) — chmod 664
+      # and chgrp to a shared group if needed.
+      - "${HOST_OPENCLAW_CONFIG_HOST_PATH:-./harvis-openclaw-config}:/host-openclaw:rw"
     networks:
       - ollama-n8n-network
       - openclaw-internal
@@ -601,7 +621,8 @@ services:
     profiles: ["legacy"]
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      # Legacy Next frontend. nginx proxies to it as http://frontend:3000.
+      - "${HARVIS_BIND_ADDR:-127.0.0.1}:3000:3000"
     environment:
       NODE_ENV: "production"
       NEXT_TELEMETRY_DISABLED: "1"
@@ -669,14 +690,33 @@ services:
     container_name: nginx-proxy
     restart: unless-stopped
     ports:
-      - "9000:80"
+      # The front door, and the only port meant to leave this machine. It is
+      # the one surface behind a login. Everything else is loopback-only.
+      - "${HARVIS_BIND_ADDR_PUBLIC:-0.0.0.0}:9000:80"
       # Untrusted repo-preview origin (Adaptive Workspace Repo Runner live app
       # preview). Bound to localhost only so preview dev servers are reachable
       # from the local user's browser but never exposed on the LAN.
       - "127.0.0.1:9002:9002"
+      # The HTTPS front door. Nothing listens here until ./scripts/enable-https.sh
+      # has run — until then nginx has no 443 server block and the port simply
+      # refuses connections, which costs nothing. Publishing it up front is what
+      # lets that script finish with `up -d nginx` instead of asking the user to
+      # hand-edit this file.
+      #
+      # Worth turning on: browsers only grant the microphone to a "secure
+      # context". http://localhost is one, so voice works on this machine and
+      # fails on every other device reaching Harvis at http://<ip>:9000.
+      - "${HARVIS_BIND_ADDR_PUBLIC:-0.0.0.0}:${HARVIS_HTTPS_PORT:-9443}:443"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
       - ./front_end/owui/build:/usr/share/nginx/owui:ro
+      # Every route, shared by the HTTP and HTTPS listeners so they cannot drift.
+      - ./nginx-harvis.conf:/etc/nginx/harvis.conf:ro
+      # Holds the HTTPS listener and its certificate. On a stock install it has
+      # neither: nginx.conf globs this directory for *.conf and an include
+      # matching zero files is not an error, so HTTPS stays off until
+      # ./scripts/enable-https.sh puts both here.
+      - ./nginx/tls:/etc/nginx/tls:ro
       - /tmp:/tmp:ro
     depends_on:
       # long-form so nginx waits for the one-shot owui-builder to finish
@@ -734,7 +774,7 @@ services:
     profiles: ["notebooks"]
     restart: unless-stopped
     environment:
-      DATABASE_URL: "postgresql://pguser:pgpassword@pgsql:5432/database"
+      DATABASE_URL: "postgresql://pguser:${POSTGRES_PASSWORD:-pgpassword}@pgsql:5432/database"
       OLLAMA_URL: "${HARVIS_LLM_BASE_URL:-${OLLAMA_URL:-http://host.docker.internal:11434}}"
       BACKEND_URL: "http://backend:8000"
       ENVIRONMENT: "production"
@@ -777,7 +817,9 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: pguser
-      POSTGRES_PASSWORD: pgpassword
+      # Generated by install.sh on a fresh database; falls back to the
+      # historical default so existing volumes keep working.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pgpassword}
       POSTGRES_DB: database
       POSTGRES_INITDB_ARGS: "-E UTF8 --locale=C"
     volumes:
@@ -795,7 +837,11 @@ services:
       - ./python_back_end/workspace/workspace_schema.sql:/docker-entrypoint-initdb.d/002_workspace_schema.sql:ro
       - ./python_back_end/migrations/010_user_openclaw_config.sql:/docker-entrypoint-initdb.d/003_user_openclaw_config.sql:ro
     ports:
-      - "5432:5432"
+      # PostgreSQL. Loopback-only: it holds every chat, credential and user
+      # row, and it ships with well-known default credentials, so publishing
+      # it on 0.0.0.0 hands the whole database to anyone on the LAN. Nothing
+      # outside this compose file needs it — containers use pgsql:5432.
+      - "${HARVIS_BIND_ADDR:-127.0.0.1}:5432:5432"
     deploy:
       resources:
         limits:
@@ -827,7 +873,7 @@ services:
           echo 'PostgreSQL not ready, retrying in 2s...'; sleep 2;
         done &&
         echo 'Creating OpenClaw tables...' &&
-        psql postgresql://pguser:pgpassword@pgsql:5432/database <<'SQL'
+        psql postgresql://pguser:${POSTGRES_PASSWORD:-pgpassword}@pgsql:5432/database <<'SQL'
           CREATE TABLE IF NOT EXISTS openclaw_sessions (
             id           SERIAL PRIMARY KEY,
             session_key  TEXT UNIQUE NOT NULL,
@@ -898,7 +944,7 @@ services:
       OPENCLAW_GATEWAY_TOKEN: "${OPENCLAW_GATEWAY_TOKEN_BUNDLED:-${OPENCLAW_GATEWAY_TOKEN}}"
       OPENCLAW_MODE: "${OPENCLAW_MODE:-bundled}"
       OLLAMA_API_KEY: "ollama-local"
-      DATABASE_URL: "postgresql://pguser:pgpassword@pgsql:5432/database"
+      DATABASE_URL: "postgresql://pguser:${POSTGRES_PASSWORD:-pgpassword}@pgsql:5432/database"
       GH_TOKEN: "${HARVIS_GITHUB_TOKEN:-}"
       GH_USER: "${HARVIS_GITHUB_USER:-}"
       GH_EMAIL: "${HARVIS_GITHUB_EMAIL:-}"
@@ -1037,8 +1083,9 @@ services:
     profiles: ["notebooks-upstream"]
     restart: unless-stopped
     ports:
-      - "8502:8502"
-      - "5055:5055"
+      # Notebook UI + its API. Reached through nginx, not directly.
+      - "${HARVIS_BIND_ADDR:-127.0.0.1}:8502:8502"
+      - "${HARVIS_BIND_ADDR:-127.0.0.1}:5055:5055"
     environment:
       # SurrealDB Configuration
       SURREAL_URL: ws://surrealdb:8000/rpc
@@ -1113,7 +1160,8 @@ services:
     profiles: ["advanced-voice"]
     restart: unless-stopped
     ports:
-      - "8001:8001"
+      # TTS. Called by the backend as http://tts-service:8001.
+      - "${HARVIS_BIND_ADDR:-127.0.0.1}:8001:8001"
     environment:
       # TTS Configuration
       TTS_HOST: "0.0.0.0"
@@ -1387,6 +1435,8 @@ services:
       HOME: /home/codex
     volumes:
       - artifact_data:/data/artifacts
+      # Published skills (Engine sync) — read-only; the backend owns writes.
+      - ./openclaw/skills/${OPENCLAW_CONFIG_SET:-bundled}:/skills:ro
     networks:
       - ollama-n8n-network
 
@@ -1409,6 +1459,8 @@ services:
       CLAUDE_CODE_SIMPLE: "1"
     volumes:
       - artifact_data:/data/artifacts
+      # Published skills (Engine sync) — read-only; the backend owns writes.
+      - ./openclaw/skills/${OPENCLAW_CONFIG_SET:-bundled}:/skills:ro
     networks:
       - ollama-n8n-network
 
@@ -1447,6 +1499,8 @@ services:
       - artifact_data:/data/artifacts       # session clones (Build) — shared with the backend
       - hermes_gateway_home:/opt/data       # gateway (Chat) profile/config/memory
       - hermes_homes:/data/hermes-homes     # per-user Build profiles (HERMES_HOME per run)
+      # Published skills (Engine sync) — read-only; the backend owns writes.
+      - ./openclaw/skills/${OPENCLAW_CONFIG_SET:-bundled}:/skills:ro
     networks:
       - ollama-n8n-network
 

@@ -1,0 +1,19 @@
+# What lives here, and why none of it is committed.
+#
+# harvis.crt / harvis.key — the certificate and its private key. A private key
+#   must never reach a repository, and a certificate is only valid for the
+#   machine and addresses it was generated for.
+#
+# harvis-tls.conf — the activated HTTPS listener. If a clone shipped this
+#   without the certificate it points at, nginx would refuse to start and take
+#   the whole front door down on a fresh install. Only the .template is tracked;
+#   scripts/enable-https.sh makes the copy locally.
+#
+# The directory itself IS tracked (via this file and the .template), which is
+# what guarantees it exists in a fresh clone — an absent bind-mount source is
+# created by Docker as root, and the setup script could not write into it.
+harvis-tls.conf
+*.crt
+*.key
+*.pem
+*.csr
