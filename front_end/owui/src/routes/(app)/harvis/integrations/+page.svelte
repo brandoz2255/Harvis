@@ -72,7 +72,6 @@
 	const ENGINE_CARD_TO_READINESS: Record<string, string> = {
 		'claude-code': 'claude-code',
 		'codex-app': 'codex',
-		opencode: 'opencode',
 		'hermes-agent': 'hermes-agent'
 	};
 	$: merged = mergeLiveStatus(CATALOG, live).map((d) => {

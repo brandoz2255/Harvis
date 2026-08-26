@@ -606,7 +606,7 @@
 				{#if def.keyHelp}
 					{$i18n.t(def.keyHelp)}
 				{:else if def.id === 'codex-app'}
-					{$i18n.t('Your OpenAI API key — used only to run Codex in Build, stored encrypted, never shown. OpenCode needs no key (local).')}
+					{$i18n.t('Your OpenAI API key — used only to run Codex in Build, stored encrypted, never shown.')}
 				{:else if def.id === 'kimi-code'}
 					{$i18n.t('Use the API key created in the Kimi Code Console (kimi.com/coding). Uses your Kimi membership quota — a Moonshot developer-platform key (platform.moonshot.ai) is a different product and will not work here. Stored encrypted, never shown.')}
 				{:else if authMode === 'oauth_token'}

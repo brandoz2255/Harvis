@@ -24,7 +24,18 @@ export type IntegrationStatus =
 // How close an application is to being a swappable Code-mode engine (no execution built).
 export type EngineSupport = 'none' | 'planned' | 'candidate' | 'supported';
 
-export type AuthMode = 'none' | 'api_key' | 'local_auth' | 'oauth' | 'config_file' | 'ollama' | 'custom';
+// 'oauth_token' = a subscription token the user pastes (e.g. `claude setup-token`), as
+// opposed to 'oauth' which is a redirect flow. The Claude Code card has always declared
+// it; it was missing from the union, so its chip rendered blank.
+export type AuthMode =
+	| 'none'
+	| 'api_key'
+	| 'local_auth'
+	| 'oauth'
+	| 'oauth_token'
+	| 'config_file'
+	| 'ollama'
+	| 'custom';
 
 export interface CommandSpec {
 	install?: string;
@@ -68,6 +79,10 @@ export interface IntegrationDefinition {
 	authEngine?: string;
 	keyConsoleUrl?: string; // where the user creates that key (shown as a link, never auto-opened)
 	keyHelp?: string; // one honest line under the key field — what the key is used for
+	// The actual click-path for setting this integration up, in order. Rendered as a
+	// numbered list in the card's Setup section. Written for someone who has never seen
+	// Harvis before: name the real buttons, the real files, and the real gotchas.
+	setupSteps?: string[];
 	permissions?: string[];
 	auth?: { required: boolean; modes: AuthMode[]; configured?: boolean; notes?: string };
 	engine?: { support: EngineSupport; adapterId?: string; notes?: string };
@@ -218,6 +233,12 @@ export const CATALOG: IntegrationDefinition[] = [
 		connect: 'openclaw_byo',
 		permissions: ['Runs shell in a sandbox pod', 'Reads / writes repo files'],
 		commands: { check: 'curl http://openclaw:18789/health' },
+		setupSteps: [
+			'The bundled runtime is the default and needs no setup — but it is not part of the core install. Start it once with: docker compose --profile engines up -d openclaw',
+			'This card flips to Ready on its own once the gateway answers. “Not running” here means the container was never started, not that anything is broken.',
+			'Only if you run your own gateway elsewhere: put its ws:// or wss:// address in “Gateway URL” below, paste its token, and press “Verify & connect”.',
+			'“Save connection” stores the details but keeps routing on the bundled runtime until you verify. “Use bundled” switches back at any time.'
+		],
 		auth: { required: false, modes: ['config_file'], notes: 'Managed by the Harvis backend through OPENCLAW_URL and OPENCLAW_GATEWAY_TOKEN.' },
 		engine: { support: 'supported', notes: 'Primary Harvis workspace runtime.' },
 		detect: { serviceKey: 'openclaw' }
@@ -225,44 +246,44 @@ export const CATALOG: IntegrationDefinition[] = [
 	{
 		id: 'hermes-agent',
 		name: 'Hermes Agent',
-		category: 'service',
-		description: 'Full Hermes Agent runtime for Build & Chat — isolated sidecar, local Ollama, no credentials.',
+		// An application, not a "service": it executes Build tasks the same way OpenClaw and
+		// Claude Code do. It was filed under services and left off the recommended list, so
+		// the one engine that needs no cloud key and no per-token cost read as an also-ran.
+		category: 'application',
+		description: 'Full agent runtime for Build & Chat — local models, no credentials, no per-token cost.',
 		longDescription:
 			'Hermes Agent is the full Nous Research agent runtime running inside Harvis — it uses its own tools, memory, skills and profile system, while Harvis keeps control of workspace safety, RunView, Stop and diff capture. It runs in an isolated sidecar on local Ollama, with no cloud credentials. (A lighter experimental "Hermes Native" in-process engine is also available under its own flag.)',
 		brandKey: 'hermes',
 		status: 'available',
 		provider: 'Nous Research (Hermes Agent, MIT)',
+		recommended: true,
 		capabilities: ['agent_runtime', 'local_models', 'build_engine'],
-		provides: ['model_provider', 'agent_runtime'],
-		usedBy: ['chat', 'code'],
+		// `code_engine_candidate` is what lets a card be set as the Build default. It was
+		// missing, so Hermes could run Build turns but could never be *chosen* as the default.
+		provides: ['model_provider', 'agent_runtime', 'code_engine_candidate'],
+		usedBy: ['chat', 'code', 'agent_studio'],
 		runtimeNote: 'Runs the real Hermes Agent app as a Harvis Build engine (isolated sidecar, local Ollama, no credentials) when enabled.',
+		setupSteps: [
+			'Start the sidecar: docker compose --profile engines up -d hermes-agent',
+			'Make sure Ollama has a model — open the Ollama card and use Cookbook if you have not pulled one yet. Hermes runs entirely on your local models.',
+			'Come back here and press Connect. There is no API key and no account: this is the engine that costs nothing per token.',
+			'In Build, open Customize → Engine and choose Hermes Agent to make it the default for new sessions.'
+		],
 		auth: { required: false, modes: ['ollama'] },
 		connect: 'hermes_agent',
 		// Detect on the SIDECAR (engine), not the 'hermes' Ollama-model count — so the card reads
 		// "Hermes Agent app ready", not "N models". (E4B: this is the app runtime, not a model.)
+		engine: {
+			support: 'supported',
+			notes: 'Local Build engine — the real Hermes Agent app in an isolated sidecar on your own Ollama.'
+		},
 		detect: { serviceKey: 'hermes-agent' }
 	},
-	{
-		id: 'opencode',
-		name: 'OpenCode',
-		category: 'application',
-		description: 'Terminal-oriented coding agent for local and repo workflows.',
-		longDescription:
-			'A terminal-oriented coding agent for local and repo workflows — files, shell, git, and diffs. The leading candidate for the first external Code engine adapter.',
-		brandKey: 'opencode',
-		status: 'available',
-		provider: 'Open source',
-		recommended: true,
-		capabilities: ['files', 'shell', 'git', 'diff'],
-		provides: ['code_engine_candidate'],
-		usedBy: ['code'],
-		runtimeNote: 'Runs as the Harvis OpenCode engine when enabled (local Ollama models, clone-mode Build sessions).',
-		permissions: ['Runs shell commands', 'Reads / writes repo files'],
-		commands: { install: 'curl -fsSL https://opencode.ai/install | bash', launch: 'opencode', check: 'opencode --version' },
-		auth: { required: false, modes: ['ollama', 'api_key', 'config_file'] },
-		engine: { support: 'candidate', notes: 'Good candidate for the first external Code engine adapter.' },
-		links: { docs: 'https://opencode.ai/docs/', homepage: 'https://opencode.ai' }
-	},
+	// OpenCode's card is deliberately absent. Its sidecar, adapter and compose
+	// service all still exist — only the storefront entry is gone, so the engines
+	// area stops advertising a lane we aren't standing behind yet. Restore this
+	// card (and the status.ts / AgentPresets / vibecode entries removed with it)
+	// when we decide what OpenCode is for.
 
 	// ── Cloud APIs (free-tier chat providers, BYO key) ──
 	// Every one of these publishes a real free tier and speaks the OpenAI Chat Completions wire
@@ -392,6 +413,13 @@ export const CATALOG: IntegrationDefinition[] = [
 		usedBy: ['chat', 'code', 'notebook', 'agent_studio'],
 		commands: { check: 'curl $OLLAMA_URL/api/tags' },
 		href: '/harvis/agent-studio/cookbook',
+		setupSteps: [
+			'If Harvis started Ollama for you, this card already reads Ready and there is nothing to do — skip to step 4.',
+			'Running your own Ollama instead? Install it from ollama.com, then start it so it listens beyond localhost: OLLAMA_HOST=0.0.0.0 ollama serve',
+			'Point Harvis at it by setting OLLAMA_URL in the .env next to docker-compose.yaml, then: docker compose up -d backend',
+			'Open Cookbook (the “Set up models” button on this card). It reads your actual GPU and RAM and lists only models that will fit, then pulls the one you pick.',
+			'The model appears in the picker at the top of any chat. No restart.'
+		],
 		auth: { required: false, modes: ['ollama'] },
 		detect: { serviceKey: 'ollama' },
 		links: { docs: 'https://ollama.com/docs', homepage: 'https://ollama.com' }
@@ -410,6 +438,12 @@ export const CATALOG: IntegrationDefinition[] = [
 		usedBy: ['code', 'automations', 'agent_studio'],
 		connect: 'github_oauth',
 		href: '/harvis/vibecode',
+		setupSteps: [
+			'Press “Connect GitHub” below. A GitHub authorization window opens — if nothing appears, allow pop-ups for this site and press it again.',
+			'Approve the access GitHub asks for. Harvis needs it to clone repos, read diffs and open pull requests on your behalf.',
+			'You land back here showing “Connected as @your-handle”.',
+			'Open Build and use “Add repo” — your repositories are now listed. “Disconnect” on this card revokes it whenever you want.'
+		],
 		auth: { required: true, modes: ['oauth', 'api_key'], notes: 'Connect via GitHub OAuth or a personal access token.' },
 		detect: { serviceKey: 'github' },
 		links: { docs: 'https://docs.github.com', homepage: 'https://github.com' }
@@ -428,6 +462,13 @@ export const CATALOG: IntegrationDefinition[] = [
 		runtimeNote: 'Registered; agent-runtime wiring planned.',
 		connect: 'mcp_link',
 		href: '/harvis/agent-studio/customize',
+		setupSteps: [
+			'Press “Manage connections” below — it opens the MCP shop in Build → Customize.',
+			'Pick a server from the shop, or press “Add server” to enter your own command and arguments.',
+			'If the server needs credentials, type them into the fields it shows. They are stored encrypted with that server and never displayed again.',
+			'Press Connect. Harvis starts the server in a sandbox container and lists the tools it exposes.',
+			'Those tools are then available to the agent in chat and in Build — you ask in plain language, no button to press.'
+		],
 		auth: { required: false, modes: ['config_file'] },
 		detect: { serviceKey: 'mcp' },
 		links: { docs: 'https://modelcontextprotocol.io/docs/getting-started/intro', homepage: 'https://modelcontextprotocol.io' }
@@ -443,6 +484,16 @@ export const CATALOG: IntegrationDefinition[] = [
 		provides: ['notification_provider'],
 		usedBy: ['automations'],
 		runtimeNote: 'Configured at the deploy level (bot token in the server environment).',
+		setupSteps: [
+			'Open discord.com/developers/applications and press “New Application”. Name it whatever you want your bot called.',
+			'Open the “Bot” tab, press “Reset Token”, and copy the token. Discord shows it once — if you lose it you reset again.',
+			'Still on the Bot tab, scroll to “Privileged Gateway Intents” and switch ON “Message Content Intent”. Harvis needs it to read what you type; without it the bot connects and then sees every message as blank.',
+			'Go to “OAuth2 → URL Generator”. Tick the “bot” scope, then tick “Send Messages”, “Read Message History” and “Attach Files”. Open the URL it builds at the bottom and add the bot to your server.',
+			'On the Harvis machine, open the .env file next to docker-compose.yaml and add: DISCORD_BOT_TOKEN=the-token-you-copied',
+			'Lock it to one channel. In Discord turn on User Settings → Advanced → Developer Mode, right-click the channel, “Copy Channel ID”, and add: DISCORD_ALLOWED_CHANNEL_IDS=that-id — leave it blank and the bot listens everywhere it can see.',
+			'Run: docker compose up -d backend   (an env change needs up -d; restart alone will not pick it up).',
+			'In that channel, @mention the bot and ask it something. DISCORD_MENTION_ONLY defaults to true, so it stays quiet until it is mentioned.'
+		],
 		auth: { required: true, modes: ['api_key'], notes: 'Configured via a Discord bot token in the server environment.' },
 		detect: { serviceKey: 'discord' },
 		links: { docs: 'https://discord.com/developers/docs/intro', homepage: 'https://discord.com/developers/applications' }
@@ -467,9 +518,9 @@ export const CATALOG: IntegrationDefinition[] = [
 		id: 'pack-local-coder',
 		name: 'Local Coding Setup',
 		category: 'pack',
-		description: 'OpenCode + Ollama — a ready local coding stack.',
+		description: 'Hermes Agent + Ollama — a ready local coding stack.',
 		longDescription:
-			'A plug-and-play local coding stack: pair OpenCode with your local models, served by Ollama. Open each piece to set it up.',
+			'A plug-and-play local coding stack: pair the Hermes Agent runtime with your local models, served by Ollama. No cloud credentials, no per-token cost. Open each piece to set it up.',
 		brandKey: 'pack',
 		status: 'available',
 		capabilities: ['coding', 'files', 'shell', 'git'],
@@ -523,6 +574,7 @@ export const AUTH_LABEL: Record<AuthMode, string> = {
 	api_key: 'API key',
 	local_auth: 'Local sign-in / session',
 	oauth: 'OAuth',
+	oauth_token: 'Subscription token',
 	config_file: 'Config file',
 	ollama: 'Ollama',
 	custom: 'Custom'

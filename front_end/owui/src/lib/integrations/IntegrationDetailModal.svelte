@@ -96,9 +96,27 @@
 			{/if}
 
 			<!-- setup / commands -->
-			{#if def.commands?.install || def.commands?.launch || def.commands?.check}
+			{#if def.setupSteps?.length || def.commands?.install || def.commands?.launch || def.commands?.check}
 				<div class="space-y-2.5">
 					<div class="text-xs font-semibold text-gray-700 dark:text-gray-200">{$i18n.t('Setup')}</div>
+					<!-- The click-path, in order. A card that needs work outside Harvis (a token
+					     pasted into .env, a container started, a scope ticked on someone else's
+					     site) has no way to say so through a Connect button — this is where it
+					     says it, in the order the person has to do it. -->
+					{#if def.setupSteps?.length}
+						<ol class="space-y-1.5 text-xs text-gray-600 dark:text-gray-300 list-none pl-0">
+							{#each def.setupSteps as step, i}
+								<li class="flex gap-2.5">
+									<span
+										class="shrink-0 mt-[1px] w-4 h-4 rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-300 text-[10px] font-semibold flex items-center justify-center"
+									>
+										{i + 1}
+									</span>
+									<span class="flex-1 leading-relaxed">{$i18n.t(step)}</span>
+								</li>
+							{/each}
+						</ol>
+					{/if}
 					{#if def.commands.install}
 						<CommandBlock label={$i18n.t('Install')} command={def.commands.install} />
 					{/if}

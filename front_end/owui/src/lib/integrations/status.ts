@@ -26,7 +26,6 @@ export const ENGINE_READINESS_KEY: Record<string, string> = {
 	'claude-code': 'claude-code',
 	'codex-app': 'codex',
 	'kimi-code': 'kimi-code',
-	opencode: 'opencode',
 	openclaw: 'openclaw',
 	'hermes-agent': 'hermes-agent'
 };
@@ -102,7 +101,6 @@ export const GROUP_ORDER: GroupKey[] = ['engines', 'models', 'repos', 'tools', '
 const GROUP_OF: Record<string, GroupKey> = {
 	openclaw: 'engines',
 	'claude-code': 'engines',
-	opencode: 'engines',
 	'codex-app': 'engines',
 	'kimi-code': 'engines',
 	'hermes-agent': 'engines',
@@ -162,7 +160,6 @@ export const SECTION_HINT: Record<SectionKey, string> = {
 const SECTION_OF: Record<string, SectionKey> = {
 	openclaw: 'agent_engines',
 	'claude-code': 'agent_engines',
-	opencode: 'agent_engines',
 	'codex-app': 'agent_engines',
 	// Kimi Code EXECUTES (the Claude Code sidecar drives its tool loop), so it belongs with the
 	// engines — unlike the 'kimi-api' tile below, which is only a chat/model credential.
