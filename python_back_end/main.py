@@ -1120,7 +1120,25 @@ async def lifespan(app: FastAPI):
         logger.warning(f"⚠️ Cron tick loop failed to start: {e}")
         app.state.cron_tick_task = None
 
+    # Repo-sandbox idle sweeper — reaps idle preview dev-server containers.
+    # Wrapped in try/except so a missing/broken repo_sandbox never blocks startup.
+    try:
+        from owui_compat import repo_sandbox
+        app.state.repo_sandbox_sweeper_task = asyncio.create_task(repo_sandbox.run_sweeper())
+        logger.info("🧹 Repo-sandbox idle sweeper started")
+    except Exception as e:
+        logger.warning(f"⚠️ Repo-sandbox sweeper failed to start: {e}")
+        app.state.repo_sandbox_sweeper_task = None
+
     yield
+
+    # Shutdown: stop repo-sandbox sweeper
+    try:
+        sweeper_task = getattr(app.state, "repo_sandbox_sweeper_task", None)
+        if sweeper_task is not None:
+            sweeper_task.cancel()
+    except Exception as e:
+        logger.warning(f"⚠️ Repo-sandbox sweeper shutdown error: {e}")
 
     # Shutdown: stop cron tick loop
     try:

@@ -212,7 +212,7 @@ class OpenClawTUI:
 ╚════════════════════════════════════════════════════════════╝
 
 1. 🌐 ACCESS THE GATEWAY
-   Open your browser to: http://192.168.122.100:18789
+   Open your browser to: http://localhost:18789
 
 2. 🔑 AUTHENTICATE
    - Click "Control" in the left sidebar
@@ -283,7 +283,7 @@ Press Enter to continue...""")
         print()
 
         # Gateway URL
-        print("🔗 Gateway URL: http://192.168.122.100:18789")
+        print("🔗 Gateway URL: http://localhost:18789")
         print()
         input("Press Enter to continue...")
 

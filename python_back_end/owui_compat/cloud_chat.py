@@ -36,6 +36,13 @@ import httpx
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .engine_auth import get_verified_engine_auth, get_verified_auth_mode
+from .free_providers import (
+    PROVIDERS_BY_ID,
+    list_provider_models,
+    provider_of_model,
+    upstream_model_id,
+)
+from .free_providers import FREE_PROVIDERS as _FREE_PROVIDERS
 
 logger = logging.getLogger(__name__)
 
@@ -233,10 +240,13 @@ def is_cloud_chat_model(model_id: Optional[str]) -> bool:
     """True iff this is a facade cloud chat model. Facade ids are ALWAYS provider-prefixed
     (``anthropic/…`` / ``openai/…``), so matching the prefix never swallows an Ollama tag or the
     bare ``claude-code`` Build-engine id. The Claude set is DYNAMIC (live /v1/models) → matched by
-    prefix; the OpenAI set stays a fixed curated list → matched exactly."""
+    prefix; the OpenAI set stays a fixed curated list → matched exactly. The free-tier providers are
+    matched by their registered prefix too, because their catalogs are discovered at runtime —
+    see ``free_providers.provider_of_model`` for why an exact test would be wrong there."""
     mid = (model_id or "").strip()
     return (mid.startswith("anthropic/") or mid.startswith("kimi-code/")
-            or mid in _ALL_OPENAI_IDS or mid in _ALL_MOONSHOT_IDS)
+            or mid in _ALL_OPENAI_IDS or mid in _ALL_MOONSHOT_IDS
+            or provider_of_model(mid) is not None)
 
 
 def _provider_of(model_id: str) -> Optional[str]:
@@ -249,7 +259,8 @@ def _provider_of(model_id: str) -> Optional[str]:
         return "moonshot"
     if mid.startswith("kimi-code/"):
         return "kimi-code"
-    return None
+    # Free-tier providers last: a prefix test against the runtime-discovered registry.
+    return provider_of_model(mid)
 
 
 # Which verified-credential engine backs each provider's chat models. Moonshot maps to the
@@ -259,6 +270,12 @@ def _provider_of(model_id: str) -> Optional[str]:
 # a separate row from ``moonshot`` because it is a separate credential on a separate bill.
 _PROVIDER_ENGINE = {"anthropic": "claude-code", "openai": "codex", "moonshot": "kimi",
                     "kimi-code": "kimi-code"}
+# The free-tier providers use their own id as their engine id, registered from FREE_PROVIDERS.
+_PROVIDER_ENGINE.update({p.id: p.engine for p in _FREE_PROVIDERS})
+
+# Display name for the "connect this first" 402. Free providers carry their own name; this
+# covers the fixed ones so a new provider here can never inherit another vendor's label.
+_PROVIDER_LABEL = {"anthropic": "Claude", "openai": "OpenAI", "kimi-code": "Kimi Code"}
 
 
 async def _moonshot_key(pool, user_id: Optional[int]) -> tuple[str, str]:
@@ -384,6 +401,9 @@ async def cloud_chat_model_entries(pool, user_id: Optional[int]) -> list[dict]:
             out += [_model_entry(m, "kimi-code", "api_key") for m in _KIMI_CODE_MODELS]
     except Exception:
         logger.debug("cloud_chat: kimi-code model-list probe failed", exc_info=True)
+    # Free-tier providers (Groq/Cerebras/Gemini/NVIDIA/Mistral) — discovered at the vendor,
+    # so this runs before the overlay and those models get profiles like any other.
+    out += await _free_provider_entries(pool, user_id)
     # Overlay per-user model profiles (custom display name + saved effort/budget). The frontend
     # reads meta.profile_* to show the current mode label + prefill the Edit popover.
     try:
@@ -405,6 +425,47 @@ async def cloud_chat_model_entries(pool, user_id: Optional[int]) -> list[dict]:
         logger.debug("cloud_chat: profile overlay failed", exc_info=True)
     return out
 
+
+
+async def _free_provider_entries(pool, user_id: int) -> list[dict]:
+    """Discovered models for every free-tier provider this user has a verified key for.
+
+    Unlike the fixed catalogs above this DOES decrypt the key — it has to, because the catalog
+    lives at the vendor and is the whole point of discovery. The plaintext is used for exactly one
+    outbound ``GET /models``, is never logged, never cached (only its hash is), and never reaches
+    the response. Each provider is isolated: one vendor being down or unauthorized costs its own
+    section, not the model list.
+    """
+    out: list[dict] = []
+    for prov in _FREE_PROVIDERS:
+        try:
+            auth = await get_verified_engine_auth(pool, user_id, prov.engine)
+            if not auth:
+                continue
+            models = await list_provider_models(prov.id, auth[0])
+        except Exception:
+            logger.debug("cloud_chat: %s model-list probe failed", prov.id, exc_info=True)
+            continue
+        for m in models:
+            out.append({
+                "id": m["id"],
+                "name": m["name"],
+                "object": "model",
+                "owned_by": prov.id,
+                "info": {
+                    "meta": {
+                        "description": f"{prov.name} via your connected API key. {prov.free_note}",
+                        "capabilities": {},
+                        "supports_effort": False,
+                        "cloud_provider": prov.id,
+                        "context_length": m.get("context_length"),
+                        # Free tier — no price to show. Left unset so the Build usage meter
+                        # renders "—" rather than an invented $0.00 that looks like a measurement.
+                    },
+                    "params": {},
+                },
+            })
+    return out
 
 # ── Routing entrypoint ──────────────────────────────────────────────────────────────────
 async def proxy_cloud_chat(owui_body: dict, pool, user_id: Optional[int]):
@@ -453,14 +514,23 @@ async def proxy_cloud_chat(owui_body: dict, pool, user_id: Optional[int]):
         auth = await get_verified_engine_auth(pool, user_id, engine) if (pool and user_id) else None
     except Exception:
         auth = None
+    free = PROVIDERS_BY_ID.get(provider)
     if not auth:
-        label = "Claude" if provider == "anthropic" else "OpenAI"
+        label = free.name if free else _PROVIDER_LABEL.get(provider, provider)
         return _err_response(
             owui_body, 402,
             f"Connect {label} in Integrations to use these chat models (no verified credential found).",
         )
     secret, mode = auth
     try:
+        if free:
+            # Every free-tier provider speaks OpenAI Chat Completions — same proxy, different host.
+            return await _proxy_openai_api(
+                owui_body, model_id, secret, effort,
+                url=f"{free.base_url}/chat/completions",
+                label=free.name,
+                extra_headers=free.extra_headers,
+            )
         if provider == "openai":
             return await _proxy_openai_api(owui_body, model_id, secret, effort)
         if provider == "kimi-code":
@@ -733,10 +803,24 @@ def _anthropic_msg_to_openai(body: dict, model_id: str, show_thinking: bool = Tr
 
 
 # ── OpenAI Chat Completions path (api_key) ──────────────────────────────────────────────
-async def _proxy_openai_api(owui_body: dict, model_id: str, api_key: str, effort: str):
+async def _proxy_openai_api(
+    owui_body: dict,
+    model_id: str,
+    api_key: str,
+    effort: str,
+    *,
+    url: str = _OPENAI_URL,
+    label: str = "GPT",
+    extra_headers: Optional[dict] = None,
+):
     """OpenAI is the target wire format → near-passthrough. Build a clean body (strip OWUI-only
     keys) + add reasoning_effort for reasoning models. Reasoning models reject temperature/top_p,
-    so we deliberately send only model/messages/stream/reasoning_effort."""
+    so we deliberately send only model/messages/stream/reasoning_effort.
+
+    ``url``/``label`` generalize this to every OpenAI-compatible vendor (the free-tier providers in
+    ``free_providers.py``) — same wire format, different host, so one proxy serves them all. Those
+    providers aren't in ``_OPENAI_BY_ID``, so ``spec`` is empty and no ``reasoning_effort`` is sent,
+    which is what a vendor that doesn't implement it needs."""
     spec = _OPENAI_BY_ID.get(model_id, {})
     messages = [
         {"role": m.get("role"), "content": m.get("content")}
@@ -747,22 +831,22 @@ async def _proxy_openai_api(owui_body: dict, model_id: str, api_key: str, effort
     eff = _EFFORT_OPENAI.get(effort)
     if eff and spec.get("supports_effort"):
         body["reasoning_effort"] = eff
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", **(extra_headers or {})}
 
     if not body["stream"]:
         async with httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0)) as client:
-            r = await client.post(_OPENAI_URL, headers=headers, json=body)
+            r = await client.post(url, headers=headers, json=body)
         if r.status_code >= 400:
-            return _err_response(owui_body, 502, _safe_openai_error(r))
+            return _err_response(owui_body, 502, _safe_openai_error(r, label))
         return JSONResponse(status_code=200, content=r.json())
 
     async def _gen():
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(None, connect=10.0)) as client:
-                async with client.stream("POST", _OPENAI_URL, headers=headers, json=body) as r:
+                async with client.stream("POST", url, headers=headers, json=body) as r:
                     if r.status_code >= 400:
                         detail = (await r.aread()).decode("utf-8", "replace")
-                        err = {"error": {"message": f"GPT error: {_clip(detail)}"}}
+                        err = {"error": {"message": f"{label} error: {_clip(detail)}"}}
                         yield ("data: " + json.dumps(err) + "\n\n").encode()
                         yield b"data: [DONE]\n\n"
                         return
@@ -771,8 +855,8 @@ async def _proxy_openai_api(owui_body: dict, model_id: str, api_key: str, effort
                         if chunk:
                             yield chunk
         except Exception as exc:
-            logger.warning("cloud_chat: openai stream dropped: %s", type(exc).__name__)
-            yield ("data: " + json.dumps({"error": {"message": "GPT chat stream dropped."}}) + "\n\n").encode()
+            logger.warning("cloud_chat: %s stream dropped: %s", label, type(exc).__name__)
+            yield ("data: " + json.dumps({"error": {"message": f"{label} chat stream dropped."}}) + "\n\n").encode()
             yield b"data: [DONE]\n\n"
 
     return StreamingResponse(
@@ -781,13 +865,13 @@ async def _proxy_openai_api(owui_body: dict, model_id: str, api_key: str, effort
     )
 
 
-def _safe_openai_error(resp) -> str:
+def _safe_openai_error(resp, label: str = "GPT") -> str:
     try:
         body = resp.json()
         msg = (((body or {}).get("error") or {}).get("message")) or json.dumps(body)
     except Exception:
         msg = f"HTTP {resp.status_code}"
-    return f"GPT error: {_clip(msg)}"
+    return f"{label} error: {_clip(msg)}"
 
 
 # ── Moonshot / Kimi path (OpenAI-compatible api_key) ────────────────────────────────────

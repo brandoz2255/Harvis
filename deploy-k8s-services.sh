@@ -4,6 +4,12 @@
 
 set -e  # Exit on error
 
+# Cluster-specific addresses. Override for your own cluster; these are only
+# used in the printed "where to find it" summaries, not in any manifest.
+ARGOCD_PROXY_IP="${ARGOCD_PROXY_IP:-<argocd-nginx-proxy-ip>}"
+ARGOCD_LB_IP="${ARGOCD_LB_IP:-<argocd-loadbalancer-ip>}"
+ARGOCD_DNS_NAME="${ARGOCD_DNS_NAME:-argocd.example.internal}"
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -126,8 +132,8 @@ deploy_argocd() {
     kubectl get svc -n argocd
     echo ""
     log_info "ArgoCD will be accessible at:"
-    log_info "  - Via nginx proxy: http://192.168.10.242"
-    log_info "  - Direct LB: http://192.168.10.243"
+    log_info "  - Via nginx proxy: http://${ARGOCD_PROXY_IP}"
+    log_info "  - Direct LB: http://${ARGOCD_LB_IP}"
     log_info "  - Internal: http://argocd-server.argocd.svc.cluster.local"
 }
 
@@ -199,9 +205,9 @@ print_access_info() {
     echo "  - Logs: kubectl logs -n gitlab-runner -l app.kubernetes.io/name=gitlab-runner"
     echo ""
     echo "ArgoCD:"
-    echo "  - UI URL: http://192.168.10.242 (via nginx proxy)"
-    echo "  - UI URL: http://192.168.10.243 (direct LoadBalancer)"
-    echo "  - CLI: argocd login 192.168.10.242"
+    echo "  - UI URL: http://${ARGOCD_PROXY_IP} (via nginx proxy)"
+    echo "  - UI URL: http://${ARGOCD_LB_IP} (direct LoadBalancer)"
+    echo "  - CLI: argocd login ${ARGOCD_PROXY_IP}"
     echo "  - Get password: kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath=\"{.data.password}\" | base64 -d"
     echo ""
     echo "Artifact Executor:"
@@ -211,7 +217,7 @@ print_access_info() {
     echo "🔧 Next Steps:"
     echo "  1. Register GitLab runners with your GitLab instance"
     echo "  2. Login to ArgoCD and configure applications"
-    echo "  3. Update your DNS to point argocd.dulc3.tech to 192.168.10.242"
+    echo "  3. Update your DNS to point ${ARGOCD_DNS_NAME} to ${ARGOCD_PROXY_IP}"
     echo ""
     echo "📊 Useful Commands:"
     echo "  watch kubectl get pods --all-namespaces"

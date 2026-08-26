@@ -870,7 +870,7 @@ class OpenClawClient:
         # ── Pick HOME + SKILLS_BASE for THIS connected gateway ───────────────
         # Two different things resolve based on which gateway we landed on:
         #   - OPENCLAW_HOME: the writable workspace root the agent can mkdir/cd
-        #     into. host BYO → user home (e.g. /home/user); dockerized
+        #     into. host BYO → user home (e.g. /home/<user>); dockerized
         #     openclaw → /home/node (container HOME).
         #   - SKILLS_BASE: where the harvis CTF skills actually live. host BYO
         #     loads from ~/.openclaw/skills (per openclaw.json extraDirs);

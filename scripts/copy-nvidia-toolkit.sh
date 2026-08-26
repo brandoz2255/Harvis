@@ -1,10 +1,10 @@
 #!/bin/bash
 # copy-nvidia-toolkit.sh
-# Copies the working NVIDIA container toolkit from this machine (dulc3-os)
-# to the laptop node (dulc3-top) and restarts containerd/k3s on the target.
+# Copies the working NVIDIA container toolkit from THIS machine to another
+# k3s node and restarts containerd/k3s on the target.
 #
 # Usage: ./scripts/copy-nvidia-toolkit.sh [-i identity_file] <target-ip> [ssh-user]
-# Example: ./scripts/copy-nvidia-toolkit.sh -i ~/.ssh/control_node_homeserver 10.0.0.4 dulc3
+# Example: ./scripts/copy-nvidia-toolkit.sh -i ~/.ssh/id_ed25519 10.0.0.4 myuser
 
 set -euo pipefail
 

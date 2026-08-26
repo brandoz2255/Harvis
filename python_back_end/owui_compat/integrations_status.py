@@ -108,6 +108,30 @@ async def probe_services(request: Request, user) -> tuple[dict, list]:
         services["github"] = {"status": "needs_setup"}
         services["mcp"] = {"status": "available"}
 
+    # ── Free-tier cloud chat providers (Groq, Cerebras, Gemini, NVIDIA, Mistral) ──
+    # Ready ONLY when THIS user has a VERIFIED key — the card must not claim "connected" off a
+    # saved-but-unverified key. One query for all of them; presence + verified_at only, no secret.
+    from .free_providers import FREE_PROVIDERS
+
+    _verified_free: set[str] = set()
+    if pool is not None:
+        try:
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT engine FROM user_engine_auth WHERE user_id=$1 AND verified_at IS NOT NULL "
+                    "AND api_key_encrypted IS NOT NULL AND engine = ANY($2::text[])",
+                    int(user.id), [p.engine for p in FREE_PROVIDERS],
+                )
+            _verified_free = {r["engine"] for r in rows}
+        except Exception:
+            _verified_free = set()  # fail-closed: show "needs setup", never a false "connected"
+    for _p in FREE_PROVIDERS:
+        services[_p.engine] = (
+            {"status": "ready", "detail": "Connected"}
+            if _p.engine in _verified_free
+            else {"status": "needs_setup"}
+        )
+
     # ── Discord bot configured? (presence of the env var only) ──
     services["discord"] = (
         {"status": "ready"} if os.getenv("DISCORD_BOT_TOKEN") else {"status": "available"}

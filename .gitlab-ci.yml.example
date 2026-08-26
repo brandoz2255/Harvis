@@ -238,7 +238,7 @@ deploy:
     - kubectl rollout status deployment/harvis-ai-frontend -n ai-agents --timeout=5m
   environment:
     name: production
-    url: http://192.168.10.241
+    url: http://harvis.example.internal
   when: manual  # Only run manually for now
   only:
     - main

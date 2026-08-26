@@ -10,7 +10,7 @@
 # Usage:
 #   bash scripts/diagnostics/probe-ollama-tool-choice.sh
 #   MODEL=gpt-oss:latest bash scripts/diagnostics/probe-ollama-tool-choice.sh
-#   MODEL=qwen3:14b OLLAMA_URL=http://192.168.20.58:11434 \
+#   MODEL=qwen3:14b OLLAMA_URL=http://your-ollama-host:11434 \
 #       bash scripts/diagnostics/probe-ollama-tool-choice.sh
 set -euo pipefail
 

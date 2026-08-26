@@ -191,7 +191,10 @@
 		// 'kimi-api' tile, which is a Moonshot pay-as-you-go key in the plain api-key store.
 		'kimi-code': 'kimi-code'
 	};
-	$: authEngine = ENGINE_AUTH_OF[def.id] ?? '';
+	// A card may name its OWN auth engine (`authEngine` in the catalog) — that wins, so adding a
+	// provider is a catalog row and nothing more. The map above stays as the fallback for cards
+	// that predate the field, and the guard below still catches anything with neither.
+	$: authEngine = def.authEngine ?? ENGINE_AUTH_OF[def.id] ?? '';
 	$: if (def.connect === 'engine_api_key' && !authEngine) {
 		console.error(
 			`ConnectionPanel: integration '${def.id}' uses connect:'engine_api_key' but has no engine-auth mapping. ` +
@@ -586,8 +589,23 @@
 				{/if}
 			</div>
 
+			{#if def.keyConsoleUrl}
+				<p class="text-[11px]">
+					<a
+						href={def.keyConsoleUrl}
+						target="_blank"
+						rel="noopener noreferrer"
+						class="text-blue-600 dark:text-blue-300 hover:underline"
+					>
+						{$i18n.t('Get a free API key from {{provider}} →', { provider: def.provider ?? def.name })}
+					</a>
+				</p>
+			{/if}
+
 			<p class="text-[11px] text-gray-400">
-				{#if def.id === 'codex-app'}
+				{#if def.keyHelp}
+					{$i18n.t(def.keyHelp)}
+				{:else if def.id === 'codex-app'}
 					{$i18n.t('Your OpenAI API key — used only to run Codex in Build, stored encrypted, never shown. OpenCode needs no key (local).')}
 				{:else if def.id === 'kimi-code'}
 					{$i18n.t('Use the API key created in the Kimi Code Console (kimi.com/coding). Uses your Kimi membership quota — a Moonshot developer-platform key (platform.moonshot.ai) is a different product and will not work here. Stored encrypted, never shown.')}

@@ -107,6 +107,11 @@ const GROUP_OF: Record<string, GroupKey> = {
 	'kimi-code': 'engines',
 	'hermes-agent': 'engines',
 	ollama: 'models',
+	'groq-api': 'models',
+	'cerebras-api': 'models',
+	'gemini-api': 'models',
+	'nvidia-api': 'models',
+	'mistral-api': 'models',
 	github: 'repos',
 	mcp: 'tools',
 	discord: 'chat',
@@ -166,6 +171,12 @@ const SECTION_OF: Record<string, SectionKey> = {
 	'anthropic-api': 'cloud_apis',
 	'openai-api': 'cloud_apis',
 	'kimi-api': 'cloud_apis',
+	// Free-tier BYO-key chat providers (see free_providers.py — ids must stay in sync).
+	'groq-api': 'cloud_apis',
+	'cerebras-api': 'cloud_apis',
+	'gemini-api': 'cloud_apis',
+	'nvidia-api': 'cloud_apis',
+	'mistral-api': 'cloud_apis',
 	mcp: 'mcp_servers',
 	ssh: 'ssh_remote'
 };

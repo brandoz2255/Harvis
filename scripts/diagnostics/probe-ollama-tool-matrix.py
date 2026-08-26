@@ -30,8 +30,10 @@ from pathlib import Path
 from typing import Any
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
-LAPTOP = "http://localhost:11434"
-RIG = "http://192.168.20.58:11434"
+# Both default to localhost. Point HARNESS_RIG_URL at a second Ollama host
+# to compare a laptop-class box against a bigger one.
+LAPTOP = os.getenv("HARNESS_LAPTOP_URL", "http://localhost:11434")
+RIG = os.getenv("HARNESS_RIG_URL", LAPTOP)
 
 # (model_name, base_url, endpoint_label)
 MODELS: list[tuple[str, str, str]] = [

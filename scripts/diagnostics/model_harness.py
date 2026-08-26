@@ -18,11 +18,11 @@ The diff between the two isolates what our middleware contributes.
 
 USAGE (host, substrate against the rig):
   python3 model_harness.py --body /tmp/case_hash.json --model qwen3:14b \
-      --target ollama --ollama-url http://192.168.20.58:11434 --runs 10
+      --target ollama --ollama-url http://your-ollama-host:11434 --runs 10
 
   # multi-case: point at a dir of request.json-bearing folders
   python3 model_harness.py --body-dir /tmp/harvis-diagnostics --model granite4.1 \
-      --target ollama --ollama-url http://192.168.20.58:11434 --runs 5
+      --target ollama --ollama-url http://your-ollama-host:11434 --runs 5
 
   # proxy mode (run inside the backend container so localhost:8000 + token resolve):
   docker exec harvis-backend python3 /app/scripts/diagnostics/model_harness.py \
@@ -142,7 +142,7 @@ def main() -> int:
     ap.add_argument("--body-dir", help="Dir of <case>/request.json folders")
     ap.add_argument("--model", required=True, help="Model to test (overrides body)")
     ap.add_argument("--target", choices=["ollama", "proxy"], default="ollama")
-    ap.add_argument("--ollama-url", default=os.getenv("HARNESS_OLLAMA_URL", "http://192.168.20.58:11434"))
+    ap.add_argument("--ollama-url", default=os.getenv("HARNESS_OLLAMA_URL", "http://your-ollama-host:11434"))
     ap.add_argument("--proxy-url", default=os.getenv("HARNESS_PROXY_URL", "http://localhost:8000"))
     ap.add_argument("--token", default=os.getenv("OPENCLAW_GATEWAY_TOKEN"))
     ap.add_argument("--runs", type=int, default=10)

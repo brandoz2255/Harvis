@@ -670,6 +670,10 @@ services:
     restart: unless-stopped
     ports:
       - "9000:80"
+      # Untrusted repo-preview origin (Adaptive Workspace Repo Runner live app
+      # preview). Bound to localhost only so preview dev servers are reachable
+      # from the local user's browser but never exposed on the LAN.
+      - "127.0.0.1:9002:9002"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
       - ./front_end/owui/build:/usr/share/nginx/owui:ro

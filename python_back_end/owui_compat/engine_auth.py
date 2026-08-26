@@ -13,8 +13,10 @@ Endpoints (registered in owui_compat/router.py):
   POST   /api/owui/engine-auth/{engine}/verify    — verify key against the vendor, set verified_at
   POST   /api/owui/engine-auth/{engine}/disconnect — delete the row
 
-`{engine}` ∈ {codex, claude-code}. `codex` covers the Codex GPT engine; `claude-code`
-covers Claude Code. (OpenCode is local + needs no key, so it has no auth row.)
+`{engine}` ∈ AUTH_ENGINES = {codex, claude-code} + the free-tier providers registered in
+`free_providers.py` (groq, cerebras, gemini, nvidia, mistral). `codex` covers the Codex GPT
+engine; `claude-code` covers Claude Code; the free-tier ids are chat-only OpenAI-compatible
+vendors. (OpenCode is local + needs no key, so it has no auth row.)
 """
 
 from __future__ import annotations
@@ -30,9 +32,26 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 logger = logging.getLogger(__name__)
 
+from .free_providers import (
+    FREE_ENGINE_IDS,
+    PROVIDERS_BY_ENGINE,
+    invalidate_model_cache,
+    verify_provider_key,
+)
+
+
+def _drop_free_model_cache(engine: str) -> None:
+    """A free provider's discovered model list is keyed by its key — so a save or disconnect must
+    drop it, or the picker keeps showing the OLD key's catalog until the TTL expires."""
+    prov = PROVIDERS_BY_ENGINE.get(engine)
+    if prov:
+        invalidate_model_cache(prov.id)
+
 # Auth-bearing engines (NOT opencode — it's local, no key). Maps the auth-row engine id
 # to the vendor verify contract.
-AUTH_ENGINES = {"codex", "claude-code", "kimi-code"}
+# The free-tier OpenAI-compatible providers (Groq, Cerebras, Gemini, NVIDIA, Mistral)
+# register themselves from FREE_PROVIDERS so adding one stays a single table row.
+AUTH_ENGINES = {"codex", "claude-code", "kimi-code"} | set(FREE_ENGINE_IDS)
 
 # Kimi Code = the SUBSCRIPTION coding product (platform: www.kimi.com/coding), which serves an
 # Anthropic-compatible Messages API so the real Claude Code CLI can drive it. This is a DIFFERENT
@@ -170,6 +189,10 @@ async def _verify_credential(engine: str, secret: str, auth_mode: str) -> tuple[
     auth_mode: API key → vendor HTTP check; Claude subscription OAuth token → CLI smoke."""
     if engine == "claude-code" and auth_mode == "oauth_token":
         return await _verify_oauth_token_via_cli(secret)
+    # Free-tier OpenAI-compatible providers: one shared contract (GET /v1/models with a Bearer
+    # token) that both proves the key and warms model discovery. No token spend.
+    if engine in FREE_ENGINE_IDS:
+        return await verify_provider_key(PROVIDERS_BY_ENGINE[engine].id, secret)
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             if engine == "codex":
@@ -319,6 +342,7 @@ def register_engine_auth_routes(router: APIRouter, get_current_user: Callable) -
                     "auth_mode=EXCLUDED.auth_mode, verified_at=NULL, last_error=NULL, updated_at=NOW()",
                     int(user.id), engine, enc, auth_mode,
                 )
+        _drop_free_model_cache(engine)
         verified_at = row["verified_at"].isoformat() if keep_verified and row else None
         return {
             "engine": engine,
@@ -393,4 +417,5 @@ def register_engine_auth_routes(router: APIRouter, get_current_user: Callable) -
             await conn.execute(
                 "DELETE FROM user_engine_auth WHERE user_id=$1 AND engine=$2", int(user.id), engine
             )
+        _drop_free_model_cache(engine)
         return {"engine": engine, "ok": True}
