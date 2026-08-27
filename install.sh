@@ -125,17 +125,82 @@ print_check_table() {
 }
 
 # ── Prerequisites ───────────────────────────────────────────────────────────
+is_macos() { [ "$(uname -s 2>/dev/null || echo unknown)" = "Darwin" ]; }
+
+# Docker Desktop installs its CLI into ~/.docker/bin and puts that on PATH only
+# by editing the shell profile. A terminal opened before Docker was installed —
+# or any non-login shell — therefore sees no `docker` at all while Docker
+# Desktop is running in the menu bar. Recover it from the known install
+# locations before concluding it is missing.
+find_docker_cli() {
+  command -v docker >/dev/null 2>&1 && return 0
+  local d
+  for d in "${HOME:-/nonexistent}/.docker/bin" /usr/local/bin /opt/homebrew/bin \
+           "/Applications/Docker.app/Contents/Resources/bin"; do
+    if [ -x "$d/docker" ]; then
+      PATH="$d:$PATH"
+      export PATH
+      add_hint "  The Docker CLI is at $d/docker but was not on your PATH.
+  Using it for this run. To make that permanent, open a NEW terminal (Docker
+  Desktop adds it to your shell profile when it installs), or add:
+
+      export PATH=\"$d:\$PATH\""
+      return 0
+    fi
+  done
+  return 1
+}
+
 check_prereqs() {
-  if command -v docker >/dev/null 2>&1; then
+  if find_docker_cli; then
     add_row PASS docker "$(docker --version 2>/dev/null || echo present)"
   else
     add_row FAIL docker "not found — install Docker first"
+    if is_macos; then
+      add_hint "  Install Docker Desktop for Mac:
+      https://docs.docker.com/desktop/install/mac-install/
+
+  If it IS already installed, its CLI lives in ~/.docker/bin — open a NEW
+  terminal window so your shell profile is re-read, then run this again."
+    else
+      add_hint "  Install Docker Engine and the compose v2 plugin:
+      https://docs.docker.com/engine/install/"
+    fi
     return 1
   fi
+
   if docker compose version >/dev/null 2>&1; then
     add_row PASS "docker compose" "$(docker compose version --short 2>/dev/null || echo present)"
   else
     add_row FAIL "docker compose" "v2 plugin ('docker compose') not found"
+    return 1
+  fi
+
+  # `docker` and `docker compose` are CLIENT binaries — both answer fine while
+  # the engine is stopped. Without this check the preflight table passes and
+  # the FIRST real command dies on "Cannot connect to the Docker daemon",
+  # which reads like a Harvis bug rather than "Docker Desktop isn't running".
+  local server
+  server="$(docker version --format '{{.Server.Version}}' 2>/dev/null || true)"
+  if [ -n "$server" ]; then
+    add_row PASS "docker daemon" "engine $server"
+  else
+    add_row FAIL "docker daemon" "CLI is installed but the engine is not reachable"
+    if is_macos; then
+      add_hint "  Start Docker Desktop and wait for the whale icon to stop animating:
+
+      open -a Docker
+
+  Then run this script again."
+    else
+      add_hint "  Start the Docker engine:
+
+      sudo systemctl start docker
+
+  If it is already running, your user may not be in the 'docker' group:
+
+      sudo usermod -aG docker \"\$USER\"    # then log out and back in"
+    fi
     return 1
   fi
 }
