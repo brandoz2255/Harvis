@@ -1301,6 +1301,13 @@ _CHAT_SANDBOX_SYSTEM = (
     "menu of things you could do unless you were asked.\n"
     "Do not touch the workspace unless the task needs files. A greeting, a definition or an "
     "opinion needs no tool call at all — just answer it.\n"
+    "YOU HAVE WEB ACCESS. This container reaches the public internet and you have WebSearch "
+    "and WebFetch. Never say you cannot browse, cannot search, or have no web access — that "
+    "is false here. If a question turns on something you do not recognise or cannot know "
+    "from training — slang, a meme, a person, a product, a release, a price, anything "
+    "current — SEARCH FOR IT instead of saying you do not know it or asking the user to "
+    "explain it. Say you don't know only after a search came back empty, and say that the "
+    "search is what came back empty.\n"
     "When a task DOES need files:\n"
     "- This directory PERSISTS across turns and you CAN write to it. SANDBOX.md and "
     "README.md here are your project docs — read them when the task involves this "
@@ -1312,7 +1319,6 @@ _CHAT_SANDBOX_SYSTEM = (
     "surfaces every file you create as a readable card under your answer, so say what "
     "you built and why, not where it lives on disk.\n"
     "- NEVER tell the user to open a local path or run a command on their machine.\n"
-    "- Do not browse the public web from this sandbox.\n"
     "Answer in Markdown. Do not narrate what you are about to do, and do not summarise what "
     "you just said."
 )
@@ -1330,9 +1336,14 @@ async def _proxy_claude_cli(owui_body: dict, model_id: str, token: str, user_id=
 
     prompt = _flatten_to_prompt(owui_body)
     run_id = uuid.uuid4().hex  # credit-safety: lets us hard-kill THIS run's subtree by env marker
+    # Latency accounting. A slow turn on this lane has four possible owners — our sandbox
+    # setup, the container spawn, the model's think time, and generation — and until they
+    # are split apart every report is "it was slow", which is not actionable.
+    t_request = time.monotonic()
     workdir = "/tmp"
     if user_id:
         workdir = (await mkdir_workdir(user_id, run_id)) or "/tmp"
+    setup_ms = int((time.monotonic() - t_request) * 1000)
     argv = [
         "docker", "exec",
         "-e", f"HARVIS_RUN_ID={run_id}",
@@ -1343,8 +1354,13 @@ async def _proxy_claude_cli(owui_body: dict, model_id: str, token: str, user_id=
         "--output-format", "stream-json", "--verbose",
         "--dangerously-skip-permissions",
         "--add-dir", workdir,
-        # File tools + Bash so it can run python3/node/harvis-check. No web from chat.
-        "--allowedTools", "Read,Write,Edit,MultiEdit,Bash,Glob,Grep",
+        # File tools + Bash so it can run python3/node/harvis-check, plus web lookup.
+        # WebSearch/WebFetch used to be withheld here, and the model correctly reported
+        # that as "I don't have web access in this sandbox" — which reads to the user as
+        # the assistant inventing an excuse. The container does have egress (verified
+        # against duckduckgo and wikipedia), so the restriction bought nothing and cost
+        # every question about anything past the training cutoff.
+        "--allowedTools", "Read,Write,Edit,MultiEdit,Bash,Glob,Grep,WebSearch,WebFetch",
         "--append-system-prompt", _CHAT_SANDBOX_SYSTEM,
         "--model", _api_model(model_id),
     ]
@@ -1380,12 +1396,16 @@ async def _proxy_claude_cli(owui_body: dict, model_id: str, token: str, user_id=
         proc = None
         stderr_buf: list[str] = []
         parts: list[str] = []
+        spawn_ms = -1
+        first_delta_ms = -1
         try:
             try:
+                t_spawn = time.monotonic()
                 proc = await asyncio.create_subprocess_exec(
                     *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                     limit=1024 * 1024,
                 )
+                spawn_ms = int((time.monotonic() - t_spawn) * 1000)
             except FileNotFoundError:
                 raise RuntimeError("Claude subscription chat unavailable (docker CLI missing).")
 
@@ -1430,6 +1450,8 @@ async def _proxy_claude_cli(owui_body: dict, model_id: str, token: str, user_id=
                         continue
                     delta = render.feed(obj)
                     if delta:
+                        if first_delta_ms < 0:
+                            first_delta_ms = int((time.monotonic() - t_request) * 1000)
                         parts.append(delta)
                         yield delta
             except asyncio.CancelledError:
@@ -1442,6 +1464,14 @@ async def _proxy_claude_cli(owui_body: dict, model_id: str, token: str, user_id=
                         await asyncio.wait_for(proc.wait(), timeout=8)
                     except Exception:
                         _hard_kill_claude(proc, run_id)
+                t = render.timing or {}
+                logger.info(
+                    "cloud_chat timing model=%s total_ms=%d setup_ms=%d spawn_ms=%d "
+                    "first_delta_ms=%d cli_ttft_ms=%s cli_api_ms=%s cli_wall_ms=%s turns=%s",
+                    model_id, int((time.monotonic() - t_request) * 1000), setup_ms,
+                    spawn_ms, first_delta_ms, t.get("ttft_ms"), t.get("duration_api_ms"),
+                    t.get("duration_ms"), t.get("num_turns"),
+                )
 
             tail = render.flush()
             if tail:

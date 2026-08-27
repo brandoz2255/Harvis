@@ -47,6 +47,72 @@ function domainOf(url: string): string {
 }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
+/** Same wording the main chat's ResearchRunCard uses, so one run reads the same in both places. */
+const PHASE_LABEL: Record<string, string> = {
+  probing: 'Checking the model',
+  planning: 'Planning the research',
+  searching: 'Gathering sources',
+  reading: 'Reading sources',
+  analyzing: 'Analyzing findings',
+  writing: 'Writing the report',
+}
+
+interface ProgressEvent {
+  phase?: string
+  status?: string
+  round?: number
+  message?: string
+  url?: string
+  title?: string
+  total_sources?: number
+  sources?: { url: string }[]
+  queries?: string[]
+  final?: boolean
+  error?: string
+}
+
+/**
+ * Consume GET /api/research/stream/{id}.
+ *
+ * The old code polled /status every 2.5s and rendered `progress.message || progress.phase`.
+ * Most events carry no `message`, so the user saw a bare word like "reading" — and because a
+ * poll only ever sees the LATEST event, whole rounds went by unreported. The stream pushes
+ * every distinct progress change at 1.5s, with the round number, the URL being read and the
+ * running source count attached. EventSource can't carry an Authorization header, so this
+ * reads the body itself — the same approach owui's `streamResearch` takes.
+ */
+async function streamResearch(
+  sessionId: string,
+  onEvent: (e: ProgressEvent) => void,
+  isCancelled: () => boolean,
+): Promise<void> {
+  const res = await fetch(`/api/research/stream/${sessionId}`, { headers: authHeaders() })
+  if (!res.ok || !res.body) throw new Error(`stream HTTP ${res.status}`)
+  const reader = res.body.getReader()
+  const dec = new TextDecoder()
+  let buf = ''
+  for (;;) {
+    if (isCancelled()) {
+      await reader.cancel().catch(() => {})
+      return
+    }
+    const { done, value } = await reader.read()
+    if (done) break
+    buf += dec.decode(value, { stream: true })
+    const parts = buf.split('\n\n')
+    buf = parts.pop() || ''
+    for (const part of parts) {
+      const line = part.split('\n').find((l) => l.startsWith('data:'))
+      if (!line) continue
+      try {
+        onEvent(JSON.parse(line.slice(5).trim()))
+      } catch {
+        // a malformed frame is not a reason to drop the run
+      }
+    }
+  }
+}
+
 /** A single compact result row (favicon + title + snippet) with an Add button. */
 function ResultRow({
   url,
@@ -138,6 +204,11 @@ export function SourceWebSearch({
   // Deep
   const [deepPhase, setDeepPhase] = useState<'idle' | 'running' | 'done' | 'error'>('idle')
   const [deepProgress, setDeepProgress] = useState('')
+  // What the run is doing right now: the round it is on, the page it is reading, and how
+  // many sources it has collected. Shown under the phase line so a long run visibly moves.
+  const [deepRound, setDeepRound] = useState(0)
+  const [deepDetail, setDeepDetail] = useState('')
+  const [deepSourceCount, setDeepSourceCount] = useState(0)
   const [report, setReport] = useState('')
   const [showReport, setShowReport] = useState(true)
   const [cited, setCited] = useState<DeepSource[]>([])
@@ -211,6 +282,9 @@ export function SourceWebSearch({
     setAlsoFound([])
     setShowReport(true)
     setDeepProgress('Starting research…')
+    setDeepRound(0)
+    setDeepDetail('')
+    setDeepSourceCount(0)
     setDeepPhase('running')
     try {
       const start = await fetch('/api/research/start', {
@@ -222,18 +296,33 @@ export function SourceWebSearch({
       const { session_id: sid } = await start.json()
       if (!sid) throw new Error('No research session id returned')
 
-      // Poll status until it stops running (deep research is multi-round; minutes).
-      for (let i = 0; i < 200 && !cancelRef.current; i++) {
-        await sleep(2500)
-        if (cancelRef.current) return
-        const st = await fetch(`/api/research/status/${sid}`, { headers: authHeaders() })
-          .then((r) => (r.ok ? r.json() : null))
-          .catch(() => null)
-        if (!st) continue
-        const p = st.progress || {}
-        const msg = p.message || p.phase || p.stage || st.status
-        if (typeof msg === 'string') setDeepProgress(msg)
-        if (st.status && st.status !== 'running') break
+      const applyProgress = (p: ProgressEvent) => {
+        const label = (p.phase && PHASE_LABEL[p.phase]) || p.message || p.phase || p.status
+        if (typeof label === 'string' && label) setDeepProgress(label)
+        if (typeof p.round === 'number' && p.round > 0) setDeepRound(p.round)
+        // `reading` events name the page; anything else with a message says why.
+        if (p.phase === 'reading' && (p.title || p.url)) setDeepDetail(p.title || p.url || '')
+        else if (p.message && p.phase !== 'reading') setDeepDetail(p.message)
+        const n = Array.isArray(p.sources) ? p.sources.length : p.total_sources
+        if (typeof n === 'number') setDeepSourceCount(n)
+      }
+
+      try {
+        await streamResearch(sid, applyProgress, () => cancelRef.current)
+      } catch {
+        // The stream is the good path; if it can't be opened (proxy without SSE
+        // passthrough, for instance) fall back to the old poll rather than leaving
+        // the user staring at "Starting research…" for the whole run.
+        for (let i = 0; i < 200 && !cancelRef.current; i++) {
+          await sleep(2500)
+          if (cancelRef.current) return
+          const st = await fetch(`/api/research/status/${sid}`, { headers: authHeaders() })
+            .then((r) => (r.ok ? r.json() : null))
+            .catch(() => null)
+          if (!st) continue
+          applyProgress({ ...(st.progress || {}), status: st.status })
+          if (st.status && st.status !== 'running') break
+        }
       }
       if (cancelRef.current) return
 
@@ -353,10 +442,20 @@ export function SourceWebSearch({
       {mode === 'deep' && (
         <>
           {deepBusy && (
-            <p className="text-xs text-muted-foreground mt-2 px-0.5 flex items-center gap-1.5">
-              <Loader2 className="h-3 w-3 animate-spin" />
-              {deepProgress || 'Researching…'} <span className="opacity-60">(this can take a few minutes)</span>
-            </p>
+            <div className="text-xs text-muted-foreground mt-2 px-0.5 space-y-0.5">
+              <p className="flex items-center gap-1.5">
+                <Loader2 className="h-3 w-3 animate-spin flex-shrink-0" />
+                <span className="font-medium text-foreground/80">{deepProgress || 'Researching…'}</span>
+                {deepRound > 0 && <span className="opacity-70">· round {deepRound}</span>}
+                {deepSourceCount > 0 && (
+                  <span className="opacity-70">
+                    · {deepSourceCount} source{deepSourceCount === 1 ? '' : 's'}
+                  </span>
+                )}
+              </p>
+              {deepDetail && <p className="pl-[18px] truncate opacity-70">{deepDetail}</p>}
+              <p className="pl-[18px] opacity-50">This runs for a few minutes.</p>
+            </div>
           )}
 
           {deepPhase === 'done' && (
