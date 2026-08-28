@@ -243,7 +243,9 @@
 					($user?.role === 'admin' || $user?.permissions?.features?.calendar)
 				);
 			case 'playground':
-				return $user?.role === 'admin';
+				// Retired: the Playground entry was removed from the user menu, so a
+				// previously-pinned one would be stuck in the sidebar with no way to unpin.
+				return false;
 			case 'agent-studio':
 			case 'vibecode':
 			case 'open-notebook':
