@@ -84,7 +84,7 @@ _MAX_VERIFY_PREVIEWS = max(1, int(os.getenv("HARVIS_VISION_MAX_PREVIEWS", "2")))
 _TOOL_RESULT_CHARS = max(200, int(os.getenv("HARVIS_ORCH_TOOL_RESULT_CHARS", "500")))
 _READ_RESULT_CHARS = max(1000, int(os.getenv("HARVIS_ORCH_READ_RESULT_CHARS", "12000")))
 _READ_TOTAL_CHARS = max(4000, int(os.getenv("HARVIS_ORCH_READ_TOTAL_CHARS", "36000")))
-# Tools whose output IS the information the agent was asked for. Every agent_reach.*
+# Tools whose output IS the information the agent was asked for. Every agent_reach_*
 # tool qualifies (matched by prefix below), plus reading a file off the workspace.
 _CONTENT_TOOLS = ("read_file",)
 _SKIP_DIRS = {
@@ -505,7 +505,7 @@ class SubAgentRunner:
             context window and timing out the next model round.
             """
             nonlocal read_chars_used
-            if not (name.startswith("agent_reach.") or name in _CONTENT_TOOLS):
+            if not (name.startswith(("agent_reach_", "agent_reach.")) or name in _CONTENT_TOOLS):
                 return result[:_TOOL_RESULT_CHARS]
             room = min(_READ_RESULT_CHARS, _READ_TOTAL_CHARS - read_chars_used)
             if room <= _TOOL_RESULT_CHARS:
@@ -585,7 +585,7 @@ class SubAgentRunner:
         _reach_tools = {
             n
             for n in ((e.get("function") or {}).get("name", "") for e in WIRE_TOOL_SCHEMA)
-            if n.startswith("agent_reach.")
+            if n.startswith("agent_reach_")
         }
         try:
             from agent_reach import agent_reach_enabled

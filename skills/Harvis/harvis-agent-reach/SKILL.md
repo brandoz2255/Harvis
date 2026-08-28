@@ -21,11 +21,11 @@ in the OpenClaw pod.
 
 | Tool | Purpose |
 |------|---------|
-| `agent_reach.web_search` | Find pages for a query — numbered results, no page bodies. Start here whenever you do not already have the URL |
-| `agent_reach.web_read` | Readable text for a public URL (Jina) |
-| `agent_reach.yt_transcript` | YouTube captions |
-| `agent_reach.gh_view` | Public GitHub file — a `https://…` GitHub URL, or the shorthand `owner/repo/path[@ref]` (ref defaults to `main`) |
-| `agent_reach.rss_read` | Public RSS/Atom feed items |
+| `agent_reach_web_search` | Find pages for a query — numbered results, no page bodies. Start here whenever you do not already have the URL |
+| `agent_reach_web_read` | Readable text for a public URL (Jina) |
+| `agent_reach_yt_transcript` | YouTube captions |
+| `agent_reach_gh_view` | Public GitHub file — a `https://…` GitHub URL, or the shorthand `owner/repo/path[@ref]` (ref defaults to `main`) |
+| `agent_reach_rss_read` | Public RSS/Atom feed items |
 
 Requires `HARVIS_AGENT_REACH_ENABLED=1`. If denied, say so and fall back to
 existing `/api/tools/search` + `web-fetch` when Web Research / live_web is on.

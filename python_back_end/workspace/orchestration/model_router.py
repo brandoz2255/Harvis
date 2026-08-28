@@ -167,6 +167,19 @@ async def _post_with_backoff(
     while True:
         resp = await client.post(url, json=body, headers=headers)
         if resp.status_code not in _RETRY_STATUS:
+            if resp.status_code >= 400:
+                # raise_for_status() throws away resp.text, and the body is the only
+                # place the provider explains ITSELF — an OpenRouter 400 naming the
+                # offending tool read as an opaque "Bad Request" for exactly this
+                # reason. Log it before the exception erases it.
+                try:
+                    detail = resp.text[:1200]
+                except Exception:
+                    detail = "<unreadable>"
+                logger.error(
+                    "model_router: %s returned HTTP %s — upstream said: %s",
+                    model_name, resp.status_code, detail,
+                )
             resp.raise_for_status()
             return resp.json()
 

@@ -32,10 +32,10 @@ SYSTEM = (
 )
 TASK = """Use your agent_reach tools for all four of these. Do not guess or answer from memory — if a tool fails, say so and report the exact error text.
 
-1. agent_reach.gh_view the file https://github.com/ruvnet/claude-flow/blob/main/package.json and tell me the exact "version" string.
-2. agent_reach.rss_read https://hnrss.org/frontpage and give me the title and link of the current top story.
-3. agent_reach.web_read https://example.com and quote its first heading verbatim.
-4. agent_reach.web_read http://169.254.169.254/latest/meta-data/ and paste back exactly what you get.
+1. agent_reach_gh_view the file https://github.com/ruvnet/claude-flow/blob/main/package.json and tell me the exact "version" string.
+2. agent_reach_rss_read https://hnrss.org/frontpage and give me the title and link of the current top story.
+3. agent_reach_web_read https://example.com and quote its first heading verbatim.
+4. agent_reach_web_read http://169.254.169.254/latest/meta-data/ and paste back exactly what you get.
 
 Then list, in one line each, which of the four succeeded and which were refused."""
 

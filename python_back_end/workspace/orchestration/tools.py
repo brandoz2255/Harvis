@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import uuid
 from collections.abc import Iterable
 
@@ -351,12 +352,12 @@ TOOL_SCHEMA = [
     {
         "type": "function",
         "function": {
-            "name": "agent_reach.web_search",
+            "name": "agent_reach_web_search",
             "description": (
                 "Search the web and get back numbered results (title, url, snippet) — no page "
                 "bodies. USE THIS FIRST for anything you cannot answer from memory: a release, a "
                 "version, a price, a model card, anything current. Never guess a URL for "
-                "agent_reach.web_read — search for it, then read the result you want. "
+                "agent_reach_web_read — search for it, then read the result you want. "
                 "Lane 5 / HARVIS_AGENT_REACH_ENABLED. Not available inside OpenClaw."
             ),
             "parameters": {
@@ -373,10 +374,10 @@ TOOL_SCHEMA = [
     {
         "type": "function",
         "function": {
-            "name": "agent_reach.web_read",
+            "name": "agent_reach_web_read",
             "description": (
                 "Read a public web page as text (Jina reader via Harvis backend). Pass a URL you "
-                "got from agent_reach.web_search — a URL assembled from memory is usually a 404. "
+                "got from agent_reach_web_search — a URL assembled from memory is usually a 404. "
                 "Lane 5 / HARVIS_AGENT_REACH_ENABLED. No cookies. Not available inside OpenClaw."
             ),
             "parameters": {
@@ -392,7 +393,7 @@ TOOL_SCHEMA = [
     {
         "type": "function",
         "function": {
-            "name": "agent_reach.yt_transcript",
+            "name": "agent_reach_yt_transcript",
             "description": (
                 "Fetch YouTube captions/transcript for a public video URL. "
                 "Requires HARVIS_AGENT_REACH_ENABLED."
@@ -410,7 +411,7 @@ TOOL_SCHEMA = [
     {
         "type": "function",
         "function": {
-            "name": "agent_reach.gh_view",
+            "name": "agent_reach_gh_view",
             "description": (
                 "Read a public GitHub file (raw). Pass a github.com/raw URL or "
                 "owner/repo/path[@ref]. Requires HARVIS_AGENT_REACH_ENABLED."
@@ -428,7 +429,7 @@ TOOL_SCHEMA = [
     {
         "type": "function",
         "function": {
-            "name": "agent_reach.rss_read",
+            "name": "agent_reach_rss_read",
             "description": (
                 "Read items from a public RSS/Atom feed URL. "
                 "Requires HARVIS_AGENT_REACH_ENABLED."
@@ -473,6 +474,20 @@ TOOL_SCHEMA = [
 WIRE_TOOL_SCHEMA = [
     {k: v for k, v in entry.items() if k != "lane"} for entry in TOOL_SCHEMA
 ]
+
+# Every wire name must match OpenAI's function-name grammar. Local Ollama does not
+# enforce it, so a name it accepts can still 400 on OpenRouter, Groq, Cerebras,
+# Mistral and OpenAI itself — the reason the agent_reach tools lost their dots.
+# Logged rather than raised: a bad name must not take the backend down at import.
+_WIRE_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+for _entry in WIRE_TOOL_SCHEMA:
+    _n = ((_entry.get("function") or {}).get("name") or "")
+    if not _WIRE_NAME_RE.match(_n):
+        logger.error(
+            "tools: wire tool name %r is not ^[a-zA-Z0-9_-]{1,64}$ — strict "
+            "OpenAI-compatible providers will reject the whole request",
+            _n,
+        )
 
 
 def wire_tool_names() -> set[str]:
@@ -682,7 +697,7 @@ async def dispatch_tool(
                 return ("git_commit needs a non-empty `message`.", False)
             return await _git_commit_workspace(workspace_path, message)
 
-        if name.startswith("agent_reach."):
+        if name.startswith(("agent_reach_", "agent_reach.")):
             from agent_reach import dispatch_agent_reach
 
             out = await dispatch_agent_reach(name, args)
