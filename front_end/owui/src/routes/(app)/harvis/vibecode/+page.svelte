@@ -21,6 +21,9 @@
 		getVibecodeSessionDiff,
 		getVibecodeSessionFiles,
 		getVibecodeSessionFile,
+		getVibecodePreview,
+		runVibecodePreview,
+		stopVibecodePreview,
 		getRunArtifacts,
 		cancelWorkspaceRun,
 		getActiveDiscordSession,
@@ -45,6 +48,7 @@
 	import PrDrawer from '$lib/agent-studio/build/PrDrawer.svelte';
 	import WorkspaceFileRail from '$lib/agent-studio/build/WorkspaceFileRail.svelte';
 	import WorkspaceMainPanel from '$lib/agent-studio/build/WorkspaceMainPanel.svelte';
+	import VibecodeRunSurface from '$lib/agent-studio/build/VibecodeRunSurface.svelte';
 	import WorkspacePanel from '$lib/agent-studio/build/WorkspacePanel.svelte';
 	import BackgroundTaskCard from '$lib/agent-studio/build/BackgroundTaskCard.svelte';
 	import ShellTab from '$lib/agent-studio/build/ShellTab.svelte';
@@ -251,6 +255,60 @@
 		}
 	};
 
+	// ── Run & Preview: the session's own code, running in the sandbox ──
+	// `runPreview` carries both halves — what Run WOULD do (the detected plan) and what
+	// it IS doing (the live container state). Re-fetched after every turn because the
+	// plan changes the moment the agent writes an index.html or a package.json.
+	let runPreview: any = null;
+	let runBusy = false;
+	let runError = '';
+	const loadRunPreview = async () => {
+		if (!sessionId) {
+			runPreview = null;
+			return;
+		}
+		const reqId = sessionId;
+		const r = await getVibecodePreview(reqId);
+		if (reqId !== sessionId) return; // switched sessions mid-fetch → drop
+		if (r) runPreview = r; // null = fetch failed → keep the last-known state
+	};
+	// Only a session with a workspace can run anything; the tab explains the rest itself.
+	$: hasRunTab = !!sessionId;
+	$: runInProgress = ['installing', 'starting'].includes(runPreview?.preview?.status ?? '');
+	// Poll only while a launch is in flight — install + first compile take a while and
+	// there is no stream for them. A settled preview needs no polling at all.
+	let runPollTimer: any = null;
+	$: if (typeof window !== 'undefined') {
+		if (runInProgress && !runPollTimer) runPollTimer = setInterval(loadRunPreview, 2500);
+		else if (!runInProgress && runPollTimer) {
+			clearInterval(runPollTimer);
+			runPollTimer = null;
+		}
+	}
+	onDestroy(() => {
+		if (runPollTimer) clearInterval(runPollTimer);
+	});
+	const startRun = async () => {
+		if (!sessionId || runBusy) return;
+		runBusy = true;
+		runError = '';
+		try {
+			const r = await runVibecodePreview(sessionId);
+			// Adopt the optimistic 'starting' immediately so the ladder moves on click;
+			// the poll that the status change arms replaces it with the real thing.
+			if (runPreview) runPreview = { ...runPreview, preview: r.preview };
+			await loadRunPreview();
+		} catch (e: any) {
+			runError = e?.message || 'Could not start the app.';
+		}
+		runBusy = false;
+	};
+	const stopRun = async () => {
+		if (!sessionId) return;
+		await stopVibecodePreview(sessionId);
+		await loadRunPreview();
+	};
+
 	// Refresh the workspace runs + session diff on load and whenever a turn completes.
 	$: {
 		doneTurns;
@@ -259,6 +317,7 @@
 		loadDiff();
 		loadArtifacts();
 		loadSessionFiles();
+		loadRunPreview();
 	}
 	const clearBg = () => {
 		bgHidden = new Set([...bgHidden, ...finishedTasks.map((t) => t.id)]);
@@ -269,7 +328,7 @@
 
 	// Left-rail tab + main-panel tab + file/artifact selection wiring.
 	let fileTab: 'files' | 'changes' | 'artifacts' = 'changes';
-	let mainTab: 'chat' | 'diff' | 'logs' | 'editor' | 'preview' = 'chat';
+	let mainTab: 'chat' | 'diff' | 'logs' | 'editor' | 'preview' | 'run' = 'chat';
 	const onFileSelect = (path: string) => {
 		selectedFile = path;
 		// Files sub-tab = browsing the repo → open the read-only Editor view; the
@@ -2747,7 +2806,17 @@
 									</div>
 								{:else}
 									<div class="flex-1 min-h-0">
-										<WorkspaceMainPanel showChat={false} bind:tab={mainTab} {selectedFile} diffLines={selectedFileObj ? selectedFileObj.lines : []} {fileContent} {fileLoading} {fileBinary} {fileTruncated} {fileError} hasRepo={!!sessionId} hasChanges={changedFiles.length > 0} {hasPreview} on:refresh={refreshFiles}>
+										<WorkspaceMainPanel showChat={false} bind:tab={mainTab} {selectedFile} diffLines={selectedFileObj ? selectedFileObj.lines : []} {fileContent} {fileLoading} {fileBinary} {fileTruncated} {fileError} hasRepo={!!sessionId} hasChanges={changedFiles.length > 0} {hasPreview} hasRun={hasRunTab} on:refresh={refreshFiles}>
+											<div slot="run" class="h-full min-h-0">
+												<VibecodeRunSurface
+													preview={runPreview}
+													busy={runBusy}
+													error={runError}
+													on:run={startRun}
+													on:stop={stopRun}
+													on:refresh={loadRunPreview}
+												/>
+											</div>
 											<div slot="preview" class="h-full min-h-0 flex flex-col">
 												<div class="shrink-0 flex items-center justify-end px-2 py-1 border-b border-gray-200 dark:border-white/10">
 													<button

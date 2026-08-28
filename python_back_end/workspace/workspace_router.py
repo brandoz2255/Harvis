@@ -5267,6 +5267,169 @@ class VibecodeCreatePrRequest(BaseModel):
     override: bool = False
 
 
+# ── Run & Preview ─────────────────────────────────────────────────────────────
+# Code it in Harvis, run it in Harvis. The session's workspace is bind-mounted into
+# the same isolated sandbox the Repo Runner uses — no GitHub, no clone, no copy.
+#
+# The preview is served from a SEPARATE ORIGIN (a 127.0.0.1 host port docker assigns)
+# and never proxied through Harvis's own origin. That is deliberate and load-bearing:
+# `auth_optimized` accepts the JWT from an `access_token` cookie, so a same-origin
+# preview would let model-written JavaScript call Harvis's API as the signed-in user.
+# The cost of a separate origin is that the iframe only embeds when the browser is on
+# the Docker host — the UI says so rather than showing a silent blank frame.
+
+
+def _vibecode_run_stack(root: str) -> dict:
+    """Recompute the run plan from what is ON DISK right now. Never cached: the agent
+    may have written package.json (or the first index.html) since the last look."""
+    from owui_compat import fab_repo
+    return fab_repo.detect_stack(root)
+
+
+def _vibecode_install_cmd(stack: dict) -> str | None:
+    """The install step, or None when there is genuinely nothing to install. A hand-
+    written page has no manifest, and running `npm install` on it only produces a
+    confusing failure."""
+    plan = stack.get("run_plan") or {}
+    if plan.get("framework") == "static":
+        return None
+    return stack.get("install") or None
+
+
+@workspace_router.get("/vibecode/session/{session_id}/preview")
+async def get_vibecode_preview(
+    session_id: str,
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """What Run would do, and what it is doing. Everything the Preview tab renders."""
+    from owui_compat import workspace_sandbox
+    pool = getattr(request.app.state, "pg_pool", None)
+    uid = current_user["id"]
+    sess = await _vibecode_session_row(pool, session_id, uid)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    root = _vibecode_browse_root(dict(sess))
+    enabled = workspace_sandbox.run_enabled()
+    out: dict = {
+        "enabled": enabled,
+        "reason": "" if enabled else (
+            "Running your session's code isn't enabled on this deployment. It executes "
+            "code in a container, so it stays off until an operator sets "
+            "HARVIS_VIBECODE_RUN_ENABLED=true and the isolated sandbox network is up."
+        ),
+        "plan": None,
+        "preview": workspace_sandbox.get_manager().state(session_id),
+    }
+    if not root:
+        out["reason"] = out["reason"] or "This session has no workspace directory on disk."
+        return out
+    stack = _vibecode_run_stack(root)
+    plan = stack.get("run_plan") or {}
+    out["plan"] = {
+        "stack": stack.get("stack"),
+        "framework": plan.get("framework"),
+        "web": bool(plan.get("web")),
+        "dev_cmd": plan.get("dev_cmd"),
+        "install": _vibecode_install_cmd(stack),
+        "port": plan.get("port"),
+        "blocked_reason": (stack.get("requirements") or {}).get("blocked_reason"),
+    }
+    return out
+
+
+@workspace_router.post("/vibecode/session/{session_id}/run")
+async def run_vibecode_preview(
+    session_id: str,
+    payload: dict,
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """Start this session's app in the sandbox and publish a live preview.
+
+    Approval-gated per run (``approved: true``) because it executes code the model
+    wrote. Launches in the background; the client polls ``/preview``."""
+    from owui_compat import workspace_sandbox
+    pool = getattr(request.app.state, "pg_pool", None)
+    uid = current_user["id"]
+    sess = await _vibecode_session_row(pool, session_id, uid)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if not workspace_sandbox.run_enabled():
+        raise HTTPException(
+            status_code=403,
+            detail="Running your session's code isn't enabled on this deployment "
+                   "(HARVIS_VIBECODE_RUN_ENABLED).",
+        )
+    if not bool((payload or {}).get("approved")):
+        raise HTTPException(status_code=403, detail="Running the app needs your explicit approval.")
+    root = _vibecode_browse_root(dict(sess))
+    if not root:
+        raise HTTPException(status_code=400, detail="This session has no workspace directory on disk.")
+
+    stack = _vibecode_run_stack(root)
+    plan = stack.get("run_plan") or {}
+    req = stack.get("requirements") or {}
+    if req.get("multi_service"):
+        services = [s.get("name") for s in (req.get("services") or [])
+                    if isinstance(s, dict) and s.get("name")]
+        raise HTTPException(
+            status_code=400,
+            detail="This looks like a multi-service app (needs %s). The sandbox runs one "
+                   "process; start it as a single web app, or run it outside Harvis."
+                   % (", ".join(services) or "external services"),
+        )
+    if not plan.get("web") or not plan.get("dev_cmd"):
+        raise HTTPException(
+            status_code=400,
+            detail=req.get("blocked_reason")
+            or "Nothing here serves a web page yet — write an index.html (or a dev script) first.",
+        )
+
+    mgr = workspace_sandbox.get_manager()
+    cur = mgr.state(session_id)
+    if cur and cur.get("status") in ("installing", "starting", "running"):
+        return {"ok": True, "preview": cur}  # already up or coming up — don't double-launch
+
+    ready = await mgr.probe()
+    if not ready.get("ready"):
+        raise HTTPException(status_code=503, detail=f"Preview sandbox not ready: {ready.get('reason')}")
+
+    fw = plan.get("framework") or "app"
+
+    async def _persist(status: str, fields: dict) -> None:
+        # The manager's own box table IS the state the /preview route reads, and it is
+        # already updated before this fires — so this only needs to leave a trail.
+        logger.info("[vibe-preview:%s] %s (%s)", session_id, status,
+                    (fields or {}).get("error") or fw)
+
+    asyncio.create_task(mgr.run(
+        session_id, root, _vibecode_install_cmd(stack), plan["dev_cmd"],
+        plan.get("env") or {}, fw, _persist,
+    ))
+    logger.info("vibecode: preview launching for session %s (fw=%s)", session_id, fw)
+    return {"ok": True, "preview": {"status": "starting", "framework": fw,
+                                    "port": plan.get("port"), "host_port": 0,
+                                    "error": "", "log_tail": ""}}
+
+
+@workspace_router.post("/vibecode/session/{session_id}/stop")
+async def stop_vibecode_preview(
+    session_id: str,
+    request: Request,
+    current_user: dict = Depends(get_current_user_optimized),
+):
+    """Tear down this session's preview container."""
+    from owui_compat import workspace_sandbox
+    pool = getattr(request.app.state, "pg_pool", None)
+    uid = current_user["id"]
+    sess = await _vibecode_session_row(pool, session_id, uid)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    stopped = await workspace_sandbox.get_manager().stop(session_id)
+    return {"ok": True, "stopped": stopped}
+
+
 @workspace_router.post("/vibecode/session/{session_id}/create-pr")
 async def create_pr_for_vibecode_session(
     session_id: str,

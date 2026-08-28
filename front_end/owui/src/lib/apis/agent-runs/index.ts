@@ -791,6 +791,82 @@ export const getVibecodeSessionFile = async (
 	}
 };
 
+// ── Run & Preview ──
+// Run the code the agent just wrote, in the same isolated sandbox the Repo Runner
+// uses. The preview is served from its OWN origin (a 127.0.0.1 host port docker
+// assigns) — never proxied through Harvis — so model-written JavaScript can't call
+// Harvis's API with the signed-in user's cookie.
+export interface VibecodePreviewState {
+	status: 'installing' | 'starting' | 'running' | 'failed' | 'stopped' | string;
+	port: number;
+	host_port: number;
+	framework: string;
+	error: string;
+	log_tail: string;
+}
+
+export interface VibecodeRunPlan {
+	stack: string | null;
+	framework: string | null;
+	web: boolean;
+	dev_cmd: string | null;
+	install: string | null;
+	port: number | null;
+	blocked_reason: string | null;
+}
+
+export interface VibecodePreview {
+	enabled: boolean;
+	reason: string;
+	plan: VibecodeRunPlan | null;
+	preview: VibecodePreviewState | null;
+}
+
+// What Run would do, and what it is doing. null = the fetch failed (an older backend
+// without these routes included) — callers keep their last state and stay quiet.
+export const getVibecodePreview = async (sessionId: string): Promise<VibecodePreview | null> => {
+	try {
+		const r = await fetch(`${BASE}/vibecode/session/${sessionId}/preview`, {
+			headers: headers(),
+			credentials: 'include'
+		});
+		return r.ok ? await r.json() : null;
+	} catch (_) {
+		return null;
+	}
+};
+
+// Start the session's app. `approved` is the per-run consent the backend requires —
+// this executes code, so it is never implied. Throws Error(detail) so the UI can show
+// the backend's own explanation ("nothing here serves a web page yet", …).
+export const runVibecodePreview = async (
+	sessionId: string
+): Promise<{ ok: boolean; preview: VibecodePreviewState }> => {
+	const r = await fetch(`${BASE}/vibecode/session/${sessionId}/run`, {
+		method: 'POST',
+		headers: headers(),
+		credentials: 'include',
+		body: JSON.stringify({ approved: true })
+	});
+	if (!r.ok) {
+		const detail = (await r.json().catch(() => null))?.detail;
+		throw new Error(detail || `HTTP ${r.status}`);
+	}
+	return await r.json();
+};
+
+export const stopVibecodePreview = async (sessionId: string): Promise<void> => {
+	try {
+		await fetch(`${BASE}/vibecode/session/${sessionId}/stop`, {
+			method: 'POST',
+			headers: headers(),
+			credentials: 'include'
+		});
+	} catch (_) {
+		/* best effort — the idle sweeper reaps it either way */
+	}
+};
+
 // HUMAN-only: open ONE PR from the session's accumulated diff. Throws Error(detail).
 // Backend refuses main/master + requires the source to have a GitHub origin.
 // `base` (optional, additive) = the PR TARGET branch; older backends ignore it and

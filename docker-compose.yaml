@@ -416,6 +416,12 @@ services:
       HARVIS_ADAPTIVE_REPO_SANDBOX_CPUS: "${HARVIS_ADAPTIVE_REPO_SANDBOX_CPUS:-1.5}"
       HARVIS_ADAPTIVE_REPO_SANDBOX_MEM: "${HARVIS_ADAPTIVE_REPO_SANDBOX_MEM:-1500m}"
       HARVIS_ADAPTIVE_REPO_DEV_PORT: "${HARVIS_ADAPTIVE_REPO_DEV_PORT:-3000}"
+      # Build/Code tab Run & Preview — run the code the agent just wrote for THIS
+      # session, in the same sandbox, image and network as the Repo Runner above. The
+      # session workspace is bind-mounted instead of cloned; nothing else differs.
+      # Flag default OFF for the same reason: it executes code.
+      HARVIS_VIBECODE_RUN_ENABLED: "${HARVIS_VIBECODE_RUN_ENABLED:-false}"
+      HARVIS_VIBECODE_MAX_SANDBOXES: "${HARVIS_VIBECODE_MAX_SANDBOXES:-3}"
       # MCP connector runtime — runs a user's MCP servers as sibling containers
       # (stdio via npx/uvx) on the SAME isolated network and the SAME polyglot
       # image as the Repo Runner, because the backend image has no Node/uv and

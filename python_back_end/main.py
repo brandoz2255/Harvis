@@ -1212,6 +1212,22 @@ async def lifespan(app: FastAPI):
         logger.warning(f"⚠️ Repo-sandbox sweeper failed to start: {e}")
         app.state.repo_sandbox_sweeper_task = None
 
+    # VibeCode preview sweeper — same job for the Build/Code tab's own sandboxes.
+    # Only started when the feature is on: an always-running loop over an empty
+    # table is pure noise.
+    try:
+        from owui_compat import workspace_sandbox
+        if workspace_sandbox.run_enabled():
+            app.state.vibecode_sandbox_sweeper_task = asyncio.create_task(
+                workspace_sandbox.run_sweeper()
+            )
+            logger.info("🧹 VibeCode preview idle sweeper started")
+        else:
+            app.state.vibecode_sandbox_sweeper_task = None
+    except Exception as e:
+        logger.warning(f"⚠️ VibeCode preview sweeper failed to start: {e}")
+        app.state.vibecode_sandbox_sweeper_task = None
+
     yield
 
     # Shutdown: stop repo-sandbox sweeper
@@ -1219,6 +1235,9 @@ async def lifespan(app: FastAPI):
         sweeper_task = getattr(app.state, "repo_sandbox_sweeper_task", None)
         if sweeper_task is not None:
             sweeper_task.cancel()
+        vibe_task = getattr(app.state, "vibecode_sandbox_sweeper_task", None)
+        if vibe_task is not None:
+            vibe_task.cancel()
     except Exception as e:
         logger.warning(f"⚠️ Repo-sandbox sweeper shutdown error: {e}")
 

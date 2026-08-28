@@ -686,6 +686,40 @@ def _python_stack(root: str, has) -> dict:
     }
 
 
+# Directories a hand-written static site puts its entry point in, in the order a
+# human would guess. Root first: a model asked for "a page I can play" writes
+# index.html next to game.js and nothing else.
+_STATIC_DIRS = ("", "public", "dist", "site", "www", "static", "build")
+
+
+def _static_run_plan(root: str) -> dict | None:
+    """A run_plan for a repo that is just files a browser can open — index.html and
+    whatever it links. Returns None when no entry point is found.
+
+    This exists because a page written from scratch inside Harvis has no manifest at
+    all, so every manifest-driven branch below reports ``web: False`` and the Run
+    button can only ever say "nothing to run". Python's own http.server is the whole
+    server: no install step, no dependency, already in the sandbox image.
+    """
+    for d in _STATIC_DIRS:
+        base = os.path.join(root, d) if d else root
+        if not os.path.isdir(base):
+            continue
+        if not os.path.isfile(os.path.join(base, "index.html")):
+            continue
+        serve = f" --directory {d}" if d else ""
+        return {
+            "web": True,
+            "framework": "static",
+            "port": _DEV_PORT,
+            # -u so the request log reaches the tailed dev log unbuffered.
+            "dev_cmd": f"python3 -u -m http.server {_DEV_PORT} --bind 0.0.0.0{serve}",
+            "env": {},
+            "static_dir": d or ".",
+        }
+    return None
+
+
 def detect_stack(root: str) -> dict:
     """Detect the runtime + likely setup commands from manifest files. Suggestions
     only — nothing runs. Real inference from real files. Every result also carries
@@ -725,6 +759,17 @@ def detect_stack(root: str) -> dict:
     if "run_plan" not in out:
         out["run_plan"] = {"web": False, "framework": (out["stack"] or "unknown").lower(),
                            "port": _DEV_PORT, "dev_cmd": None, "env": {}}
+    if not out["run_plan"].get("web"):
+        # Last resort, and deliberately after every manifest branch: a real dev server
+        # always wins over serving the same tree as flat files. This catches both the
+        # manifest-less page and the package.json with no dev script that happens to
+        # ship an index.html.
+        static = _static_run_plan(root)
+        if static:
+            out["run_plan"] = static
+            if out["stack"] in (None, "Unknown"):
+                out.update({"stack": "Static", "manager": None, "install": None,
+                            "build": None, "start": static["dev_cmd"]})
     out["requirements"] = detect_services(root, out["run_plan"])
     return out
 
