@@ -248,3 +248,7 @@ python_back_end/research_cache/
 # SkillOpt corpus + candidates — mined from real user runs (task briefs are user content).
 # Regenerate with ./scripts/skillopt-offline.sh; never commit.
 /data/skillopt/
+# Database dumps written by database-backup/backup.sh — a full copy of the live
+# database: user rows, password hashes, chat history, stored provider credentials.
+# The scripts are tracked; what they produce never is.
+database-backup/backups/
