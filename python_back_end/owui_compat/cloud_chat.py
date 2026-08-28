@@ -62,10 +62,11 @@ def _api_model(facade_id: str) -> str:
 
 
 # Static metadata by REAL anthropic id — display name, context, pricing (USD per MILLION tokens),
-# and the extended-thinking cap. The catalog is fetched LIVE from Anthropic's /v1/models (ids +
-# display names); this table enriches each id with cost/context/effort. A model NOT listed here
-# still appears (via _CLAUDE_META_DEFAULT) so the list is genuinely self-updating — only its price
-# is unknown until added. `max_thinking` > 0 ⇒ the model supports the reasoning-effort control.
+# and a reference thinking figure. The catalog is fetched LIVE from Anthropic's /v1/models (ids +
+# display names); this table enriches each id with cost/context. A model NOT listed here still
+# appears (via _CLAUDE_META_DEFAULT) so the list is genuinely self-updating — only its price is
+# unknown until added. `max_thinking` is REFERENCE ONLY: it is hand-authored, it is not Anthropic's
+# authority, and nothing clamps against it. Every Claude takes a reasoning effort on both lanes.
 _CLAUDE_META: dict[str, dict] = {
     # `pin`/`pout` here are the Opus-line rate, not a separately confirmed Opus 5 price. They feed the
     # cost ESTIMATE only; a wrong number is visibly wrong, whereas leaving them None would silently
@@ -92,7 +93,7 @@ _CLAUDE_META_DEFAULT = {"name": None, "ctx": 200000, "pin": None, "pout": None, 
 def _claude_spec(model_id: str) -> dict:
     """Metadata for a facade Claude id (dynamic-safe): strip prefix → _CLAUDE_META, else default."""
     meta = _CLAUDE_META.get(_api_model(model_id), _CLAUDE_META_DEFAULT)
-    return {**meta, "supports_effort": bool(meta.get("max_thinking"))}
+    return {**meta, "supports_effort": True}
 
 
 # Static FALLBACK id lists — used ONLY when the live /v1/models fetch fails (network down / rate
@@ -197,8 +198,18 @@ _OPENAI_MODELS = [
 _OPENAI_BY_ID = {m["id"]: m for m in _OPENAI_MODELS}
 _ALL_OPENAI_IDS = {m["id"] for m in _OPENAI_MODELS}
 _OPENAI_URL = "https://api.openai.com/v1/chat/completions"
-# reasoning_effort is the OpenAI reasoning control (low|medium|high). "max" → "high" (no native ultra).
-_EFFORT_OPENAI = {"low": "low", "medium": "medium", "high": "high", "max": "high"}
+# reasoning_effort is the OpenAI reasoning control, and it has FOUR values: minimal|low|medium|high.
+# The picker offers seven, so everything above "high" collapses to "high" here — OpenAI has no
+# deeper level to send. The panel says so on those rows rather than pretending they differ.
+_EFFORT_OPENAI = {
+    "minimal": "minimal",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "extra_high": "high",
+    "max": "high",
+    "ultra": "high",
+}
 
 # Phase 3 — Moonshot / Kimi K2.5 (the ``kimi`` engine = the ORIGINAL Harvis workspace engine).
 # Same provider-prefix discipline (``moonshot/…``). Moonshot's API is OpenAI-compatible wire format,
@@ -237,7 +248,19 @@ _ALL_MOONSHOT_IDS = {m["id"] for m in _MOONSHOT_MODELS}
 _MOONSHOT_URL = f"{_MOONSHOT_BASE_URL.rstrip('/')}/chat/completions"
 
 # Effort → extended-thinking budget (Anthropic api_key path). "auto"/"none"/absent → no thinking.
-_EFFORT_BUDGET = {"low": 4000, "medium": 8000, "high": 16000, "max": 32000}
+# Every value is CLAMPED to the model's own ``max_thinking`` at the call site below, so the top of
+# this ladder is a request, not a promise: on a 24000-cap model (Sonnet 4.6/4.5, Fable 5) both
+# "max" and "ultra" land on 24000 and are genuinely the same run. The UI states that per model
+# instead of hiding it.
+_EFFORT_BUDGET = {
+    "minimal": 2000,
+    "low": 4000,
+    "medium": 8000,
+    "high": 16000,
+    "extra_high": 24000,
+    "max": 32000,
+    "ultra": 48000,
+}
 
 _CLAUDE_CODE_CONTAINER = os.getenv("HARVIS_CLAUDE_CODE_CONTAINER", "harvis-claude-code")
 
@@ -353,7 +376,13 @@ def _claude_entry_from_id(mid: str, display: Optional[str], mode: str) -> dict:
         name = f"{name} (subscription)"
     m = {
         "id": f"anthropic/{mid}", "name": name,
-        "supports_effort": bool(meta.get("max_thinking")),
+        # Subscription mode routes to _proxy_claude_cli, which takes no effort argument — the CLI
+        # exposes no thinking budget. Advertising support there offered a control whose value was
+        # silently discarded, so the flag is API-key-only.
+        # True on BOTH lanes. The api_key path sends a `thinking` block; the subscription path
+        # exports MAX_THINKING_TOKENS into the Claude Code CLI, which is the CLI's own control
+        # for the same budget. Neither discards it.
+        "supports_effort": True,
         "max_thinking": meta.get("max_thinking", 0),
         "ctx": meta.get("ctx"), "pin": meta.get("pin"), "pout": meta.get("pout"),
         "primary": mid in _CLAUDE_PRIMARY,
@@ -558,7 +587,7 @@ async def proxy_cloud_chat(owui_body: dict, pool, user_id: Optional[int]):
                 url=f"{KIMI_CODE_BASE_URL.rstrip('/')}/v1/messages",
             )
         if mode == "oauth_token":
-            return await _proxy_claude_cli(owui_body, model_id, secret, user_id)
+            return await _proxy_claude_cli(owui_body, model_id, secret, user_id, effort, budget_override)
         return await _proxy_claude_api(owui_body, model_id, secret, effort, budget_override)
     except Exception as exc:  # never leak the secret in the error
         logger.warning("cloud_chat: proxy failed (%s): %s", model_id, type(exc).__name__)
@@ -566,8 +595,11 @@ async def proxy_cloud_chat(owui_body: dict, pool, user_id: Optional[int]):
 
 
 def _normalize_effort(val) -> str:
+    """Any id the picker can save must be listed here. An id missing from this set falls through
+    to "none", which sends NO thinking block — the control reads as set and does nothing. Keep it
+    in lockstep with _EFFORT_BUDGET, _EFFORT_OPENAI and model_profiles._EFFORTS."""
     e = (str(val or "")).strip().lower()
-    return e if e in {"low", "medium", "high", "max"} else "none"
+    return e if e in _EFFORT_BUDGET else "none"
 
 
 # ── Anthropic Messages API path (api_key) ───────────────────────────────────────────────
@@ -607,7 +639,10 @@ def _to_anthropic_request(owui_body: dict, model_id: str, effort: str, budget_ov
     # A saved per-model thinking budget (profile) overrides the effort→budget mapping.
     budget = int(budget_override) if budget_override else _EFFORT_BUDGET.get(effort, 0)
     if budget and spec.get("supports_effort"):
-        budget = min(budget, int(spec.get("max_thinking") or budget))
+        # Sent as chosen — no local clamp. The per-model max_thinking figure is Harvis's own
+        # hand-authored table, not an authority, and clamping to it silently downgraded a level
+        # the user picked on purpose. If a model genuinely refuses this budget, Anthropic says so
+        # and names its real limit, which beats a quiet downgrade nobody can see.
         payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
         payload["temperature"] = 1.0  # required when thinking is enabled
         payload["max_tokens"] = budget + 8192
@@ -1324,7 +1359,8 @@ _CHAT_SANDBOX_SYSTEM = (
 )
 
 
-async def _proxy_claude_cli(owui_body: dict, model_id: str, token: str, user_id=None):
+async def _proxy_claude_cli(owui_body: dict, model_id: str, token: str, user_id=None,
+                            effort: str = "none", budget_override=None):
     """Run `claude -p` in the sidecar on the user's subscription OAuth token.
 
     Streams Claude Code ``stream-json`` as OpenAI SSE deltas so the UI types the
@@ -1344,11 +1380,17 @@ async def _proxy_claude_cli(owui_body: dict, model_id: str, token: str, user_id=
     if user_id:
         workdir = (await mkdir_workdir(user_id, run_id)) or "/tmp"
     setup_ms = int((time.monotonic() - t_request) * 1000)
+    # Reasoning effort on this lane. The CLI has no --thinking flag; MAX_THINKING_TOKENS is its
+    # own env control for the extended-thinking budget, so the same seven levels mean the same
+    # thing here as on the API-key path. No budget → the variable is simply not exported and the
+    # CLI keeps its default behaviour.
+    thinking_budget = int(budget_override) if budget_override else _EFFORT_BUDGET.get(effort, 0)
     argv = [
         "docker", "exec",
         "-e", f"HARVIS_RUN_ID={run_id}",
         "-e", f"CLAUDE_CODE_OAUTH_TOKEN={token}",
         "-e", "CLAUDE_CODE_SIMPLE=",
+        *(["-e", f"MAX_THINKING_TOKENS={thinking_budget}"] if thinking_budget else []),
         "-u", "1001", "-w", workdir, _CLAUDE_CODE_CONTAINER,
         "claude", "-p", prompt,
         "--output-format", "stream-json", "--verbose",

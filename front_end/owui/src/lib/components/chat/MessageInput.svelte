@@ -74,7 +74,7 @@
 		getWeekday
 	} from '$lib/utils';
 	import { uploadFile } from '$lib/apis/files';
-	import { generateAutoCompletion } from '$lib/apis';
+	import { generateAutoCompletion, getModels } from '$lib/apis';
 	import { deleteFileById } from '$lib/apis/files';
 	import { getChatById } from '$lib/apis/chats';
 	import { getSessionUser } from '$lib/apis/auths';
@@ -230,19 +230,67 @@
 	let modelSearch = '';
 	let showModelEditor = false;
 	let editorModel: any = null;
-	let showEffortSlider = false;
-	let effortSliderModel: any = null;
-	// % position of a model's current effort on the Faster→Smarter mini-slider (default: medium).
-	const effortPct = (m: any) => {
-		const L = ['low', 'medium', 'high', 'max'];
-		return (Math.max(0, L.indexOf(m?.info?.meta?.profile_effort ?? 'medium')) / 3) * 100;
-	};
 	const isCloudModel = (m) => ['anthropic', 'openai'].includes(m?.owned_by);
+	// Abbreviations, because the effort rides on the model row and on the composer pill — both
+	// are tight. No saved effort = thinking is off, which reads as "Auto": the model decides.
+	// Blank for models that can't take an effort at all.
+	const EFFORT_SHORT: Record<string, string> = {
+		minimal: 'Min',
+		low: 'Low',
+		medium: 'Med',
+		high: 'High',
+		extra_high: 'X-High',
+		max: 'Max',
+		ultra: 'Ultra'
+	};
 	const effortLabelOf = (m) => {
 		const e = m?.info?.meta?.profile_effort;
-		if (e) return e.charAt(0).toUpperCase() + e.slice(1);
+		if (e) return EFFORT_SHORT[e] ?? e;
 		return m?.info?.meta?.supports_effort ? 'Auto' : '';
 	};
+
+	// Picker footer. The dropdown is the entry point for model management, so a stale catalogue
+	// can be re-fetched without leaving the composer, and the full editor is one click away.
+	let refreshingModels = false;
+	const refreshModels = async () => {
+		if (refreshingModels) return;
+		refreshingModels = true;
+		try {
+			models.set(
+				await getModels(
+					localStorage.token,
+					$config?.features?.enable_direct_connections && ($settings?.directConnections ?? null),
+					false,
+					true
+				)
+			);
+			toast.success($i18n.t('Models refreshed'));
+		} catch (e) {
+			toast.error(`${e}`);
+		} finally {
+			refreshingModels = false;
+		}
+	};
+
+	// The effort flyout that opens beside a hovered model row. It lives OUTSIDE the scrolling
+	// list — an absolutely positioned child of a scroll container is clipped by it — so the row
+	// hands over its offset and the panel is placed against the list instead.
+	let modelListEl: HTMLDivElement | null = null;
+	let effortFlyoutModel: any = null;
+	let effortFlyoutTop = 0;
+	let effortFlyoutTimer: any = null;
+	const openEffortFlyout = (m: any, ev: MouseEvent) => {
+		clearTimeout(effortFlyoutTimer);
+		const row = (ev.currentTarget as HTMLElement)?.closest('[data-model-row]') as HTMLElement;
+		if (row && modelListEl) effortFlyoutTop = row.offsetTop - modelListEl.scrollTop;
+		effortFlyoutModel = m;
+	};
+	// A small grace period so the pointer can cross the gap between the row and the panel.
+	const closeEffortFlyout = () => {
+		clearTimeout(effortFlyoutTimer);
+		effortFlyoutTimer = setTimeout(() => (effortFlyoutModel = null), 160);
+	};
+	const holdEffortFlyout = () => clearTimeout(effortFlyoutTimer);
 	// The "show all Claude models" gate is a persisted user setting, managed in
 	// Settings → Interface (not in this dropdown). The picker just reads it below.
 	$: modelMenuList = (() => {
@@ -269,31 +317,34 @@
 		return showAllModels || q ? filtered : filtered.slice(0, 7);
 	})();
 
-	// Phase F: reasoning-effort control. Shown only when the active model advertises support
-	// (cloud reasoning models). 'auto' → no forced thinking; others map to a thinking budget.
-	const EFFORT_OPTIONS = [
-		{ id: 'auto', label: 'Auto' },
-		{ id: 'low', label: 'Low' },
-		{ id: 'medium', label: 'Medium' },
-		{ id: 'high', label: 'High' },
-		{ id: 'max', label: 'Max' }
-	];
-	let showEffortMenu = false;
+	// Same list, under provider headings. Groups appear in order of first appearance, so the
+	// active model's provider leads (modelMenuList already floats the active model to the top).
+	$: modelMenuGroups = (() => {
+		const LABELS = { anthropic: 'Anthropic', openai: 'OpenAI' };
+		const groups: { label: string; models: any[] }[] = [];
+		for (const m of modelMenuList) {
+			const label = LABELS[m?.owned_by] ?? 'Local';
+			let g = groups.find((x) => x.label === label);
+			if (!g) groups.push((g = { label, models: [] }));
+			g.models.push(m);
+		}
+		return groups;
+	})();
+
+	// The active model, for the effort shown on the composer pill. Only models that advertise
+	// support have one (Claude on an API key, the GPT-5 reasoning models); everything else shows
+	// the model name alone. Effort is SET from the Options panel attached to the picker, not from
+	// a second dropdown out here — one control, next to the model it belongs to.
 	$: effortModel = ($models ?? []).find(
 		(m) => m.id === (atSelectedModel?.id ?? selectedModels?.[0] ?? '')
 	);
 	$: effortCapable = !!effortModel?.info?.meta?.supports_effort;
-	// The composer effort button (next to Send) reflects the ACTIVE model's effort level.
-	$: composerEffortLabel = (() => {
-		const e = effortModel?.info?.meta?.profile_effort;
-		const M: Record<string, string> = { low: 'Low', medium: 'Medium', high: 'High', max: 'Max' };
-		return e ? M[e] : 'Auto';
-	})();
-	$: composerEffortPct = (() => {
-		const L = ['low', 'medium', 'high', 'max'];
-		const e = effortModel?.info?.meta?.profile_effort;
-		return e ? (L.indexOf(e) / 3) * 100 : 50; // 'Auto' (unset) → mid
-	})();
+	// What rides on the composer pill after the model name: `Opus 4.6 · Med`. Empty on a model
+	// with no effort axis at all, so the pill is just the model name there.
+	$: composerEffortShort = effortCapable ? effortLabelOf(effortModel) : '';
+	// What the picker's "Edit Models…" footer opens: the active model when it has an editable
+	// profile (cloud only), else nothing — the action is disabled rather than silently inert.
+	$: editableModel = isCloudModel(effortModel) ? effortModel : null;
 
 	// Mic dropdown — detect input devices + the chosen one (threaded into recording).
 	let showMicMenu = false;
@@ -2234,7 +2285,7 @@
 												bind:show={showModeMenu}
 												side="bottom"
 												align="start"
-												contentClass="rounded-xl border border-gray-100 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-lg p-1 w-[30rem] max-w-[calc(100vw-2rem)] text-sm"
+												contentClass="rounded-lg border border-gray-150 dark:border-gray-850 bg-white dark:bg-gray-900 shadow-xl p-1 w-72 max-w-[calc(100vw-2rem)] text-sm"
 											>
 												<button
 													type="button"
@@ -2248,49 +2299,112 @@
 														title={$chatMode === 'auto' ? composerModel : CHAT_MODE_META[$chatMode]?.label}
 														>{$chatMode === 'auto' ? composerModel : CHAT_MODE_META[$chatMode]?.label}</span
 													>
+													{#if $chatMode === 'auto' && composerEffortShort}
+														<span class="shrink-0 opacity-60">· {composerEffortShort}</span>
+													{/if}
 													<svg class="size-3 opacity-70" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6" /></svg>
 												</button>
 
 												<svelte:fragment slot="content">
-													<div class="flex items-center gap-2 px-2.5 py-1.5 border-b border-gray-100 dark:border-gray-800 mb-0.5">
-														<svg class="size-3.5 text-gray-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/></svg>
-														<input bind:value={modelSearch} placeholder={$i18n.t("Search models")} autocomplete="off" class="w-full bg-transparent outline-none text-sm" on:click|stopPropagation />
+													<div class="flex items-center gap-1.5 px-2 py-1 border-b border-gray-150 dark:border-gray-850 mb-0.5">
+														<svg class="size-3 text-gray-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/></svg>
+														<input bind:value={modelSearch} placeholder={$i18n.t("Search models")} autocomplete="off" class="w-full bg-transparent outline-none text-[13px] py-0.5" on:click|stopPropagation />
 													</div>
-													<div class="max-h-72 overflow-y-auto">
-														{#each modelMenuList as m}
-															<div class="w-full flex items-start gap-1 group/mrow rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800 transition">
-																<button type="button" class="flex-1 min-w-0 flex flex-col gap-0.5 px-2.5 py-1.5 text-left" on:click={() => { selectedModels = [m.id]; showModeMenu = false; }}>
-																	<span class="text-gray-800 dark:text-gray-100 break-words leading-snug">{m.name}</span>
-																	<span class="flex items-center gap-1.5 text-[11px] leading-none text-gray-400 dark:text-gray-500">
-																		{#if m.id !== m.name}
-																			<span class="font-mono break-all">{m.id}</span>
+													<!-- Grouped by provider, one line per model with its effort inline. The Options
+													     panel opens to the LEFT and sits OUTSIDE the scroll box — inside it, an
+													     absolutely positioned panel would be clipped by the scroll container. -->
+													<div class="relative">
+														<div class="max-h-72 overflow-y-auto" bind:this={modelListEl} on:scroll={() => (effortFlyoutModel = null)}>
+															{#each modelMenuGroups as g (g.label)}
+																<div class="px-2.5 pt-1.5 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-gray-400 dark:text-gray-500">
+																	{$i18n.t(g.label)}
+																</div>
+																{#each g.models as m}
+																	<div
+																		data-model-row
+																		class="w-full flex items-center gap-1 group/mrow rounded-md hover:bg-gray-100 dark:hover:bg-gray-800 transition"
+																		on:mouseenter={(e) => (m?.info?.meta?.supports_effort ? openEffortFlyout(m, e) : closeEffortFlyout())}
+																		on:mouseleave={closeEffortFlyout}
+																		on:focusin={(e) => (m?.info?.meta?.supports_effort ? openEffortFlyout(m, e) : closeEffortFlyout())}
+																		on:focusout={closeEffortFlyout}
+																	>
+																		<button
+																			type="button"
+																			class="flex-1 min-w-0 flex items-center gap-1.5 px-2.5 py-1 text-left"
+																			title={[m.id, modelContext(m)].filter(Boolean).join(' · ')}
+																			on:click={() => { selectedModels = [m.id]; showModeMenu = false; }}
+																		>
+																			<span class="flex-1 min-w-0 truncate text-[13px] text-gray-800 dark:text-gray-100">{m.name}</span>
+																			{#if m?.info?.meta?.supports_effort}
+																				<!-- The effort rides on the row, so "which model" and "how deep"
+																				     read as one line. Hovering the row opens the panel that sets it. -->
+																				<span class="shrink-0 text-[11px] text-gray-400 dark:text-gray-500">{effortLabelOf(m)}</span>
+																			{/if}
+																		</button>
+																		{#if isCloudModel(m)}
+																			<button type="button" class="shrink-0 text-[11px] text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 px-1 py-1 opacity-0 group-hover/mrow:opacity-100 transition" aria-label={$i18n.t("Edit model profile")} on:click|stopPropagation={() => { editorModel = m; showModelEditor = true; }}>{$i18n.t('Edit')}</button>
 																		{/if}
-																		{#if modelContext(m)}
-																			<span class="shrink-0">· {modelContext(m)}</span>
-																		{/if}
-																	</span>
-																</button>
-																{#if isCloudModel(m)}
-																	<button type="button" class="shrink-0 text-xs text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 px-1.5 py-1.5 opacity-0 group-hover/mrow:opacity-100 transition" aria-label={$i18n.t("Edit model profile")} on:click|stopPropagation={() => { editorModel = m; showModelEditor = true; }}>{$i18n.t('Edit')}</button>
-																{/if}
-																{#if (selectedModels?.[0] ?? '') === m.id}
-																	<svg class="size-4 text-blue-500 shrink-0 mr-1" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
-																{/if}
+																		<span class="w-4 shrink-0 mr-1 flex items-center justify-center">
+																			{#if (selectedModels?.[0] ?? '') === m.id}
+																				<svg class="size-3.5 text-blue-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
+																			{/if}
+																		</span>
+																	</div>
+																{/each}
+															{/each}
+														</div>
+
+														{#if effortFlyoutModel}
+															<div
+																class="absolute right-full mr-1 z-20 w-48 rounded-lg border border-gray-150 dark:border-gray-850 bg-white dark:bg-gray-900 shadow-xl"
+																style="top: {Math.max(0, effortFlyoutTop - 8)}px"
+																on:mouseenter={holdEffortFlyout}
+																on:mouseleave={closeEffortFlyout}
+															>
+																<EffortSlider model={effortFlyoutModel} on:changed={() => models.update((ms) => [...ms])} />
 															</div>
-														{/each}
+														{/if}
 													</div>
+
+													<!-- Utility actions, fenced off from the model list: the picker is also where
+													     the catalogue is managed, so neither needs a trip to settings. -->
+													<div class="my-1 border-t border-gray-150 dark:border-gray-850"></div>
 													{#if !showAllModels && !modelSearch.trim() && ($models ?? []).length > 7}
-														<div class="my-1 border-t border-gray-100 dark:border-gray-800"></div>
 														<button
 															type="button"
-															class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-left text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800 transition"
+															class="w-full flex items-center gap-2 px-2.5 py-1 rounded-md text-left text-[13px] text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
 															on:click={() => (showAllModels = true)}
 														>
 															<span class="flex-1">{$i18n.t('Show all models')} ({($models ?? []).length})</span>
-															<svg class="size-3.5 opacity-60 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+															<svg class="size-3 opacity-60 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
 														</button>
 													{/if}
-												</svelte:fragment>
+													<button
+														type="button"
+														class="w-full flex items-center gap-2 px-2.5 py-1 rounded-md text-left text-[13px] text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 transition disabled:opacity-50"
+														disabled={refreshingModels}
+														on:click|stopPropagation={refreshModels}
+													>
+														<svg class="size-3.5 shrink-0 opacity-70 {refreshingModels ? 'animate-spin' : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+														<span class="flex-1">{refreshingModels ? $i18n.t('Refreshing…') : $i18n.t('Refresh Models')}</span>
+													</button>
+													<!-- NOT /workspace/models: that route is unbacked in the Harvis facade
+													     (/api/v1/models/* 404s), so it is flag-gated and bounces to
+													     /workspace/knowledge — which from the composer reads as "nothing
+													     happened". The profile editor is the surface that actually edits a
+													     model here, and it is the same one the row's Edit button opens. -->
+													<button
+														type="button"
+														class="w-full flex items-center gap-2 px-2.5 py-1 rounded-md text-left text-[13px] text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 transition disabled:opacity-40"
+														disabled={!editableModel}
+														title={editableModel ? '' : $i18n.t('Local models have no editable profile')}
+														on:click|stopPropagation={() => { editorModel = editableModel; showModelEditor = true; showModeMenu = false; }}
+													>
+														<svg class="size-3.5 shrink-0 opacity-70" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+														<span class="flex-1">{$i18n.t('Edit Models…')}</span>
+													</button>
+												
+</svelte:fragment>
 											</Dropdown>
 										</div>
 
@@ -2298,28 +2412,7 @@
 											<ModelProfileEditor bind:show={showModelEditor} model={editorModel} on:saved={() => models.update((ms) => [...ms])} />
 										{/if}
 
-										<!-- Phase F: reasoning-effort dropdown — same UI as the model pill, shown only
-										     when the active cloud model supports it (Claude via API key, GPT reasoning). -->
-										{#if effortCapable}
-											<div class="flex items-center">
-												<Dropdown
-													bind:show={showEffortMenu}
-													side="top"
-													align="end"
-													contentClass="rounded-xl border border-gray-100 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-lg w-64"
-												>
-													<button type="button" class="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-gray-850 hover:bg-gray-200 dark:hover:bg-gray-800 transition" tabindex="-1" aria-label={$i18n.t("Reasoning effort")}>
-														<span class="max-w-[7rem] truncate">{composerEffortLabel}</span>
-														<svg class="size-3 opacity-70" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6" /></svg>
-													</button>
-													<svelte:fragment slot="content">
-														<EffortSlider model={effortModel} on:changed={() => models.update((ms) => [...ms])} />
-													</svelte:fragment>
-												</Dropdown>
-											</div>
-										{/if}
-
-										{#if prompt === '' && files.length === 0 && ($_user?.role === 'admin' || ($_user?.permissions?.chat?.call ?? true))}
+{#if prompt === '' && files.length === 0 && ($_user?.role === 'admin' || ($_user?.permissions?.chat?.call ?? true))}
 											<div class=" flex items-center">
 												<!-- {$i18n.t('Call')} -->
 												<Tooltip content={$i18n.t('Voice mode')}>
