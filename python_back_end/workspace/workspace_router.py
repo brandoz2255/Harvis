@@ -7,7 +7,8 @@ Endpoints:
   GET  /api/workspace/stream/{ws_id}   — SSE stream of workspace activity log
   POST /api/workspace/cancel/{ws_id}   — Cancel a running workspace
   GET  /api/workspace/status/{ws_id}   — Get current workspace status
-  GET  /api/workspace/history          — List last 20 workspace runs for current user
+  GET  /api/workspace/history          — Last 50 workspace runs for current user
+                                         (?run_id=<id> → that one run, Build turns included)
   GET  /api/workspace/run/{ws_id}/events — Get all stored events for a run
   POST /api/workspace/run/{ws_id}/rerun  — Re-run a previous workspace task
 
@@ -115,6 +116,47 @@ KIMI_ENGINE_IDS = {"kimi"}
 # It runs the real Claude Code CLI against the session clone through the engine-adapter,
 # with ANTHROPIC_BASE_URL repointed. See docs/kimi-integration.md.
 KIMI_CODE_ENGINE_IDS = {"kimi-code"}
+
+
+# A model's provider -> the Build engine (lane) that can actually run it. This MUST agree
+# with `engineForOwner` in the Build page: the picker decides the lane there, and the
+# session row decides it here, so a disagreement sends a model down a lane that cannot
+# serve it. That is not theoretical - a session created as `native`, then given
+# `anthropic/claude-sonnet-5` by a picker that had carried over from another chat, POSTed
+# to Ollama and came back `404 Not Found for http://...:11434/v1/chat/completions`.
+#
+# The provider is the segment before the first "/" of the model id, which is how every
+# non-Ollama model is namespaced (`anthropic/...`, `kimi-code/...`, `openrouter/...`). A
+# bare id with no slash is a local Ollama tag and belongs to the native loop.
+def _engine_for_model(model_name: str) -> str:
+    name = (model_name or "").strip().lower()
+    if "/" not in name:
+        return "native"
+    owner = name.split("/", 1)[0]
+    if owner.startswith("anthropic"):
+        return "claude-code"
+    if owner.startswith("hermes"):
+        return "hermes-agent"
+    if owner == "openai":
+        return "codex"
+    # Before the generic kimi/moonshot arm: "kimi-code" also starts with "kimi", and
+    # falling through would run a MEMBERSHIP model on the pay-as-you-go Moonshot lane.
+    if owner == "kimi-code":
+        return "kimi-code"
+    if owner.startswith("moonshot") or owner.startswith("kimi"):
+        return "kimi"
+    # openrouter / groq / cerebras / ... are OpenAI-compatible endpoints the native runner
+    # already speaks; they need no sidecar.
+    return "native"
+
+
+def _engine_runnable(engine: str) -> bool:
+    """Can this lane actually serve a turn right now? Mirrors the dispatch below."""
+    if engine in ("native", "kimi", "kimi-code"):
+        return True  # kimi-code is gated on a verified key, resolved at dispatch
+    if engine == "hermes-native":
+        return _hermes_engine_enabled()
+    return _engine_enabled(engine)
 
 
 def _engine_enabled(engine: str) -> bool:
@@ -3774,6 +3816,106 @@ async def _vibecode_session_row(pool, session_id: str, user_id: int):
         )
 
 
+# How many prior turns of a Build/Code session get replayed to the agent. The
+# per-message and whole-block caps live in conversation_prefix(); this only bounds
+# the query. Six turns is twelve messages, which is that function's own turn cap.
+_VIBECODE_HISTORY_TURNS = 6
+
+# Hard size budget for the replayed transcript. NOT belt-and-braces: `task_brief` can
+# carry an inlined attachment (_ATTACH_INLINE_MAX_BYTES is 80 KB) and a `final_summary`
+# already reaches 18 KB in this database — and the Kimi/Ollama workspace lane's
+# `_build_context_message` caps message COUNT but not length, so an unbounded history
+# would land a quarter-megabyte prompt on a metered endpoint. `conversation_prefix`
+# trims again for the lanes that use it; this is the floor under all of them.
+_VIBECODE_HISTORY_MAX_PER_MSG = 2000
+_VIBECODE_HISTORY_MAX_CHARS = 12000
+
+# The Agent Review lane writes its run row with source='vibecode' and the session's
+# id too — deliberately, so the review lands in the session thread. Its task_brief is
+# this server-written placeholder rather than anything the user typed, so anything
+# reconstructing what the USER asked has to skip it. One constant, matched as a bound
+# parameter, so the two readers below cannot drift if the wording ever changes.
+_REVIEW_BRIEF_PREFIX = "Agent review of"
+
+
+async def _vibecode_chat_history(
+    pool, session_id: str, user_id: int, exclude_run_id: str = "",
+) -> list[dict]:
+    """The session's earlier turns, as a user/assistant transcript.
+
+    A Build/Code session's history IS its workspace_runs rows: ``task_brief`` is what
+    the user asked and ``final_summary`` is what the agent answered. Every lane is
+    one-shot, so without this the turn route handed the runner an empty history,
+    ``conversation_prefix`` returned the brief untouched, and a follow-up like "try
+    again" reached the model as a sentence about nothing — it would go and review the
+    workspace instead of continuing the build it could no longer see.
+
+    A turn that never produced a summary (it failed, or it is still running)
+    contributes only its user message. That is the honest record, and it reads
+    correctly: the same ask, made twice.
+
+    Two rows are deliberately NOT turns: an Agent Review run (see
+    ``_REVIEW_BRIEF_PREFIX`` — its brief is a server-written placeholder, and
+    replaying it would put words in the user's mouth), and anything owned by another
+    user. Session ids are truncated UUIDs, so the ownership filter costs nothing and
+    means a collision can never hand one person another's transcript.
+    """
+    if pool is None or not session_id:
+        return []
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT task_brief, final_summary
+                FROM workspace_runs
+                WHERE session_id = $1
+                  AND user_id = $2
+                  AND source = 'vibecode'
+                  AND id <> $3
+                  AND task_brief IS NOT NULL
+                  AND task_brief NOT LIKE $4
+                ORDER BY started_at DESC, id DESC
+                LIMIT $5
+                """,
+                session_id, user_id, exclude_run_id or "",
+                _REVIEW_BRIEF_PREFIX + "%", _VIBECODE_HISTORY_TURNS,
+            )
+    except Exception as exc:
+        # Context is an enhancement, never a precondition — the turn still runs.
+        logger.warning("vibecode: chat history load failed for %s: %s", session_id, exc)
+        return []
+
+    def _clip(text: str) -> str:
+        text = text.strip()
+        if len(text) <= _VIBECODE_HISTORY_MAX_PER_MSG:
+            return text
+        return text[:_VIBECODE_HISTORY_MAX_PER_MSG] + " …[truncated]"
+
+    # Walk newest-first (the order the LIMIT already gave us) and spend the budget on
+    # the most recent turns, because that is what a follow-up actually refers to. The
+    # newest turn is always admitted even if it alone exceeds the budget — clipped, but
+    # present, since dropping it would leave "try again" with nothing again.
+    msgs: list[dict] = []
+    used = 0
+    for r in rows:
+        pair: list[dict] = []
+        reply = (r["final_summary"] or "").strip()
+        if reply:
+            pair.append({"role": "assistant", "content": _clip(reply)})
+        brief = (r["task_brief"] or "").strip()
+        if brief:
+            pair.append({"role": "user", "content": _clip(brief)})
+        if not pair:
+            continue
+        cost = sum(len(m["content"]) for m in pair)
+        if msgs and used + cost > _VIBECODE_HISTORY_MAX_CHARS:
+            break
+        msgs.extend(pair)
+        used += cost
+    msgs.reverse()  # newest-first pairs → chronological transcript
+    return msgs
+
+
 def _parse_preflight_col(raw):
     """vibecode_sessions.preflight (JSONB) → dict|None. asyncpg may hand it back as a
     JSON string (no codec) or an already-decoded dict — handle both."""
@@ -4219,9 +4361,16 @@ async def get_vibecode_session(
             SELECT r.id, r.task_brief, r.status, r.started_at, r.completed_at,
                    r.duration_ms, r.tool_calls, r.final_summary, r.error_message,
                    r.model_name, r.prompt_tokens, r.completion_tokens, r.context_window,
-                   r.attachments, r.analysis_md,
+                   r.usage_detail, r.attachments, r.analysis_md,
                    (SELECT COUNT(*) FROM workspace_runs c WHERE c.parent_run_id = r.id)
-                     AS child_count
+                     AS child_count,
+                   -- The files the workspace held as of this turn. The chat card lists
+                   -- them under the reply so "what did it actually create?" is answerable
+                   -- without opening a panel — the question that sent a user hunting after
+                   -- a turn wrote one index.html and said nothing about it.
+                   (SELECT a.content FROM workspace_artifacts a
+                     WHERE a.workspace_id = r.id AND a.artifact_type = 'changed_files'
+                     ORDER BY a.created_at DESC LIMIT 1) AS changed_files
             FROM workspace_runs r
             WHERE r.session_id = $1 AND r.source = 'vibecode'
             ORDER BY r.started_at ASC
@@ -4271,6 +4420,21 @@ def _vibecode_turn_to_dict(t) -> dict:
             d["attachments"] = []
     elif raw is None:
         d["attachments"] = []
+    # Same asyncpg JSONB-as-str treatment for the split usage record. None stays None:
+    # "we have no trustworthy occupancy number" is a state the meter renders honestly,
+    # and an empty dict would look like a measured zero.
+    ud = d.get("usage_detail")
+    if isinstance(ud, str):
+        try:
+            d["usage_detail"] = json.loads(ud) or None
+        except Exception:
+            d["usage_detail"] = None
+    # `changed_files` arrives as the stored newline-joined blob; hand the UI a list.
+    # Cumulative vs the session baseline, NOT per-turn — the card labels it accordingly.
+    cf = d.get("changed_files")
+    d["changed_files"] = (
+        [ln for ln in cf.splitlines() if ln.strip()] if isinstance(cf, str) else []
+    )
     return d
 
 
@@ -4384,6 +4548,53 @@ async def start_vibecode_turn(
         else (s.get("permission_mode") or "ask")
     )
 
+    # ── The lane must match the model, or the turn 404s in a way nobody can read. ──
+    # `engine` is stored on the session at CREATION and the dispatch below reads it from
+    # that row, but the model is chosen per turn in the composer. Those two disagreed
+    # silently: picking Claude inside a session created as `native` sent
+    # `anthropic/claude-sonnet-5` to Ollama, which answered `404 Not Found` for a model it
+    # has never heard of, and the chat showed that raw URL as the run's error.
+    #
+    # Changing the model is a deliberate act, so it moves the session's lane with it —
+    # you can switch a Build chat from local to Claude mid-conversation. When the lane the
+    # model needs is not available at all, refuse HERE with a sentence that names the
+    # engine, instead of letting the wrong lane fail with a hostname.
+    _req_model = (req.model_name or "").strip()
+    if _req_model:
+        _want_engine = _engine_for_model(_req_model)
+        _have_engine = s.get("engine") or "native"
+        if _want_engine != _have_engine:
+            if not _engine_runnable(_want_engine):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"{_req_model} runs on the {_want_engine} engine, which is not "
+                        "connected. Connect it under Integrations, or pick a model this "
+                        "session can run."
+                    ),
+                )
+            try:
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE vibecode_sessions SET engine = $2, updated_at = NOW() "
+                        "WHERE id = $1",
+                        session_id,
+                        _want_engine,
+                    )
+                s = {**s, "engine": _want_engine}
+                logger.info(
+                    "vibecode: session %s engine %s -> %s (model %s)",
+                    session_id, _have_engine, _want_engine, _req_model,
+                )
+            except Exception as exc:
+                # Fail loud rather than run the turn down the old lane: that is exactly
+                # the silent mismatch this block exists to end.
+                logger.error("vibecode: engine switch failed for %s: %s", session_id, exc)
+                raise HTTPException(
+                    status_code=500,
+                    detail="Could not switch this session to the engine that model needs.",
+                )
+
     # Create the turn row NOW with the ORIGINAL text + attachments (for display), BEFORE
     # spawning the bg task — run_vibecode_turn's _db_create_run is ON CONFLICT DO NOTHING,
     # so this original wins; the agent still receives the assembled agent_brief below.
@@ -4401,6 +4612,12 @@ async def start_vibecode_turn(
     except Exception as exc:
         logger.error("vibecode: turn bookkeeping failed for %s: %s", workspace_id, exc)
 
+    # The session's earlier turns. Loaded HERE rather than sent by the browser: the
+    # rows are already the authoritative transcript, they cannot be spoofed by a
+    # client, and every existing session gains context without a frontend release.
+    # The row created just above is this turn — exclude it or the brief repeats.
+    turn_history = await _vibecode_chat_history(pool, session_id, uid, workspace_id)
+
     if req.orchestrate:
         # MULTI-AGENT turn: fan out to N task-delegated sub-agents (the LLM planner
         # decides 3–10, naming each after its job). Runs through the SAME orchestrator
@@ -4415,7 +4632,7 @@ async def start_vibecode_turn(
             workspace_id=workspace_id,
             session_id=session_id,
             task_brief=task_brief,  # clean brief → the planner decomposes it
-            chat_history=[],
+            chat_history=turn_history,
             agent_id="orchestrated",
             user_id=uid,
             pool=pool,
@@ -4479,7 +4696,7 @@ async def start_vibecode_turn(
             workspace_id=workspace_id,
             session_id=session_id,  # the turn run's session_id == the vibecode session id
             task_brief=agent_brief,
-            chat_history=[],
+            chat_history=turn_history,
             agent_id=(
                 "kimi" if _use_kimi
                 else ("engine-adapter" if (_use_engine or _use_kimi_code) else "vibecode-turn")
@@ -4602,9 +4819,9 @@ async def _latest_vibecode_turn_brief(pool, session_id: str) -> str:
             row = await conn.fetchval(
                 "SELECT task_brief FROM workspace_runs WHERE session_id = $1 "
                 "AND source = 'vibecode' AND task_brief IS NOT NULL "
-                "AND task_brief NOT LIKE 'Agent review of%' "
+                "AND task_brief NOT LIKE $2 "
                 "ORDER BY started_at DESC LIMIT 1",
-                session_id,
+                session_id, _REVIEW_BRIEF_PREFIX + "%",
             )
         return (row or "").strip()
     except Exception as exc:
@@ -5585,16 +5802,29 @@ async def list_workspace_history(
     # per-chat: a chat-launched run's session_id IS the OWUI chat_id). Persistent because
     # the rows are DB-backed — reopening the chat re-shows its runs + statuses.
     sess = request.query_params.get("session_id")
-    # Exclude VibeCode session turns — they live in their own surface (the VibeCode
-    # thread), not the generic Agent Studio history / Neural Map. IS DISTINCT FROM
-    # keeps NULL-source rows (all generic/orchestrated runs).
-    where = "WHERE r.user_id = $1 AND r.source IS DISTINCT FROM 'vibecode'" + (
-        " AND r.parent_run_id IS NULL" if top_level else ""
-    )
+    # ?run_id=<id> → ONE run, looked up by an id the caller already holds. RunView asks
+    # this to learn whether the run it is streaming has finished on the server, and that
+    # answer is the ONLY thing that stops its "Working…" indicator when the live stream
+    # never delivers a terminal event (a view mounted after the run ended, a replay that
+    # raced, a severed reconnect). The vibecode exclusion below keeps Build turns out of
+    # the Agent Studio LIST — but a lookup by explicit id is not a list, and applying it
+    # there returned nothing for every Build turn, so that guard was dead on the one
+    # surface that renders inside the Build thread. Ownership is still enforced.
+    run_id = request.query_params.get("run_id")
     params: list = [current_user["id"]]
-    if sess:
-        where += f" AND r.session_id = ${len(params) + 1}"
-        params.append(sess)
+    if run_id:
+        where = "WHERE r.user_id = $1 AND r.id = $2"
+        params.append(run_id)
+    else:
+        # Exclude VibeCode session turns — they live in their own surface (the VibeCode
+        # thread), not the generic Agent Studio history / Neural Map. IS DISTINCT FROM
+        # keeps NULL-source rows (all generic/orchestrated runs).
+        where = "WHERE r.user_id = $1 AND r.source IS DISTINCT FROM 'vibecode'" + (
+            " AND r.parent_run_id IS NULL" if top_level else ""
+        )
+        if sess:
+            where += f" AND r.session_id = ${len(params) + 1}"
+            params.append(sess)
     try:
         async with pool.acquire() as conn:
             rows = await conn.fetch(
@@ -5603,6 +5833,7 @@ async def list_workspace_history(
                        r.started_at, r.completed_at, r.duration_ms,
                        r.event_count, r.tool_calls, r.final_summary, r.error_message,
                        r.model_name, r.prompt_tokens, r.completion_tokens,
+                       r.context_window,
                        (SELECT COUNT(*) FROM workspace_runs c WHERE c.parent_run_id = r.id)
                          AS child_count
                 FROM workspace_runs r
@@ -5864,7 +6095,7 @@ async def get_active_runs(
         async with pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT id, session_id
+                SELECT id, session_id, source
                 FROM workspace_runs
                 WHERE user_id = $1
                   AND status = 'running'
@@ -5883,7 +6114,11 @@ async def get_active_runs(
     synthetic = ("owui-", "discord-", "sess-")
     return {
         "runs": [
-            {"id": r["id"], "session_id": r["session_id"]}
+            # `source` says WHICH list owns this id: 'vibecode' means the session_id is a
+            # Build session (the Code sidebar's list), anything else means it is an OWUI
+            # chat id. Without it the sidebar was already writing activity entries keyed on
+            # Build ids that no chat row would ever render or clear.
+            {"id": r["id"], "session_id": r["session_id"], "source": r["source"] or ""}
             for r in rows
             if r["id"] in _workspaces
             and r["session_id"]

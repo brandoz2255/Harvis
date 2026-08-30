@@ -94,6 +94,112 @@ _SKIP_DIRS = {
 _BASELINE_FILE = ".harvis-baseline.json"
 
 
+# ── In-turn context compaction ────────────────────────────────────────────────
+# `conversation.py` clips PRIOR turns before a run starts. INSIDE a turn nothing
+# clipped anything: every tool result was appended in full and the message list
+# only ever grew, so a long build walked its own prompt into the model's limit.
+# What gets lost at that point is decided by the provider, not by us, and it is
+# usually the head — the system prompt and the actual task. That is context rot.
+#
+# The fix is mechanical on purpose. A summarising model call would cost another
+# round-trip on a box that is already being rate-limited, and a summariser can
+# quietly rewrite what the agent did. So keep EVERY message — the system prompt,
+# the task and every assistant turn stay byte-for-byte — and shrink the oldest
+# TOOL RESULTS, which is where essentially all the bulk lives (one read_file of a
+# 400-line file, fetched twice, dwarfs the whole conversation around it). The
+# head of each old result survives, because that is where "wrote index.html" and
+# "exit 0" sit, and the model is told plainly that the rest was dropped so it can
+# re-read rather than assume the file was short.
+_CTX_COMPACT_AT = float(os.getenv("HARVIS_BUILD_CTX_COMPACT_AT", "0.70") or 0.70)
+_CTX_COMPACT_TO = float(os.getenv("HARVIS_BUILD_CTX_COMPACT_TO", "0.50") or 0.50)
+# The most recent exchanges are never touched: the step the model is answering
+# right now is the one place the detail is actually load-bearing.
+_CTX_COMPACT_KEEP_TAIL = max(2, int(os.getenv("HARVIS_BUILD_CTX_KEEP_TAIL", "4")))
+_CTX_COMPACT_HEAD_CHARS = max(120, int(os.getenv("HARVIS_BUILD_CTX_HEAD_CHARS", "400")))
+_CTX_CONTINUE = "\n\nContinue the task. Call finish(summary) once it is fully done."
+
+
+def _msg_chars(msg: dict) -> int:
+    """Rough size of one message. Multimodal parts count their data URL length,
+    which is the honest measure — an inlined screenshot is most of the prompt."""
+    c = msg.get("content")
+    if isinstance(c, str):
+        return len(c)
+    if isinstance(c, list):
+        n = 0
+        for part in c:
+            if not isinstance(part, dict):
+                continue
+            n += len(part.get("text") or "")
+            url = (part.get("image_url") or {}).get("url") if isinstance(
+                part.get("image_url"), dict
+            ) else None
+            n += len(url or "")
+        return n
+    return 0
+
+
+def _shrink_tool_results(text: str) -> str | None:
+    """Shrink one tool-results user turn. None ⇒ not one, or not worth shrinking."""
+    if not isinstance(text, str) or not text.startswith("Tool results:"):
+        return None
+    if len(text) <= _CTX_COMPACT_HEAD_CHARS * 2:
+        return None
+    dropped = len(text) - _CTX_COMPACT_HEAD_CHARS
+    return (
+        text[:_CTX_COMPACT_HEAD_CHARS]
+        + f"\n[...{dropped} characters of these earlier tool results were dropped to "
+        "make room in the context. If you need that detail, call the tool again "
+        "rather than assuming what it said.]"
+        + _CTX_CONTINUE
+    )
+
+
+def _compact_messages(msgs: list, used_tokens: int, window: int) -> tuple[int, int]:
+    """Shrink old tool results in place once the prompt crosses the bar.
+
+    Returns (messages_changed, chars_saved). A no-op unless the LAST call's real
+    `prompt_tokens` says we are past `_CTX_COMPACT_AT` of the window, so a short
+    run never pays for this and never loses a byte.
+    """
+    if window <= 0 or used_tokens <= 0 or used_tokens < _CTX_COMPACT_AT * window:
+        return (0, 0)
+    total = sum(_msg_chars(m) for m in msgs)
+    if total <= 0:
+        return (0, 0)
+    # Calibrate on this very conversation instead of a fixed chars-per-token
+    # guess: the provider just told us how many tokens these exact characters
+    # cost, and that ratio differs a lot between prose, JSON and base64.
+    target_chars = int((_CTX_COMPACT_TO * window) * (total / used_tokens))
+    changed = saved = 0
+    # Index 0 is the system prompt and index 1 is the task. Neither is ever
+    # touched — they are the two messages a provider-side truncation eats first,
+    # and the whole point of compacting here is to keep them.
+    for i in range(2, max(2, len(msgs) - _CTX_COMPACT_KEEP_TAIL)):
+        if total - saved <= target_chars:
+            break
+        msg = msgs[i]
+        content = msg.get("content")
+        if isinstance(content, list):
+            # A multimodal follow-up: keep the text, drop the images. An old
+            # screenshot is pure weight — the model has already reacted to it.
+            text = " ".join(
+                p.get("text") or "" for p in content if isinstance(p, dict)
+            ).strip()
+            before = _msg_chars(msg)
+            msg["content"] = _shrink_tool_results(text) or text
+            saved += before - _msg_chars(msg)
+            changed += 1
+            continue
+        shrunk = _shrink_tool_results(content)
+        if shrunk is None:
+            continue
+        saved += len(content) - len(shrunk)
+        msg["content"] = shrunk
+        changed += 1
+    return (changed, saved)
+
+
 def _ws_fingerprint(path: str) -> str:
     """SHA-256 over the workspace's files — lets the runner detect when an agent has
     stopped producing real changes. Large files (>1 MB) fingerprint by (size, mtime)
@@ -525,6 +631,10 @@ class SubAgentRunner:
         last_prompt_tokens = 0
         total_completion_tokens = 0
         total_tokens_sum = 0
+        # What the run is BILLED for on the input side. Every step re-sends the whole
+        # conversation, so this climbs far past the window while `last_prompt_tokens`
+        # stays inside it. The gauge wants the second number; the cost wants this one.
+        billed_prompt_tokens = 0
         ctx_window = int(os.getenv("HARVIS_OLLAMA_NUM_CTX", "24576") or 24576)
         # Offer-time tool policy: auto-detected launches never even SEE the heavy
         # tools in the offered schema. authorize_action stays the runtime backstop.
@@ -630,6 +740,18 @@ class SubAgentRunner:
         try:
             while steps < max_steps and (time.monotonic() - started) < max_runtime_seconds:
                 steps += 1
+                # Before the call, not after: `last_prompt_tokens` is what THIS
+                # message list cost last time, so it is the only honest reading of
+                # how full the window is about to be.
+                _shrunk, _saved = _compact_messages(
+                    messages, last_prompt_tokens, ctx_window
+                )
+                if _shrunk:
+                    logger.info(
+                        "subagent %s: compacted %d old tool result(s), ~%d chars, "
+                        "at %d/%d prompt tokens (step %d)",
+                        label, _shrunk, _saved, last_prompt_tokens, ctx_window, steps,
+                    )
                 msg = await self.router.complete(
                     model_name=model_name, messages=messages,
                     tools=filter_wire_schema(disabled) + mcp_specs, temperature=0.2,
@@ -642,6 +764,7 @@ class SubAgentRunner:
                 _usage = msg.get("_usage") or {}
                 if _usage:
                     last_prompt_tokens = int(_usage.get("prompt_tokens") or last_prompt_tokens)
+                    billed_prompt_tokens += int(_usage.get("prompt_tokens") or 0)
                     total_completion_tokens += int(_usage.get("completion_tokens") or 0)
                     total_tokens_sum += int(_usage.get("total_tokens") or 0)
                     # Report the running totals now, not only in agent_end. These numbers
@@ -653,6 +776,13 @@ class SubAgentRunner:
                         "total_tokens": total_tokens_sum
                         or (last_prompt_tokens + total_completion_tokens),
                         "context_window": ctx_window,
+                        "usage_detail": {
+                            # No prompt caching on this lane, so every input token is base rate.
+                            "input": billed_prompt_tokens, "cache_read": 0, "cache_write": 0,
+                            "output": total_completion_tokens,
+                            "context_tokens": last_prompt_tokens,
+                            "cost_usd": None, "source": "native",
+                        },
                         "duration_ms": int((time.monotonic() - started) * 1000),
                         "steps": steps,
                     })
@@ -1148,5 +1278,11 @@ class SubAgentRunner:
                 "completion_tokens": total_completion_tokens,
                 "total_tokens": total_tokens_sum or (last_prompt_tokens + total_completion_tokens),
                 "context_window": ctx_window,
+                "usage_detail": {
+                    "input": billed_prompt_tokens, "cache_read": 0, "cache_write": 0,
+                    "output": total_completion_tokens,
+                    "context_tokens": last_prompt_tokens,
+                    "cost_usd": None, "source": "native",
+                },
             },
         )

@@ -35,11 +35,13 @@
 		type VibecodeFileEntry,
 		type PendingAction
 	} from '$lib/apis/agent-runs';
+	import ComposerModelMenu from '$lib/components/chat/ModelSelector/ComposerModelMenu.svelte';
 	import RunView from '$lib/agent-studio/RunView.svelte';
 	import RunArtifacts from '$lib/agent-studio/RunArtifacts.svelte';
 	import BrowserPanel from '$lib/agent-studio/build/BrowserPanel.svelte';
 	import { subscribeRun } from '$lib/apis/streaming/runStream';
 	import BuildActions from '$lib/agent-studio/BuildActions.svelte';
+	import TurnFiles from '$lib/agent-studio/build/TurnFiles.svelte';
 	import WorkflowInspector from '$lib/agent-studio/WorkflowInspector.svelte';
 	import { humanizeRunTitle } from '$lib/agent-studio/runFormat';
 	import PlanPanel from '$lib/agent-studio/PlanPanel.svelte';
@@ -343,6 +345,34 @@
 		}
 		dockTab = 'br';
 	};
+	// ── Files under each reply ─────────────────────────────────────────────────
+	// Each turn stores the workspace's changed set as of that turn, so the paths that
+	// are absent from the PREVIOUS turn are the ones this turn actually created. That
+	// subtraction is the only per-turn-accurate signal here; the rest of the list is
+	// cumulative and the chips label it as such.
+	$: turnNewFiles = (() => {
+		const out: Record<string, string[]> = {};
+		let prev = new Set<string>();
+		for (const t of turns) {
+			const cur = t.changed_files ?? [];
+			out[t.id] = cur.filter((f) => !prev.has(f));
+			prev = new Set(cur);
+		}
+		return out;
+	})();
+	// A chip click opens the read-only file viewer — same surface the Explorer uses,
+	// reached without knowing the Explorer exists.
+	const openTurnFile = (path: string) => {
+		selectedFile = path;
+		mainTab = 'editor';
+		loadFileContent(path);
+		if (!panelVisible.br) {
+			panelVisible = { ...panelVisible, br: true };
+			persistPanels();
+		}
+		setDockTab('br');
+	};
+
 	let artifacts: any[] = [];
 	/** Live screenshot_preview frames for Browse & verify (not persisted). */
 	let verifyFrames: {
@@ -676,15 +706,25 @@
 	// ── Tabbed dock (Claude-Code-Desktop style): ONE panel at a time, a tab strip on
 	// top. The ⋯ menu still controls WHICH tabs exist (panelVisible); this picks the
 	// active one. Order: Tasks · Plan · Files · File.
+	// True once the user has picked a tab themselves — this run or any earlier session.
+	// A run starting used to yank the dock back to Tasks every time, so opening Files and
+	// then asking for a change put the files away again. An explicit choice now sticks.
+	let dockTabPinned = false;
 	let dockTab: string = (() => {
 		try {
-			return localStorage.getItem('harvis.vibecode.docktab') || 'tl';
+			const saved = localStorage.getItem('harvis.vibecode.docktab');
+			if (saved) {
+				dockTabPinned = true;
+				return saved;
+			}
 		} catch {
-			return 'tl';
+			/* ignore */
 		}
+		return 'tl';
 	})();
 	const setDockTab = (k: string) => {
 		dockTab = k;
+		dockTabPinned = true;
 		try {
 			localStorage.setItem('harvis.vibecode.docktab', k);
 		} catch {
@@ -761,8 +801,9 @@
 				panelVisible = { ...panelVisible, tl: true };
 				persistPanels();
 			}
-			// Bring the Tasks tab forward so the new run is immediately visible.
-			dockTab = 'tl';
+			// Bring Tasks forward ONLY for someone who has never chosen a tab. Overriding a
+			// deliberate choice is what made the Files panel feel like it kept closing itself.
+			if (!dockTabPinned) dockTab = 'tl';
 		}
 		prevRunningCount = n;
 	}
@@ -794,7 +835,6 @@
 	//    come from its /api/models metadata (info.meta.context_length / price_in / price_out).
 	//    Local Ollama models carry no price → shown as Free. No hardcoded per-engine logic. ──
 	let showUsageStats = false;
-	let showModelMenu = false;
 	let selectedModel = ''; // '' ⇒ engine/turn default; set ⇒ sent on every turn
 	let liveCompletionTokens = 0; // streamed output tokens for the running turn (live tick)
 
@@ -840,7 +880,6 @@
 
 	const pickModel = (id: string) => {
 		selectedModel = id;
-		showModelMenu = false;
 		// The Build engine follows the picked model automatically (see the selectedEngine reactive
 		// below) — there is no separate engine pill. Picking a Claude model routes the run to the
 		// Claude Code lane; a local model runs on native.
@@ -916,16 +955,20 @@
 	};
 	const onWindowFocus = () => refreshModels(true);
 
-	// Toggle the model dropdown; force a fresh, cache-busting model fetch on the opening edge
-	// so the list the user is about to pick from is genuinely current.
-	const toggleModelMenu = () => {
-		openMenu(showModelMenu ? '' : 'model');
-		if (showModelMenu) refreshModels(true);
-	};
-
 	$: usageTurns = turns.filter((t) => (t.prompt_tokens ?? 0) > 0 || (t.completion_tokens ?? 0) > 0);
 	$: lastUsage = usageTurns.length ? usageTurns[usageTurns.length - 1] : null;
-	$: sessionTokens = usageTurns.reduce((s, t) => s + (t.prompt_tokens || 0) + (t.completion_tokens || 0), 0);
+	// BILLED tokens for the whole session. On the CLI lanes every step re-sends the
+	// conversation, so this is legitimately much larger than any single context window —
+	// that is what "session total" means, and it is not the gauge's number.
+	$: sessionTokens = usageTurns.reduce((s, t) => {
+		const d = t.usage_detail;
+		return (
+			s +
+			(d
+				? (d.input || 0) + (d.cache_read || 0) + (d.cache_write || 0) + (d.output || 0)
+				: (t.prompt_tokens || 0) + (t.completion_tokens || 0))
+		);
+	}, 0);
 
 	// Engine-filtered picker list (Claude Code → only Claude, etc.).
 	// The picker shows ALL available models (local + Claude + Hermes + OpenAI) — same list the
@@ -933,38 +976,6 @@
 	// pick routes to the right lane instead of being hidden. Making this the full set also makes
 	// the engine-filter wipe reactive below inert (a picked model is always present).
 	$: modelOptions = ($models || []).filter((m: any) => m && m.id);
-	// Provider groups for the picker menu (Local Ollama incl. 'ollama-desktop' rig-routed).
-	const OWNER_GROUPS: { label: string; test: (o: string) => boolean }[] = [
-		{ label: 'Local', test: (o) => o.startsWith('ollama') || o === '' },
-		{ label: 'Claude', test: (o) => o.startsWith('anthropic') },
-		{ label: 'Hermes', test: (o) => o.startsWith('hermes') },
-		{ label: 'OpenAI', test: (o) => o === 'openai' },
-		// Ordered BEFORE 'Kimi': the generic Kimi test below also matches 'kimi-code', so the
-		// membership group has to claim those models first. Two groups because they are two
-		// products on two bills — the membership models must be pickable as such, not blended
-		// into the Moonshot list.
-		{ label: 'Kimi Code (membership)', test: (o) => o === 'kimi-code' },
-		{ label: 'Kimi (Moonshot)', test: (o) => o.startsWith('moonshot') || o.startsWith('kimi') }
-	];
-	$: modelGroups = (() => {
-		// First match wins. Skipping already-claimed ids is what makes that true: without it
-		// every kimi-code model ALSO fell into the broader 'Kimi' group below and the picker
-		// listed each one twice — under a Moonshot header, for an account with no Moonshot key.
-		// The backend only ships a provider's models once its credential is connected, so a
-		// group with nothing left to claim is dropped rather than shown empty.
-		const used = new Set<string>();
-		const groups: { label: string; models: any[] }[] = [];
-		for (const g of OWNER_GROUPS) {
-			const ms = modelOptions.filter(
-				(m: any) => !used.has(m.id) && g.test((m.owned_by || 'ollama').toString().toLowerCase())
-			);
-			ms.forEach((m: any) => used.add(m.id));
-			if (ms.length) groups.push({ label: g.label, models: ms });
-		}
-		const rest = modelOptions.filter((m: any) => !used.has(m.id));
-		if (rest.length) groups.push({ label: 'Other', models: rest });
-		return groups;
-	})();
 	// Picked model no longer valid for the current engine (e.g. switched to Claude Code) → default.
 	$: if (selectedModel && modelOptions.length && !modelOptions.find((m: any) => m.id === selectedModel)) {
 		selectedModel = '';
@@ -994,15 +1005,54 @@
 	$: priceOut = Number(meterModelMeta.price_out || 0); // USD / million output tokens
 	$: isFreeModel = priceIn === 0 && priceOut === 0; // local Ollama → no cost
 	$: isSubscriptionModel = /subscription/i.test(meterEntry?.name || '');
-	$: sessionCost = usageTurns.reduce(
-		(s, t) => s + ((t.prompt_tokens || 0) * priceIn + (t.completion_tokens || 0) * priceOut) / 1e6,
-		0
-	);
+
+	// Anthropic charges the three input classes at three different rates: a cache READ at a
+	// tenth of the base input rate, a cache WRITE at a quarter above it. A long agent run is
+	// almost entirely cache reads, so summing them and pricing the total at the base rate
+	// came out close to an order of magnitude high.
+	const CACHE_READ_RATE = 0.1;
+	const CACHE_WRITE_RATE = 1.25;
+	const turnCost = (t: any, pin: number, pout: number): number => {
+		const d = t?.usage_detail;
+		// The CLI's own total, computed by the vendor on the vendor's current rates. That
+		// beats any price table we keep in here, so when it exists it wins outright.
+		if (d && typeof d.cost_usd === 'number') return d.cost_usd;
+		if (d && ((d.input || 0) + (d.cache_read || 0) + (d.cache_write || 0) + (d.output || 0)) > 0) {
+			return (
+				((d.input || 0) * pin +
+					(d.cache_read || 0) * pin * CACHE_READ_RATE +
+					(d.cache_write || 0) * pin * CACHE_WRITE_RATE +
+					(d.output || 0) * pout) /
+				1e6
+			);
+		}
+		// Turns recorded before the split: one flat input number, base rate, no better option.
+		return ((t?.prompt_tokens || 0) * pin + (t?.completion_tokens || 0) * pout) / 1e6;
+	};
+	$: sessionCost = usageTurns.reduce((s, t) => s + turnCost(t, priceIn, priceOut), 0);
+	// Did the provider price this run, or did we estimate it? The popover says which, rather
+	// than presenting both with the same confidence.
+	$: costIsVendorReported = usageTurns.some((t) => typeof t.usage_detail?.cost_usd === 'number');
 
 	$: liveOn = runningTasks.length > 0; // a turn is streaming → tick the completion side live
 	$: ctxWindow = Number(meterModelMeta.context_length || lastUsage?.context_window || 24576);
-	$: ctxUsed = (lastUsage?.prompt_tokens || 0) + (liveOn ? liveCompletionTokens : 0);
-	$: ctxPct = ctxWindow ? Math.min(100, Math.round((ctxUsed / ctxWindow) * 100)) : 0;
+	// `prompt_tokens` is NOT occupancy on the CLI lanes — it is the run's cumulative BILLED
+	// input, and it climbs straight past the window (a measured Claude run reported 1,014,460
+	// against 200,000, which `Math.min(100, …)` quietly turned into a permanently full red
+	// bar). Only `usage_detail.context_tokens` answers "how full is the window".
+	$: ctxTokens = (() => {
+		const d = lastUsage?.usage_detail;
+		if ((d?.context_tokens || 0) > 0) return Number(d?.context_tokens);
+		// Turns recorded before the split carry one number that means occupancy on the native
+		// lane and billed input on the CLI lanes, with nothing on the row to tell them apart.
+		// One thing can: a figure that does not fit the window was never occupancy.
+		const p = Number(lastUsage?.prompt_tokens || 0);
+		return p > 0 && ctxWindow && p <= ctxWindow ? p : 0;
+	})();
+	// No trustworthy reading → the gauge says so instead of drawing a bar off the wrong number.
+	$: ctxKnown = ctxTokens > 0;
+	$: ctxUsed = ctxKnown ? ctxTokens + (liveOn ? liveCompletionTokens : 0) : 0;
+	$: ctxPct = ctxKnown && ctxWindow ? Math.min(100, Math.round((ctxUsed / ctxWindow) * 100)) : 0;
 	$: ctxAvail = Math.max(0, ctxWindow - ctxUsed);
 	// Was `meterModelId || lastUsage?.model_name || 'llama3.1:8b'` via an intermediate `usageModel`
 	// — but meterModelId already folds in lastUsage.model_name, so the middle term was dead and the
@@ -1012,6 +1062,10 @@
 	$: displayModel = meterEntry?.name || selectedModel || meterModelId;
 	$: liveSessionTokens = sessionTokens + (liveOn ? liveCompletionTokens : 0);
 	$: liveCost = sessionCost + (liveOn ? (liveCompletionTokens * priceOut) / 1e6 : 0);
+	// A subscription lane charges nothing per token. Showing a dollar figure as spend there is
+	// simply wrong, so the number becomes what the same work would have cost on the API and
+	// says as much; out-of-pocket is zero.
+	$: outOfPocket = isSubscriptionModel ? 0 : liveCost;
 
 	// (Removed the live token-tick 2nd SSE: it was a redundant per-run stream consumer that,
 	// stacked on the inline run view + the review mirror, pushed toward the browser's ~6-
@@ -1092,16 +1146,80 @@
 	const isCurrentSession = (seq: number) => seq === sessionSeq;
 
 	let loadedFor = '';
+
+	/**
+	 * Everything on this page that describes ONE session, blanked in one place.
+	 *
+	 * `loadSession` only ever owned `session` + `turns`. The whole right-hand side —
+	 * the diff, the file tree, the open file and its contents, the artifacts, which run
+	 * cards are expanded — kept whatever the session you LEFT had put there, because
+	 * nothing called `loadDiff`/`loadSessionFiles` on a switch. Open a new chat and the
+	 * editor, the tree and the preview were still the old chat's: the previous session
+	 * had visibly taken the new one over. The composer carried too, so the next thing
+	 * you typed went out under the settings of the chat you thought you had left.
+	 *
+	 * This runs BEFORE the fetch, not after, so the gap between the click and the
+	 * response shows an empty session rather than the wrong one.
+	 */
+	const resetSessionView = () => {
+		sessionDiff = '';
+		diffError = false;
+		sessionHasGithub = false;
+		sessionFileEntries = [];
+		sessionFilesError = false;
+		sessionFilesLoading = false;
+		selectedFile = '';
+		fileContent = null;
+		fileLoading = false;
+		fileBinary = false;
+		fileTruncated = false;
+		fileError = false;
+		artifacts = [];
+		verifyFrames = null;
+		expandedRuns = {};
+		_autoExpanded.clear();
+		sendError = '';
+		prompt = '';
+		attachedImages = [];
+	};
+
+	/**
+	 * The model picker follows the CHAT, not the tab.
+	 *
+	 * `selectedModel` is page state set once on mount, and `selectedEngine` is derived
+	 * from it — but a session's lane is stored on its row at creation. So a model picked
+	 * in one chat stayed selected when you opened another, and the turn went out with
+	 * that model down the OTHER session's lane. Concretely: Claude Sonnet 5, picked in a
+	 * new chat, sent back into a chat created as `native`, POSTed to Ollama and returned
+	 * `404 Not Found for http://…:11434/v1/chat/completions`.
+	 *
+	 * Restoring the session's own last-used model puts the picker back where that chat
+	 * left it, and the `selectedEngine` reactive re-derives the right lane from it. An
+	 * unknown or uninstalled model clears the slot instead of naming something that
+	 * cannot run. (The backend now also moves a session's lane to match a deliberate
+	 * model change, so switching engines mid-chat still works — this only stops the
+	 * ACCIDENTAL carry-over.)
+	 */
+	const adoptSessionModel = () => {
+		const last = turns.length ? turns[turns.length - 1]?.model_name || '' : '';
+		// Only ADOPT, never blank: a chat with no turns yet should keep the model you
+		// just picked for it, and a last-used model that is no longer installed must not
+		// leave the picker empty on mount before the model list has even loaded.
+		if (last && modelOptions.some((m: any) => m.id === last)) selectedModel = last;
+	};
+
 	$: if (sessionId !== loadedFor) {
 		loadedFor = sessionId;
 		autonameTriggered = false;
 		const seq = ++sessionSeq;
 		// Drop the previous session's folder binding; relink this one from IndexedDB.
 		clearLocalFolder();
+		resetSessionView();
 		lastWriteBackDone = -1;
 		(async () => {
 			await loadSession();
 			if (!isCurrentSession(seq)) return;
+			adoptSessionModel();
 			await relinkSessionFolder(seq);
 			if (!isCurrentSession(seq)) return;
 			await maybeWriteBack(seq);
@@ -1328,6 +1446,20 @@
 
 	// ── Composer menus + image attach ──
 	let showModeMenu = false;
+	let showModelMenu = false;
+	let composerMenu: any = null;
+	// The picker keeps its own search/expanded state; clear it when the menu closes.
+	$: if (!showModelMenu) composerMenu?.resetView();
+	// The effort of the active model, shown on the picker trigger the way the chat composer
+	// shows it on the mode pill. Blank for a model with no effort axis.
+	const PICK_EFFORT_SHORT: Record<string, string> = {
+		minimal: 'Min', low: 'Low', medium: 'Med', high: 'High',
+		extra_high: 'X-High', max: 'Max', ultra: 'Ultra'
+	};
+	$: pickedEntry = ($models || []).find((m: any) => m?.id === selectedModel);
+	$: pickedEffortShort = pickedEntry?.info?.meta?.supports_effort
+		? (PICK_EFFORT_SHORT[pickedEntry?.info?.meta?.profile_effort] ?? pickedEntry?.info?.meta?.profile_effort ?? 'Auto')
+		: '';
 	let showRepoMenu = false;
 	let showExecMenu = false; // execution-target dropdown (Local live + SSH seam)
 	let showEngineMenu = false; // Build-engine dropdown (Native + each ready engine)
@@ -1631,25 +1763,43 @@
 	let showAttachMenu = false;
 
 	// ── Toolbar menus: exactly one open at a time ──
-	// Each toggle used to be an independent `!x`, and the full-screen click-outside backdrop
-	// closed the rest, which hid that they don't coordinate. The stacking fix below lifts the
-	// composer strip ABOVE that backdrop while a menu is open, so the invariant has to be
-	// stated here instead of falling out of the click order.
+	// Each toggle used to be an independent `!x`, and a full-screen click-outside backdrop
+	// closed the rest, which hid that they don't coordinate. That backdrop is gone (see
+	// onOutsidePointerDown below), so the invariant has to be stated here rather than fall
+	// out of the click order.
 	type ToolbarMenu = '' | 'mode' | 'repo' | 'exec' | 'attach' | 'model' | 'usage';
 	const openMenu = (which: ToolbarMenu) => {
 		showModeMenu = which === 'mode';
+		showModelMenu = which === 'model';
 		showRepoMenu = which === 'repo';
 		showExecMenu = which === 'exec';
 		showAttachMenu = which === 'attach';
-		showModelMenu = which === 'model';
 		showUsageStats = which === 'usage';
+		showEngineMenu = false;
 	};
 	// The four menus that live INSIDE the `relative z-10` composer strip. Their z-30/z-40 is
-	// capped by that stacking context, so the strip itself has to clear the z-20 backdrop —
-	// see the class binding on the control strip. The other two (repo, exec) sit outside it
-	// and already paint above the backdrop.
-	$: composerMenuOpen = showModeMenu || showAttachMenu || showModelMenu || showUsageStats;
+	// capped by that stacking context, so the strip itself has to lift above the chat card
+	// sitting over it — see the class binding on the control strip. The other two (repo,
+	// exec) sit outside it and already paint clear.
+	$: composerMenuOpen = showModeMenu || showModelMenu || showAttachMenu || showUsageStats;
 	$: anyToolbarMenuOpen = composerMenuOpen || showRepoMenu || showExecMenu || showEngineMenu;
+	// Click-away. This used to be a full-screen backdrop button, which had two faults: it
+	// never cleared showModelMenu (so the model picker could only be closed by its own
+	// trigger), and — sitting over the chat card — it ATE the click meant for the textarea,
+	// so clicking the composer with a menu open did nothing at all. A capture-phase
+	// pointerdown closes the menus without consuming the event, so the same click that
+	// dismisses the picker also lands in the textarea and puts the caret there.
+	const onOutsidePointerDown = (e: PointerEvent) => {
+		if (!anyToolbarMenuOpen) return;
+		const t = e.target as HTMLElement | null;
+		if (!t?.closest) return;
+		// Inside a menu (or its trigger) — that surface handles its own clicks.
+		if (t.closest('[data-toolbar-menu]')) return;
+		// The model profile editor portals to document.body and is rendered INSIDE the model
+		// menu, so closing the menu on a click in the modal would unmount the modal.
+		if (t.closest('.modal')) return;
+		openMenu('');
+	};
 	let fileAttachInputEl: HTMLInputElement;
 	// Any-file attach (not just images) → same attachment pipeline; the backend inlines
 	// text-like files into the brief and lists the rest for the agent.
@@ -1962,11 +2112,13 @@
 </script>
 
 <svelte:window
+	on:pointerdown|capture={onOutsidePointerDown}
 	on:keydown={(e) => {
 		if (e.key !== 'Escape') return;
 		// Innermost surface first: the blown-up preview sits over the inspector.
 		if (previewFullscreen) previewFullscreen = false;
 		else if (overlayRunId) overlayRunId = '';
+		else if (anyToolbarMenuOpen) openMenu('');
 	}}
 />
 
@@ -2109,9 +2261,17 @@
 									<BuildActions
 										run={t}
 										{sessionId}
+										text={t.analysis_md || cleanSummary(t.final_summary) || ''}
 										expanded={!!expandedRuns[t.id]}
 										onOpenRun={() => toggleRun(t.id)}
 										onCreatePr={() => (showPrDrawer = true)}
+									/>
+									<!-- What the turn actually left behind. Clicking one opens the viewer. -->
+									<TurnFiles
+										files={t.changed_files ?? []}
+										newFiles={turnNewFiles[t.id] ?? []}
+										selected={selectedFile}
+										on:open={(e) => openTurnFile(e.detail.path)}
 									/>
 								{/if}
 								{#if expandedRuns[t.id] && typingText[t.id] === undefined}
@@ -2169,7 +2329,7 @@
 					<!-- context-chip row -->
 					<div class="flex items-center gap-2 mb-2">
 						<!-- Execution-target chip → dropdown (Local = live; SSH = coming-soon seam) -->
-						<div class="relative">
+						<div data-toolbar-menu class="relative">
 							<button
 								class="inline-flex items-center gap-1 text-[11px] px-2 py-1 rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700"
 								on:click={() => openMenu(showExecMenu ? '' : 'exec')}
@@ -2221,7 +2381,7 @@
 						</div>
 
 						<!-- repo chip -->
-						<div class="relative">
+						<div data-toolbar-menu class="relative">
 							<button
 								class="inline-flex items-center gap-1.5 text-[11px] px-2 py-1 rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 {sessionId
 									? 'cursor-default'
@@ -2395,10 +2555,10 @@
 				     no card, no border, no shadow. relative+z keeps the upward menus
 				     stacking above the chat card.
 				     That z-index also opens a stacking context, which CAPS every menu inside
-				     it at this level — so at z-10 the z-40 model dropdown still painted under
-				     the z-20 click-outside backdrop, and nothing in it could be clicked or
-				     scrolled. While one of its own menus is open the strip clears the
-				     backdrop; otherwise it stays at z-10 and doesn't float over page chrome. -->
+				     it at this level — so at z-10 an upward menu painted UNDER the chat card
+				     above it and nothing in it could be clicked or scrolled. While one of its
+				     own menus is open the strip lifts to z-30 to clear that card; otherwise it
+				     stays at z-10 and doesn't float over page chrome. -->
 				<div
 					class="relative {composerMenuOpen ? 'z-30' : 'z-10'} w-full max-w-4xl mx-auto bg-transparent px-1.5 pt-2"
 				>
@@ -2425,7 +2585,7 @@
 						{#if selectedEngine === 'native'}
 						<!-- Run-mode = the permission PYRAMID (per turn): Plan ▸ Ask ▸ Accept ▸ Auto.
 						     The agent works on a clone; the diff/PR is the outer gate. -->
-						<div class="relative">
+						<div data-toolbar-menu class="relative">
 							<button
 								type="button"
 								class="inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-lg border transition hover:opacity-90 {runMode ===
@@ -2539,7 +2699,7 @@
 						{/if}
 
 						<!-- attach menu: the + opens a multi-choice popup (Add image / Attach files) -->
-						<div class="relative">
+						<div data-toolbar-menu class="relative">
 							<button
 								class="text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 p-1.5"
 								title={$i18n.t('Add attachment')}
@@ -2599,73 +2759,90 @@
 
 						<div class="flex-1"></div>
 
-						<!-- model selector → pick from available models -->
-						<div class="relative">
+						<!-- model selector — literally the chat composer's menu (ComposerModelMenu), so
+						     hovering a Claude row opens the same effort panel and the two can't drift.
+						     It opens UPWARD (bottom-full): this composer sits at the bottom of the
+						     viewport, where a downward menu is drawn past the fold. -->
+						<div data-toolbar-menu class="relative">
 							<button
-								class="inline-flex items-center gap-1 text-[11px] px-2 py-1 rounded-lg border border-gray-200 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.05] text-gray-500 dark:text-gray-400 hover:bg-black/[0.06] dark:hover:bg-white/10 hover:text-gray-700 dark:hover:text-gray-200 transition max-w-[10rem]"
-								on:click={toggleModelMenu}
+								type="button"
+								class="max-w-[14rem] flex items-center gap-1 text-[11px] px-2 py-1 rounded-lg border border-gray-200 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.05] text-gray-500 dark:text-gray-400 hover:bg-black/[0.06] dark:hover:bg-white/10 hover:text-gray-700 dark:hover:text-gray-200 transition"
 								title={$i18n.t('Model')}
+								on:click={() => { refreshModels(true); openMenu(showModelMenu ? '' : 'model'); }}
 							>
 								<span class="truncate">{displayModel || $i18n.t('Select model')}</span>
-								<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="size-3 shrink-0"><path d="M6 9l6 6 6-6" stroke-linecap="round" /></svg>
+								{#if pickedEffortShort}
+									<span class="shrink-0 opacity-60">· {pickedEffortShort}</span>
+								{/if}
+								<svg class="size-3 shrink-0 opacity-70" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6" /></svg>
 							</button>
 							{#if showModelMenu}
-								<div class="absolute bottom-full right-0 mb-1 z-40 w-64 max-h-72 overflow-y-auto rounded-xl bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 shadow-xl py-1 text-xs">
-									{#if !modelOptions.length}
-										<div class="px-3 py-1.5 text-gray-400">{$i18n.t('No models available.')}</div>
-									{/if}
-									{#each modelGroups as g}
-										<div class="px-3 pt-1.5 pb-1 text-[10px] uppercase tracking-wider text-gray-400">{g.label}</div>
-										{#each g.models as m}
-											<button class="w-full flex items-center justify-between gap-2 text-left px-3 py-1.5 hover:bg-gray-100 dark:hover:bg-gray-850" on:click={() => pickModel(m.id)}>
-												<span class="truncate">{m.name || m.id}</span>
-												<!-- compare the model ID, not displayModel: that holds a display NAME
-												     (meterEntry.name), and the list below renders `m.name || m.id`, so for
-												     every model whose name differs from its id the tick never appeared. -->
-												{#if meterModelId === m.id}<span class="shrink-0 text-blue-500">✓</span>{/if}
-											</button>
-										{/each}
-									{/each}
+								<div
+									class="absolute bottom-full mb-1 right-0 z-30 w-72 max-w-[calc(100vw-2rem)] rounded-lg border border-gray-150 dark:border-gray-850 bg-white dark:bg-gray-900 shadow-xl p-1 text-sm"
+								>
+									<ComposerModelMenu
+										bind:this={composerMenu}
+										items={modelOptions}
+										selectedId={selectedModel}
+										on:select={(e) => { pickModel(e.detail); showModelMenu = false; }}
+										on:close={() => (showModelMenu = false)}
+									/>
 								</div>
 							{/if}
 						</div>
 
 						<!-- model + context/token usage (logs real tokens used vs the context window) -->
 						<!-- usage gauge → click for the full context/token breakdown -->
-						<div class="relative hidden sm:block">
+						<div data-toolbar-menu class="relative hidden sm:block">
 							<button
 								class="flex items-center gap-2 text-[10px] text-gray-500 px-1.5 py-1 hover:bg-black/[0.04] dark:hover:bg-white/[0.06] transition"
 								on:click={() => openMenu(showUsageStats ? '' : 'usage')}
 								title={$i18n.t('Context & token usage')}
 							>
 								<div class="flex flex-col items-end leading-tight">
-									<span class="tabular-nums text-gray-500 dark:text-gray-400">{fmtTok(ctxUsed)} / {fmtTok(ctxWindow)} · {ctxPct}%</span>
-									<span class="text-gray-400 dark:text-gray-500 tabular-nums">{#if isFreeModel}{$i18n.t('Free')}{:else}{fmtCost(liveCost)}{/if} · {fmtTok(liveSessionTokens)} tok</span>
+									<span class="tabular-nums text-gray-500 dark:text-gray-400">{#if ctxKnown}{fmtTok(ctxUsed)} / {fmtTok(ctxWindow)} · {ctxPct}%{:else}{fmtTok(ctxWindow)} {$i18n.t('window')}{/if}</span>
+									<span class="text-gray-400 dark:text-gray-500 tabular-nums">{#if isFreeModel}{$i18n.t('Free')}{:else if isSubscriptionModel}{$i18n.t('Included')}{:else}{fmtCost(outOfPocket)}{/if} · {fmtTok(liveSessionTokens)} tok</span>
 								</div>
 								<div class="w-14 h-1.5 rounded-full bg-gray-200 dark:bg-gray-800 overflow-hidden">
-									<div class="h-full rounded-full transition-all {liveOn ? 'animate-pulse ' : ''}{ctxPct > 85 ? 'bg-red-500' : 'bg-blue-500'}" style="width: {ctxPct}%"></div>
+									<div class="h-full rounded-full transition-all {liveOn ? 'animate-pulse ' : ''}{ctxPct > 85 ? 'bg-red-500' : 'bg-blue-500'}" style="width: {ctxKnown ? ctxPct : 0}%"></div>
 								</div>
 							</button>
 							{#if showUsageStats}
 								<div class="absolute bottom-full right-0 mb-1 z-40 w-64 rounded-2xl bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 shadow-xl p-3 text-xs space-y-2">
 									<div class="flex items-center justify-between text-gray-700 dark:text-gray-200 font-medium">
 										<span>{$i18n.t('Context window')}</span>
-										<span class="tabular-nums">{ctxUsed.toLocaleString()} / {ctxWindow.toLocaleString()}</span>
+										<span class="tabular-nums">{#if ctxKnown}{ctxUsed.toLocaleString()} / {ctxWindow.toLocaleString()}{:else}{ctxWindow.toLocaleString()}{/if}</span>
 									</div>
 									<div class="w-full h-2 rounded-full bg-gray-200 dark:bg-gray-800 overflow-hidden">
-										<div class="h-full rounded-full {ctxPct > 85 ? 'bg-red-500' : 'bg-blue-500'}" style="width: {ctxPct}%"></div>
+										<div class="h-full rounded-full {ctxPct > 85 ? 'bg-red-500' : 'bg-blue-500'}" style="width: {ctxKnown ? ctxPct : 0}%"></div>
 									</div>
-									<div class="flex justify-between text-gray-500"><span>{$i18n.t('Used')}</span><span class="tabular-nums">{ctxPct}%</span></div>
-									<div class="flex justify-between text-gray-500"><span>{$i18n.t('Available')}</span><span class="tabular-nums">{ctxAvail.toLocaleString()} {$i18n.t('tokens')}</span></div>
+									{#if ctxKnown}
+										<div class="flex justify-between text-gray-500"><span>{$i18n.t('Used')}</span><span class="tabular-nums">{ctxPct}%</span></div>
+										<div class="flex justify-between text-gray-500"><span>{$i18n.t('Available')}</span><span class="tabular-nums">{ctxAvail.toLocaleString()} {$i18n.t('tokens')}</span></div>
+									{:else}
+										<!-- The engine reports what it BILLED, never what it was holding. Saying so
+										     beats drawing a bar from the wrong number, which read as permanently full. -->
+										<div class="text-gray-400 leading-snug">{$i18n.t("This engine doesn't report how full its context is — it compacts on its own.")}</div>
+									{/if}
 									<div class="border-t border-gray-100 dark:border-gray-800"></div>
-									<div class="flex justify-between text-gray-500"><span>{$i18n.t('Last turn')}</span><span class="tabular-nums">↑ {(lastUsage?.prompt_tokens || 0).toLocaleString()} · ↓ {(lastUsage?.completion_tokens || 0).toLocaleString()}</span></div>
+									<div class="flex justify-between text-gray-500"><span>{$i18n.t('Last turn, billed')}</span><span class="tabular-nums">↑ {(lastUsage?.prompt_tokens || 0).toLocaleString()} · ↓ {(lastUsage?.completion_tokens || 0).toLocaleString()}</span></div>
+									{#if (lastUsage?.usage_detail?.cache_read || 0) > 0}
+										<!-- Broken out because a cache read bills at a tenth of a fresh input token,
+										     so the split is most of what the run actually costs. -->
+										<div class="flex justify-between text-gray-400"><span class="pl-2">{$i18n.t('of which cached')}</span><span class="tabular-nums">{(lastUsage?.usage_detail?.cache_read || 0).toLocaleString()}</span></div>
+									{/if}
 									<div class="flex justify-between text-gray-500"><span>{$i18n.t('Session total')}</span><span class="tabular-nums">{liveSessionTokens.toLocaleString()} · {usageTurns.length} {$i18n.t('turns')}</span></div>
 									<div class="flex justify-between text-gray-500">
-										<span>{$i18n.t('Est. cost')}</span>
+										<span>{#if isFreeModel}{$i18n.t('Cost')}{:else if costIsVendorReported}{$i18n.t('Cost')}{:else}{$i18n.t('Est. cost')}{/if}</span>
 										<span class="tabular-nums text-gray-700 dark:text-gray-300">
-											{#if isFreeModel}{$i18n.t('Free · local')}{:else}{fmtCost(liveCost)}{#if isSubscriptionModel} <span class="text-gray-400">· {$i18n.t('at API rates')}</span>{/if}{/if}
+											{#if isFreeModel}{$i18n.t('Free · local')}{:else if isSubscriptionModel}{$i18n.t('Included in plan')}{:else}{fmtCost(liveCost)}{/if}
 										</span>
 									</div>
+									{#if isSubscriptionModel && !isFreeModel}
+										<!-- A subscription bills nothing per token, so the dollar figure is only
+										     useful as "what this would have cost on the API" — labelled as such. -->
+										<div class="flex justify-between text-gray-400"><span class="pl-2">{$i18n.t('at API rates')}</span><span class="tabular-nums">{fmtCost(liveCost)}</span></div>
+									{/if}
 									<div class="flex justify-between text-gray-500"><span>{$i18n.t('Model')}</span><span class="truncate ml-2 text-gray-700 dark:text-gray-300">{displayModel || $i18n.t('None selected')}</span></div>
 								</div>
 							{/if}
@@ -2901,23 +3078,6 @@
 		</div>
 	{/if}
 
-	<!-- click-away backdrop for the composer menus -->
-	{#if anyToolbarMenuOpen}
-		<button
-			class="fixed inset-0 z-20 cursor-default"
-			tabindex="-1"
-			aria-hidden="true"
-			on:click={() => {
-				showModeMenu = false;
-				showRepoMenu = false;
-				showExecMenu = false;
-				showEngineMenu = false;
-				showAttachMenu = false;
-				showUsageStats = false;
-				showModelMenu = false;
-			}}
-		></button>
-	{/if}
 
 	<!-- Acknowledge-popup: a gated in-place action awaiting approval. -->
 	{#if pendingAction}

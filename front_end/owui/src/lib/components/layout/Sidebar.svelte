@@ -54,6 +54,7 @@
 	import { checkActiveChats } from '$lib/apis/tasks';
 	import { getCadCapability } from '$lib/apis/cad';
 	import { fetchActiveResearch } from '$lib/apis/research';
+	import { listVibecodeSessions, autonameVibecodeSession } from '$lib/apis/agent-runs';
 	import {
 		chatActivity,
 		markChatRunning,
@@ -649,6 +650,29 @@
 	// which is what turns the row's spinner into a blue dot.
 	let activityTimer: ReturnType<typeof setInterval> | null = null;
 
+	// The Build session on screen, which is `?session=` rather than `$chatId`. A run belonging
+	// to it needs no sidebar indicator for the same reason the open chat needs none.
+	$: activeVibecodeSession =
+		$page?.url?.pathname?.startsWith('/harvis/vibecode')
+			? ($page?.url?.searchParams?.get('session') ?? '')
+			: '';
+
+	// Name a Build session whose first run has just finished. The page's own `maybeAutoname`
+	// can only fire while that page is mounted, so leaving mid-run left the session called
+	// "Untitled session" forever. Only untitled ones are touched — the endpoint regenerates
+	// unconditionally, so asking it about a named session would rewrite the user's own title.
+	const autonamed = new Set<string>();
+	const autonameFinishedSession = async (sessionId: string) => {
+		if (!sessionId || autonamed.has(sessionId)) return;
+		autonamed.add(sessionId);
+		try {
+			const list = await listVibecodeSessions();
+			const s = list.find((x: any) => x?.id === sessionId);
+			if (!s || (s.title || '').trim()) return;
+			await autonameVibecodeSession(sessionId);
+		} catch (_) {}
+	};
+
 	/**
 	 * Workspace runs the backend still considers live, as chatId → workspaceId.
 	 *
@@ -657,14 +681,24 @@
 	 * trying to report. `/active-runs` is the read-only list. Returns null (not an empty
 	 * map) when the poll itself failed, so a network blip can't be read as "all finished".
 	 */
-	const fetchLiveWorkspaceRuns = async (): Promise<Map<string, string> | null> => {
+	const fetchLiveWorkspaceRuns = async (): Promise<Map<
+		string,
+		{ id: string; vibecode: boolean }
+	> | null> => {
 		try {
 			const res = await fetch(`${WEBUI_BASE_URL}/api/workspace/active-runs`, {
 				headers: { Authorization: `Bearer ${localStorage.token}` }
 			});
 			if (!res.ok) return null;
 			const data = await res.json();
-			return new Map((data?.runs ?? []).map((r: any) => [r.session_id, r.id]));
+			return new Map(
+				(data?.runs ?? []).map((r: any) => [
+					r.session_id,
+					// `source` says which list owns the id: a Build session belongs to
+					// VibeCodeNav, everything else to the chat list.
+					{ id: r.id, vibecode: r.source === 'vibecode' }
+				])
+			);
 		} catch (e) {
 			return null;
 		}
@@ -689,13 +723,16 @@
 		// spinner on the row you are reading is noise.
 		if (workspaces) {
 			const known = $chatActivity;
-			for (const [sessionId, workspaceId] of workspaces) {
-				if (sessionId === $chatId) continue;
+			for (const [sessionId, run] of workspaces) {
+				// Whichever surface is on screen already shows its own run state. For a chat
+				// that is `$chatId`; for a Build session it is the ?session= in the URL, and
+				// missing that second case put a spinner on the row the user was reading.
+				if (sessionId === $chatId || sessionId === activeVibecodeSession) continue;
 				// Re-marking an unchanged entry every 8s would rewrite localStorage and wake
 				// every sidebar row for nothing.
 				const cur = known[sessionId];
-				if (cur?.state === 'running' && cur.workspace === workspaceId) continue;
-				markChatRunning(sessionId, undefined, workspaceId);
+				if (cur?.state === 'running' && cur.workspace === run.id) continue;
+				markChatRunning(sessionId, undefined, run.id, run.vibecode ? 'vibecode' : undefined);
 			}
 		}
 
@@ -714,8 +751,13 @@
 				// An ordinary reply; its own stream settles it.
 				continue;
 			}
+			// A Build session that finished still has no name if the run that would have
+			// named it outlived the page. `maybeAutoname` lives on the vibecode page, whose
+			// poll loop is torn down on navigation — the sidebar is the one thing still
+			// mounted, so it is where the naming has to happen.
+			if (v.kind === 'vibecode') autonameFinishedSession(cid);
 			// Finished while the user was looking at it: no notification needed.
-			if (cid === $chatId) clearChatActivity(cid);
+			if (cid === $chatId || cid === activeVibecodeSession) clearChatActivity(cid);
 			else markChatDone(cid);
 		}
 	};

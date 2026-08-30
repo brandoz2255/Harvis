@@ -74,7 +74,7 @@
 		getWeekday
 	} from '$lib/utils';
 	import { uploadFile } from '$lib/apis/files';
-	import { generateAutoCompletion, getModels } from '$lib/apis';
+	import { generateAutoCompletion } from '$lib/apis';
 	import { deleteFileById } from '$lib/apis/files';
 	import { getChatById } from '$lib/apis/chats';
 	import { getSessionUser } from '$lib/apis/auths';
@@ -135,14 +135,9 @@
 		orchestrate: 'bg-purple-500'
 	};
 	let showModeMenu = false;
-	// "Browse all models…" expands the capped composer model menu IN PLACE (the old goto pointed
-	// at the admin /workspace/models page, which isn't a model picker). Reset when the menu closes.
-	let showAllModels = false;
-	$: if (!showModeMenu) {
-		showAllModels = false;
-		modelSearch = '';
-	}
-
+	// The picker keeps its own search/expanded state; clear it when the menu closes.
+	let composerMenu: any = null;
+	$: if (!showModeMenu) composerMenu?.resetView();
 	// The composer always Auto-routes by default; the mode pill shows the active model name.
 	onMount(() => chatMode.set('auto'));
 
@@ -167,12 +162,11 @@
 	import InputVariablesModal from './MessageInput/InputVariablesModal.svelte';
 	import Voice from '../icons/Voice.svelte';
 	import Terminal from '../icons/Terminal.svelte';
+	import ComposerModelMenu from './ModelSelector/ComposerModelMenu.svelte';
 	import TerminalMenu from './MessageInput/TerminalMenu.svelte';
 	import PlusAlt from '../icons/PlusAlt.svelte';
 	import Folder from '../icons/Folder.svelte';
 	import Dropdown from '../common/Dropdown.svelte';
-	import ModelProfileEditor from './ModelSelector/ModelProfileEditor.svelte';
-	import EffortSlider from './ModelSelector/EffortSlider.svelte';
 
 	import CommandSuggestionList from './MessageInput/CommandSuggestionList.svelte';
 	import Knobs from '../icons/Knobs.svelte';
@@ -212,28 +206,9 @@
 		($models ?? []).find((m) => m.id === (selectedModels?.[0] ?? ''))?.name ??
 		(selectedModels?.[0] || 'Auto');
 
-	// Context window, shown beside each model id in the picker. Several vendor catalogues
-	// carry families that differ only in the tail of the id (gemini-2.5-flash-lite vs
-	// -flash-lite-preview-09-2025), and the window is often the thing that actually
-	// separates them. Blank when the provider never reported one.
-	const modelContext = (m: any) => {
-		const n = Number(m?.info?.meta?.context_length || 0);
-		if (!n) return '';
-		return n >= 1_000_000 ? `${Math.round(n / 1_000_000)}M ctx` : `${Math.round(n / 1024)}K ctx`;
-	};
-
-	// Cap the composer model menu; a footer links to the full list. Phase F: connected cloud
-	// models (Claude/GPT) float to the TOP — when you've connected a cloud provider it becomes
-	// the primary set, with local Ollama models below (still reachable, never stranded).
-	// Cursor-style picker helpers: cloud models (Claude/OpenAI) carry a mode (reasoning effort) +
-	// an editable profile; local Ollama models don't.
-	let modelSearch = '';
-	let showModelEditor = false;
-	let editorModel: any = null;
-	const isCloudModel = (m) => ['anthropic', 'openai'].includes(m?.owned_by);
-	// Abbreviations, because the effort rides on the model row and on the composer pill — both
-	// are tight. No saved effort = thinking is off, which reads as "Auto": the model decides.
-	// Blank for models that can't take an effort at all.
+	// Abbreviations for the effort shown on the composer pill (the picker has its own copy for
+	// the model rows). No saved effort = thinking is off, which reads as "Auto": the model
+	// decides. Blank for models that can't take an effort at all.
 	const EFFORT_SHORT: Record<string, string> = {
 		minimal: 'Min',
 		low: 'Low',
@@ -249,88 +224,6 @@
 		return m?.info?.meta?.supports_effort ? 'Auto' : '';
 	};
 
-	// Picker footer. The dropdown is the entry point for model management, so a stale catalogue
-	// can be re-fetched without leaving the composer, and the full editor is one click away.
-	let refreshingModels = false;
-	const refreshModels = async () => {
-		if (refreshingModels) return;
-		refreshingModels = true;
-		try {
-			models.set(
-				await getModels(
-					localStorage.token,
-					$config?.features?.enable_direct_connections && ($settings?.directConnections ?? null),
-					false,
-					true
-				)
-			);
-			toast.success($i18n.t('Models refreshed'));
-		} catch (e) {
-			toast.error(`${e}`);
-		} finally {
-			refreshingModels = false;
-		}
-	};
-
-	// The effort flyout that opens beside a hovered model row. It lives OUTSIDE the scrolling
-	// list — an absolutely positioned child of a scroll container is clipped by it — so the row
-	// hands over its offset and the panel is placed against the list instead.
-	let modelListEl: HTMLDivElement | null = null;
-	let effortFlyoutModel: any = null;
-	let effortFlyoutTop = 0;
-	let effortFlyoutTimer: any = null;
-	const openEffortFlyout = (m: any, ev: MouseEvent) => {
-		clearTimeout(effortFlyoutTimer);
-		const row = (ev.currentTarget as HTMLElement)?.closest('[data-model-row]') as HTMLElement;
-		if (row && modelListEl) effortFlyoutTop = row.offsetTop - modelListEl.scrollTop;
-		effortFlyoutModel = m;
-	};
-	// A small grace period so the pointer can cross the gap between the row and the panel.
-	const closeEffortFlyout = () => {
-		clearTimeout(effortFlyoutTimer);
-		effortFlyoutTimer = setTimeout(() => (effortFlyoutModel = null), 160);
-	};
-	const holdEffortFlyout = () => clearTimeout(effortFlyoutTimer);
-	// The "show all Claude models" gate is a persisted user setting, managed in
-	// Settings → Interface (not in this dropdown). The picker just reads it below.
-	$: modelMenuList = (() => {
-		const all = $models ?? [];
-		const q = modelSearch.trim().toLowerCase();
-		const match = (m) =>
-			!q || (m?.name ?? '').toLowerCase().includes(q) || (m?.id ?? '').toLowerCase().includes(q);
-		const isCloud = (m) => ['anthropic', 'openai'].includes(m?.owned_by);
-		// Claude is limited to the current-generation flagship 4 (meta.primary) unless the user has
-		// opted into the full catalog in settings; OpenAI + local are unaffected.
-		const showAllClaude = $settings?.showAllCloudModels === true;
-		const claude = all.filter((m) => m?.owned_by === 'anthropic');
-		const claudeShown = showAllClaude ? claude : claude.filter((m) => m?.info?.meta?.primary);
-		const openai = all.filter((m) => m?.owned_by === 'openai');
-		const local = all.filter((m) => !isCloud(m));
-		const ordered = [...claudeShown, ...openai, ...local]; // cloud-first
-		const cur = selectedModels?.[0];
-		const curModel = all.find((m) => m.id === cur);
-		// Float the active model to the very top (so the current pick is visible) without
-		// disturbing the cloud-first ordering of the rest.
-		const withCur = curModel ? [curModel, ...ordered.filter((m) => m.id !== cur)] : ordered;
-		const filtered = withCur.filter(match);
-		// Capped to 7 by default; a search OR "Show all models" expands to the full list.
-		return showAllModels || q ? filtered : filtered.slice(0, 7);
-	})();
-
-	// Same list, under provider headings. Groups appear in order of first appearance, so the
-	// active model's provider leads (modelMenuList already floats the active model to the top).
-	$: modelMenuGroups = (() => {
-		const LABELS = { anthropic: 'Anthropic', openai: 'OpenAI' };
-		const groups: { label: string; models: any[] }[] = [];
-		for (const m of modelMenuList) {
-			const label = LABELS[m?.owned_by] ?? 'Local';
-			let g = groups.find((x) => x.label === label);
-			if (!g) groups.push((g = { label, models: [] }));
-			g.models.push(m);
-		}
-		return groups;
-	})();
-
 	// The active model, for the effort shown on the composer pill. Only models that advertise
 	// support have one (Claude on an API key, the GPT-5 reasoning models); everything else shows
 	// the model name alone. Effort is SET from the Options panel attached to the picker, not from
@@ -342,9 +235,6 @@
 	// What rides on the composer pill after the model name: `Opus 4.6 · Med`. Empty on a model
 	// with no effort axis at all, so the pill is just the model name there.
 	$: composerEffortShort = effortCapable ? effortLabelOf(effortModel) : '';
-	// What the picker's "Edit Models…" footer opens: the active model when it has an editable
-	// profile (cloud only), else nothing — the action is disabled rather than silently inert.
-	$: editableModel = isCloudModel(effortModel) ? effortModel : null;
 
 	// Mic dropdown — detect input devices + the chosen one (threaded into recording).
 	let showMicMenu = false;
@@ -2306,111 +2196,16 @@
 												</button>
 
 												<svelte:fragment slot="content">
-													<div class="flex items-center gap-1.5 px-2 py-1 border-b border-gray-150 dark:border-gray-850 mb-0.5">
-														<svg class="size-3 text-gray-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/></svg>
-														<input bind:value={modelSearch} placeholder={$i18n.t("Search models")} autocomplete="off" class="w-full bg-transparent outline-none text-[13px] py-0.5" on:click|stopPropagation />
-													</div>
-													<!-- Grouped by provider, one line per model with its effort inline. The Options
-													     panel opens to the LEFT and sits OUTSIDE the scroll box — inside it, an
-													     absolutely positioned panel would be clipped by the scroll container. -->
-													<div class="relative">
-														<div class="max-h-72 overflow-y-auto" bind:this={modelListEl} on:scroll={() => (effortFlyoutModel = null)}>
-															{#each modelMenuGroups as g (g.label)}
-																<div class="px-2.5 pt-1.5 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-gray-400 dark:text-gray-500">
-																	{$i18n.t(g.label)}
-																</div>
-																{#each g.models as m}
-																	<div
-																		data-model-row
-																		class="w-full flex items-center gap-1 group/mrow rounded-md hover:bg-gray-100 dark:hover:bg-gray-800 transition"
-																		on:mouseenter={(e) => (m?.info?.meta?.supports_effort ? openEffortFlyout(m, e) : closeEffortFlyout())}
-																		on:mouseleave={closeEffortFlyout}
-																		on:focusin={(e) => (m?.info?.meta?.supports_effort ? openEffortFlyout(m, e) : closeEffortFlyout())}
-																		on:focusout={closeEffortFlyout}
-																	>
-																		<button
-																			type="button"
-																			class="flex-1 min-w-0 flex items-center gap-1.5 px-2.5 py-1 text-left"
-																			title={[m.id, modelContext(m)].filter(Boolean).join(' · ')}
-																			on:click={() => { selectedModels = [m.id]; showModeMenu = false; }}
-																		>
-																			<span class="flex-1 min-w-0 truncate text-[13px] text-gray-800 dark:text-gray-100">{m.name}</span>
-																			{#if m?.info?.meta?.supports_effort}
-																				<!-- The effort rides on the row, so "which model" and "how deep"
-																				     read as one line. Hovering the row opens the panel that sets it. -->
-																				<span class="shrink-0 text-[11px] text-gray-400 dark:text-gray-500">{effortLabelOf(m)}</span>
-																			{/if}
-																		</button>
-																		{#if isCloudModel(m)}
-																			<button type="button" class="shrink-0 text-[11px] text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 px-1 py-1 opacity-0 group-hover/mrow:opacity-100 transition" aria-label={$i18n.t("Edit model profile")} on:click|stopPropagation={() => { editorModel = m; showModelEditor = true; }}>{$i18n.t('Edit')}</button>
-																		{/if}
-																		<span class="w-4 shrink-0 mr-1 flex items-center justify-center">
-																			{#if (selectedModels?.[0] ?? '') === m.id}
-																				<svg class="size-3.5 text-blue-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
-																			{/if}
-																		</span>
-																	</div>
-																{/each}
-															{/each}
-														</div>
-
-														{#if effortFlyoutModel}
-															<div
-																class="absolute right-full mr-1 z-20 w-48 rounded-lg border border-gray-150 dark:border-gray-850 bg-white dark:bg-gray-900 shadow-xl"
-																style="top: {Math.max(0, effortFlyoutTop - 8)}px"
-																on:mouseenter={holdEffortFlyout}
-																on:mouseleave={closeEffortFlyout}
-															>
-																<EffortSlider model={effortFlyoutModel} on:changed={() => models.update((ms) => [...ms])} />
-															</div>
-														{/if}
-													</div>
-
-													<!-- Utility actions, fenced off from the model list: the picker is also where
-													     the catalogue is managed, so neither needs a trip to settings. -->
-													<div class="my-1 border-t border-gray-150 dark:border-gray-850"></div>
-													{#if !showAllModels && !modelSearch.trim() && ($models ?? []).length > 7}
-														<button
-															type="button"
-															class="w-full flex items-center gap-2 px-2.5 py-1 rounded-md text-left text-[13px] text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
-															on:click={() => (showAllModels = true)}
-														>
-															<span class="flex-1">{$i18n.t('Show all models')} ({($models ?? []).length})</span>
-															<svg class="size-3 opacity-60 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
-														</button>
-													{/if}
-													<button
-														type="button"
-														class="w-full flex items-center gap-2 px-2.5 py-1 rounded-md text-left text-[13px] text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 transition disabled:opacity-50"
-														disabled={refreshingModels}
-														on:click|stopPropagation={refreshModels}
-													>
-														<svg class="size-3.5 shrink-0 opacity-70 {refreshingModels ? 'animate-spin' : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
-														<span class="flex-1">{refreshingModels ? $i18n.t('Refreshing…') : $i18n.t('Refresh Models')}</span>
-													</button>
-													<!-- NOT /workspace/models: that route is unbacked in the Harvis facade
-													     (/api/v1/models/* 404s), so it is flag-gated and bounces to
-													     /workspace/knowledge — which from the composer reads as "nothing
-													     happened". The profile editor is the surface that actually edits a
-													     model here, and it is the same one the row's Edit button opens. -->
-													<button
-														type="button"
-														class="w-full flex items-center gap-2 px-2.5 py-1 rounded-md text-left text-[13px] text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 transition disabled:opacity-40"
-														disabled={!editableModel}
-														title={editableModel ? '' : $i18n.t('Local models have no editable profile')}
-														on:click|stopPropagation={() => { editorModel = editableModel; showModelEditor = true; showModeMenu = false; }}
-													>
-														<svg class="size-3.5 shrink-0 opacity-70" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
-														<span class="flex-1">{$i18n.t('Edit Models…')}</span>
-													</button>
-												
-</svelte:fragment>
+													<ComposerModelMenu
+														bind:this={composerMenu}
+														items={$models ?? []}
+														selectedId={selectedModels?.[0] ?? ''}
+														on:select={(e) => { selectedModels = [e.detail]; showModeMenu = false; }}
+														on:close={() => (showModeMenu = false)}
+													/>
+												</svelte:fragment>
 											</Dropdown>
 										</div>
-
-										{#if editorModel}
-											<ModelProfileEditor bind:show={showModelEditor} model={editorModel} on:saved={() => models.update((ms) => [...ms])} />
-										{/if}
 
 {#if prompt === '' && files.length === 0 && ($_user?.role === 'admin' || ($_user?.permissions?.chat?.call ?? true))}
 											<div class=" flex items-center">

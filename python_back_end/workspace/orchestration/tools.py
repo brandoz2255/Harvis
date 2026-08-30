@@ -25,6 +25,7 @@ from owui_compat.workspace_method import (
 )
 
 from .isolation import validate_agent_path
+from .syntax_gate import check_source
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,26 @@ _MAX_OUTPUT = 8000
 _EXEC_TIMEOUT = 60
 
 _FALSY = {"0", "false", "no", "off"}
+
+
+def _syntax_note(rel: str, content: str) -> str:
+    """A loud suffix for a write whose result cannot run — '' when it parses.
+
+    The write itself SUCCEEDED (the bytes are on disk), so this never turns into a
+    tool error; it rides along on the success message. The wording is imperative
+    because a warning phrased as an observation gets read past: a turn once wrote
+    an Asteroids page whose <script> was never closed, called finish, and reported
+    it as done — the browser ran none of it and the START button just flashed.
+    """
+    err = check_source(rel, content)
+    if not err:
+        return ""
+    return (
+        f"\n\n⚠ BUT {rel} DOES NOT PARSE — {err}.\n"
+        "Nothing in that file will run until this is fixed. Re-read it, find the "
+        "unbalanced or malformed part, and repair it NOW before you do anything "
+        "else. Do not call finish while this stands."
+    )
 
 
 def _isolated_runner_enabled() -> bool:
@@ -587,7 +608,7 @@ async def dispatch_tool(
             os.makedirs(os.path.dirname(fp) or workspace_path, exist_ok=True)
             with open(fp, "w", encoding="utf-8") as f:
                 f.write(content)
-            return (f"Wrote {len(content)} bytes to {rel}", True)
+            return (f"Wrote {len(content)} bytes to {rel}" + _syntax_note(rel, content), True)
 
         if name == "str_replace":
             rel = str(args.get("path") or "")
@@ -617,9 +638,10 @@ async def dispatch_tool(
                     "is unique (exactly one match).",
                     False,
                 )
+            updated = data.replace(old, new, 1)
             with open(fp, "w", encoding="utf-8") as f:
-                f.write(data.replace(old, new, 1))
-            return (f"Replaced 1 occurrence in {rel}", True)
+                f.write(updated)
+            return (f"Replaced 1 occurrence in {rel}" + _syntax_note(rel, updated), True)
 
         if name == "apply_patch":
             # SESSION-ONLY (Phase 4): the tracked edit primitive. Same path safety
@@ -666,13 +688,18 @@ async def dispatch_tool(
                         "is unique (exactly one match).",
                         False,
                     )
+                updated = data.replace(old, new, 1)
                 with open(fp, "w", encoding="utf-8") as f:
-                    f.write(data.replace(old, new, 1))
+                    f.write(updated)
                 await _record_file_change(
                     pool, session_id, run_id, rel, "modify", patch_id,
                     before_sha, _git_blob_sha(fp),
                 )
-                return (f"Replaced 1 occurrence in {rel} (patch {patch_id})", True)
+                return (
+                    f"Replaced 1 occurrence in {rel} (patch {patch_id})"
+                    + _syntax_note(rel, updated),
+                    True,
+                )
 
             content = args.get("content")
             if content is None:
@@ -685,7 +712,11 @@ async def dispatch_tool(
                 pool, session_id, run_id, rel, ("modify" if existed else "add"),
                 patch_id, before_sha, _git_blob_sha(fp),
             )
-            return (f"Wrote {len(content)} bytes to {rel} (patch {patch_id})", True)
+            return (
+                f"Wrote {len(content)} bytes to {rel} (patch {patch_id})"
+                + _syntax_note(rel, content),
+                True,
+            )
 
         if name == "git_commit":
             # SESSION-ONLY (Phase 4): local commit on the session's work branch.

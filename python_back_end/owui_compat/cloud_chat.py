@@ -71,16 +71,26 @@ _CLAUDE_META: dict[str, dict] = {
     # `pin`/`pout` here are the Opus-line rate, not a separately confirmed Opus 5 price. They feed the
     # cost ESTIMATE only; a wrong number is visibly wrong, whereas leaving them None would silently
     # blank the meter for the flagship model, which reads as "this model is free".
+    # `ctx` is the CONTEXT WINDOW the usage meter divides by, and it must match what the
+    # engine actually gives the model — a wrong denominator is what made a healthy run look
+    # like a pegged red bar. Sonnet 5 and Fable 5 have NATIVE 1M windows; Claude Code compacts
+    # them at ~967K and the rest of the line at the 200K boundary, so 200K here understated
+    # the two by 5x. Nothing pins the CLI's compaction window — its per-model tuning IS the
+    # recommendation (see `_build_claude_command`), so this table only has to tell the truth.
+    # CAVEAT for the direct-API lane: 1M on Sonnet needs the `context-1m-2025-08-07` beta
+    # header, which this module does not send (`_ANTHROPIC_VERSION` only). Over 200K there
+    # Anthropic errors loudly rather than truncating, so the bar can read low before a visible
+    # failure — sending the header (and its above-200K pricing tier) is the follow-up.
     "claude-opus-5":              {"name": "Claude Opus 5",    "ctx": 200000, "pin": 15.0, "pout": 75.0, "max_thinking": 32000},
     "claude-opus-4-8":            {"name": "Claude Opus 4.8",  "ctx": 200000, "pin": 15.0, "pout": 75.0, "max_thinking": 32000},
     "claude-opus-4-7":            {"name": "Claude Opus 4.7",  "ctx": 200000, "pin": 15.0, "pout": 75.0, "max_thinking": 32000},
     "claude-opus-4-6":            {"name": "Claude Opus 4.6",  "ctx": 200000, "pin": 15.0, "pout": 75.0, "max_thinking": 32000},
     "claude-opus-4-5-20251101":   {"name": "Claude Opus 4.5",  "ctx": 200000, "pin": 15.0, "pout": 75.0, "max_thinking": 32000},
     "claude-opus-4-1-20250805":   {"name": "Claude Opus 4.1",  "ctx": 200000, "pin": 15.0, "pout": 75.0, "max_thinking": 32000},
-    "claude-sonnet-5":            {"name": "Claude Sonnet 5",  "ctx": 200000, "pin": 3.0,  "pout": 15.0, "max_thinking": 32000},
+    "claude-sonnet-5":            {"name": "Claude Sonnet 5",  "ctx": 1000000, "pin": 3.0,  "pout": 15.0, "max_thinking": 32000},
     "claude-sonnet-4-6":          {"name": "Claude Sonnet 4.6","ctx": 200000, "pin": 3.0,  "pout": 15.0, "max_thinking": 24000},
     "claude-sonnet-4-5-20250929": {"name": "Claude Sonnet 4.5","ctx": 200000, "pin": 3.0,  "pout": 15.0, "max_thinking": 24000},
-    "claude-fable-5":             {"name": "Claude Fable 5",   "ctx": 200000, "pin": 1.0,  "pout": 5.0,  "max_thinking": 24000},
+    "claude-fable-5":             {"name": "Claude Fable 5",   "ctx": 1000000, "pin": 1.0,  "pout": 5.0,  "max_thinking": 24000},
     "claude-haiku-4-5-20251001":  {"name": "Claude Haiku 4.5", "ctx": 200000, "pin": 1.0,  "pout": 5.0,  "max_thinking": 0},
 }
 

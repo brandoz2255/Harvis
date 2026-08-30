@@ -34,6 +34,7 @@ from .schemas import (
     OwuiSigninBody,
     OwuiSignupBody,
 )
+from .changelog import register_changelog_routes
 from .stubs import register_stub_routes
 from .knowledge import register_knowledge_routes
 from .skills import register_skill_routes
@@ -848,6 +849,7 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
     # Stub v1 routes (settings, tools, tags, profile images, …) — must be
     # registered before parameterized chat routes where paths overlap.
     register_stub_routes(router, get_current_user)
+    register_changelog_routes(router, get_current_user)
     register_admin_config_routes(router, get_current_user)
     register_knowledge_routes(router, get_current_user)
     register_skill_routes(router, get_current_user)
