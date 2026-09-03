@@ -93,6 +93,9 @@ certs/
 # Deliberately broad — they must catch credential FILES wherever they land.
 **/*api-key*
 **/*token*
+# FreeToken is the inference server's name, not a secret: its unit files and the
+# FT_* env example carry no credentials (the real env lives in ~/.config).
+!scripts/freetoken/freetoken*
 **/credentials*
 # …but not at the cost of source code. A module with one of those words in its NAME is not a
 # secret; a secret INSIDE a file is, and that is what the pre-push secret scan is for. Without

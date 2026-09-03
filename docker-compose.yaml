@@ -204,6 +204,11 @@ services:
       # Optional desktop-GPU Ollama for the model picker. Surfaces models that
       # only exist on the desktop (e.g. gemma4-26b on the 5080) in /api/models.
       DESKTOP_OLLAMA_URL: "${DESKTOP_OLLAMA_URL:-}"
+      # Inference nodes — OpenAI-dialect servers (FreeToken, vLLM, llama-server) on this
+      # box or another, checked before Ollama for the models they report. Empty = inert.
+      # Format and the thinking policy: docs/inference-nodes.md
+      HARVIS_INFERENCE_NODES: "${HARVIS_INFERENCE_NODES:-}"
+      HARVIS_NODE_THINKING: "${HARVIS_NODE_THINKING:-auto}"
       # Deep-research synthesis model. MUST be forwarded here or a .env override
       # never reaches the container (the code default would always win). Empty =
       # fall back to the code default (llama3.1:8b); set in .env to an installed

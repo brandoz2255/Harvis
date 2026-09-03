@@ -1,0 +1,7 @@
+[Unit]
+Description=Stop FreeToken after a period with no requests (opt-in)
+
+[Service]
+Type=oneshot
+EnvironmentFile=-%h/.config/freetoken.env
+ExecStart=%h/.local/bin/freetoken-idle-stop
