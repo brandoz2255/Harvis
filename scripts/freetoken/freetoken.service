@@ -1,0 +1,22 @@
+[Unit]
+Description=FreeToken inference node for Harvis
+Documentation=file://%h/Projects/Recent-EX/Harvis/docs/inference-nodes.md
+After=network-online.target
+
+[Service]
+# All tuning lives in the env file; see freetoken.env.example next to this unit.
+EnvironmentFile=%h/.config/freetoken.env
+ExecStart=%h/.local/bin/freetoken-serve
+Restart=on-failure
+RestartSec=15
+# Model load and the CUDA graph capture take ~40 s; give a clean shutdown time to
+# drain in-flight requests instead of SIGKILLing a generation.
+TimeoutStartSec=300
+TimeoutStopSec=30
+Nice=10
+# Keep the box usable while the model loads and the MoE CPU threads run.
+CPUWeight=60
+IOWeight=60
+
+[Install]
+WantedBy=default.target

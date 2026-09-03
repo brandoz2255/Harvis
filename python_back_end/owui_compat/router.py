@@ -327,6 +327,20 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
     async def owui_chat_actions(action_id: str, request: Request, user=Depends(get_current_user)):
         return {}
 
+    async def _node_task_text(prompt: str, *, max_tokens: int = 24,
+                              temperature: float = 0.0) -> str:
+        """Task-gen text from a reachable inference node (thinking off); "" if none.
+
+        Never raises: task-gen fires after the response and must not break chats.
+        """
+        try:
+            from plugins.inference_nodes import node_complete
+            return (await node_complete(prompt, max_tokens=max_tokens,
+                                        temperature=temperature)) or ""
+        except Exception:
+            logger.warning("owui_compat: inference-node task-gen failed", exc_info=True)
+            return ""
+
     @router.post("/api/v1/tasks/title/completions")
     async def owui_title(request: Request, user=Depends(get_current_user)):
         # Auto-generate a concise chat title from the conversation via the LLM
@@ -456,6 +470,7 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
             return ""
 
         title = fallback
+        raw = ""
         try:
             # Generous timeout: the model may need a one-time reload; this call is
             # fire-after-response, so the user never waits on it. NO num_ctx → reuse
@@ -484,11 +499,19 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
                 )
                 r.raise_for_status()
                 raw = (r.json().get("response") or "").strip()
-            cleaned = _clean_title(raw)
-            if cleaned:
-                title = cleaned
         except Exception:
-            logger.warning("owui_compat: title generation fell back to heuristic", exc_info=True)
+            logger.warning("owui_compat: title generation via Ollama failed; trying inference nodes",
+                           exc_info=True)
+        if not _clean_title(raw):
+            # Ollama cannot load the title model while an inference node holds the GPU
+            # (FreeToken keeps ~6 GB of the 8 GB card → /api/generate 500). The node that
+            # IS awake writes the title instead, thinking off, before the heuristic fires.
+            raw = await _node_task_text(prompt, max_tokens=24) or raw
+        cleaned = _clean_title(raw)
+        if cleaned:
+            title = cleaned
+        else:
+            logger.warning("owui_compat: title generation fell back to heuristic")
         return {"choices": [{"message": {"content": json.dumps({"title": title})}}]}
 
     # Tag / follow-up / emoji task-gen. The OWUI frontend fires these after each
@@ -524,6 +547,7 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
         model = os.getenv("HARVIS_TITLE_MODEL", "llama3.1:8b")
         ollama_url = os.getenv("OLLAMA_URL", "http://ollama:11434")
         prompt = prompt_tmpl.replace("{transcript}", transcript[:4000])
+        raw = ""
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as hc:
                 r = await hc.post(
@@ -533,10 +557,12 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
                 )
                 r.raise_for_status()
                 raw = (r.json().get("response") or "").strip()
-            return re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL | re.IGNORECASE).strip()
         except Exception:
-            logger.warning("owui_compat: task-gen failed", exc_info=True)
-            return ""
+            logger.warning("owui_compat: task-gen via Ollama failed; trying inference nodes", exc_info=True)
+        if not raw:
+            # Same GPU-contention fallback as the title endpoint.
+            raw = await _node_task_text(prompt, max_tokens=num_predict, temperature=temperature) or ""
+        return re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL | re.IGNORECASE).strip()
 
     @router.post("/api/v1/tasks/tags/completions")
     async def owui_tags(request: Request, user=Depends(get_current_user)):

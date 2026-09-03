@@ -33,14 +33,22 @@ function detailsTokenizer(src: string) {
 
 	const detailsMatch = detailsRegex.exec(src);
 	if (detailsMatch) {
-		const endIndex = findMatchingClosingTag(src, '<details', '</details>');
-		if (endIndex === -1) return;
-
-		const fullMatch = src.slice(0, endIndex);
 		const detailsTag = detailsMatch[0];
 		const attributes = parseAttributes(detailsTag); // Parse attributes from <details>
+		const endIndex = findMatchingClosingTag(src, '<details', '</details>');
+		// A block the chat is still streaming into (`done="false"`, opened by
+		// openReasoning in Chat.svelte) has no closing tag yet. Returning nothing here
+		// dropped it to the sanitizer and the whole "Thinking..." phase rendered as a
+		// bare cursor for 20-30 s on a local reasoning model. Take the rest of the
+		// message as the block's body until the close arrives.
+		const streaming = endIndex === -1 && attributes.done === 'false';
+		if (endIndex === -1 && !streaming) return;
 
-		let content = fullMatch.slice(detailsTag.length, -10).trim(); // Remove <details> and </details>
+		const fullMatch = streaming ? src : src.slice(0, endIndex);
+
+		let content = (
+			streaming ? fullMatch.slice(detailsTag.length) : fullMatch.slice(detailsTag.length, -10)
+		).trim(); // Remove <details> and </details>
 		let summary = '';
 
 		const summaryMatch = summaryRegex.exec(content);
