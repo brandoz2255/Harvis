@@ -117,11 +117,15 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
         # The signup flag is an ADMIN-SETTABLE value now, not just an env var,
         # so the "Sign up" link this draws stays in lockstep with the gate in
         # main._signup_with_connection — both read admin_config.signup_enabled.
-        from .admin_config import signup_enabled_via_pool
+        from .admin_config import dev_mode_enabled_via_pool, signup_enabled_via_pool
 
         return owui_config.build_config(
             onboarding=onboarding,
             signup_enabled=await signup_enabled_via_pool(pool),
+            # Same reason as the line above: the admin switch and the surfaces it
+            # hides must resolve through one function, or the panel claims dev
+            # mode is off while its panels are still on screen.
+            dev_mode=await dev_mode_enabled_via_pool(pool),
         )
 
     @router.get("/api/version")
@@ -184,7 +188,19 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
             except JWTError:
                 expires_at = None
         return harvis_user_to_owui(
-            {"id": user.id, "username": user.username, "email": user.email, "avatar": user.avatar},
+            {
+                "id": user.id,
+                "username": user.username,
+                "email": user.email,
+                "avatar": user.avatar,
+                # Settings -> Account repopulates its form from this response.
+                # Without these it rendered four empty inputs every time, even
+                # after a successful save.
+                "name": getattr(user, "name", None),
+                "bio": getattr(user, "bio", None),
+                "gender": getattr(user, "gender", None),
+                "date_of_birth": getattr(user, "date_of_birth", None),
+            },
             token or "",
             expires_at=expires_at or (_now() + deps.access_token_expire_minutes * 60),
         )
@@ -260,6 +276,19 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
                     data.append(_cm)
         except Exception:
             pass
+        # Agent Teammates: each enabled teammate is a pickable model `agent:<uuid>`.
+        # Additive and last, so a teammate can never displace a real model; the
+        # helper swallows its own errors, so an install with no teammates (or a
+        # missing 018 migration) simply adds nothing.
+        try:
+            from .agent_bridge import agent_model_entries
+            for _am in await agent_model_entries(
+                getattr(request.app.state, "pg_pool", None), getattr(user, "id", None)
+            ):
+                if not any((m or {}).get("id") == _am["id"] for m in data):
+                    data.append(_am)
+        except Exception:
+            pass
         return {"data": data}
 
     @router.get("/api/models")
@@ -274,6 +303,16 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
     @router.post("/api/chat/completions")
     async def owui_chat_completions(request: Request, user=Depends(get_current_user)):
         owui_body = await request.json()
+        # A teammate first: the model id alone decides it (`agent:<uuid>`), so
+        # this is one string check and it can never claim a turn meant for
+        # anything else. It has to precede the detectors below, which read the
+        # message text and would otherwise route a teammate's goal into a plain
+        # workspace run with no teammate attached.
+        from .agent_bridge import maybe_handle_agent
+
+        agent_turn = await maybe_handle_agent(request, owui_body, user)
+        if agent_turn is not None:
+            return agent_turn
         # CAD first — it is the narrowest detector of the three (an explicit
         # "🧊 create cad <recipe>" marker, never natural language), so it can only
         # ever claim a turn that was unambiguously meant for it. CAD is an optional

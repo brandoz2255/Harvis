@@ -13,6 +13,7 @@
 	import Plus from '$lib/components/icons/Plus.svelte';
 	import Connection from './Tools/Connection.svelte';
 	import Terminals from './Integrations/Terminals.svelte';
+	import SettingsSection from './SettingsSection.svelte';
 
 	import AddToolServerModal from '$lib/components/AddToolServerModal.svelte';
 
@@ -82,44 +83,13 @@
 >
 	<div class="overflow-y-scroll scrollbar-hidden h-full">
 		{#if servers !== null}
-			<div>
-				<div class="pr-1.5">
-					<div class="">
-						<div class="flex justify-between items-center pt-1 pb-2">
-							<div class="text-lg font-semibold text-gray-900 dark:text-gray-100">
-								{$i18n.t('Manage Tool Servers')}
-							</div>
-
-							<Tooltip content={$i18n.t('Add Connection')}>
-								<button
-									aria-label={$i18n.t('Add Connection')}
-									class="px-1"
-									on:click={() => (showConnectionModal = true)}
-									type="button"
-								>
-									<Plus />
-								</button>
-							</Tooltip>
-						</div>
-
-						<div class="flex flex-col gap-1.5">
-							{#each servers as server, idx}
-								<Connection
-									bind:connection={server}
-									direct
-									onSubmit={() => updateHandler()}
-									onDelete={() => {
-										servers = servers.filter((_, i) => i !== idx);
-										updateHandler();
-									}}
-								/>
-							{/each}
-						</div>
-					</div>
-
-					<div class="my-2">
+			<div class="flex items-start justify-between gap-4">
+				<SettingsSection title={$i18n.t('Manage Tool Servers')} className="min-w-0 flex-1">
+					<svelte:fragment slot="description">
 						<div
-							class={`text-sm ${($settings?.highContrastMode ?? false) ? 'text-gray-800 dark:text-gray-100' : 'text-gray-500'}`}
+							class={($settings?.highContrastMode ?? false)
+								? 'text-gray-800 dark:text-gray-100'
+								: 'text-gray-500'}
 						>
 							{$i18n.t('Connect to your own OpenAPI compatible external tool servers.')}
 							<br />
@@ -127,40 +97,65 @@
 								'CORS must be properly configured by the provider to allow requests from Harvis.'
 							)}
 						</div>
-					</div>
+						<div class="mt-1 text-xs text-gray-600 dark:text-gray-300">
+							<a
+								class="underline"
+								href="https://github.com/open-webui/openapi-servers"
+								target="_blank">{$i18n.t('Learn more about OpenAPI tool servers.')} ↗</a
+							>
+						</div>
+					</svelte:fragment>
 
-					<div class="text-xs text-gray-600 dark:text-gray-300 mb-2">
-						<a
-							class="underline"
-							href="https://github.com/open-webui/openapi-servers"
-							target="_blank">{$i18n.t('Learn more about OpenAPI tool servers.')} ↗</a
+					<div class="mt-3 flex flex-col gap-1.5">
+						{#each servers as server, idx}
+							<Connection
+								bind:connection={server}
+								direct
+								onSubmit={() => updateHandler()}
+								onDelete={() => {
+									servers = servers.filter((_, i) => i !== idx);
+									updateHandler();
+								}}
+							/>
+						{/each}
+					</div>
+				</SettingsSection>
+
+				<div class="mt-1 flex h-7 shrink-0 items-center">
+					<Tooltip content={$i18n.t('Add Connection')}>
+						<button
+							aria-label={$i18n.t('Add Connection')}
+							class="px-1"
+							on:click={() => (showConnectionModal = true)}
+							type="button"
 						>
-					</div>
+							<Plus />
+						</button>
+					</Tooltip>
 				</div>
+			</div>
 
-				<hr class="border-gray-100/50 dark:border-gray-850/50 my-4" />
-
-				<div class="pr-1.5">
-					<Terminals bind:servers={terminalServerConfigs} onChange={() => updateHandler()} />
-
-					<div class="mt-1.5">
+			<div class="pt-6">
+				<Terminals bind:servers={terminalServerConfigs} onChange={() => updateHandler()}>
+					<svelte:fragment slot="description">
 						<div
-							class={`text-xs ${($settings?.highContrastMode ?? false) ? 'text-gray-800 dark:text-gray-100' : 'text-gray-500'}`}
+							class={($settings?.highContrastMode ?? false)
+								? 'text-gray-800 dark:text-gray-100'
+								: 'text-gray-500'}
 						>
 							{$i18n.t(
 								'Connect to Open Terminal instances to browse files and use them as always-on tools. Only one can be active at a time.'
 							)}
 						</div>
-
-						<div class="text-xs text-gray-600 dark:text-gray-300 mt-1">
+						<div class="mt-1 text-xs text-gray-600 dark:text-gray-300">
 							<a
 								class="underline"
 								href="https://github.com/open-webui/open-terminal"
 								target="_blank">{$i18n.t('Learn more about Open Terminal')} ↗</a
 							>
 						</div>
-					</div>
-				</div>
+					</svelte:fragment>
+				</Terminals>
 			</div>
 		{:else}
 			<div class="flex h-full justify-center">

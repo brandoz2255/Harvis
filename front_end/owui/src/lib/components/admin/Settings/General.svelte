@@ -21,6 +21,17 @@
 	 * a control that cannot change the thing it names is worse than no control.
 	 *
 	 * Adding a switch here means wiring its enforcement in the same commit.
+	 * The developer-mode switch below meets that bar: it persists through the
+	 * same admin_config module, is republished in the boot payload as
+	 * `features.enable_dev_mode`, and Settings.svelte drops the experimental
+	 * tabs from the list, the search index and the URL whitelist when it is
+	 * off. Saving refreshes the boot config, so the tabs appear and disappear
+	 * without a reload.
+	 *
+	 * The layout is the shared Pane/Section/Row set from ./ui. It replaced a
+	 * `flex flex-col h-full justify-between`, which pinned these two switches to
+	 * the top of the viewport and Save to the very bottom with nothing in
+	 * between.
 	 */
 	import { getContext, onMount } from 'svelte';
 	import { toast } from 'svelte-sonner';
@@ -31,11 +42,15 @@
 	import { WEBUI_BUILD_HASH, WEBUI_VERSION } from '$lib/constants';
 	import { showChangelog } from '$lib/stores';
 
+	import Pane from './ui/Pane.svelte';
+	import Row from './ui/Row.svelte';
+	import Section from './ui/Section.svelte';
+
 	const i18n = getContext('i18n');
 
 	export let saveHandler: Function;
 
-	let adminConfig: { ENABLE_SIGNUP: boolean } | null = null;
+	let adminConfig: { ENABLE_SIGNUP: boolean; DEV_MODE: boolean } | null = null;
 	let loadError = '';
 
 	const updateHandler = async () => {
@@ -62,64 +77,76 @@
 </script>
 
 <form
-	class="flex flex-col h-full justify-between space-y-3 text-sm"
+	class="text-sm h-full"
 	on:submit|preventDefault={async () => {
 		updateHandler();
 	}}
 >
-	<div class="space-y-3 overflow-y-scroll scrollbar-hidden h-full">
-		<div class="mb-3.5">
-			<div class="mt-0.5 mb-2.5 text-base font-medium">{$i18n.t('General')}</div>
-
-			<hr class="border-gray-100/30 dark:border-gray-850/30 my-2" />
-
-			<div class="mb-2.5">
-				<div class="mb-1 text-xs font-medium">{$i18n.t('Version')}</div>
-				<div class="flex flex-col text-xs text-gray-700 dark:text-gray-200">
-					<Tooltip content={WEBUI_BUILD_HASH}>
-						<span>v{WEBUI_VERSION}</span>
-					</Tooltip>
-					<button
-						class="underline flex items-center space-x-1 text-xs text-gray-500 dark:text-gray-500 w-fit"
-						type="button"
-						on:click={() => {
-							showChangelog.set(true);
-						}}
-					>
-						<div>{$i18n.t("See what's new")}</div>
-					</button>
-				</div>
-			</div>
-
-			<hr class="border-gray-100/30 dark:border-gray-850/30 my-2" />
-
-			{#if adminConfig !== null}
-				<div class="mb-2.5 flex w-full justify-between pr-2">
-					<div class="self-center text-xs font-medium">{$i18n.t('Enable New Sign Ups')}</div>
-					<Switch bind:state={adminConfig.ENABLE_SIGNUP} />
-				</div>
-				<div class="text-xs text-gray-600 dark:text-gray-400 pr-2">
-					{$i18n.t(
+	<Pane
+		title={$i18n.t('General')}
+		description={$i18n.t('Instance-wide settings. These apply to everyone on this Harvis.')}
+	>
+		{#if adminConfig !== null}
+			<Section title={$i18n.t('Access')}>
+				<Row
+					label={$i18n.t('Enable New Sign Ups')}
+					description={$i18n.t(
 						'When off, the sign-in page stops offering to create an account and the server refuses new registrations. Existing accounts are unaffected.'
 					)}
-				</div>
-			{:else if loadError}
-				<div class="text-xs text-red-700 dark:text-red-400 pr-2">
-					{$i18n.t('Could not load instance settings')}: {loadError}
-				</div>
-			{:else}
-				<div class="text-xs text-gray-600 dark:text-gray-400 pr-2">{$i18n.t('Loading...')}</div>
-			{/if}
-		</div>
-	</div>
+				>
+					<Switch bind:state={adminConfig.ENABLE_SIGNUP} />
+				</Row>
 
-	<div class="flex justify-end pt-3 text-sm font-medium">
-		<button
-			class="px-3.5 py-1.5 text-sm font-medium bg-black hover:bg-gray-900 text-white dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-lg"
-			type="submit"
-			disabled={adminConfig === null}
-		>
-			{$i18n.t('Save')}
-		</button>
-	</div>
+				<Row
+					label={$i18n.t('Developer Mode')}
+					description={$i18n.t(
+						'Shows experimental admin surfaces that are still being built. Currently: Inference Nodes (the FreeToken power switch and MoE model detection). Turn it off on a machine other people use — the panels disappear from this list, from search, and from their own links.'
+					)}
+				>
+					<Switch bind:state={adminConfig.DEV_MODE} />
+				</Row>
+			</Section>
+		{:else if loadError}
+			<div
+				class="mb-3 rounded-xl border border-red-200 dark:border-red-900/50 bg-red-50/60 dark:bg-red-950/20 px-4 py-3 text-xs text-red-700 dark:text-red-400"
+			>
+				{$i18n.t('Could not load instance settings')}: {loadError}
+			</div>
+		{:else}
+			<Section>
+				<Row label={$i18n.t('Loading...')} />
+			</Section>
+		{/if}
+
+		<Section title={$i18n.t('About')}>
+			<Row label={$i18n.t('Version')}>
+				<svelte:fragment slot="detail">
+					<div class="mt-1 flex flex-col text-xs text-gray-700 dark:text-gray-200">
+						<Tooltip content={WEBUI_BUILD_HASH} placement="right">
+							<span class="w-fit">v{WEBUI_VERSION}</span>
+						</Tooltip>
+						<button
+							class="underline flex items-center space-x-1 text-xs text-gray-500 dark:text-gray-500 w-fit"
+							type="button"
+							on:click={() => {
+								showChangelog.set(true);
+							}}
+						>
+							<div>{$i18n.t("See what's new")}</div>
+						</button>
+					</div>
+				</svelte:fragment>
+			</Row>
+		</Section>
+
+		<svelte:fragment slot="actions">
+			<button
+				class="px-3.5 py-1.5 text-sm font-medium bg-black hover:bg-gray-900 text-white dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+				type="submit"
+				disabled={adminConfig === null}
+			>
+				{$i18n.t('Save')}
+			</button>
+		</svelte:fragment>
+	</Pane>
 </form>

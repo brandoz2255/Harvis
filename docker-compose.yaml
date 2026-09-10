@@ -556,6 +556,13 @@ services:
       - ./python_back_end/integrations:/app/integrations:ro
       - ./python_back_end/plugins:/app/plugins:ro
       - ./python_back_end/owui_compat:/app/owui_compat:ro
+      # main.py replays migrations/010-017 on every boot, but migrations/ was
+      # only ever baked into the image. The image here predates 016, so boot
+      # logged "Migration file missing" for it and inference_nodes existed only
+      # because someone had copied the file in by hand — a fresh deploy from
+      # this image would come up without the table. Mounted like the packages
+      # above so a new .sql file is live on restart instead of on rebuild.
+      - ./python_back_end/migrations:/app/migrations:ro
       - ./python_back_end/onb_compat:/app/onb_compat:ro
       - ./python_back_end/open_notebook:/app/open_notebook:ro
       - ./openclaw/config:/app/openclaw_config
@@ -680,8 +687,19 @@ services:
     networks:
       - openclaw-internal
       - ollama-n8n-network
+    volumes:
+      # Each teammate's Firefox profile — its cookies, its logins, its history.
+      # A named volume, never a host path, because the same compose file has to
+      # come up unchanged on Docker Desktop for Windows and macOS. preview-runner
+      # deliberately does NOT mount this: it renders untrusted model-authored
+      # HTML, and nothing untrusted should ever see a teammate's session.
+      - agent-browser-profiles:/profiles
     expose:
+      # 8765 = the automation API. 6080 = the one websockify port every watchable
+      # session is multiplexed onto by token; nginx proxies it at /agents/vnc/,
+      # so no new host port is published on any platform.
       - "8765"
+      - "6080"
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8765/health || curl -sf http://localhost:8765/docs || exit 0"]
       interval: 30s
@@ -806,6 +824,40 @@ services:
     networks:
       - ollama-n8n-network
 
+  # Same idea as owui-builder, for the vendored Hermes desktop UI. Behind the
+  # `hermes-ui` profile on purpose: a default `docker compose up -d` must not
+  # start paying for a second frontend build, and /hermes simply 404s when the
+  # dist dir is empty. To populate it:
+  #
+  #     docker compose --profile hermes-ui up hermes-ui-builder
+  #
+  # Context is ./front_end (not the UI dir) because the build also needs
+  # ./front_end/hermes-shared — see front_end/hermes-desktop-ui/Dockerfile.
+  hermes-ui-builder:
+    build:
+      context: ./front_end
+      dockerfile: hermes-desktop-ui/Dockerfile
+      target: artifact
+    image: harvis-hermes-ui-builder:local
+    pull_policy: build
+    container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-hermes-ui-builder
+    profiles: ["hermes-ui"]
+    restart: "no"
+    volumes:
+      - ./front_end/hermes-desktop-ui/dist:/out
+    command:
+      - sh
+      - -c
+      - >
+        if [ -f /out/index.html ]; then
+          echo 'hermes UI build already present in ./front_end/hermes-desktop-ui/dist — skipping (clear it to force a rebuild)';
+        else
+          echo 'Populating ./front_end/hermes-desktop-ui/dist from the Docker build...';
+          cp -a /app/dist/. /out/ && echo 'hermes UI build ready';
+        fi
+    networks:
+      - ollama-n8n-network
+
   # Nginx Reverse Proxy
   nginx:
     # No `user:` on purpose. The upstream image starts its master as root to
@@ -835,6 +887,10 @@ services:
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
       - ./front_end/owui/build:/usr/share/nginx/owui:ro
+      # Vendored Hermes desktop UI, served at /hermes (see nginx-harvis.conf).
+      # Read-only and independent of owui: if the dir is empty /hermes 404s and
+      # every other route is unaffected.
+      - ./front_end/hermes-desktop-ui/dist:/usr/share/nginx/hermes:ro
       # Every route, shared by the HTTP and HTTPS listeners so they cannot drift.
       - ./nginx-harvis.conf:/etc/nginx/harvis.conf:ro
       # Holds the HTTPS listener and its certificate. On a stock install it has
@@ -1772,3 +1828,4 @@ volumes:
   hermes_gateway_home:   # Phase E4B: Hermes Agent gateway (Chat) profile/config/memory
   hermes_homes:          # Phase E4B: per-user Hermes Build profiles (HERMES_HOME per run)
   sentrysearch_videos:   # Optional SentrySearch profile — local user video volume only
+  agent-browser-profiles:  # Agent Teammates: one Firefox profile per teammate (browser-runner only)

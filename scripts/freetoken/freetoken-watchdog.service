@@ -1,0 +1,8 @@
+[Unit]
+Description=Restart FreeToken when it is up but not serving
+Documentation=https://github.com/brandoz2255/Harvis/blob/main/docs/inference-nodes.md
+
+[Service]
+Type=oneshot
+EnvironmentFile=-%h/.config/freetoken.env
+ExecStart=%h/.local/bin/freetoken-watchdog

@@ -24,12 +24,23 @@ sympy==1.13.1
 fastapi
 uvicorn[standard]
 websockets
-python-multipart
+python-multipart==0.0.32
 asyncpg
 passlib[bcrypt]==1.7.4
-python-jose[cryptography]==3.3.0
+# 3.5.0, not 3.4.0. Both fix CVE-2024-33663 (CRITICAL, algorithm confusion with
+# OpenSSH ECDSA keys) and CVE-2024-33664, but 3.4.0 declares `pyasn1<0.5.0`, which
+# drags pyasn1 down to 0.4.8 and reintroduces four HIGH denial-of-service
+# advisories (unbounded recursion, quadratic OID parsing, unbounded long-form tag
+# IDs, REAL-value resource exhaustion). 3.5.0 relaxed that to `pyasn1>=0.5.0`, so
+# it is the only version that fixes the JWT flaw without trading it for four more.
+python-jose[cryptography]==3.5.0
 bcrypt==4.0.1
-cryptography>=41.0.0
+# CVE-2026-69247 (HIGH): PKCS#7 EnvelopedData decryption leaked a Bleichenbacher
+# oracle through distinguishable errors and timing. Fixed in 50.0.0. The floor was
+# >=41.0.0, which resolved to a vulnerable build. Harvis does not decrypt
+# EnvelopedData itself, but cryptography is the backend for python-jose, passlib
+# and google-auth, so it is not somewhere to carry a known-bad floor.
+cryptography>=50.0.0
 requests
 pydantic
 Pillow
@@ -84,7 +95,11 @@ rank-bm25>=0.2.2
 
 youtube-transcript-api>=0.6.0
 yt-dlp>=2024.0.0
-pypdf>=3.0.0
+# Floor raised from >=3.0.0 for CVE-2026-84310, CVE-2026-71870 and six sibling
+# advisories: malformed outlines and oversized /ToUnicode streams cause unbounded
+# runtime and memory. This is the RAG text-extraction path, so every PDF a user
+# uploads reaches it. Fixed in 6.16.1.
+pypdf>=6.16.1
 python-magic>=0.4.27
 python-docx
 
@@ -114,3 +129,34 @@ reportlab>=4.0.0
 # coexist on purpose.
 pypdfium2>=4.30.0
 croniter
+
+# --- Transitive security floors -------------------------------------------
+# Neither of these is imported by Harvis directly; both arrive as dependencies
+# and both resolved to versions with published advisories. Pinned here because
+# there is nowhere else to say it — remove a line only when its parent stops
+# pulling the package.
+
+# Pulled in by newspaper3k (unmaintained since 2020, so it will not raise its own
+# floor). 3.10.0 carried eight advisories including GHSA-m4rf-3fr8-xwx3 (CRITICAL,
+# JVM argument injection via the Stanford tagger) and an unpickler validation
+# bypass allowing remote code execution. 3.10.3 fixes seven of the eight; the
+# remaining one (GHSA-8mgp-746c-j5xp, model-artifact path escape) has no fix
+# released and is only reachable through the model-download APIs, which Harvis
+# does not call.
+nltk>=3.10.3
+
+# Pulled in by the http2 extras of httpx/httpcore. CVE-2026-71554: a duplicate
+# Host header could facilitate request smuggling. Fixed in 4.4.1.
+h2>=4.4.1
+
+# Pulled in by python-jose (via rsa) and by google-auth's pyasn1_modules. The
+# floor exists to stop a resolver from satisfying an older python-jose cap by
+# walking pyasn1 back to 0.4.x, which carries four HIGH DoS advisories. 0.6.4 is
+# the first release clear of all four.
+pyasn1>=0.6.4
+
+# Not pinnable: ecdsa (a hard dependency of python-jose) carries CVE-2024-23342,
+# a Minerva timing attack on P-256, and upstream has published no fix and does not
+# intend to. It is inert here — Harvis signs and verifies with HS256 only
+# (ALGORITHM = "HS256"; every jwt.decode passes algorithms=[...] explicitly), so
+# no ECDSA operation ever runs. Revisit if an asymmetric JWT algorithm is adopted.

@@ -379,6 +379,8 @@ TOOL_SCHEMA = [
                 "bodies. USE THIS FIRST for anything you cannot answer from memory: a release, a "
                 "version, a price, a model card, anything current. Never guess a URL for "
                 "agent_reach_web_read — search for it, then read the result you want. "
+                "If you have computer_open, prefer the browser for a search the user asked you "
+                "to do: it is the screen they can watch. "
                 "Lane 5 / HARVIS_AGENT_REACH_ENABLED. Not available inside OpenClaw."
             ),
             "parameters": {
@@ -399,6 +401,9 @@ TOOL_SCHEMA = [
             "description": (
                 "Read a public web page as text (Jina reader via Harvis backend). Pass a URL you "
                 "got from agent_reach_web_search — a URL assembled from memory is usually a 404. "
+                "If you have computer_open, use the browser instead: the user can watch and take "
+                "over it, every action is recorded, and it can click and type. This reader is the "
+                "fallback for a long article the browser snapshot truncates. "
                 "Lane 5 / HARVIS_AGENT_REACH_ENABLED. No cookies. Not available inside OpenClaw."
             ),
             "parameters": {
@@ -488,6 +493,146 @@ TOOL_SCHEMA = [
     },
 ]
 
+# ── The teammate's computer ─────────────────────────────────────────────────
+# A real browser on the browser runner, with a screen the user watches and can
+# take over. Refs, not pixels: every result is a snapshot naming the controls
+# on the page (ref_12), and the verbs act on those refs. Offered ONLY when the
+# runner was handed a computer context (SubAgentRunner.run(computer=...)) —
+# today that is a teammate run through the coordinator. Lane 5, and each call
+# is judged against the four hard limits before it runs (plugins/agents/
+# computer.hard_limit_for, called from the runner's gate).
+_REF_ARG = {"type": "string", "description": "A ref from the latest snapshot, e.g. ref_12."}
+COMPUTER_TOOL_SCHEMA = [
+    {
+        "type": "function",
+        "function": {
+            "name": "computer_open",
+            "description": (
+                "Open a page in YOUR browser (a real Firefox the user can watch). Use this "
+                "for anything on the web: browsing, searching, shopping, reading a site. No "
+                "URL in mind? Open a search, e.g. https://duckduckgo.com/?q=laptops+under+800. "
+                "Returns a snapshot: title, URL, page text and the controls as refs."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"url": {"type": "string", "description": "An https URL."}},
+                "required": ["url"],
+            },
+        },
+        "lane": LANE_EXTERNAL_SERVICES,
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "computer_snapshot",
+            "description": (
+                "Look at the page that is open in your browser right now: title, URL, text, "
+                "and the clickable/typeable controls as refs. Take one whenever the page may "
+                "have changed; refs from an older snapshot are stale."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+        "lane": LANE_EXTERNAL_SERVICES,
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "computer_click",
+            "description": "Click a control by its ref. Returns a fresh snapshot.",
+            "parameters": {
+                "type": "object",
+                "properties": {"ref": _REF_ARG},
+                "required": ["ref"],
+            },
+        },
+        "lane": LANE_EXTERNAL_SERVICES,
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "computer_type",
+            "description": (
+                "Type into a textbox by its ref (replaces what is there). Set submit=true to "
+                "press Enter afterwards, e.g. to run a search. Never type passwords or card "
+                "numbers. Returns a fresh snapshot."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ref": _REF_ARG,
+                    "text": {"type": "string", "description": "What to type."},
+                    "submit": {"type": "boolean", "description": "Press Enter after typing."},
+                },
+                "required": ["ref", "text"],
+            },
+        },
+        "lane": LANE_EXTERNAL_SERVICES,
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "computer_press",
+            "description": "Press a key (Enter, Escape, Tab, ArrowDown…), optionally inside a ref.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string", "description": "Key name, e.g. Enter."},
+                    "ref": _REF_ARG,
+                },
+                "required": ["key"],
+            },
+        },
+        "lane": LANE_EXTERNAL_SERVICES,
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "computer_scroll",
+            "description": "Scroll the page (or a ref) up or down to see more. Returns a fresh snapshot.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "direction": {"type": "string", "enum": ["up", "down"]},
+                    "amount": {"type": "integer", "description": "Pixels, default 600."},
+                    "ref": _REF_ARG,
+                },
+            },
+        },
+        "lane": LANE_EXTERNAL_SERVICES,
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "computer_back",
+            "description": "Go back one page in your browser. Returns a fresh snapshot.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+        "lane": LANE_EXTERNAL_SERVICES,
+    },
+]
+TOOL_SCHEMA.extend(COMPUTER_TOOL_SCHEMA)
+COMPUTER_TOOLS = frozenset(
+    (e.get("function") or {}).get("name", "") for e in COMPUTER_TOOL_SCHEMA
+)
+
+# Goes into the system prompt of any run that has the computer. Kept next to
+# the schema so the words and the tools cannot drift apart.
+COMPUTER_PROMPT = (
+    "## Your computer\n"
+    "You have a real web browser that the user can watch and take over. For ANYTHING on "
+    "the web — browsing, searching, shopping, reading a site, filling a form — use it "
+    "instead of guessing or asking the user for a URL. computer_open(url) loads a page; "
+    "with no URL in mind, open a search such as https://duckduckgo.com/?q=your+words. "
+    "Every result is a SNAPSHOT: the page title, URL, its text, and the controls on it as "
+    "refs like ref_12. Act on refs: computer_click(ref), computer_type(ref, text, submit), "
+    "computer_press(key), computer_scroll(direction). Use refs from the LATEST snapshot only; "
+    "call computer_snapshot when you need a fresh look. Signing in, paying, sending and "
+    "deleting always pause for the user's approval — that is normal, keep going once it "
+    "resolves. If a call says the user has taken over, wait and try again rather than "
+    "giving up. Never type passwords or card numbers. Put what you found in your finish "
+    "summary, and in a file too when the user asked for one."
+)
+
 # What actually goes ON THE WIRE to the model API — TOOL_SCHEMA minus Harvis-
 # internal keys ("lane"). Strict OpenAI-compatible upstreams can reject unknown
 # keys inside a tool entry, so the request body must stay byte-identical to the
@@ -574,9 +719,15 @@ async def dispatch_tool(
     session_id: str | None = None,
     pool=None,
     run_id: str | None = None,
+    computer: dict | None = None,
 ) -> tuple[str, bool]:
     """Run one tool. Returns (output, ok). Never raises — failures come back as
     (message, False) so the agent loop can react.
+
+    ``computer`` is the screen this run may act on (see plugins.agents.computer
+    — user_id, agent_id, run_id, cleared_limits). None for every run that was
+    not handed one, and then the computer_* verbs refuse rather than start a
+    browser nobody is watching.
 
     ``session_id`` is set ONLY for VibeCode-session turns (session_turn.py); it
     routes exec/run_tests into the hardened per-session runner container when
@@ -586,6 +737,13 @@ async def dispatch_tool(
     context for the code_file_changes audit trail (fail-open when absent)."""
     args = args if isinstance(args, dict) else {}
     try:
+        if name in COMPUTER_TOOLS:
+            if computer is None:
+                return ("DENIED: this run has no computer.", False)
+            from plugins.agents.computer import act as computer_act
+
+            return await computer_act(computer, name, args)
+
         if name == "read_file":
             rel = str(args.get("path") or "")
             if not validate_agent_path(workspace_path, rel):

@@ -485,12 +485,26 @@
 
 	$: if (selectedModels) rememberLastModels();
 
+	// The last real model picked, kept apart from teammates (`agent:<id>`): a
+	// teammate whose own model is "auto" runs on this one.
+	const LAST_CHAT_MODEL_KEY = 'harvis.chat.last_chat_model';
+
 	const rememberLastModels = () => {
 		const ids = (selectedModels ?? []).filter((m) => m && m !== '');
 		if (ids.length === 0) return;
 		try {
 			localStorage.setItem(LAST_MODEL_KEY, JSON.stringify(ids));
+			const plain = ids.find((m) => !m.startsWith('agent:'));
+			if (plain) localStorage.setItem(LAST_CHAT_MODEL_KEY, plain);
 		} catch (_) {}
+	};
+
+	const lastChatModel = (): string => {
+		try {
+			return localStorage.getItem(LAST_CHAT_MODEL_KEY) || '';
+		} catch (_) {
+			return '';
+		}
 	};
 
 	const lastUsedModels = (): string[] => {
@@ -3443,6 +3457,7 @@
 				stream: stream,
 				model: model.id,
 				harvis_mode: $chatMode, // 'auto' | 'chat' | 'agent' | 'orchestrate' — forces fast chat vs workspace
+				harvis_last_model: lastChatModel() || undefined, // teammates on "auto" run on the last real pick
 				harvis_orchestrate_uniform: $orchestrateUniformModel, // orchestrate: force one model for all sub-agents
 				harvis_repo_path: $orchestrateRepoPath || undefined, // orchestrate: attach a real repo (clone-local diff vs HEAD)
 				...(messages.length > 0 ? { messages } : {}),

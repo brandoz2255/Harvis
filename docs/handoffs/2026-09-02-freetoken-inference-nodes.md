@@ -2,7 +2,7 @@
 
 FreeToken session, continuing from the 2026-08-31 spike (`~/freetoken-spike/results.md`)
 and yesterday's three-layer plan. **Layer 1 and Layer 2 are built, deployed and verified
-live in the UI. Layer 3 is logged, not built. Committed on `fixes` (COMMIT_HASH), not pushed.**
+live in the UI. Layer 3 is logged, not built. Committed on `fixes` (9f758eda), not pushed.**
 
 Second half of the day (the "it messes up the chat rendering" follow-up) is at the
 bottom: **Afternoon — what the first real run showed, and what changed**.
@@ -21,7 +21,7 @@ state of the world.
 
 | Branch | State |
 |---|---|
-| `fixes` | The running stack's checkout. This session's files are committed as COMMIT_HASH. Earlier uncommitted work (`discord_workspace_bot.py`, `chat_completion.py`, `fast_path.py`, `orchestration/{authz,runner}.py`, `agent_reach/provenance.py`, `owui_compat/system_prompt.py`, `test_reach_egress_guard.py`, `test_system_prompt_core.py`) was **not** touched and is still uncommitted. |
+| `fixes` | The running stack's checkout. This session's files are committed as 9f758eda. Earlier uncommitted work (`discord_workspace_bot.py`, `chat_completion.py`, `fast_path.py`, `orchestration/{authz,runner}.py`, `agent_reach/provenance.py`, `owui_compat/system_prompt.py`, `test_reach_egress_guard.py`, `test_system_prompt_core.py`) was **not** touched and is still uncommitted. |
 | `harvis1.3`, `main` | untouched |
 
 Files from this session:
@@ -106,7 +106,7 @@ untouched when no node is configured.
 
 ## Next
 
-1. ~~Commit~~ — done (COMMIT_HASH on `fixes`). Not pushed; `main`/`harvis1.3` untouched.
+1. ~~Commit~~ — done (9f758eda on `fixes`). Not pushed; `main`/`harvis1.3` untouched.
 2. Decide the GPU split: `FT_MEMORY_RATIO` is 0.90 now (measured, see the afternoon
    section); going lower to fit a small Ollama title model is untested, and
    `sudo system76-power graphics hybrid` + reboot is still on hold per you.
@@ -160,10 +160,14 @@ VRAM 6.75 GB.
    `front_end/owui/build` (index and both fix chunks, `reasoningOpen` and the
    `done==="false"` tokenizer path present), and a live stream straight from the
    node returned 127 `reasoning_content` deltas before content. The 32 backend
-   tests still pass. The one thing not re-done is the visual click-through in a
-   browser (the Chrome automation from the original session was gone); if the
-   Thinking card still misbehaves live, suspect a third gate in
-   `MarkdownTokens.svelte`/`Collapsible.svelte`, not these two.
+   tests still pass. **Visual click-through done 4:58 PM 2026-09-02** from the
+   signed-in Chrome (user `cisco`, "in three sentences, why do teams switch on
+   pick and roll defense"): the bubble showed *Working through it…* at 9 s, then
+   the spinner + **Thinking…** collapsible at 19 s, 31 s and 51 s (no bare dot),
+   then *Thought for 43 seconds* and a three-sentence answer; footer
+   `2.1k / 16k · 13%`, sidebar title **Pick And Roll Defense** from the node.
+   No third gate. Cosmetic leftover: the bubble's "420 tok/s" is wrong (OWUI
+   divides by a missing `eval_duration`); the journal says ~30 tok/s.
 2. **The reach classifier thought for 17 s** because `ModelRouter.complete` bypassed
    the node policy. Fixed: it now shapes the body like the proxy does. Verified ~1 s,
    24 tokens.
@@ -192,6 +196,11 @@ requests: prompt 11,508 / completion 932 tokens, p95 33.6 s, TTFT mean 5.2 s (co
 MoE cache after the restart), VRAM 5.9 GB. Tests: **32 passed** in the container.
 
 Cost of the new settings: expert slots 1,457 → 1,165 (more PCIe fetches on a cold
-cache). Decode speed after warm-up not yet re-measured — that is the next thing to
-look at if chats feel slower than this morning's ~34 tok/s.
+cache). **Warm decode re-measured 4:58 PM** from the FreeToken journal's
+`gen throughput` samples (first cold sample dropped): 30.2 tok/s mean over 33
+samples at ratio 0.90, against 32.9 tok/s over 33 samples this morning at 0.95 —
+about 8% slower, and it still cannot OOM on a grounded prompt. Prefill of the
+763-token prompt took 1.6 s; VRAM 7.1 GB of 8.15 with desktop apps on the card.
+Not worth clawing back unless chats start feeling slow; if so, the lever is
+`FT_KV_RESERVE=8192` + `FT_MEMORY_RATIO=0.92`, restart only, no reboot.
 

@@ -38,6 +38,15 @@ from owui_compat.workspace_method import (
 
 from .risk import gate_decision_ex, is_session_approved
 
+# Reach fetch tools whose URL argument is chosen by the MODEL. web_search takes a
+# query, not a URL, so it is deliberately absent.
+_REACH_FETCH_TOOLS = frozenset({
+    "agent_reach_web_read",
+    "agent_reach_yt_transcript",
+    "agent_reach_gh_view",
+    "agent_reach_rss_read",
+})
+
 logger = logging.getLogger(__name__)
 
 _TRUTHY = {"1", "true", "yes", "on"}
@@ -85,6 +94,13 @@ def _lane_flag_enabled(lane: int, tool_name: str = "") -> bool:
             return (
                 os.getenv("HARVIS_VISION_SELF_CHECK_ENABLED") or ""
             ).strip().lower() in _TRUTHY
+        # The teammate's browser. On by default: the tools are only ever
+        # offered to a run that was handed a screen, and every call is judged
+        # against the hard limits before it runs (plugins/agents/computer).
+        if name.startswith("computer_"):
+            return (
+                os.getenv("HARVIS_AGENT_COMPUTER_ENABLED", "1") or ""
+            ).strip().lower() in _TRUTHY
         # Agent Reach / research internet tools (lane-5, never OpenClaw egress).
         if name.startswith(("agent_reach_", "agent_reach.", "web_reach_")):
             return (
@@ -108,6 +124,21 @@ async def _emit_decision(emit, payload: dict) -> None:
         logger.warning("authz decision emit failed: %s", exc)
 
 
+def _reach_target(tool_name: str, args: dict) -> str:
+    """The URL a reach fetch tool would go to, or "" when it is not one."""
+    base = (tool_name or "").lower()
+    if base.startswith("agent_reach."):
+        base = "agent_reach_" + base[len("agent_reach.") :]
+    if base not in _REACH_FETCH_TOOLS:
+        return ""
+    if not isinstance(args, dict):
+        return ""
+    # Same key order dispatch_agent_reach itself reads, so the string checked is
+    # the string fetched. gh_view also accepts owner/repo/path shorthand, which
+    # is not a URL — provenance.check abstains on those.
+    return str(args.get("url") or args.get("path") or "")
+
+
 async def authorize_action(
     *,
     tool_name: str,
@@ -118,9 +149,14 @@ async def authorize_action(
     emit,
     session_id: str | None = None,
     pool=None,
+    hard_limit: str | None = None,
 ) -> AuthzResult:
     """The choke point: lane gate first, then the friction gate. Emits exactly
-    one 'decision' payload {tool, lane, tier, policy, reason, source} per call."""
+    one 'decision' payload {tool, lane, tier, policy, reason, source} per call.
+
+    ``hard_limit`` names the teammate limit (sign_in / pay / send / delete) the
+    caller has already decided this action crosses; it forces the ``hard`` tier,
+    which asks under every rung and is never pre-approved for a session."""
 
     # ── a. LANE GATE (structural) ─────────────────────────────────────────
     tool = {
@@ -140,11 +176,34 @@ async def authorize_action(
         })
         return AuthzResult(allowed=False, reason=reason, tier=None, needs_approval=False)
 
+    # ── a2. EGRESS GATE (URL provenance) ────────────────────────
+    # A reach fetch may follow a link, never invent one. Measured: telling the
+    # model in the prompt to distrust page content does not stop it obeying an
+    # injected instruction, so the refusal has to live here rather than in words.
+    # Abstains unless the caller opened a provenance ledger for this run.
+    target = _reach_target(tool_name, args)
+    if target:
+        try:
+            from agent_reach.provenance import check as _prov_check
+
+            ok_url, why = _prov_check(run_id, target)
+        except Exception as exc:  # never let the guard break a run
+            logger.warning("egress provenance check errored: %s", exc)
+            ok_url, why = True, ""
+        if not ok_url:
+            await _emit_decision(emit, {
+                "tool": tool_name, "lane": lane, "tier": None,
+                "policy": "deny", "reason": why, "source": "egress_gate",
+            })
+            return AuthzResult(allowed=False, reason=why, tier=None, needs_approval=False)
+
     # ── b. FRICTION GATE (permission ladder) ──────────────────────────────
     # Only when permission_mode is set — clone-mode + the orchestrator pass
     # None and have never been risk-gated; that behavior is preserved.
     if permission_mode:
-        decision, tier, risk_reason = gate_decision_ex(tool_name, args, permission_mode)
+        decision, tier, risk_reason = gate_decision_ex(
+            tool_name, args, permission_mode, hard_limit
+        )
         if decision == "block":
             reason = f"blocked by permission mode '{permission_mode}' (risk: {tier})"
             await _emit_decision(emit, {
@@ -155,7 +214,11 @@ async def authorize_action(
         if decision == "gate":
             # Approve-for-session FIRST: an action the user already approved for the
             # whole session auto-allows without re-prompting (Build Space Phase 2).
-            if session_id and await is_session_approved(pool, session_id, tool_name, args):
+            if (
+                session_id
+                and tier != "hard"
+                and await is_session_approved(pool, session_id, tool_name, args)
+            ):
                 await _emit_decision(emit, {
                     "tool": tool_name, "lane": lane, "tier": tier,
                     "policy": "allow", "reason": "pre-approved for this session",

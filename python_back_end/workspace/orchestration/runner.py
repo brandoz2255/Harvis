@@ -18,16 +18,39 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 from typing import AsyncGenerator
 
+from owui_compat.system_prompt import with_core
 from owui_compat.workspace_method import DEFAULT_SAFE_LANE
 
 from ..openclaw_client import OpenClawEvent
 from .authz import authorize_action
+
+try:
+    # URL provenance for reach fetches. The ledger is what authorize_action's
+    # egress gate consults; a run that never calls begin() is simply not gated.
+    from agent_reach.provenance import (
+        begin as _prov_begin,
+        drop as _prov_drop,
+        note_observed as _prov_note,
+    )
+except Exception:  # pragma: no cover - keeps the runner importable without it
+    def _prov_begin(*_a, **_k): return None
+    def _prov_drop(*_a, **_k): return None
+    def _prov_note(*_a, **_k): return None
 from .model_router import ModelRouter
 from .risk import await_action_decision, mark_pending_resolved, persist_pending, register_pending
-from .tools import WIRE_TOOL_SCHEMA, dispatch_tool, filter_wire_schema, lane_for_tool, parse_tool_calls
+from .tools import (
+    COMPUTER_PROMPT,
+    COMPUTER_TOOLS,
+    WIRE_TOOL_SCHEMA,
+    dispatch_tool,
+    filter_wire_schema,
+    lane_for_tool,
+    parse_tool_calls,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +72,32 @@ _MAX_WRITES_PER_PATH = max(1, int(os.getenv("HARVIS_ORCH_MAX_WRITES_PER_PATH", "
 # Argument keys the file-writing tools use for their target, across every engine we speak
 # to. Order matters: the first one present wins.
 _PATH_ARG_KEYS = ("path", "file_path", "filename", "file", "filepath", "target_file", "target")
+
+# A model that says what it is ABOUT to do and then calls nothing has not
+# finished — it stalled mid-thought. Ending the run there ships the announcement
+# itself as the deliverable: a "browse for cats" run came back with
+# "Let me take a fresh snapshot to see the current state of the page." and no
+# cats, four steps into a twelve-step budget. Detect the announcement so the
+# loop can ask for the call instead of accepting it as an answer.
+_MAX_STALL_RETRIES = max(0, int(os.getenv("HARVIS_ORCH_MAX_STALL_RETRIES", "2")))
+_NARRATION_RE = re.compile(
+    r"^(?:ok(?:ay)?|now|next|then|first|alright|sure)?[,.!\s]*"
+    r"(?:let me\b|let'?s\b|i'?ll\b|i will\b|i'?m going to\b|i am going to\b"
+    r"|i need to\b|i should\b|going to\b)",
+    re.IGNORECASE,
+)
+
+
+def _is_narration(s: str) -> bool:
+    """True when the text announces a next action instead of answering."""
+    t = (s or "").strip().strip('"\'`*').lstrip("-• ").strip()
+    if not t or not _NARRATION_RE.match(t):
+        return False
+    # An announcement that also carries the answer IS an answer. Length is the
+    # honest signal: "Let me check the page." is a stall; three paragraphs that
+    # open with "Let me walk you through it" is a deliverable.
+    return len(t) <= 400 and t.count("\n") <= 2
+
 # Argument keys carrying the bytes to be written.
 _CONTENT_ARG_KEYS = ("content", "text", "contents", "new_str", "body", "data", "patch", "diff")
 
@@ -87,6 +136,21 @@ _READ_TOTAL_CHARS = max(4000, int(os.getenv("HARVIS_ORCH_READ_TOTAL_CHARS", "360
 # Tools whose output IS the information the agent was asked for. Every agent_reach_*
 # tool qualifies (matched by prefix below), plus reading a file off the workspace.
 _CONTENT_TOOLS = ("read_file",)
+
+# Every computer_* call answers with a fresh page snapshot, shaped
+# "Page: … / URL: … / Controls: …refs… / Text: …". Controls come FIRST, so the
+# flat 500-char clip spent the whole budget on the title and two refs and cut
+# the page text off entirely — the agent browsed for real and then answered
+# from prior knowledge because it had never seen the page. A snapshot is the
+# agent's eyes; it gets a real budget, and it is deliberately NOT charged to
+# the run-wide read ceiling: superseded snapshots are shrunk by
+# _compact_messages already, and starving the newest one is the exact bug
+# this fixes.
+_SNAPSHOT_TOOLS = frozenset({
+    "computer_open", "computer_snapshot", "computer_click",
+    "computer_type", "computer_press", "computer_scroll", "computer_back",
+})
+_SNAPSHOT_RESULT_CHARS = max(1000, int(os.getenv("HARVIS_ORCH_SNAPSHOT_CHARS", "8000")))
 _SKIP_DIRS = {
     ".git", "__pycache__", "node_modules", ".venv", "venv", "dist", "build",
     ".next", "target", "vendor", ".cache", "coverage", ".mypy_cache", ".pytest_cache",
@@ -256,6 +320,9 @@ def _default_system(label: str, disabled: set[str]) -> str:
         if "exec" not in disabled
         else " You cannot run commands in this session, so make the code correct by reading it."
     )
+    # The computer paragraph rides only when the verbs are actually offered —
+    # same rule as edit/check above: never describe a tool the model cannot call.
+    computer = ("\n\n" + COMPUTER_PROMPT) if "computer_snapshot" not in disabled else ""
     return (
         f"You are {label}, an autonomous coding sub-agent working in an ISOLATED, "
         "initially-empty workspace directory. You can ONLY use the provided tools, and "
@@ -284,7 +351,7 @@ def _default_system(label: str, disabled: set[str]) -> str:
         "summary is the entire reply the user sees — there are no files beside it. So "
         "the summary must BE the answer: the table, the numbers, the comparison, the "
         "sources you read. A run that answers \"I compiled a comparison of X and Y\" "
-        "has told the user nothing. Write what you found, not what you did."
+        "has told the user nothing. Write what you found, not what you did." + computer
     )
 
 
@@ -511,8 +578,19 @@ class SubAgentRunner:
         pool=None,
         user_id: int | None = None,
         session_id: str | None = None,  # VibeCode session — enables approve-for-session
+        # The screen this run may act on (plugins.agents.computer context). None
+        # withholds the computer_* verbs entirely; see the coordinator.
+        computer: dict | None = None,
     ) -> AsyncGenerator[OpenClawEvent, None]:
         def ev(etype: str, data: dict) -> OpenClawEvent:
+            if etype == "tool_result":
+                # Everything the run has SEEN becomes followable — page bodies,
+                # search-result lists, file contents, connector output. Exact URLs
+                # only: seeing a link is permission to follow that link, never
+                # permission to address the site it points at with a query of the
+                # model's own devising. One site on purpose — every tool result in
+                # this method goes through ev(), including the MCP branch.
+                _prov_note(run_id, str(data.get("output") or ""))
             e = OpenClawEvent(
                 etype,
                 {**data, "agent_label": label, "parent_run_id": parent_run_id, "model": model_name},
@@ -522,6 +600,9 @@ class SubAgentRunner:
             return e
 
         started = time.monotonic()
+        # URLs the USER named are trusted at HOST level (so "check example.com/docs"
+        # also permits example.com/docs/api). Nothing the run merely reads earns that.
+        _prov_begin(run_id, task if isinstance(task, str) else "")
         yield ev("agent_start", {"label": label})
 
         # The default template carries a {label} placeholder; a CUSTOM sub-agent
@@ -555,6 +636,7 @@ class SubAgentRunner:
         # track completion, NOT "every tool call succeeded".
         completed = False
         steps = 0
+        stall_retries = 0
         last_fp = await asyncio.to_thread(_ws_fingerprint, workspace_path)  # baseline (off the event loop)
         made_edit = False
         idle = 0
@@ -611,6 +693,8 @@ class SubAgentRunner:
             context window and timing out the next model round.
             """
             nonlocal read_chars_used
+            if name in _SNAPSHOT_TOOLS:
+                return result[:_SNAPSHOT_RESULT_CHARS]
             if not (name.startswith(("agent_reach_", "agent_reach.")) or name in _CONTENT_TOOLS):
                 return result[:_TOOL_RESULT_CHARS]
             room = min(_READ_RESULT_CHARS, _READ_TOTAL_CHARS - read_chars_used)
@@ -636,6 +720,22 @@ class SubAgentRunner:
         # stays inside it. The gauge wants the second number; the cost wants this one.
         billed_prompt_tokens = 0
         ctx_window = int(os.getenv("HARVIS_OLLAMA_NUM_CTX", "24576") or 24576)
+        # That default describes Ollama. A model served by an inference node has
+        # whatever KV cache THAT box allocated — FreeToken reports 16,469 tokens for
+        # Qwen3.6 — and compacting at 70% of a window the node does not have means
+        # compaction fires after the node is already full. Ask the node.
+        try:
+            from plugins.inference_nodes import resolve_node as _resolve_node
+            from plugins.inference_nodes.probe import ctx_for as _node_ctx_for
+
+            _node, _ = await _resolve_node(model_name)
+            if _node is not None:
+                _cap = _node_ctx_for(_node.spec.name, model_name)
+                if _cap and _cap > 0:
+                    ctx_window = int(_cap)
+        except Exception:
+            # No node, or the probe is cold: the Ollama default is the right answer.
+            pass
         # Offer-time tool policy: auto-detected launches never even SEE the heavy
         # tools in the offered schema. authorize_action stays the runtime backstop.
         # launch_mode == "user" (the default) → empty set → schema identical to today.
@@ -704,6 +804,10 @@ class SubAgentRunner:
                 disabled |= _reach_tools
         except Exception:
             disabled |= _reach_tools
+        # The computer exists only for a run that was handed a screen to act on
+        # (teammate runs, via the coordinator). Everyone else never sees the verbs.
+        if computer is None:
+            disabled |= COMPUTER_TOOLS
 
         # `disabled` is final — now the default prompt can name the real tool set.
         if not system_prompt:
@@ -714,6 +818,13 @@ class SubAgentRunner:
                     + "\n\n".join(skill_blocks)
                 )
             messages[0]["content"] = _base
+
+        # The house ground rules ride on EVERY run — default prompt or custom
+        # sub-agent prompt alike. A custom system_prompt replaces _default_system
+        # wholesale above, which is right for the task brief and wrong for the
+        # safety rules, and this is the lane that actually reads the web and calls
+        # connector tools. with_core is idempotent, so a re-entrant call is safe.
+        messages[0]["content"] = with_core(messages[0].get("content"))
 
         # MCP connector tools. Resolved ONCE per run, not per step: connecting
         # spawns a container, and a server that is down must cost one failed
@@ -732,6 +843,18 @@ class SubAgentRunner:
             except Exception:
                 logger.exception("mcp: tool discovery failed; continuing without it")
                 mcp_specs = []
+        if mcp_specs and computer is not None:
+            # A teammate run re-sends every tool schema on every step, so the
+            # whole connector catalogue (156 tools / ~200 KB here) starved the
+            # model of time before its first tool call. Budget it, goal-first.
+            from plugins.agents.tool_budget import trim as _trim_mcp
+
+            mcp_specs, _dropped_mcp = _trim_mcp(mcp_specs, task)
+            if _dropped_mcp:
+                logger.info(
+                    "subagent %s: connector tools trimmed to %d (%d over budget)",
+                    label, len(mcp_specs), _dropped_mcp,
+                )
         if mcp_specs:
             yield ev("token", {
                 "content": f"[{len(mcp_specs)} connector tool(s) available]\n"
@@ -803,9 +926,50 @@ class SubAgentRunner:
                 })
 
                 if not tcs:
-                    # No tool call → the model is done (its content is the summary).
-                    if _is_placeholder(content):
+                    # No tool call → the model is done (its content is the summary)
+                    # UNLESS it only announced a next action, in which case it
+                    # stalled and gets a nudge to actually make the call. Once the
+                    # nudges are spent the narration is discarded rather than
+                    # shipped, leaving `summary` empty so the tools-removed answer
+                    # round below writes a real deliverable from what it has.
+                    if _is_narration(content) and stall_retries < _MAX_STALL_RETRIES:
+                        stall_retries += 1
+                        logger.info(
+                            "subagent %s: narrated a next action with no tool call, "
+                            "nudging (%d/%d): %r",
+                            label, stall_retries, _MAX_STALL_RETRIES, content[:120],
+                        )
+                        messages.append({"role": "assistant", "content": content})
+                        messages.append({"role": "user", "content": (
+                            "You described what you were about to do but did not call a "
+                            "tool. Do it now — emit the tool call itself. If the task is "
+                            "already done, call finish(summary) with the full answer."
+                        )})
+                        continue
+                    if _is_placeholder(content) or _is_narration(content):
                         content = ""
+                    if not content and stall_retries < _MAX_STALL_RETRIES:
+                        # Nothing at all: no tool call, no prose. That is a model
+                        # that failed to emit, not a model that is finished, and
+                        # ending here burned 9 of 12 steps and delivered nothing.
+                        # Log what the model actually sent — an empty turn is
+                        # invisible otherwise, and the cause differs (truncation,
+                        # a reasoning-only channel, a malformed call).
+                        stall_retries += 1
+                        logger.info(
+                            "subagent %s: empty turn (no tool call, no content), "
+                            "retrying (%d/%d); finish_reason=%r keys=%s usage=%s",
+                            label, stall_retries, _MAX_STALL_RETRIES,
+                            msg.get("finish_reason"),
+                            sorted(k for k in msg if not k.startswith("_")),
+                            _usage or {},
+                        )
+                        messages.append({"role": "assistant", "content": _NO_PROSE})
+                        messages.append({"role": "user", "content": (
+                            "That reply was empty. Answer the request now, or call a "
+                            "tool to make progress on it."
+                        )})
+                        continue
                     if content:
                         yield ev("token", {"content": content[:600]})
                     # Answering in prose is how a question ends — the model has no
@@ -857,9 +1021,16 @@ class SubAgentRunner:
                     yield ev("tool_call", {"tool": name, "args": args})
                     if name in _EDIT_TOOLS:
                         edit_attempted = True
+                    # Per-call view of the computer: gains the approval id when
+                    # the user cleared this specific action (for the audit row).
+                    computer_call = computer
                     try:
                         call_key = f"{name}|{json.dumps(args, sort_keys=True, default=str)}"
                     except Exception:
+                        call_key = ""
+                    if name in COMPUTER_TOOLS:
+                        # The page moves under identical arguments: a second
+                        # snapshot, click or scroll is new information, not a repeat.
                         call_key = ""
                     if call_key and call_key in seen_calls:
                         # Re-running it would return the same bytes and double their cost
@@ -1023,6 +1194,14 @@ class SubAgentRunner:
                     # unchanged (clone-mode + the orchestrator pass None).
                     if permission_mode or lane > DEFAULT_SAFE_LANE:
                         decision_payloads: list[dict] = []
+                        # A browser verb is judged against the four hard limits
+                        # by what it is about to touch (the latest snapshot's
+                        # refs); a named limit forces the 'hard' tier below.
+                        hard_limit = None
+                        if computer is not None and name in COMPUTER_TOOLS:
+                            from plugins.agents import computer as _computer
+
+                            hard_limit = _computer.hard_limit_for(computer, name, args)
                         res = await authorize_action(
                             tool_name=name,
                             args=args,
@@ -1032,6 +1211,7 @@ class SubAgentRunner:
                             emit=decision_payloads.append,
                             session_id=session_id,
                             pool=pool,
+                            hard_limit=hard_limit,
                         )
                         # 'decision' trace events ride the normal event pipeline
                         # (workspace_events + SSE), same as tool_call/tool_result.
@@ -1080,6 +1260,16 @@ class SubAgentRunner:
                                 pool, action_id, "approved" if approved else "denied",
                             )
                             yield ev("approval_resolved", {"action_id": action_id, "approved": approved})
+                            if computer is not None and name in COMPUTER_TOOLS:
+                                from plugins.agents import computer as _computer
+
+                                if approved:
+                                    computer_call = {**computer, "approval_id": action_id}
+                                else:
+                                    await _computer.record_gate(
+                                        computer, pool, name, args, res.tier, "denied",
+                                        res.reason, action_id,
+                                    )
                             if not approved:
                                 yield ev("tool_result", {"output": "Denied by the user.", "success": False})
                                 results_text.append(f"{name} DENIED by user")
@@ -1112,7 +1302,7 @@ class SubAgentRunner:
                     # orchestrated/generic runs pass None → unchanged in-process path.
                     result, ok = await dispatch_tool(
                         workspace_path, name, args, session_id=session_id,
-                        pool=pool, run_id=run_id,
+                        pool=pool, run_id=run_id, computer=computer_call,
                     )
                     # NOTE: a single failed tool no longer marks the whole agent failed —
                     # the agent can (and often does) recover and finish. Success is decided
@@ -1261,8 +1451,10 @@ class SubAgentRunner:
                     "files": made,
                 },
             )
+            _prov_drop(run_id)
             return
 
+        _prov_drop(run_id)
         yield ev(
             "agent_end",
             {

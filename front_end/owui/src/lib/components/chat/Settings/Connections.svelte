@@ -13,6 +13,7 @@
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import Plus from '$lib/components/icons/Plus.svelte';
 	import Connection from './Connections/Connection.svelte';
+	import SettingsSection from './SettingsSection.svelte';
 
 	import AddConnectionModal from '$lib/components/AddConnectionModal.svelte';
 
@@ -78,62 +79,13 @@
 >
 	<div class=" overflow-y-scroll scrollbar-hidden h-full">
 		{#if config !== null}
-			<div class="">
-				<div class="pr-1.5">
-					<div class="">
-						<div class="flex justify-between items-center pt-1 pb-2">
-							<div class="text-lg font-semibold text-gray-900 dark:text-gray-100">
-								{$i18n.t('Manage Direct Connections')}
-							</div>
-
-							<Tooltip content={$i18n.t(`Add Connection`)}>
-								<button
-									class="px-1"
-									aria-label={$i18n.t('Add Connection')}
-									on:click={() => {
-										showConnectionModal = true;
-									}}
-									type="button"
-								>
-									<Plus />
-								</button>
-							</Tooltip>
-						</div>
-
-						<div class="flex flex-col gap-1.5">
-							{#each config?.OPENAI_API_BASE_URLS ?? [] as url, idx}
-								<Connection
-									bind:url
-									bind:key={config.OPENAI_API_KEYS[idx]}
-									bind:config={config.OPENAI_API_CONFIGS[idx]}
-									onSubmit={() => {
-										updateHandler();
-									}}
-									onDelete={() => {
-										config.OPENAI_API_BASE_URLS = config.OPENAI_API_BASE_URLS.filter(
-											(url, urlIdx) => idx !== urlIdx
-										);
-										config.OPENAI_API_KEYS = config.OPENAI_API_KEYS.filter(
-											(key, keyIdx) => idx !== keyIdx
-										);
-
-										let newConfig = {};
-										config.OPENAI_API_BASE_URLS.forEach((url, newIdx) => {
-											newConfig[newIdx] =
-												config.OPENAI_API_CONFIGS[newIdx < idx ? newIdx : newIdx + 1];
-										});
-										config.OPENAI_API_CONFIGS = newConfig;
-									}}
-								/>
-							{/each}
-						</div>
-					</div>
-
-					<div class="my-2">
+			<div class="flex items-start justify-between gap-4">
+				<SettingsSection title={$i18n.t('Manage Direct Connections')} className="min-w-0 flex-1">
+					<svelte:fragment slot="description">
 						<div
-							class="text-sm {($settings?.highContrastMode ?? false)
+							class={($settings?.highContrastMode ?? false)
 								? 'text-gray-800 dark:text-gray-100'
-								: 'text-gray-500'}"
+								: 'text-gray-500'}
 						>
 							{$i18n.t('Connect to your own OpenAI compatible API endpoints.')}
 							<br />
@@ -141,7 +93,50 @@
 								'CORS must be properly configured by the provider to allow requests from Harvis.'
 							)}
 						</div>
+					</svelte:fragment>
+
+					<div class="mt-3 flex flex-col gap-1.5">
+						{#each config?.OPENAI_API_BASE_URLS ?? [] as url, idx}
+							<Connection
+								bind:url
+								bind:key={config.OPENAI_API_KEYS[idx]}
+								bind:config={config.OPENAI_API_CONFIGS[idx]}
+								onSubmit={() => {
+									updateHandler();
+								}}
+								onDelete={() => {
+									config.OPENAI_API_BASE_URLS = config.OPENAI_API_BASE_URLS.filter(
+										(url, urlIdx) => idx !== urlIdx
+									);
+									config.OPENAI_API_KEYS = config.OPENAI_API_KEYS.filter(
+										(key, keyIdx) => idx !== keyIdx
+									);
+
+									let newConfig = {};
+									config.OPENAI_API_BASE_URLS.forEach((url, newIdx) => {
+										newConfig[newIdx] =
+											config.OPENAI_API_CONFIGS[newIdx < idx ? newIdx : newIdx + 1];
+									});
+									config.OPENAI_API_CONFIGS = newConfig;
+								}}
+							/>
+						{/each}
 					</div>
+				</SettingsSection>
+
+				<div class="mt-1 flex h-7 shrink-0 items-center">
+					<Tooltip content={$i18n.t(`Add Connection`)}>
+						<button
+							class="px-1"
+							aria-label={$i18n.t('Add Connection')}
+							on:click={() => {
+								showConnectionModal = true;
+							}}
+							type="button"
+						>
+							<Plus />
+						</button>
+					</Tooltip>
 				</div>
 			</div>
 		{:else}

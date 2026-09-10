@@ -248,6 +248,45 @@ def _roster_section(subagents: list[dict] | None) -> str:
     )
 
 
+async def generate_json(
+    model: str, prompt: str, *, num_predict: int = 700, temperature: float = 0.3
+) -> dict | None:
+    """One local generate call that must come back as a JSON object, or None.
+
+    Extracted so the agent coordinator can ask the same provider the same way
+    without a second copy of the httpx + brace-extraction dance. Returns None
+    for every failure mode (transport, non-200, no JSON in the reply, bad
+    JSON), because every one of them means the same thing to the caller: try
+    the next model, then fall back.
+    """
+    try:
+        async with _httpx.AsyncClient(timeout=90.0) as c:
+            r = await c.post(
+                f"{_OLLAMA_URL.rstrip('/')}/api/generate",
+                json={
+                    "model": model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {
+                        "temperature": temperature,
+                        "num_predict": num_predict,
+                        "num_ctx": 8192,
+                    },
+                },
+            )
+        if r.status_code != 200:
+            return None
+        text = (r.json().get("response") or "").strip()
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if not m:
+            return None
+        obj = json.loads(m.group(0))
+        return obj if isinstance(obj, dict) else None
+    except Exception as exc:
+        logger.debug("generate_json: model %s failed: %s", model, exc)
+        return None
+
+
 async def plan_agents(
     task_brief: str,
     *,
@@ -278,23 +317,9 @@ async def plan_agents(
     planner_models = await _installed(_PLANNER_MODELS) or pool
     for model in planner_models:
         try:
-            async with _httpx.AsyncClient(timeout=90.0) as c:
-                r = await c.post(
-                    f"{_OLLAMA_URL.rstrip('/')}/api/generate",
-                    json={
-                        "model": model,
-                        "prompt": prompt,
-                        "stream": False,
-                        "options": {"temperature": 0.3, "num_predict": 700, "num_ctx": 8192},
-                    },
-                )
-            if r.status_code != 200:
+            obj = await generate_json(model, prompt)
+            if obj is None:
                 continue
-            text = (r.json().get("response") or "").strip()
-            m = re.search(r"\{.*\}", text, re.DOTALL)
-            if not m:
-                continue
-            obj = json.loads(m.group(0))
             raw = obj.get("agents") or obj.get("steps") or []
             agents = [
                 a for a in raw

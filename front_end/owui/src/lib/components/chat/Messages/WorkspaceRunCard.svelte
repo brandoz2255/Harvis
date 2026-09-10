@@ -27,6 +27,12 @@
 	import RunActivitySummary from './RunActivitySummary.svelte';
 	import TerminalRunCard from './TerminalRunCard.svelte';
 	import { getRunArtifacts } from '$lib/apis/agent-runs';
+	import AgentRunPanel from '$lib/agents/AgentRunPanel.svelte';
+	import {
+		initialAgentRunState,
+		reduceAgentEvent,
+		type AgentRunState
+	} from '$lib/agents/agentRunProjection';
 	import { saveRunAsSkill } from '$lib/apis/skills';
 	import { toast } from 'svelte-sonner';
 	import { trailingText } from '$lib/utils/trailingText';
@@ -85,6 +91,12 @@
 	$: engineBrand = ENGINE_BRAND[(engineLabel || '').trim().toLowerCase()] ?? 'pack';
 	// Launch-mode chip ("Auto" / "Agent" / "Orchestrate") — set by the bridge marker.
 	$: launchMode = attributes?.launchmode ?? '';
+	// Agent Teammates: the marker carries `agentid` only when a teammate owns this
+	// run. Everything below is inert for every other run, so the ordinary card is
+	// unchanged.
+	$: agentId = attributes?.agentid ?? '';
+	$: agentTint = attributes?.agenttint || '#7c5cff';
+	let agentState: AgentRunState = initialAgentRunState();
 	$: taskBrief = attributes?.taskbrief ?? '';
 	// Opt-in approval gate (P1.5): the marker carries needsapproval="1" when the
 	// run is parked pending Approve. Read once — the marker doesn't change.
@@ -364,6 +376,8 @@
 	const handle = (evt: WorkspaceEvent) => {
 		// Feed the progress timeline (every event, incl. replayed ones on reload).
 		recordEvent(evt);
+		// …and the teammate projection, which drives the panel above the timeline.
+		if (agentId) agentState = reduceAgentEvent(agentState, evt);
 		lastEventAt = Date.now();
 		if (evt.model) execModel = evt.model;
 		switch (evt.type) {
@@ -674,6 +688,14 @@
 			</div>
 		{/if}
 	</div>
+
+	{#if agentId}
+		<!-- The teammate's own view: restated goal, steps, the four hard limits when
+		     one is hit, the deliverable, and what it suggests doing next. -->
+		<div class="mt-2.5">
+			<AgentRunPanel state={agentState} {workspaceId} tint={agentTint} />
+		</div>
+	{/if}
 
 	<!-- Cursor-style compact activity sentence. It advances only from real typed
 	     events and expands into the complete public tool history on demand. -->

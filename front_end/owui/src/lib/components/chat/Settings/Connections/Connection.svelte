@@ -44,7 +44,7 @@
 
 <div class="flex w-full gap-2 items-center">
 	<Tooltip
-		className="w-full relative"
+		className="w-full min-w-0 relative"
 		content={$i18n.t(`WebUI will make requests to "{{url}}/chat/completions"`, {
 			url
 		})}
@@ -56,7 +56,7 @@
 			></div>
 		{/if}
 		<div class="flex w-full gap-2">
-			<div class="flex-1 relative">
+			<div class="flex-1 min-w-0 relative">
 				<input
 					class={`w-full bg-transparent ${($settings?.highContrastMode ?? false) ? '' : 'outline-hidden'} ${pipeline ? 'pr-8' : ''}`}
 					placeholder={$i18n.t('API Base URL')}
@@ -67,7 +67,7 @@
 		</div>
 	</Tooltip>
 
-	<div class="flex gap-1 items-center">
+	<div class="flex gap-1 items-center shrink-0">
 		<Tooltip content={$i18n.t('Configure')} className="self-start">
 			<button
 				aria-label={$i18n.t('Open modal to configure connection')}

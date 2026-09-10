@@ -2408,6 +2408,11 @@ def _register_harvis_code(
         description="Agent code review of this session — coder and reviewer talk it out here",
     )
     async def code_review(interaction: discord.Interaction):
+        # Sourced from the enforcing constant, not restated: HARVIS_REVIEW_MAX_ROUNDS
+        # makes the cap configurable, and copy that hardcodes it lies on any box
+        # where the operator has tuned it.
+        from workspace.orchestration.review import _MAX_REVIEW_ROUNDS
+
         sid, uid = await _thread_context(interaction)
         if not sid:
             return
@@ -2420,9 +2425,9 @@ def _register_harvis_code(
             )
             return
         await interaction.response.send_message(
-            "\U0001f50e Starting the agent review — the coder and reviewer will discuss "
-            "the session's changes in this thread (up to 5 rounds). PRs stay gated "
-            "until they agree (you can always override)."
+            f"\U0001f50e Starting the agent review — the coder and reviewer will discuss "
+            f"the session's changes in this thread (up to {_MAX_REVIEW_ROUNDS} rounds). "
+            f"PRs stay gated until they agree (you can always override)."
         )
         asyncio.create_task(
             _code_run_review(app_request, cfg, interaction.channel, uid, sid),

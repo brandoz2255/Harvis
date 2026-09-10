@@ -3,6 +3,8 @@
 	import { toast } from 'svelte-sonner';
 	import { updateUserPassword } from '$lib/apis/auths';
 	import SensitiveInput from '$lib/components/common/SensitiveInput.svelte';
+	import SettingsSection from '../SettingsSection.svelte';
+	import SettingRow from '../SettingRow.svelte';
 
 	const i18n = getContext('i18n');
 
@@ -54,25 +56,31 @@
 		updatePasswordHandler();
 	}}
 >
-	<div class="flex justify-between items-center py-2">
-		<div class="text-lg font-semibold text-gray-900 dark:text-gray-100">{$i18n.t('Change Password')}</div>
-		<button
-			class=" text-sm font-medium text-gray-500"
-			type="button"
-			on:click={() => {
-				show = !show;
-			}}>{show ? $i18n.t('Hide') : $i18n.t('Show')}</button
-		>
-	</div>
+	<SettingsSection>
+		<SettingRow border={false}>
+			<svelte:fragment slot="title">
+				<div class="text-lg">{$i18n.t('Change Password')}</div>
+			</svelte:fragment>
+			<button
+				class=" text-sm font-medium text-gray-500"
+				type="button"
+				on:click={() => {
+					show = !show;
+				}}>{show ? $i18n.t('Hide') : $i18n.t('Show')}</button
+			>
+		</SettingRow>
 
-	{#if show}
-		<div class=" py-2.5 space-y-1.5">
-			<div class="flex flex-col w-full">
-				<div class=" mb-1 text-sm font-medium text-gray-700 dark:text-gray-300">{$i18n.t('Current Password')}</div>
-
-				<div class="flex-1">
+		{#if show}
+			<!--
+			  SensitiveInput takes inputClassName/outerClassName, not `class` — a
+			  `class` attribute on it is silently dropped, so don't add one here.
+			  Its defaults already render correctly inside these wrappers.
+			-->
+			<SettingRow title={$i18n.t('Current Password')}>
+				<div
+					class="w-full sm:w-72 rounded-[10px] bg-gray-100 dark:bg-gray-850 px-3 py-1.5 text-sm text-gray-800 dark:text-gray-100"
+				>
 					<SensitiveInput
-						class="w-full bg-transparent text-sm dark:text-gray-300 outline-hidden placeholder:opacity-30"
 						type="password"
 						bind:value={currentPassword}
 						placeholder={$i18n.t('Enter your current password')}
@@ -80,14 +88,13 @@
 						required
 					/>
 				</div>
-			</div>
+			</SettingRow>
 
-			<div class="flex flex-col w-full">
-				<div class=" mb-1 text-sm font-medium text-gray-700 dark:text-gray-300">{$i18n.t('New Password')}</div>
-
-				<div class="flex-1">
+			<SettingRow title={$i18n.t('New Password')}>
+				<div
+					class="w-full sm:w-72 rounded-[10px] bg-gray-100 dark:bg-gray-850 px-3 py-1.5 text-sm text-gray-800 dark:text-gray-100"
+				>
 					<SensitiveInput
-						class="w-full bg-transparent text-sm dark:text-gray-300 outline-hidden placeholder:opacity-30"
 						type="password"
 						bind:value={newPassword}
 						placeholder={$i18n.t('Enter your new password')}
@@ -95,14 +102,13 @@
 						required
 					/>
 				</div>
-			</div>
+			</SettingRow>
 
-			<div class="flex flex-col w-full">
-				<div class=" mb-1 text-sm font-medium text-gray-700 dark:text-gray-300">{$i18n.t('Confirm Password')}</div>
-
-				<div class="flex-1">
+			<SettingRow title={$i18n.t('Confirm Password')} border={false}>
+				<div
+					class="w-full sm:w-72 rounded-[10px] bg-gray-100 dark:bg-gray-850 px-3 py-1.5 text-sm text-gray-800 dark:text-gray-100"
+				>
 					<SensitiveInput
-						class="w-full bg-transparent text-sm dark:text-gray-300 outline-hidden placeholder:opacity-30"
 						type="password"
 						bind:value={newPasswordConfirm}
 						placeholder={$i18n.t('Confirm your new password')}
@@ -110,23 +116,23 @@
 						required
 					/>
 				</div>
-			</div>
-		</div>
+			</SettingRow>
 
-		<div class="mt-3 flex justify-end items-center gap-3">
-			{#if !PASSWORD_CHANGE_AVAILABLE}
-				<div class="text-xs text-gray-400 dark:text-gray-500">
-					{$i18n.t('Password changes are not available in this deployment yet.')}
-				</div>
-			{/if}
-			<button
-				class="px-3.5 py-1.5 text-sm font-medium bg-black text-white dark:bg-white dark:text-black transition rounded-lg {PASSWORD_CHANGE_AVAILABLE
-					? 'hover:bg-gray-900 dark:hover:bg-gray-100'
-					: 'opacity-50 cursor-not-allowed'}"
-				disabled={!PASSWORD_CHANGE_AVAILABLE}
-			>
-				{$i18n.t('Update password')}
-			</button>
-		</div>
-	{/if}
+			<div class="mt-3 flex justify-end items-center gap-3">
+				{#if !PASSWORD_CHANGE_AVAILABLE}
+					<div class="text-xs text-gray-400 dark:text-gray-500">
+						{$i18n.t('Password changes are not available in this deployment yet.')}
+					</div>
+				{/if}
+				<button
+					class="px-3.5 py-1.5 text-sm font-medium bg-black text-white dark:bg-white dark:text-black transition rounded-lg {PASSWORD_CHANGE_AVAILABLE
+						? 'hover:bg-gray-900 dark:hover:bg-gray-100'
+						: 'opacity-50 cursor-not-allowed'}"
+					disabled={!PASSWORD_CHANGE_AVAILABLE}
+				>
+					{$i18n.t('Update password')}
+				</button>
+			</div>
+		{/if}
+	</SettingsSection>
 </form>

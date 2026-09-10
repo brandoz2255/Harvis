@@ -107,6 +107,9 @@ export const showControls = writable(false);
 export const workspaceControlsTab = writable<string | null>(null);
 // The workspace id the chat right-rail dock is currently showing (compact RunView).
 export const dockedRunId = writable<string | null>(null);
+// Chat | Work on the landing page. Work hands the composer to a teammate (model
+// `agent:<id>`), whose runs get the computer; Chat is the ordinary model turn.
+export const workMode = writable<boolean>(false);
 // Token/throughput metrics for a workspace run, keyed by workspace id.
 //
 // The assistant message that hosts a run card carries only the `<details
@@ -429,6 +432,10 @@ type Config = {
 		enable_autocomplete_generation: boolean;
 		enable_direct_connections: boolean;
 		enable_version_update_check: boolean;
+		// Harvis: developer mode — gates the experimental admin surfaces.
+		// Optional because a backend older than the flag simply omits it, and
+		// the consumers treat "absent" as on (see admin/Settings.svelte).
+		enable_dev_mode?: boolean;
 		folder_max_file_count?: number;
 	};
 	oauth: {

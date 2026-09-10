@@ -235,10 +235,30 @@ async def _resolve_route(model_name: str) -> tuple[str, dict, bool, bool, str | 
         # The node that last served this model did not answer. Falling through would
         # hand the name to Ollama, which never had it, and the user would read "model
         # not found" for a box that is merely asleep.
+        _asleep = _node_reason.split(":", 1)[1]
+        # Asleep is the common case once the idle timer is on, and the user picking this
+        # model *is* the request to start it. Ask the host agent and wait for the load
+        # rather than making them go find a terminal. Only ever the local node: a node
+        # on another machine has no control channel here.
+        try:
+            from plugins.inference_nodes import (
+                auto_wake_enabled, control_installed, local_node_name, wake_node,
+            )
+            _wakeable = auto_wake_enabled and _asleep == local_node_name and control_installed()
+        except Exception:
+            _wakeable = False
+        if _wakeable:
+            logger.info("model_proxy: %s is on sleeping node %s — waking it", model_name, _asleep)
+            if await wake_node(_asleep, by="chat"):
+                _node, _node_reason = await resolve_node(model_name, force=True)
+                if _node is not None:
+                    logger.info("model_proxy: %s → inference node %s (woken)",
+                                model_name, _node.spec.name)
+                    return _node.spec.chat_url, _node.spec.headers(), False, False, None
         raise HTTPException(
             status_code=503,
             detail=(f"Model '{model_name}' is served by inference node "
-                    f"'{_node_reason.split(':', 1)[1]}', which is unreachable right now."),
+                    f"'{_asleep}', which is unreachable right now."),
         )
 
     # Try to get user-configured OpenClaw settings
@@ -979,7 +999,9 @@ async def execute_chat_completion(request: Request, body: dict):
     # table and substitute it. This lets desktop OpenClaw's config stay as
     # `harvis-proxy/auto` permanently — the user's `/model` pick takes effect
     # on every request without rewriting the desktop config file.
-    _AUTO_SENTINELS = {"auto", "default", "user-pref", "dynamic"}
+    # "" too: an empty model name reached Ollama as-is and 400ed before the
+    # first token; it means "no pick" exactly like the named sentinels.
+    _AUTO_SENTINELS = {"", "auto", "default", "user-pref", "dynamic"}
     if model_name in _AUTO_SENTINELS:
         cfg = await _get_openclaw_config()
         # Configurable safety net: the model used when the user has no saved pick

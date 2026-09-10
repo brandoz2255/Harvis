@@ -15,6 +15,14 @@ from selenium.webdriver.firefox.service import Service as FirefoxService
 
 app = FastAPI()
 
+# A watchable, persistent browser for Agent Teammates. Both modules degrade on
+# their own: without Xvfb/x11vnc a headed request falls back to headless with no
+# screen, and the /camofox routes still work (refs need no display).
+import camofox_api  # noqa: E402
+import display  # noqa: E402
+
+app.include_router(camofox_api.router)
+
 # In-memory sessions: session_id -> (driver, created_at)
 _sessions: Dict[str, Tuple[webdriver.Firefox, float]] = {}
 _sessions_lock = threading.Lock()
@@ -23,6 +31,7 @@ _MAX_SESSIONS = max(1, int(os.getenv("HARVIS_BROWSER_MAX_SESSIONS", "8")))
 _SESSION_TTL_S = max(30, int(os.getenv("HARVIS_BROWSER_SESSION_TTL_S", "300")))
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
+
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -58,6 +67,12 @@ def health() -> Dict[str, Any]:
         "max_sessions": _MAX_SESSIONS,
         "safe_mode_default": _SAFE_MODE_DEFAULT,
         "safe_mode_forced": _SAFE_MODE_FORCED,
+        # Agent Teammates: whether this runner will show a watchable screen, and
+        # the one port it is served on. False on the preview instance even though
+        # the image can, because forced safe mode refuses headed sessions — a
+        # caller that trusts this flag must not be told a screen is on offer.
+        "headedAvailable": display.available() and not _SAFE_MODE_FORCED,
+        "vncPort": display.WEBSOCKIFY_PORT,
     }
 
 
@@ -67,6 +82,12 @@ class CreateSessionRequest(BaseModel):
     height: Optional[int] = Field(default=None, ge=240, le=2160)
     # None = use this deployment's default. Ignored when SAFE_MODE_FORCED.
     safeMode: Optional[bool] = None
+    # Agent Teammates. `headed` puts the session on its own X display so the
+    # user can watch and take over; `profile` is a per-teammate Firefox profile
+    # directory so its logins survive between runs. Both default off, so every
+    # existing caller behaves exactly as before.
+    headed: bool = False
+    profile: Optional[str] = Field(default=None, max_length=64)
 
 
 class NavigateRequest(BaseModel):
@@ -155,6 +176,7 @@ def _expire_stale_locked() -> None:
             driver.quit()
         except Exception:
             pass
+        display.stop(sid)
 
 
 def _get_driver(session_id: str) -> webdriver.Firefox:
@@ -207,6 +229,19 @@ def _full_page_png(driver: webdriver.Firefox, *, allow_js: bool = True) -> Tuple
         return driver.get_screenshot_as_png(), "viewport"
 
 
+def _profile_dir(key: str) -> str:
+    """Resolve a profile key to a directory under the profiles volume.
+
+    The validation lives in display.py so it can be tested without selenium,
+    and so the one place that knows what a profile directory is also owns the
+    rule about what may name one.
+    """
+    try:
+        return display.profile_dir(key)
+    except display.BadProfileKey as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/session")
 def create_session(req: CreateSessionRequest) -> Dict[str, Any]:
     with _sessions_lock:
@@ -222,18 +257,47 @@ def create_session(req: CreateSessionRequest) -> Dict[str, Any]:
     if _SAFE_MODE_FORCED:
         safe = True
 
+    width = int(req.width or 1280)
+    height = int(req.height or 720)
+
+    # A headed session needs a screen. If this image was built without Xvfb the
+    # request degrades to headless rather than failing: the run still works, it
+    # just cannot be watched, and the response says so.
+    #
+    # The preview instance shares this image but renders untrusted, model-authored
+    # HTML, and it is the one place where safe mode is forced. Nothing there is
+    # meant to be watched or to keep a profile, so a page that asks for either is
+    # refused outright rather than quietly given a screen nobody can reach.
+    if _SAFE_MODE_FORCED and (req.headed or req.profile):
+        raise HTTPException(
+            status_code=403,
+            detail="this runner renders untrusted content: no watchable screen, no profile",
+        )
+    screen = display.start(session_id, width=width, height=height) if req.headed else None
+    headless = req.headless and screen is None
+
     opts = FirefoxOptions()
-    if req.headless:
+    if headless:
         opts.add_argument("--headless")
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
+    if req.profile:
+        opts.add_argument("-profile")
+        opts.add_argument(_profile_dir(req.profile))
     if safe:
         _apply_safe_mode_prefs(opts)
 
     service = _firefox_service()
-    driver = webdriver.Firefox(service=service, options=opts)
-    width = int(req.width or 1280)
-    height = int(req.height or 720)
+    if screen is not None:
+        # geckodriver passes its own environment to Firefox, so this is what
+        # puts the browser on the watchable display.
+        service.env = {**os.environ, **screen.env()}
+    try:
+        driver = webdriver.Firefox(service=service, options=opts)
+    except Exception:
+        if screen is not None:
+            display.stop(session_id)
+        raise
     try:
         driver.set_window_size(width, height)
     except Exception:
@@ -241,13 +305,20 @@ def create_session(req: CreateSessionRequest) -> Dict[str, Any]:
 
     with _sessions_lock:
         _sessions[session_id] = (driver, time.time())
-        _session_meta[session_id] = {"safe_mode": safe}
-    return {
+        _session_meta[session_id] = {"safe_mode": safe, "profile": req.profile}
+    out: Dict[str, Any] = {
         "sessionId": session_id,
         "width": width,
         "height": height,
         "safeMode": safe,
+        "headed": screen is not None,
+        "profile": req.profile,
     }
+    if screen is not None:
+        out["vncPort"] = display.WEBSOCKIFY_PORT
+        out["vncToken"] = screen.token
+        out["display"] = screen.display_name
+    return out
 
 
 @app.post("/navigate")
@@ -317,6 +388,9 @@ def close(req: CloseRequest) -> Dict[str, Any]:
             entry[0].quit()
         except Exception:
             pass
+    # Take the screen down with the session, so its VNC token stops working the
+    # moment the run ends rather than lingering until the container restarts.
+    display.stop(req.sessionId)
     return {"ok": True}
 
 
@@ -336,3 +410,8 @@ def screenshot(req: ScreenshotRequest) -> Dict[str, Any]:
         "captureMode": mode,
         "safeMode": safe,
     }
+
+
+# camofox_api acts through the same session table; a getter keeps that module
+# free of a circular import back into this one.
+camofox_api.set_driver_provider(_get_driver)

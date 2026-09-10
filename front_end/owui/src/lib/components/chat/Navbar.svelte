@@ -29,6 +29,7 @@
 
 	import ShareChatModal from '../chat/ShareChatModal.svelte';
 	import ModelSelector from '../chat/ModelSelector.svelte';
+	import WorkModeToggle from '$lib/agents/WorkModeToggle.svelte';
 	import Tooltip from '../common/Tooltip.svelte';
 	import Menu from '$lib/components/layout/Navbar/Menu.svelte';
 	import UserMenu from '$lib/components/layout/Sidebar/UserMenu.svelte';
@@ -133,6 +134,13 @@
 			"
 				>
 					<!-- Top model selector removed; the model is chosen in the composer pill. -->
+					<!-- Chat | Work, centred. The only copy of this control: it used to
+					     live on the empty-chat placeholder, which unmounts the moment you
+					     send a message, so the mode could not be changed without starting
+					     a new chat. The model itself is picked in the composer pill. -->
+					<div class="flex items-center justify-center w-full">
+						<WorkModeToggle bind:selectedModels compact />
+					</div>
 					{#if projectName}
 						<div class="flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400 min-w-0">
 							<a

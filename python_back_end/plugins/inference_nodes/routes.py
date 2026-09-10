@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 from auth_optimized import get_current_user_optimized
 from owui_compat.authz import is_admin, user_id_of
 
-from . import probe, store
+from . import control, moe, probe, store
 from .policy import thinking_mode
 from .provision import DEFAULT_MODEL_REPO, render_script
 from .types import NodeSpec
@@ -77,10 +77,112 @@ async def provision_script(
     model: str = Query(DEFAULT_MODEL_REPO, max_length=200),
     port: int = Query(1919, ge=1024, le=65535),
     host: str = Query("0.0.0.0", max_length=64),
-    max_running: int = Query(2, ge=1, le=64),
+    # Left unset, the generated script measures the target box. Pass one of these only
+    # to pin it against what the machine says it can do.
+    max_running: int | None = Query(None, ge=1, le=64),
+    kv_reserve_tokens: int | None = Query(None, ge=512, le=1_048_576),
+    memory_ratio: float | None = Query(None, gt=0.1, le=0.99),
+    moe_cpu_threads: int | None = Query(None, ge=1, le=256),
     user=Depends(get_current_user_optimized),
 ):
-    return render_script(node_name=name, model_repo=model, port=port, host=host, max_running=max_running)
+    return render_script(
+        node_name=name,
+        model_repo=model,
+        port=port,
+        host=host,
+        max_running=max_running,
+        kv_reserve_tokens=kv_reserve_tokens,
+        memory_ratio=memory_ratio,
+        moe_cpu_threads=moe_cpu_threads,
+    )
+
+
+class PowerIn(BaseModel):
+    state: str = Field(pattern=r"^(on|off)$")
+    node: str = Field(default="", max_length=64)
+
+
+@router.get("/power")
+async def power(user=Depends(get_current_user_optimized)):
+    """Whether the local node is up, and whether this backend can do anything about it.
+
+    Read-only for any signed-in user so a settings pane can render the switch; the
+    switch itself is admin-only below.
+    """
+    name = control.LOCAL_NODE
+    states = await probe.snapshot()
+    out = control.power_state(states.get(name))
+    out["node"] = name
+    out["known"] = name in states
+    return out
+
+
+@router.post("/power")
+async def set_power(body: PowerIn, user=Depends(get_current_user_optimized)):
+    """Start or stop the local node, and wait long enough to answer honestly.
+
+    Turning it on blocks until the node answers (a cold checkpoint load is 30–90 s) so
+    the caller gets the real outcome instead of an optimistic 200 and a model that is
+    still loading. Turning it off returns as soon as the host has acknowledged.
+    """
+    _require_admin(user)
+    name = (body.node or control.LOCAL_NODE).strip()
+    if not control.installed():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "No host control agent is listening. FreeToken runs as a systemd --user "
+                "service on the host and the backend is in a container, so it cannot be "
+                "started from here without one: run scripts/freetoken/install-user-units.sh "
+                "on that machine."
+            ),
+        )
+    if body.state == "on":
+        came_up = await control.wake(name, by=str(user_id_of(user) or "admin"))
+        states = await probe.snapshot(force=True)
+        out = control.power_state(states.get(name))
+        out["node"] = name
+        if not came_up:
+            out["hint"] = (
+                "Asked the host to start it, but it has not answered yet. Check "
+                "`journalctl --user -u freetoken` on that machine."
+            )
+        return out
+    control.request("off", by=str(user_id_of(user) or "admin"), reason="settings toggle")
+    probe.invalidate()
+    states = await probe.snapshot(force=True)
+    out = control.power_state(states.get(name))
+    out["node"] = name
+    return out
+
+
+@router.get("/moe-candidates")
+async def moe_candidates(user=Depends(get_current_user_optimized)):
+    """Installed Ollama models, classified by whether a node should be serving them.
+
+    The point of a node is sparsity: a mixture-of-experts model keeps its experts in
+    host RAM and streams the few it needs per token, which is why a 35B model runs on
+    an 8 GB card. This says which of the pulled models have that shape.
+    """
+    states = await probe.snapshot()
+    served: set[str] = set()
+    reachable = False
+    for st in states.values():
+        served |= st.models | st.last_good_models
+        reachable = reachable or st.reachable
+    rows = await moe.candidates(served, reachable)
+    return {
+        "models": rows,
+        "counts": {
+            k: sum(1 for r in rows if r["verdict"] == k)
+            for k in ("node_would_help", "served_by_node", "fits_anyway", "dense")
+        },
+        "note": (
+            "A node serves its own checkpoint. FreeToken's GGUF reader understands one "
+            "architecture today, so it cannot take over Ollama's copy of a model — "
+            "'node_would_help' means worth getting a checkpoint for, not one click away."
+        ),
+    }
 
 
 @router.get("/{name}/stats")

@@ -7,7 +7,7 @@
 # quietly shipping a multi-gigabyte "light" image.
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
-python-multipart==0.0.20
+python-multipart==0.0.31
 numpy==2.2.1
 soundfile==0.13.0
 sherpa-onnx==1.13.4
