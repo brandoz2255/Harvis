@@ -10,6 +10,10 @@
 	import { getAllUsers } from '$lib/apis/users';
 	import { exportConfig, importConfig } from '$lib/apis/configs';
 
+	import Pane from './ui/Pane.svelte';
+	import Row from './ui/Row.svelte';
+	import Section from './ui/Section.svelte';
+
 	const i18n = getContext('i18n');
 
 	export let saveHandler: Function;
@@ -49,8 +53,11 @@
 	});
 </script>
 
-<div class="flex flex-col h-full justify-between text-sm">
-	<div class="space-y-3 overflow-y-scroll scrollbar-hidden h-full">
+<div class="text-sm h-full">
+	<Pane
+		title={$i18n.t('Database')}
+		description={$i18n.t('Move configuration and data in and out of this Harvis.')}
+	>
 		<input
 			id="config-json-input"
 			hidden
@@ -77,95 +84,93 @@
 			}}
 		/>
 
-		<div>
-			<div class="mb-1 text-sm font-medium">{$i18n.t('Config')}</div>
+		<Section title={$i18n.t('Config')}>
+			<Row
+				label={$i18n.t('Import Config')}
+				description={$i18n.t(
+					'Pick a JSON file exported from a Harvis instance and load it as the configuration of this one.'
+				)}
+			>
+				<button
+					class="p-1 px-3 text-xs flex rounded-sm transition"
+					on:click={() => {
+						document.getElementById('config-json-input').click();
+					}}
+					type="button"
+				>
+					<span class="self-center">{$i18n.t('Import')}</span>
+				</button>
+			</Row>
 
-			<div>
-				<div class="py-0.5 flex w-full justify-between">
-					<div class="self-center text-xs">{$i18n.t('Import Config')}</div>
+			<Row
+				label={$i18n.t('Export Config')}
+				description={$i18n.t('Save the current configuration as a JSON file.')}
+			>
+				<button
+					class="p-1 px-3 text-xs flex rounded-sm transition"
+					on:click={async () => {
+						const config = await exportConfig(localStorage.token);
+						const blob = new Blob([JSON.stringify(config)], {
+							type: 'application/json'
+						});
+						saveAs(blob, `config-${Date.now()}.json`);
+					}}
+					type="button"
+				>
+					<span class="self-center">{$i18n.t('Export')}</span>
+				</button>
+			</Row>
+		</Section>
+
+		{#if $config?.features.enable_admin_export ?? true}
+			<Section title={$i18n.t('Export')}>
+				<Row
+					label={$i18n.t('Download Database')}
+					description={$i18n.t('Download a copy of the server database file.')}
+				>
 					<button
 						class="p-1 px-3 text-xs flex rounded-sm transition"
 						on:click={() => {
-							document.getElementById('config-json-input').click();
+							downloadDatabase(localStorage.token).catch((error) => {
+								toast.error(`${error}`);
+							});
 						}}
 						type="button"
 					>
-						<span class="self-center">{$i18n.t('Import')}</span>
+						<span class="self-center">{$i18n.t('Download')}</span>
 					</button>
-				</div>
-			</div>
+				</Row>
 
-			<div>
-				<div class="py-0.5 flex w-full justify-between">
-					<div class="self-center text-xs">{$i18n.t('Export Config')}</div>
+				<Row
+					label={$i18n.t('Export All Chats (All Users)')}
+					description={$i18n.t('Save every chat belonging to every user as one JSON file.')}
+				>
 					<button
 						class="p-1 px-3 text-xs flex rounded-sm transition"
-						on:click={async () => {
-							const config = await exportConfig(localStorage.token);
-							const blob = new Blob([JSON.stringify(config)], {
-								type: 'application/json'
-							});
-							saveAs(blob, `config-${Date.now()}.json`);
+						on:click={() => {
+							exportAllUserChats();
 						}}
 						type="button"
 					>
 						<span class="self-center">{$i18n.t('Export')}</span>
 					</button>
-				</div>
-			</div>
-		</div>
+				</Row>
 
-		{#if $config?.features.enable_admin_export ?? true}
-			<div>
-				<div class="mb-1 text-sm font-medium">{$i18n.t('Database')}</div>
-
-				<div>
-					<div class="py-0.5 flex w-full justify-between">
-						<div class="self-center text-xs">{$i18n.t('Download Database')}</div>
-						<button
-							class="p-1 px-3 text-xs flex rounded-sm transition"
-							on:click={() => {
-								downloadDatabase(localStorage.token).catch((error) => {
-									toast.error(`${error}`);
-								});
-							}}
-							type="button"
-						>
-							<span class="self-center">{$i18n.t('Download')}</span>
-						</button>
-					</div>
-				</div>
-
-				<div>
-					<div class="py-0.5 flex w-full justify-between">
-						<div class="self-center text-xs">{$i18n.t('Export All Chats (All Users)')}</div>
-						<button
-							class="p-1 px-3 text-xs flex rounded-sm transition"
-							on:click={() => {
-								exportAllUserChats();
-							}}
-							type="button"
-						>
-							<span class="self-center">{$i18n.t('Export')}</span>
-						</button>
-					</div>
-				</div>
-
-				<div>
-					<div class="py-0.5 flex w-full justify-between">
-						<div class="self-center text-xs">{$i18n.t('Export Users')}</div>
-						<button
-							class="p-1 px-3 text-xs flex rounded-sm transition"
-							on:click={() => {
-								exportUsers();
-							}}
-							type="button"
-						>
-							<span class="self-center">{$i18n.t('Export')}</span>
-						</button>
-					</div>
-				</div>
-			</div>
+				<Row
+					label={$i18n.t('Export Users')}
+					description={$i18n.t('Save a CSV of every user with their id, name, email and role.')}
+				>
+					<button
+						class="p-1 px-3 text-xs flex rounded-sm transition"
+						on:click={() => {
+							exportUsers();
+						}}
+						type="button"
+					>
+						<span class="self-center">{$i18n.t('Export')}</span>
+					</button>
+				</Row>
+			</Section>
 		{/if}
-	</div>
+	</Pane>
 </div>

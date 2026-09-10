@@ -922,6 +922,14 @@ async def _db_save_event(pool, workspace_id: str, seq: int, event: OpenClawEvent
             # Both were being enriched onto the live event and then dropped here, so a
             # reload replayed a run with its files missing — the card showed prose only.
             "changed_files", "files",
+            # Agent teammates: the restated goal, per-step header lines, the
+            # deliverable and the "what's worth doing next" list. Without these
+            # a reloaded run card replays as a bare tool log.
+            "restated_goal", "status", "suggestions", "artifacts", "touched",
+            "n", "engine", "agent_id", "agent_name", "computer", "unsupervised_shell",
+            # step_started carries the parent run id in `run_id` (to_sse overwrites
+            # it), so the child's id rides here.
+            "step_run_id",
         ):
             val = event.data.get(key)
             if val is not None:
@@ -1197,7 +1205,11 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
     # builds produce artifacts (+ auto-pop) like vibecode/orchestrator already do.
     # Excludes the lanes that already collect via _db_save_artifact internally.
     _oc_writes: dict[str, str] = {}
-    _collect_writes = agent_id not in ("orchestrated", "vibecode-turn", "engine-adapter", "claude", "kimi-code")
+    _collect_writes = (
+        agent_id not in ("orchestrated", "vibecode-turn", "engine-adapter", "claude", "kimi-code")
+        # Teammate runs collect their own diff/file artifacts in the coordinator.
+        and not agent_id.startswith("agent:")
+    )
 
     async def _flush_oc_writes() -> None:
         nonlocal event_count
@@ -1393,6 +1405,49 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
             # Offer-time tool policy: auto-detected launches get heavy tools withheld.
             launch_mode=ws.get("launch_mode", "user"),
         )
+
+    elif agent_id.startswith("agent:"):
+        # A named teammate. The lane id carries which agent (and whether the user
+        # said "just do all of it"), because _start_workspace's argument list is
+        # already 28 wide and a teammate run needs nothing else from it.
+        #
+        # Everything below the coordinator is the machinery this file already
+        # drives: the same OpenClawEvent stream, the same persist/broadcast loop,
+        # the same run tree. See orchestration/coordinator.py.
+        from plugins.agents.intake import parse_lane
+        from plugins.agents.store import get_agent_any_user
+        from .orchestration.coordinator import run_agent_coordinated
+
+        _agent_uuid, _override = parse_lane(agent_id)
+        _agent = await get_agent_any_user(pool, _agent_uuid) if _agent_uuid else None
+        if _agent is None or int(_agent.get("user_id") or -1) != int(ws["user_id"]):
+            # Deleted mid-run, or a lane id that does not belong to this user.
+            # Failing loudly beats silently running as a generic agent with none
+            # of the teammate's tool limits or budget.
+            logger.warning(
+                "[workspace:%s] agent lane %r did not resolve to this user's teammate",
+                workspace_id, agent_id,
+            )
+
+            async def _agent_gone():
+                ev = OpenClawEvent("done", {
+                    "summary": "That teammate no longer exists, so this run was stopped.",
+                    "success": False,
+                })
+                ev.run_id = workspace_id
+                yield ev
+
+            event_stream = _agent_gone()
+        else:
+            event_stream = run_agent_coordinated(
+                task_brief, chat_history,
+                agent=_agent,
+                override=_override,
+                model_name=model_name, pool=pool,
+                parent_workspace_id=workspace_id, user_id=ws["user_id"],
+                session_id=ws.get("session_id") or f"agent-{_agent_uuid}",
+                launch_mode=ws.get("launch_mode", "user"),
+            )
 
     elif agent_id == "agent-native":
         # Agent pill on a model whose lane does NOT bring its own tool-loop: run ONE
@@ -2679,7 +2734,14 @@ async def _start_workspace(
     # event racing ahead of the row is dropped, which is what produced "missing first
     # trace events". Create it here, before create_task; the post-hoc _db_create_run
     # calls in the launch handlers become idempotent no-ops (ON CONFLICT DO NOTHING).
-    await _db_create_run(pool, workspace_id, user_id, session_id, task_brief)
+    # model_name goes on the row here, not later: this is the create that wins
+    # (the post-hoc calls below are ON CONFLICT DO NOTHING), and without it every
+    # run — agent lane included — stored NULL and no card could say what was
+    # thinking. `or None` keeps the "nothing resolved" case a NULL, not an ''.
+    await _db_create_run(
+        pool, workspace_id, user_id, session_id, task_brief,
+        model_name=model_name or None,
+    )
 
     task = asyncio.create_task(
         _run_workspace_bg(workspace_id, pool, started_epoch),
@@ -6018,6 +6080,13 @@ async def get_active_workspace(
 
     Used for external triggers (e.g., Discord) so the UI can attach to a run that
     started outside the browser.
+
+    Only top-level runs are considered. A step run (``<parent>-s1``, ``role='step'``)
+    is never registered in ``_workspaces`` under its own id -- its parent owns the
+    in-memory task -- so the orphan sweep below would read every live step as a
+    leftover and mark it ``error`` mid-run, every time the UI polled. Filtering on
+    ``parent_run_id IS NULL`` also matches what the caller wants: a workspace to
+    attach to, not one of its steps.
     """
     pool = getattr(request.app.state, "pg_pool", None)
     if pool is None:
@@ -6030,6 +6099,7 @@ async def get_active_workspace(
                 FROM workspace_runs
                 WHERE user_id = $1
                   AND status = 'running'
+                  AND parent_run_id IS NULL
                 ORDER BY started_at DESC
                 LIMIT 10
                 """,

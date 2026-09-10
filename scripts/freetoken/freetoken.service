@@ -1,6 +1,6 @@
 [Unit]
 Description=FreeToken inference node for Harvis
-Documentation=file://%h/Projects/Recent-EX/Harvis/docs/inference-nodes.md
+Documentation=https://github.com/brandoz2255/Harvis/blob/main/docs/inference-nodes.md
 After=network-online.target
 
 [Service]

@@ -6,6 +6,8 @@
 	import { onMount, getContext } from 'svelte';
 	import { toast } from 'svelte-sonner';
 	import { WEBUI_BASE_URL } from '$lib/constants';
+	import SettingsSection from './SettingsSection.svelte';
+	import SettingRow from './SettingRow.svelte';
 
 	const i18n: any = getContext('i18n');
 	export let saveSettings: Function = () => {};
@@ -19,6 +21,7 @@
 	let apiKey = ''; // write-only; never populated from the server
 	let hasStoredConfig = false;
 	let usage: any = null;
+	let loadError = '';
 
 	$: hasUsage =
 		usage &&
@@ -33,6 +36,7 @@
 
 	const load = async () => {
 		loading = true;
+		loadError = '';
 		try {
 			const res = await fetch(`${WEBUI_BASE_URL}/api/user/openclaw-config`, { headers: authHeaders() });
 			if (res.ok) {
@@ -41,9 +45,15 @@
 				providerUrl = d.provider_url ?? 'http://ollama:11434';
 				modelId = d.model_id ?? '';
 				hasStoredConfig = !!d.id;
+			} else {
+				// A failed GET used to fall through silently, leaving the form showing
+				// the hard-coded Ollama defaults as if they were the saved config —
+				// and Save would then write those over whatever the server holds.
+				loadError = `${res.status} ${res.statusText}`.trim();
 			}
 		} catch (e) {
 			console.error('openclaw-config load', e);
+			loadError = `${e}`;
 		}
 		try {
 			const u = await fetch(`${WEBUI_BASE_URL}/api/workspace/usage/summary`, { headers: authHeaders() });
@@ -55,6 +65,10 @@
 	};
 
 	const save = async () => {
+		if (loadError) {
+			toast.error($i18n.t('Cannot save while the current settings failed to load.'));
+			return;
+		}
 		saving = true;
 		try {
 			const body: Record<string, any> = {
@@ -91,6 +105,8 @@
 			if (res.ok) {
 				toast.success($i18n.t('Reset to default (Ollama)'));
 				await load();
+			} else {
+				toast.error($i18n.t('Failed to reset workspace settings'));
 			}
 		} catch (e) {
 			toast.error(`${e}`);
@@ -102,63 +118,72 @@
 
 <div class="flex flex-col h-full justify-between text-sm">
 	<div class="overflow-y-scroll max-h-[28rem] md:max-h-full pr-1">
-		<div class="pb-1 text-lg font-semibold text-gray-900 dark:text-gray-100">{$i18n.t('Workspace / OpenClaw')}</div>
-
-		{#if loading}
-			<div class="text-gray-500">{$i18n.t('Loading…')}</div>
-		{:else}
-			<div class="mb-1 text-sm text-gray-500 dark:text-gray-400">
-				{$i18n.t('The model the Harvis agent (OpenClaw) uses for workspace runs.')}
-			</div>
-
-			<div class="mt-3 mb-3">
-				<div class="mb-1 text-sm font-medium text-gray-700 dark:text-gray-300">{$i18n.t('Provider')}</div>
-				<select
-					bind:value={providerType}
-					class="w-full rounded-[10px] py-2 px-3 text-sm bg-gray-100 dark:bg-gray-850 text-gray-800 dark:text-gray-100 outline-none"
+		<SettingsSection title={$i18n.t('Workspace / OpenClaw')}>
+			{#if loading}
+				<div class="text-gray-500">{$i18n.t('Loading…')}</div>
+			{:else if loadError}
+				<div
+					class="rounded-lg bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900 px-3 py-2.5 text-sm text-red-700 dark:text-red-300"
 				>
-					<option value="ollama">Ollama (local)</option>
-					<option value="openai">OpenAI-compatible</option>
-				</select>
-			</div>
-
-			<div class="mb-3">
-				<div class="mb-1 text-sm font-medium text-gray-700 dark:text-gray-300">{$i18n.t('Provider URL')}</div>
-				<input
-					bind:value={providerUrl}
-					class="w-full rounded-[10px] py-2 px-3 text-sm bg-gray-100 dark:bg-gray-850 text-gray-800 dark:text-gray-100 outline-none"
-					placeholder="http://ollama:11434"
-				/>
-			</div>
-
-			<div class="mb-3">
-				<div class="mb-1 text-sm font-medium text-gray-700 dark:text-gray-300">{$i18n.t('Model')}</div>
-				<input
-					bind:value={modelId}
-					class="w-full rounded-[10px] py-2 px-3 text-sm bg-gray-100 dark:bg-gray-850 text-gray-800 dark:text-gray-100 outline-none"
-					placeholder="qwen2.5-coder:32b"
-				/>
-			</div>
-
-			<div class="mb-1">
-				<div class="mb-1 text-sm font-medium text-gray-700 dark:text-gray-300">{$i18n.t('API key')}</div>
-				<input
-					type="password"
-					bind:value={apiKey}
-					autocomplete="off"
-					class="w-full rounded-[10px] py-2 px-3 text-sm bg-gray-100 dark:bg-gray-850 text-gray-800 dark:text-gray-100 outline-none"
-					placeholder={hasStoredConfig
-						? $i18n.t('Leave blank to keep current')
-						: $i18n.t('Only needed for cloud providers')}
-				/>
-				<div class="mt-1 text-xs text-gray-400">
-					{$i18n.t('Stored encrypted on the server and never displayed.')}
+					<div class="font-medium">{$i18n.t('Could not load your workspace settings.')}</div>
+					<div class="mt-0.5 text-xs opacity-80">{loadError}</div>
+					<button
+						class="mt-2 text-xs font-medium underline underline-offset-2"
+						type="button"
+						on:click={load}>{$i18n.t('Retry')}</button
+					>
 				</div>
-			</div>
+			{:else}
+				<div class="text-sm text-gray-500 dark:text-gray-400">
+					{$i18n.t('The model the Harvis agent (OpenClaw) uses for workspace runs.')}
+				</div>
 
-			{#if hasUsage}
-				<hr class="border-gray-100 dark:border-gray-850 my-4" />
-				<div class="mb-1.5 text-[15px] font-semibold text-gray-900 dark:text-gray-100">{$i18n.t('Usage')}</div>
+				<SettingRow title={$i18n.t('Provider')}>
+					<select
+						bind:value={providerType}
+						class="w-44 sm:w-56 cursor-pointer rounded-[10px] py-2 px-3 pr-8 text-sm bg-gray-100 dark:bg-gray-850 text-gray-800 dark:text-gray-100 outline-none"
+					>
+						<option value="ollama">Ollama (local)</option>
+						<option value="openai">OpenAI-compatible</option>
+					</select>
+				</SettingRow>
+
+				<SettingRow title={$i18n.t('Provider URL')} stack={true}>
+					<input
+						bind:value={providerUrl}
+						class="w-full rounded-[10px] py-2 px-3 text-sm bg-gray-100 dark:bg-gray-850 text-gray-800 dark:text-gray-100 outline-none"
+						placeholder="http://ollama:11434"
+					/>
+				</SettingRow>
+
+				<SettingRow title={$i18n.t('Model')} stack={true}>
+					<input
+						bind:value={modelId}
+						class="w-full rounded-[10px] py-2 px-3 text-sm bg-gray-100 dark:bg-gray-850 text-gray-800 dark:text-gray-100 outline-none"
+						placeholder="qwen2.5-coder:32b"
+					/>
+				</SettingRow>
+
+				<SettingRow
+					title={$i18n.t('API key')}
+					description={$i18n.t('Stored encrypted on the server and never displayed.')}
+					stack={true}
+				>
+					<input
+						type="password"
+						bind:value={apiKey}
+						autocomplete="off"
+						class="w-full rounded-[10px] py-2 px-3 text-sm bg-gray-100 dark:bg-gray-850 text-gray-800 dark:text-gray-100 outline-none"
+						placeholder={hasStoredConfig
+							? $i18n.t('Leave blank to keep current')
+							: $i18n.t('Only needed for cloud providers')}
+					/>
+				</SettingRow>
+			{/if}
+		</SettingsSection>
+
+		{#if !loading && hasUsage}
+			<SettingsSection title={$i18n.t('Usage')}>
 				<div class="text-sm text-gray-600 dark:text-gray-300 space-y-0.5">
 					{#if usage.total_tokens != null}<div>{$i18n.t('Total tokens')}: {usage.total_tokens}</div>{/if}
 					{#if usage.tokens_in != null}<div>{$i18n.t('Tokens in')}: {usage.tokens_in}</div>{/if}
@@ -167,19 +192,24 @@
 					{#if usage.runs != null}<div>{$i18n.t('Runs')}: {usage.runs}</div>{/if}
 					{#if usage.sessions != null}<div>{$i18n.t('Sessions')}: {usage.sessions}</div>{/if}
 				</div>
-			{/if}
+			</SettingsSection>
 		{/if}
 	</div>
 
 	<div class="flex justify-between pt-3">
 		<button
 			class="text-xs px-3 py-2 rounded-lg text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-850 transition"
+			type="button"
+			disabled={loading || !!loadError}
 			on:click={resetToDefault}>{$i18n.t('Reset to default')}</button
 		>
 		<button
 			class="text-xs px-3.5 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white transition disabled:opacity-50"
+			type="button"
 			on:click={save}
-			disabled={saving}>{saving ? $i18n.t('Saving…') : $i18n.t('Save')}</button
+			disabled={saving || loading || !!loadError}>{saving
+				? $i18n.t('Saving…')
+				: $i18n.t('Save')}</button
 		>
 	</div>
 </div>

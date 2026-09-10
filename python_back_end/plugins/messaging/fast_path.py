@@ -35,6 +35,8 @@ from typing import Optional
 
 import httpx
 
+from owui_compat.system_prompt import with_core
+
 logger = logging.getLogger(__name__)
 
 
@@ -104,7 +106,11 @@ def _compose_fast_path_system_prompt(
     if recall_block and recall_block.strip():
         parts.append(recall_block.strip())
     parts.append(_FAST_PATH_SYSTEM_PROMPT_BASE)
-    return "\n\n".join(parts)
+    # with_core puts the house ground rules ABOVE the persona. The persona used to
+    # be first with nothing declaring precedence, so a saved instruction read as
+    # outranking the house rules. Order is now core → persona → recall → base,
+    # which also keeps the base prompt's "sections above this one" wording true.
+    return with_core("\n\n".join(parts))
 
 
 async def should_use_fast_path(text: str) -> bool:

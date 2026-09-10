@@ -6,6 +6,7 @@
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import Connection from './Terminals/Connection.svelte';
 	import AddTerminalServerModal from '$lib/components/AddTerminalServerModal.svelte';
+	import SettingsSection from '../SettingsSection.svelte';
 
 	export let servers = [];
 	export let onChange: (servers: typeof servers) => void = () => {};
@@ -40,15 +41,42 @@
 
 <AddTerminalServerModal direct bind:show={showAddModal} onSubmit={(server) => addServer(server)} />
 
-<div>
-	<div class="flex justify-between items-center mb-1">
-		<div class="flex items-center gap-2">
-			<div class="text-lg font-semibold text-gray-900 dark:text-gray-100">{$i18n.t('Open Terminal')}</div>
-			<span
-				class="text-[0.65rem] font-medium uppercase px-1.5 py-0.5 rounded-md bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400"
-				>{$i18n.t('Experimental')}</span
-			>
+<div class="flex items-start justify-between gap-4">
+	<SettingsSection title={$i18n.t('Open Terminal')} className="min-w-0 flex-1">
+		<svelte:fragment slot="description"><slot name="description" /></svelte:fragment>
+
+		<div class="mt-3 flex flex-col gap-1.5">
+			{#each servers as server, idx}
+				<Connection
+					bind:connection={server}
+					onSubmit={(updated) => updateServer(idx, updated)}
+					onDelete={() => deleteServer(idx)}
+					onEnable={() => enableServer(idx)}
+					onDisable={() => disableServer(idx)}
+				/>
+			{/each}
 		</div>
+
+		{#if servers.length === 0}
+			<div class="text-xs text-gray-400 dark:text-gray-500">
+				{$i18n.t('No terminal connections configured.')}
+				<a
+					href="https://github.com/open-webui/open-terminal"
+					target="_blank"
+					rel="noopener noreferrer"
+					class="underline hover:text-gray-700 dark:hover:text-gray-200"
+				>
+					{$i18n.t('Learn more')} ↗
+				</a>
+			</div>
+		{/if}
+	</SettingsSection>
+
+	<div class="mt-1 flex h-7 shrink-0 items-center gap-2">
+		<span
+			class="text-[0.65rem] font-medium uppercase px-1.5 py-0.5 rounded-md bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400"
+			>{$i18n.t('Experimental')}</span
+		>
 		<Tooltip content={$i18n.t('Add Connection')}>
 			<button
 				class="px-1"
@@ -60,30 +88,4 @@
 			</button>
 		</Tooltip>
 	</div>
-
-	<div class="flex flex-col gap-1.5">
-		{#each servers as server, idx}
-			<Connection
-				bind:connection={server}
-				onSubmit={(updated) => updateServer(idx, updated)}
-				onDelete={() => deleteServer(idx)}
-				onEnable={() => enableServer(idx)}
-				onDisable={() => disableServer(idx)}
-			/>
-		{/each}
-	</div>
-
-	{#if servers.length === 0}
-		<div class="text-xs text-gray-400 dark:text-gray-500">
-			{$i18n.t('No terminal connections configured.')}
-			<a
-				href="https://github.com/open-webui/open-terminal"
-				target="_blank"
-				rel="noopener noreferrer"
-				class="underline hover:text-gray-700 dark:hover:text-gray-200"
-			>
-				{$i18n.t('Learn more')} ↗
-			</a>
-		</div>
-	{/if}
 </div>

@@ -21,6 +21,10 @@
 	import type { i18n as i18nType } from 'i18next';
 	import Textarea from '$lib/components/common/Textarea.svelte';
 
+	import Pane from './ui/Pane.svelte';
+	import Row from './ui/Row.svelte';
+	import Section from './ui/Section.svelte';
+
 	const i18n = getContext<Writable<i18nType>>('i18n');
 
 	export let saveHandler: () => void;
@@ -207,56 +211,48 @@
 </script>
 
 <form
-	class="flex flex-col h-full justify-between space-y-3 text-sm"
+	class="text-sm h-full"
 	on:submit|preventDefault={async () => {
 		await updateConfigHandler();
 		dispatch('save');
 	}}
 >
-	<div class=" space-y-3 overflow-y-scroll scrollbar-hidden h-full">
-		<div class="flex flex-col gap-3">
-			<div>
-				<div class=" mt-0.5 mb-2.5 text-base font-medium">{$i18n.t('Speech-to-Text')}</div>
-
-				<hr class=" border-gray-100/30 dark:border-gray-850/30 my-2" />
-
-				{#if STT_ENGINE !== 'web'}
-					<div class="mb-2">
-						<div class=" mb-1.5 text-xs font-medium">{$i18n.t('Supported MIME Types')}</div>
-						<div class="flex w-full">
-							<div class="flex-1">
-								<input
-									class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
-									bind:value={STT_SUPPORTED_CONTENT_TYPES}
-									placeholder={$i18n.t(
-										'e.g., audio/wav,audio/mpeg,video/* (leave blank for defaults)'
-									)}
-								/>
-							</div>
+	<Pane>
+		<Section title={$i18n.t('Speech-to-Text')}>
+			{#if STT_ENGINE !== 'web'}
+				<Row label={$i18n.t('Supported MIME Types')}>
+					<svelte:fragment slot="detail">
+						<div class="mt-1">
+							<input
+								class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+								bind:value={STT_SUPPORTED_CONTENT_TYPES}
+								placeholder={$i18n.t(
+									'e.g., audio/wav,audio/mpeg,video/* (leave blank for defaults)'
+								)}
+							/>
 						</div>
-					</div>
-				{/if}
+					</svelte:fragment>
+				</Row>
+			{/if}
 
-				<div class="mb-2 py-0.5 flex w-full justify-between">
-					<div class=" self-center text-xs font-medium">{$i18n.t('Speech-to-Text Engine')}</div>
-					<div class="flex items-center relative">
-						<select
-							class="cursor-pointer w-fit pr-8 rounded-sm px-2 p-1 text-xs bg-transparent outline-hidden text-right"
-							bind:value={STT_ENGINE}
-							placeholder={$i18n.t('Select an engine')}
-						>
-							<option value="">{$i18n.t('Whisper (Local)')}</option>
-							<option value="openai">{$i18n.t('OpenAI')}</option>
-							<option value="web">{$i18n.t('Web API')}</option>
-							<option value="deepgram">{$i18n.t('Deepgram')}</option>
-							<option value="azure">{$i18n.t('Azure AI Speech')}</option>
-							<option value="mistral">{$i18n.t('MistralAI')}</option>
-						</select>
-					</div>
-				</div>
+			<Row label={$i18n.t('Speech-to-Text Engine')}>
+				<select
+					class="cursor-pointer w-fit pr-8 rounded-sm px-2 p-1 text-xs bg-transparent outline-hidden text-right"
+					bind:value={STT_ENGINE}
+					placeholder={$i18n.t('Select an engine')}
+				>
+					<option value="">{$i18n.t('Whisper (Local)')}</option>
+					<option value="openai">{$i18n.t('OpenAI')}</option>
+					<option value="web">{$i18n.t('Web API')}</option>
+					<option value="deepgram">{$i18n.t('Deepgram')}</option>
+					<option value="azure">{$i18n.t('Azure AI Speech')}</option>
+					<option value="mistral">{$i18n.t('MistralAI')}</option>
+				</select>
+			</Row>
 
-				{#if STT_ENGINE === 'openai'}
-					<div>
+			{#if STT_ENGINE === 'openai'}
+				<Row>
+					<svelte:fragment slot="detail">
 						<div class="mt-1 flex gap-2 mb-1">
 							<input
 								class="flex-1 w-full bg-transparent outline-hidden"
@@ -267,46 +263,42 @@
 
 							<SensitiveInput placeholder={$i18n.t('API Key')} bind:value={STT_OPENAI_API_KEY} />
 						</div>
-					</div>
+					</svelte:fragment>
+				</Row>
 
-					<hr class="border-gray-100/30 dark:border-gray-850/30 my-2" />
+				<Row label={$i18n.t('STT Model')}>
+					<svelte:fragment slot="detail">
+						<div class="mt-1">
+							<input
+								list="model-list"
+								class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+								bind:value={STT_MODEL}
+								placeholder={$i18n.t('Select a model')}
+							/>
 
-					<div>
-						<div class=" mb-1.5 text-xs font-medium">{$i18n.t('STT Model')}</div>
-						<div class="flex w-full">
-							<div class="flex-1">
-								<input
-									list="model-list"
-									class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
-									bind:value={STT_MODEL}
-									placeholder={$i18n.t('Select a model')}
-								/>
-
-								<datalist id="model-list">
-									<option value="whisper-1" />
-								</datalist>
-							</div>
+							<datalist id="model-list">
+								<option value="whisper-1" />
+							</datalist>
 						</div>
-					</div>
-				{:else if STT_ENGINE === 'deepgram'}
-					<div>
+					</svelte:fragment>
+				</Row>
+			{:else if STT_ENGINE === 'deepgram'}
+				<Row>
+					<svelte:fragment slot="detail">
 						<div class="mt-1 flex gap-2 mb-1">
 							<SensitiveInput placeholder={$i18n.t('API Key')} bind:value={STT_DEEPGRAM_API_KEY} />
 						</div>
-					</div>
+					</svelte:fragment>
+				</Row>
 
-					<hr class="border-gray-100/30 dark:border-gray-850/30 my-2" />
-
-					<div>
-						<div class=" mb-1.5 text-xs font-medium">{$i18n.t('STT Model')}</div>
-						<div class="flex w-full">
-							<div class="flex-1">
-								<input
-									class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
-									bind:value={STT_MODEL}
-									placeholder={$i18n.t('Select a model (optional)')}
-								/>
-							</div>
+				<Row label={$i18n.t('STT Model')}>
+					<svelte:fragment slot="detail">
+						<div class="mt-1">
+							<input
+								class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+								bind:value={STT_MODEL}
+								placeholder={$i18n.t('Select a model (optional)')}
+							/>
 						</div>
 						<div class="mt-2 mb-1 text-xs text-gray-400 dark:text-gray-500">
 							{$i18n.t('Leave model field empty to use the default model.')}
@@ -318,9 +310,11 @@
 								{$i18n.t('Click here to see available models.')}
 							</a>
 						</div>
-					</div>
-				{:else if STT_ENGINE === 'azure'}
-					<div>
+					</svelte:fragment>
+				</Row>
+			{:else if STT_ENGINE === 'azure'}
+				<Row>
+					<svelte:fragment slot="detail">
 						<div class="mt-1 flex gap-2 mb-1">
 							<SensitiveInput
 								placeholder={$i18n.t('API Key')}
@@ -328,63 +322,59 @@
 								required
 							/>
 						</div>
+					</svelte:fragment>
+				</Row>
 
-						<hr class="border-gray-100/30 dark:border-gray-850/30 my-2" />
-
-						<div>
-							<div class=" mb-1.5 text-xs font-medium">{$i18n.t('Azure Region')}</div>
-							<div class="flex w-full">
-								<div class="flex-1">
-									<input
-										class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
-										bind:value={STT_AZURE_REGION}
-										placeholder={$i18n.t('e.g., westus (leave blank for eastus)')}
-									/>
-								</div>
-							</div>
+				<Row label={$i18n.t('Azure Region')}>
+					<svelte:fragment slot="detail">
+						<div class="mt-1">
+							<input
+								class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+								bind:value={STT_AZURE_REGION}
+								placeholder={$i18n.t('e.g., westus (leave blank for eastus)')}
+							/>
 						</div>
+					</svelte:fragment>
+				</Row>
 
-						<div>
-							<div class=" mb-1.5 text-xs font-medium">{$i18n.t('Language Locales')}</div>
-							<div class="flex w-full">
-								<div class="flex-1">
-									<input
-										class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
-										bind:value={STT_AZURE_LOCALES}
-										placeholder={$i18n.t('e.g., en-US,ja-JP (leave blank for auto-detect)')}
-									/>
-								</div>
-							</div>
+				<Row label={$i18n.t('Language Locales')}>
+					<svelte:fragment slot="detail">
+						<div class="mt-1">
+							<input
+								class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+								bind:value={STT_AZURE_LOCALES}
+								placeholder={$i18n.t('e.g., en-US,ja-JP (leave blank for auto-detect)')}
+							/>
 						</div>
+					</svelte:fragment>
+				</Row>
 
-						<div>
-							<div class=" mb-1.5 text-xs font-medium">{$i18n.t('Endpoint URL')}</div>
-							<div class="flex w-full">
-								<div class="flex-1">
-									<input
-										class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
-										bind:value={STT_AZURE_BASE_URL}
-										placeholder={$i18n.t('(leave blank for to use commercial endpoint)')}
-									/>
-								</div>
-							</div>
+				<Row label={$i18n.t('Endpoint URL')}>
+					<svelte:fragment slot="detail">
+						<div class="mt-1">
+							<input
+								class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+								bind:value={STT_AZURE_BASE_URL}
+								placeholder={$i18n.t('(leave blank for to use commercial endpoint)')}
+							/>
 						</div>
+					</svelte:fragment>
+				</Row>
 
-						<div>
-							<div class=" mb-1.5 text-xs font-medium">{$i18n.t('Max Speakers')}</div>
-							<div class="flex w-full">
-								<div class="flex-1">
-									<input
-										class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
-										bind:value={STT_AZURE_MAX_SPEAKERS}
-										placeholder={$i18n.t('e.g., 3, 4, 5 (leave blank for default)')}
-									/>
-								</div>
-							</div>
+				<Row label={$i18n.t('Max Speakers')}>
+					<svelte:fragment slot="detail">
+						<div class="mt-1">
+							<input
+								class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+								bind:value={STT_AZURE_MAX_SPEAKERS}
+								placeholder={$i18n.t('e.g., 3, 4, 5 (leave blank for default)')}
+							/>
 						</div>
-					</div>
-				{:else if STT_ENGINE === 'mistral'}
-					<div>
+					</svelte:fragment>
+				</Row>
+			{:else if STT_ENGINE === 'mistral'}
+				<Row>
+					<svelte:fragment slot="detail">
 						<div class="mt-1 flex gap-2 mb-1">
 							<input
 								class="flex-1 w-full bg-transparent outline-hidden"
@@ -395,20 +385,17 @@
 
 							<SensitiveInput placeholder={$i18n.t('API Key')} bind:value={STT_MISTRAL_API_KEY} />
 						</div>
-					</div>
+					</svelte:fragment>
+				</Row>
 
-					<hr class="border-gray-100/30 dark:border-gray-850/30 my-2" />
-
-					<div>
-						<div class=" mb-1.5 text-xs font-medium">{$i18n.t('STT Model')}</div>
-						<div class="flex w-full">
-							<div class="flex-1">
-								<input
-									class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
-									bind:value={STT_MODEL}
-									placeholder="voxtral-mini-latest"
-								/>
-							</div>
+				<Row label={$i18n.t('STT Model')}>
+					<svelte:fragment slot="detail">
+						<div class="mt-1">
+							<input
+								class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+								bind:value={STT_MODEL}
+								placeholder="voxtral-mini-latest"
+							/>
 						</div>
 						<div class="mt-2 mb-1 text-xs text-gray-400 dark:text-gray-500">
 							{$i18n.t('Leave empty to use the default model (voxtral-mini-latest).')}
@@ -420,35 +407,30 @@
 								{$i18n.t('Learn more about Voxtral transcription.')}
 							</a>
 						</div>
-					</div>
+					</svelte:fragment>
+				</Row>
 
-					<hr class="border-gray-100/30 dark:border-gray-850/30 my-2" />
-
-					<div>
-						<div class="flex items-center justify-between mb-2">
-							<div class="text-xs font-medium">{$i18n.t('Use Chat Completions API')}</div>
-							<label class="relative inline-flex items-center cursor-pointer">
-								<input
-									type="checkbox"
-									bind:checked={STT_MISTRAL_USE_CHAT_COMPLETIONS}
-									class="sr-only peer"
-								/>
-								<div
-									class="w-9 h-5 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all dark:border-gray-600 peer-checked:bg-blue-600"
-								></div>
-							</label>
-						</div>
-						<div class="text-xs text-gray-400 dark:text-gray-500">
-							{$i18n.t(
-								'Use /v1/chat/completions endpoint instead of /v1/audio/transcriptions for potentially better accuracy.'
-							)}
-						</div>
-					</div>
-				{:else if STT_ENGINE === ''}
-					<div>
-						<div class=" mb-1.5 text-xs font-medium">{$i18n.t('STT Model')}</div>
-
-						<div class="flex w-full">
+				<Row
+					label={$i18n.t('Use Chat Completions API')}
+					description={$i18n.t(
+						'Use /v1/chat/completions endpoint instead of /v1/audio/transcriptions for potentially better accuracy.'
+					)}
+				>
+					<label class="relative inline-flex items-center cursor-pointer">
+						<input
+							type="checkbox"
+							bind:checked={STT_MISTRAL_USE_CHAT_COMPLETIONS}
+							class="sr-only peer"
+						/>
+						<div
+							class="w-9 h-5 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all dark:border-gray-600 peer-checked:bg-blue-600"
+						></div>
+					</label>
+				</Row>
+			{:else if STT_ENGINE === ''}
+				<Row label={$i18n.t('STT Model')}>
+					<svelte:fragment slot="detail">
+						<div class="mt-1 flex w-full">
 							<div class="flex-1 mr-2">
 								<input
 									class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
@@ -499,51 +481,46 @@
 								)}
 							</a>
 						</div>
-					</div>
-				{/if}
-			</div>
+					</svelte:fragment>
+				</Row>
+			{/if}
+		</Section>
 
-			<div>
-				<div class=" mt-0.5 mb-2.5 text-base font-medium">{$i18n.t('Text-to-Speech')}</div>
+		<Section title={$i18n.t('Text-to-Speech')}>
+			<Row label={$i18n.t('Text-to-Speech Engine')}>
+				<select
+					class="w-fit pr-8 cursor-pointer rounded-sm px-2 p-1 text-xs bg-transparent outline-hidden text-right"
+					bind:value={TTS_ENGINE}
+					placeholder={$i18n.t('Select a mode')}
+					on:change={async (e) => {
+						await updateConfigHandler();
+						await getVoices();
+						await getModels();
 
-				<hr class=" border-gray-100/30 dark:border-gray-850/30 my-2" />
+						if (e.target?.value === 'openai') {
+							TTS_VOICE = 'alloy';
+							TTS_MODEL = 'tts-1';
+						} else if (e.target?.value === 'mistral') {
+							TTS_VOICE = '';
+							TTS_MODEL = 'voxtral-mini-tts-2603';
+						} else {
+							TTS_VOICE = '';
+							TTS_MODEL = '';
+						}
+					}}
+				>
+					<option value="">{$i18n.t('Web API')}</option>
+					<option value="transformers">{$i18n.t('Transformers')} ({$i18n.t('Local')})</option>
+					<option value="openai">{$i18n.t('OpenAI')}</option>
+					<option value="elevenlabs">{$i18n.t('ElevenLabs')}</option>
+					<option value="azure">{$i18n.t('Azure AI Speech')}</option>
+					<option value="mistral">{$i18n.t('MistralAI')}</option>
+				</select>
+			</Row>
 
-				<div class="mb-2 py-0.5 flex w-full justify-between">
-					<div class=" self-center text-xs font-medium">{$i18n.t('Text-to-Speech Engine')}</div>
-					<div class="flex items-center relative">
-						<select
-							class="w-fit pr-8 cursor-pointer rounded-sm px-2 p-1 text-xs bg-transparent outline-hidden text-right"
-							bind:value={TTS_ENGINE}
-							placeholder={$i18n.t('Select a mode')}
-							on:change={async (e) => {
-								await updateConfigHandler();
-								await getVoices();
-								await getModels();
-
-								if (e.target?.value === 'openai') {
-									TTS_VOICE = 'alloy';
-									TTS_MODEL = 'tts-1';
-								} else if (e.target?.value === 'mistral') {
-									TTS_VOICE = '';
-									TTS_MODEL = 'voxtral-mini-tts-2603';
-								} else {
-									TTS_VOICE = '';
-									TTS_MODEL = '';
-								}
-							}}
-						>
-							<option value="">{$i18n.t('Web API')}</option>
-							<option value="transformers">{$i18n.t('Transformers')} ({$i18n.t('Local')})</option>
-							<option value="openai">{$i18n.t('OpenAI')}</option>
-							<option value="elevenlabs">{$i18n.t('ElevenLabs')}</option>
-							<option value="azure">{$i18n.t('Azure AI Speech')}</option>
-							<option value="mistral">{$i18n.t('MistralAI')}</option>
-						</select>
-					</div>
-				</div>
-
-				{#if TTS_ENGINE === 'openai'}
-					<div>
+			{#if TTS_ENGINE === 'openai'}
+				<Row>
+					<svelte:fragment slot="detail">
 						<div class="mt-1 flex gap-2 mb-1">
 							<input
 								class="flex-1 w-full bg-transparent outline-hidden"
@@ -554,49 +531,51 @@
 
 							<SensitiveInput placeholder={$i18n.t('API Key')} bind:value={TTS_OPENAI_API_KEY} />
 						</div>
-					</div>
-				{:else if TTS_ENGINE === 'elevenlabs'}
-					<div>
+					</svelte:fragment>
+				</Row>
+			{:else if TTS_ENGINE === 'elevenlabs'}
+				<Row>
+					<svelte:fragment slot="detail">
 						<div class="mt-1 flex gap-2 mb-1">
 							<SensitiveInput placeholder={$i18n.t('API Key')} bind:value={TTS_API_KEY} required />
 						</div>
-					</div>
-				{:else if TTS_ENGINE === 'azure'}
-					<div>
+					</svelte:fragment>
+				</Row>
+			{:else if TTS_ENGINE === 'azure'}
+				<Row>
+					<svelte:fragment slot="detail">
 						<div class="mt-1 flex gap-2 mb-1">
 							<SensitiveInput placeholder={$i18n.t('API Key')} bind:value={TTS_API_KEY} required />
 						</div>
+					</svelte:fragment>
+				</Row>
 
-						<hr class="border-gray-100/30 dark:border-gray-850/30 my-2" />
-
-						<div>
-							<div class=" mb-1.5 text-xs font-medium">{$i18n.t('Azure Region')}</div>
-							<div class="flex w-full">
-								<div class="flex-1">
-									<input
-										class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
-										bind:value={TTS_AZURE_SPEECH_REGION}
-										placeholder={$i18n.t('e.g., westus (leave blank for eastus)')}
-									/>
-								</div>
-							</div>
+				<Row label={$i18n.t('Azure Region')}>
+					<svelte:fragment slot="detail">
+						<div class="mt-1">
+							<input
+								class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+								bind:value={TTS_AZURE_SPEECH_REGION}
+								placeholder={$i18n.t('e.g., westus (leave blank for eastus)')}
+							/>
 						</div>
+					</svelte:fragment>
+				</Row>
 
-						<div>
-							<div class=" mb-1.5 text-xs font-medium">{$i18n.t('Endpoint URL')}</div>
-							<div class="flex w-full">
-								<div class="flex-1">
-									<input
-										class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
-										bind:value={TTS_AZURE_SPEECH_BASE_URL}
-										placeholder={$i18n.t('(leave blank for to use commercial endpoint)')}
-									/>
-								</div>
-							</div>
+				<Row label={$i18n.t('Endpoint URL')}>
+					<svelte:fragment slot="detail">
+						<div class="mt-1">
+							<input
+								class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+								bind:value={TTS_AZURE_SPEECH_BASE_URL}
+								placeholder={$i18n.t('(leave blank for to use commercial endpoint)')}
+							/>
 						</div>
-					</div>
-				{:else if TTS_ENGINE === 'mistral'}
-					<div>
+					</svelte:fragment>
+				</Row>
+			{:else if TTS_ENGINE === 'mistral'}
+				<Row>
+					<svelte:fragment slot="detail">
 						<div class="mt-1 flex gap-2 mb-1">
 							<input
 								class="flex-1 w-full bg-transparent outline-hidden"
@@ -607,287 +586,278 @@
 
 							<SensitiveInput placeholder={$i18n.t('API Key')} bind:value={TTS_MISTRAL_API_KEY} />
 						</div>
-					</div>
-				{/if}
+					</svelte:fragment>
+				</Row>
+			{/if}
 
-				<div class="mb-2">
-					{#if TTS_ENGINE === ''}
-						<div>
-							<div class=" mb-1.5 text-xs font-medium">{$i18n.t('TTS Voice')}</div>
-							<div class="flex w-full">
-								<div class="flex-1">
-									<select
-										class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
-										bind:value={TTS_VOICE}
+			{#if TTS_ENGINE === ''}
+				<Row label={$i18n.t('TTS Voice')}>
+					<svelte:fragment slot="detail">
+						<div class="mt-1">
+							<select
+								class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+								bind:value={TTS_VOICE}
+							>
+								<option value="" selected={TTS_VOICE !== ''}>{$i18n.t('Default')}</option>
+								{#each voices as voice}
+									<option
+										value={voice.voiceURI}
+										class="bg-gray-100 dark:bg-gray-700"
+										selected={TTS_VOICE === voice.voiceURI}>{voice.name}</option
 									>
-										<option value="" selected={TTS_VOICE !== ''}>{$i18n.t('Default')}</option>
-										{#each voices as voice}
-											<option
-												value={voice.voiceURI}
-												class="bg-gray-100 dark:bg-gray-700"
-												selected={TTS_VOICE === voice.voiceURI}>{voice.name}</option
-											>
-										{/each}
-									</select>
-								</div>
-							</div>
+								{/each}
+							</select>
 						</div>
-					{:else if TTS_ENGINE === 'transformers'}
-						<div>
-							<div class=" mb-1.5 text-xs font-medium">{$i18n.t('TTS Model')}</div>
-							<div class="flex w-full">
-								<div class="flex-1">
-									<input
-										list="model-list"
-										class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
-										bind:value={TTS_MODEL}
-										placeholder={$i18n.t('CMU ARCTIC speaker embedding name')}
-									/>
+					</svelte:fragment>
+				</Row>
+			{:else if TTS_ENGINE === 'transformers'}
+				<Row label={$i18n.t('TTS Model')}>
+					<svelte:fragment slot="detail">
+						<div class="mt-1">
+							<input
+								list="model-list"
+								class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+								bind:value={TTS_MODEL}
+								placeholder={$i18n.t('CMU ARCTIC speaker embedding name')}
+							/>
 
-									<datalist id="model-list">
-										<option value="tts-1" />
-									</datalist>
-								</div>
-							</div>
-							<div class="mt-2 mb-1 text-xs text-gray-400 dark:text-gray-500">
-								{$i18n.t(`Harvis uses SpeechT5 and CMU Arctic speaker embeddings.`)}
-
-								To learn more about SpeechT5,
-
-								<a
-									class=" hover:underline dark:text-gray-200 text-gray-800"
-									href="https://github.com/microsoft/SpeechT5"
-									target="_blank"
-								>
-									{$i18n.t(`click here`, {
-										name: 'SpeechT5'
-									})}.
-								</a>
-								To see the available CMU Arctic speaker embeddings,
-								<a
-									class=" hover:underline dark:text-gray-200 text-gray-800"
-									href="https://huggingface.co/datasets/Matthijs/cmu-arctic-xvectors"
-									target="_blank"
-								>
-									{$i18n.t(`click here`)}.
-								</a>
-							</div>
+							<datalist id="model-list">
+								<option value="tts-1" />
+							</datalist>
 						</div>
-					{:else if TTS_ENGINE === 'openai'}
-						<div class=" flex gap-2">
-							<div class="w-full">
-								<div class=" mb-1.5 text-xs font-medium">{$i18n.t('TTS Voice')}</div>
-								<div class="flex w-full">
-									<div class="flex-1">
-										<input
-											list="voice-list"
-											class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
-											bind:value={TTS_VOICE}
-											placeholder={$i18n.t('Select a voice')}
-										/>
-
-										<datalist id="voice-list">
-											{#each voices as voice}
-												<option value={voice.id}>{voice.name}</option>
-											{/each}
-										</datalist>
-									</div>
-								</div>
-							</div>
-							<div class="w-full">
-								<div class=" mb-1.5 text-xs font-medium">{$i18n.t('TTS Model')}</div>
-								<div class="flex w-full">
-									<div class="flex-1">
-										<input
-											list="tts-model-list"
-											class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
-											bind:value={TTS_MODEL}
-											placeholder={$i18n.t('Select a model')}
-										/>
-
-										<datalist id="tts-model-list">
-											{#each models as model}
-												<option value={model.id} class="bg-gray-50 dark:bg-gray-700" />
-											{/each}
-										</datalist>
-									</div>
-								</div>
-							</div>
-						</div>
-
 						<div class="mt-2 mb-1 text-xs text-gray-400 dark:text-gray-500">
-							<div class="w-full">
-								<div class=" mb-1.5 text-xs font-medium">{$i18n.t('Additional Parameters')}</div>
-								<div class="flex w-full">
-									<div class="flex-1">
-										<Textarea
-											className="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
-											bind:value={TTS_OPENAI_PARAMS}
-											placeholder={$i18n.t('Enter additional parameters in JSON format')}
-											minSize={100}
-										/>
-									</div>
-								</div>
+							{$i18n.t(`Harvis uses SpeechT5 and CMU Arctic speaker embeddings.`)}
+
+							To learn more about SpeechT5,
+
+							<a
+								class=" hover:underline dark:text-gray-200 text-gray-800"
+								href="https://github.com/microsoft/SpeechT5"
+								target="_blank"
+							>
+								{$i18n.t(`click here`, {
+									name: 'SpeechT5'
+								})}.
+							</a>
+							To see the available CMU Arctic speaker embeddings,
+							<a
+								class=" hover:underline dark:text-gray-200 text-gray-800"
+								href="https://huggingface.co/datasets/Matthijs/cmu-arctic-xvectors"
+								target="_blank"
+							>
+								{$i18n.t(`click here`)}.
+							</a>
+						</div>
+					</svelte:fragment>
+				</Row>
+			{:else if TTS_ENGINE === 'openai'}
+				<div class="py-3 flex gap-2">
+					<div class="w-full">
+						<div class=" mb-1.5 text-xs font-medium">{$i18n.t('TTS Voice')}</div>
+						<div class="flex w-full">
+							<div class="flex-1">
+								<input
+									list="voice-list"
+									class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									bind:value={TTS_VOICE}
+									placeholder={$i18n.t('Select a voice')}
+								/>
+
+								<datalist id="voice-list">
+									{#each voices as voice}
+										<option value={voice.id}>{voice.name}</option>
+									{/each}
+								</datalist>
 							</div>
 						</div>
-					{:else if TTS_ENGINE === 'elevenlabs'}
-						<div class=" flex gap-2">
-							<div class="w-full">
-								<div class=" mb-1.5 text-xs font-medium">{$i18n.t('TTS Voice')}</div>
-								<div class="flex w-full">
-									<div class="flex-1">
-										<input
-											list="voice-list"
-											class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
-											bind:value={TTS_VOICE}
-											placeholder={$i18n.t('Select a voice')}
-										/>
+					</div>
+					<div class="w-full">
+						<div class=" mb-1.5 text-xs font-medium">{$i18n.t('TTS Model')}</div>
+						<div class="flex w-full">
+							<div class="flex-1">
+								<input
+									list="tts-model-list"
+									class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									bind:value={TTS_MODEL}
+									placeholder={$i18n.t('Select a model')}
+								/>
 
-										<datalist id="voice-list">
-											{#each voices as voice}
-												<option value={voice.id}>{voice.name}</option>
-											{/each}
-										</datalist>
-									</div>
-								</div>
-							</div>
-							<div class="w-full">
-								<div class=" mb-1.5 text-xs font-medium">{$i18n.t('TTS Model')}</div>
-								<div class="flex w-full">
-									<div class="flex-1">
-										<input
-											list="tts-model-list"
-											class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
-											bind:value={TTS_MODEL}
-											placeholder={$i18n.t('Select a model')}
-										/>
-
-										<datalist id="tts-model-list">
-											{#each models as model}
-												<option value={model.id} class="bg-gray-50 dark:bg-gray-700" />
-											{/each}
-										</datalist>
-									</div>
-								</div>
+								<datalist id="tts-model-list">
+									{#each models as model}
+										<option value={model.id} class="bg-gray-50 dark:bg-gray-700" />
+									{/each}
+								</datalist>
 							</div>
 						</div>
-					{:else if TTS_ENGINE === 'azure'}
-						<div class=" flex gap-2">
-							<div class="w-full">
-								<div class=" mb-1.5 text-xs font-medium">{$i18n.t('TTS Voice')}</div>
-								<div class="flex w-full">
-									<div class="flex-1">
-										<input
-											list="voice-list"
-											class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
-											bind:value={TTS_VOICE}
-											placeholder={$i18n.t('Select a voice')}
-										/>
-
-										<datalist id="voice-list">
-											{#each voices as voice}
-												<option value={voice.id}>{voice.name}</option>
-											{/each}
-										</datalist>
-									</div>
-								</div>
-							</div>
-							<div class="w-full">
-								<div class=" mb-1.5 text-xs font-medium">
-									{$i18n.t('Output format')}
-									<a
-										href="https://learn.microsoft.com/en-us/azure/ai-services/speech-service/rest-text-to-speech?tabs=streaming#audio-outputs"
-										target="_blank"
-									>
-										<small>{$i18n.t('Available list')}</small>
-									</a>
-								</div>
-								<div class="flex w-full">
-									<div class="flex-1">
-										<input
-											list="tts-model-list"
-											class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
-											bind:value={TTS_AZURE_SPEECH_OUTPUT_FORMAT}
-											placeholder={$i18n.t('Select an output format')}
-										/>
-									</div>
-								</div>
-							</div>
-						</div>
-					{:else if TTS_ENGINE === 'mistral'}
-						<div class=" flex gap-2">
-							<div class="w-full">
-								<div class=" mb-1.5 text-xs font-medium">{$i18n.t('TTS Voice')}</div>
-								<div class="flex w-full">
-									<div class="flex-1">
-										<input
-											list="voice-list"
-											class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
-											bind:value={TTS_VOICE}
-											placeholder={$i18n.t('Select a voice')}
-										/>
-
-										<datalist id="voice-list">
-											{#each voices as voice}
-												<option value={voice.id}>{voice.name}</option>
-											{/each}
-										</datalist>
-									</div>
-								</div>
-							</div>
-							<div class="w-full">
-								<div class=" mb-1.5 text-xs font-medium">{$i18n.t('TTS Model')}</div>
-								<div class="flex w-full">
-									<div class="flex-1">
-										<input
-											list="tts-model-list"
-											class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
-											bind:value={TTS_MODEL}
-											placeholder={$i18n.t('Select a model')}
-										/>
-
-										<datalist id="tts-model-list">
-											{#each models as model}
-												<option value={model.id} class="bg-gray-50 dark:bg-gray-700" />
-											{/each}
-										</datalist>
-									</div>
-								</div>
-							</div>
-						</div>
-					{/if}
-				</div>
-
-				<div class="pt-0.5 flex w-full justify-between">
-					<div class="self-center text-xs font-medium">{$i18n.t('Response splitting')}</div>
-					<div class="flex items-center relative">
-						<select
-							class="w-fit pr-8 cursor-pointer rounded-sm px-2 p-1 text-xs bg-transparent outline-hidden text-right"
-							aria-label={$i18n.t('Select how to split message text for TTS requests')}
-							bind:value={TTS_SPLIT_ON}
-						>
-							{#each Object.values(TTS_RESPONSE_SPLIT) as split}
-								<option value={split}
-									>{$i18n.t(split.charAt(0).toUpperCase() + split.slice(1))}</option
-								>
-							{/each}
-						</select>
 					</div>
 				</div>
-				<div class="mt-2 mb-1 text-xs text-gray-400 dark:text-gray-500">
-					{$i18n.t(
-						"Control how message text is split for TTS requests. 'Punctuation' splits into sentences, 'paragraphs' splits into paragraphs, and 'none' keeps the message as a single string."
-					)}
+
+				<Row label={$i18n.t('Additional Parameters')}>
+					<svelte:fragment slot="detail">
+						<div class="mt-1">
+							<Textarea
+								className="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+								bind:value={TTS_OPENAI_PARAMS}
+								placeholder={$i18n.t('Enter additional parameters in JSON format')}
+								minSize={100}
+							/>
+						</div>
+					</svelte:fragment>
+				</Row>
+			{:else if TTS_ENGINE === 'elevenlabs'}
+				<div class="py-3 flex gap-2">
+					<div class="w-full">
+						<div class=" mb-1.5 text-xs font-medium">{$i18n.t('TTS Voice')}</div>
+						<div class="flex w-full">
+							<div class="flex-1">
+								<input
+									list="voice-list"
+									class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									bind:value={TTS_VOICE}
+									placeholder={$i18n.t('Select a voice')}
+								/>
+
+								<datalist id="voice-list">
+									{#each voices as voice}
+										<option value={voice.id}>{voice.name}</option>
+									{/each}
+								</datalist>
+							</div>
+						</div>
+					</div>
+					<div class="w-full">
+						<div class=" mb-1.5 text-xs font-medium">{$i18n.t('TTS Model')}</div>
+						<div class="flex w-full">
+							<div class="flex-1">
+								<input
+									list="tts-model-list"
+									class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									bind:value={TTS_MODEL}
+									placeholder={$i18n.t('Select a model')}
+								/>
+
+								<datalist id="tts-model-list">
+									{#each models as model}
+										<option value={model.id} class="bg-gray-50 dark:bg-gray-700" />
+									{/each}
+								</datalist>
+							</div>
+						</div>
+					</div>
 				</div>
-			</div>
-		</div>
-	</div>
-	<div class="flex justify-end text-sm font-medium">
-		<button
-			class="px-3.5 py-1.5 text-sm font-medium bg-black hover:bg-gray-900 text-white dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-lg"
-			type="submit"
-		>
-			{$i18n.t('Save')}
-		</button>
-	</div>
+			{:else if TTS_ENGINE === 'azure'}
+				<div class="py-3 flex gap-2">
+					<div class="w-full">
+						<div class=" mb-1.5 text-xs font-medium">{$i18n.t('TTS Voice')}</div>
+						<div class="flex w-full">
+							<div class="flex-1">
+								<input
+									list="voice-list"
+									class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									bind:value={TTS_VOICE}
+									placeholder={$i18n.t('Select a voice')}
+								/>
+
+								<datalist id="voice-list">
+									{#each voices as voice}
+										<option value={voice.id}>{voice.name}</option>
+									{/each}
+								</datalist>
+							</div>
+						</div>
+					</div>
+					<div class="w-full">
+						<div class=" mb-1.5 text-xs font-medium">
+							{$i18n.t('Output format')}
+							<a
+								href="https://learn.microsoft.com/en-us/azure/ai-services/speech-service/rest-text-to-speech?tabs=streaming#audio-outputs"
+								target="_blank"
+							>
+								<small>{$i18n.t('Available list')}</small>
+							</a>
+						</div>
+						<div class="flex w-full">
+							<div class="flex-1">
+								<input
+									list="tts-model-list"
+									class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									bind:value={TTS_AZURE_SPEECH_OUTPUT_FORMAT}
+									placeholder={$i18n.t('Select an output format')}
+								/>
+							</div>
+						</div>
+					</div>
+				</div>
+			{:else if TTS_ENGINE === 'mistral'}
+				<div class="py-3 flex gap-2">
+					<div class="w-full">
+						<div class=" mb-1.5 text-xs font-medium">{$i18n.t('TTS Voice')}</div>
+						<div class="flex w-full">
+							<div class="flex-1">
+								<input
+									list="voice-list"
+									class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									bind:value={TTS_VOICE}
+									placeholder={$i18n.t('Select a voice')}
+								/>
+
+								<datalist id="voice-list">
+									{#each voices as voice}
+										<option value={voice.id}>{voice.name}</option>
+									{/each}
+								</datalist>
+							</div>
+						</div>
+					</div>
+					<div class="w-full">
+						<div class=" mb-1.5 text-xs font-medium">{$i18n.t('TTS Model')}</div>
+						<div class="flex w-full">
+							<div class="flex-1">
+								<input
+									list="tts-model-list"
+									class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-hidden"
+									bind:value={TTS_MODEL}
+									placeholder={$i18n.t('Select a model')}
+								/>
+
+								<datalist id="tts-model-list">
+									{#each models as model}
+										<option value={model.id} class="bg-gray-50 dark:bg-gray-700" />
+									{/each}
+								</datalist>
+							</div>
+						</div>
+					</div>
+				</div>
+			{/if}
+
+			<Row
+				label={$i18n.t('Response splitting')}
+				description={$i18n.t(
+					"Control how message text is split for TTS requests. 'Punctuation' splits into sentences, 'paragraphs' splits into paragraphs, and 'none' keeps the message as a single string."
+				)}
+			>
+				<select
+					class="w-fit pr-8 cursor-pointer rounded-sm px-2 p-1 text-xs bg-transparent outline-hidden text-right"
+					aria-label={$i18n.t('Select how to split message text for TTS requests')}
+					bind:value={TTS_SPLIT_ON}
+				>
+					{#each Object.values(TTS_RESPONSE_SPLIT) as split}
+						<option value={split}
+							>{$i18n.t(split.charAt(0).toUpperCase() + split.slice(1))}</option
+						>
+					{/each}
+				</select>
+			</Row>
+		</Section>
+
+		<svelte:fragment slot="actions">
+			<button
+				class="px-3.5 py-1.5 text-sm font-medium bg-black hover:bg-gray-900 text-white dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-lg"
+				type="submit"
+			>
+				{$i18n.t('Save')}
+			</button>
+		</svelte:fragment>
+	</Pane>
 </form>

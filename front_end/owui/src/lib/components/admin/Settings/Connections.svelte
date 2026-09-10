@@ -20,6 +20,10 @@
 	import AddConnectionModal from '$lib/components/AddConnectionModal.svelte';
 	import OllamaConnection from './Connections/OllamaConnection.svelte';
 
+	import Pane from './ui/Pane.svelte';
+	import Row from './ui/Row.svelte';
+	import Section from './ui/Section.svelte';
+
 	const i18n = getContext('i18n');
 
 	const getModels = async () => {
@@ -215,215 +219,171 @@
 	onSubmit={addOllamaConnectionHandler}
 />
 
-<form class="flex flex-col h-full justify-between text-sm" on:submit|preventDefault={submitHandler}>
-	<div class=" overflow-y-scroll scrollbar-hidden h-full">
+<form class="text-sm h-full" on:submit|preventDefault={submitHandler}>
+	<Pane title={$i18n.t('Connections')}>
 		{#if ENABLE_OPENAI_API !== null && ENABLE_OLLAMA_API !== null && connectionsConfig !== null}
-			<div class="mb-3.5">
-				<div class=" mt-0.5 mb-2.5 text-base font-medium">{$i18n.t('General')}</div>
+			<Section title={$i18n.t('General')}>
+				<Row label={$i18n.t('OpenAI API')}>
+					<Switch
+						bind:state={ENABLE_OPENAI_API}
+						on:change={async () => {
+							updateOpenAIHandler();
+						}}
+					/>
+				</Row>
 
-				<hr class=" border-gray-100/30 dark:border-gray-850/30 my-2" />
+				<Row label={$i18n.t('Ollama API')}>
+					<Switch
+						bind:state={ENABLE_OLLAMA_API}
+						on:change={async () => {
+							updateOllamaHandler();
+						}}
+					/>
+				</Row>
 
-				<div class="my-2">
-					<div class="mt-2 space-y-2">
-						<div class="flex justify-between items-center text-sm">
-							<div class="  font-medium">{$i18n.t('OpenAI API')}</div>
+				<Row
+					label={$i18n.t('Direct Connections')}
+					description={$i18n.t(
+						'Direct Connections allow users to connect to their own OpenAI compatible API endpoints.'
+					)}
+				>
+					<Switch
+						bind:state={connectionsConfig.ENABLE_DIRECT_CONNECTIONS}
+						on:change={async () => {
+							updateConnectionsHandler();
+						}}
+					/>
+				</Row>
 
-							<div class="flex items-center">
-								<div class="">
-									<Switch
-										bind:state={ENABLE_OPENAI_API}
-										on:change={async () => {
-											updateOpenAIHandler();
-										}}
-									/>
-								</div>
-							</div>
-						</div>
+				<Row
+					label={$i18n.t('Cache Base Model List')}
+					description={$i18n.t(
+						'Base Model List Cache speeds up access by fetching base models only at startup or on settings save—faster, but may not show recent base model changes.'
+					)}
+				>
+					<Switch
+						bind:state={connectionsConfig.ENABLE_BASE_MODELS_CACHE}
+						on:change={async () => {
+							updateConnectionsHandler();
+						}}
+					/>
+				</Row>
+			</Section>
 
-						{#if ENABLE_OPENAI_API}
-							<div class="">
-								<div class="flex justify-between items-center">
-									<div class="font-medium text-xs">{$i18n.t('Manage OpenAI API Connections')}</div>
+			{#if ENABLE_OPENAI_API}
+				<Section title={$i18n.t('Manage OpenAI API Connections')}>
+					<svelte:fragment slot="action">
+						<Tooltip content={$i18n.t(`Add Connection`)}>
+							<button
+								class="px-1"
+								on:click={() => {
+									showAddOpenAIConnectionModal = true;
+								}}
+								type="button"
+							>
+								<Plus />
+							</button>
+						</Tooltip>
+					</svelte:fragment>
 
-									<Tooltip content={$i18n.t(`Add Connection`)}>
-										<button
-											class="px-1"
-											on:click={() => {
-												showAddOpenAIConnectionModal = true;
-											}}
-											type="button"
-										>
-											<Plus />
-										</button>
-									</Tooltip>
-								</div>
+					<div class="flex flex-col gap-1.5 py-3">
+						{#each OPENAI_API_BASE_URLS as url, idx}
+							<OpenAIConnection
+								bind:url={OPENAI_API_BASE_URLS[idx]}
+								bind:key={OPENAI_API_KEYS[idx]}
+								bind:config={OPENAI_API_CONFIGS[idx]}
+								pipeline={pipelineUrls[url] ? true : false}
+								onSubmit={() => {
+									updateOpenAIHandler();
+								}}
+								onDelete={() => {
+									OPENAI_API_BASE_URLS = OPENAI_API_BASE_URLS.filter(
+										(url, urlIdx) => idx !== urlIdx
+									);
+									OPENAI_API_KEYS = OPENAI_API_KEYS.filter((key, keyIdx) => idx !== keyIdx);
 
-								<div class="flex flex-col gap-1.5 mt-1.5">
-									{#each OPENAI_API_BASE_URLS as url, idx}
-										<OpenAIConnection
-											bind:url={OPENAI_API_BASE_URLS[idx]}
-											bind:key={OPENAI_API_KEYS[idx]}
-											bind:config={OPENAI_API_CONFIGS[idx]}
-											pipeline={pipelineUrls[url] ? true : false}
-											onSubmit={() => {
-												updateOpenAIHandler();
-											}}
-											onDelete={() => {
-												OPENAI_API_BASE_URLS = OPENAI_API_BASE_URLS.filter(
-													(url, urlIdx) => idx !== urlIdx
-												);
-												OPENAI_API_KEYS = OPENAI_API_KEYS.filter((key, keyIdx) => idx !== keyIdx);
-
-												let newConfig = {};
-												OPENAI_API_BASE_URLS.forEach((url, newIdx) => {
-													newConfig[newIdx] =
-														OPENAI_API_CONFIGS[newIdx < idx ? newIdx : newIdx + 1];
-												});
-												OPENAI_API_CONFIGS = newConfig;
-												updateOpenAIHandler();
-											}}
-										/>
-									{/each}
-								</div>
-							</div>
-						{/if}
-					</div>
-				</div>
-
-				<div class=" my-2">
-					<div class="flex justify-between items-center text-sm mb-2">
-						<div class="  font-medium">{$i18n.t('Ollama API')}</div>
-
-						<div class="mt-1">
-							<Switch
-								bind:state={ENABLE_OLLAMA_API}
-								on:change={async () => {
-									updateOllamaHandler();
+									let newConfig = {};
+									OPENAI_API_BASE_URLS.forEach((url, newIdx) => {
+										newConfig[newIdx] =
+											OPENAI_API_CONFIGS[newIdx < idx ? newIdx : newIdx + 1];
+									});
+									OPENAI_API_CONFIGS = newConfig;
+									updateOpenAIHandler();
 								}}
 							/>
-						</div>
+						{/each}
 					</div>
+				</Section>
+			{/if}
 
-					{#if ENABLE_OLLAMA_API}
-						<div class="">
-							<div class="flex justify-between items-center">
-								<div class="font-medium text-xs">{$i18n.t('Manage Ollama API Connections')}</div>
+			{#if ENABLE_OLLAMA_API}
+				<Section title={$i18n.t('Manage Ollama API Connections')}>
+					<svelte:fragment slot="action">
+						<Tooltip content={$i18n.t(`Add Connection`)}>
+							<button
+								class="px-1"
+								on:click={() => {
+									showAddOllamaConnectionModal = true;
+								}}
+								type="button"
+							>
+								<Plus />
+							</button>
+						</Tooltip>
+					</svelte:fragment>
 
-								<Tooltip content={$i18n.t(`Add Connection`)}>
-									<button
-										class="px-1"
-										on:click={() => {
-											showAddOllamaConnectionModal = true;
+					<div class="py-3">
+						<div class="flex w-full gap-1.5">
+							<div class="flex-1 flex flex-col gap-1.5">
+								{#each OLLAMA_BASE_URLS as url, idx}
+									<OllamaConnection
+										bind:url={OLLAMA_BASE_URLS[idx]}
+										bind:config={OLLAMA_API_CONFIGS[idx]}
+										{idx}
+										onSubmit={() => {
+											updateOllamaHandler();
 										}}
-										type="button"
-									>
-										<Plus />
-									</button>
-								</Tooltip>
-							</div>
+										onDelete={() => {
+											OLLAMA_BASE_URLS = OLLAMA_BASE_URLS.filter((url, urlIdx) => idx !== urlIdx);
 
-							<div class="flex w-full gap-1.5">
-								<div class="flex-1 flex flex-col gap-1.5 mt-1.5">
-									{#each OLLAMA_BASE_URLS as url, idx}
-										<OllamaConnection
-											bind:url={OLLAMA_BASE_URLS[idx]}
-											bind:config={OLLAMA_API_CONFIGS[idx]}
-											{idx}
-											onSubmit={() => {
-												updateOllamaHandler();
-											}}
-											onDelete={() => {
-												OLLAMA_BASE_URLS = OLLAMA_BASE_URLS.filter((url, urlIdx) => idx !== urlIdx);
-
-												let newConfig = {};
-												OLLAMA_BASE_URLS.forEach((url, newIdx) => {
-													newConfig[newIdx] =
-														OLLAMA_API_CONFIGS[newIdx < idx ? newIdx : newIdx + 1];
-												});
-												OLLAMA_API_CONFIGS = newConfig;
-											}}
-										/>
-									{/each}
-								</div>
-							</div>
-
-							<div class="mt-1 text-xs text-gray-400 dark:text-gray-500">
-								{$i18n.t('Trouble accessing Ollama?')}
-								<a
-									class=" text-gray-300 font-medium underline"
-									href="https://github.com/open-webui/open-webui#troubleshooting"
-									target="_blank"
-								>
-									{$i18n.t('Click here for help.')}
-								</a>
+											let newConfig = {};
+											OLLAMA_BASE_URLS.forEach((url, newIdx) => {
+												newConfig[newIdx] =
+													OLLAMA_API_CONFIGS[newIdx < idx ? newIdx : newIdx + 1];
+											});
+											OLLAMA_API_CONFIGS = newConfig;
+										}}
+									/>
+								{/each}
 							</div>
 						</div>
-					{/if}
-				</div>
 
-				<div class="my-2">
-					<div class="flex justify-between items-center text-sm">
-						<div class="  font-medium">{$i18n.t('Direct Connections')}</div>
-
-						<div class="flex items-center">
-							<div class="">
-								<Switch
-									bind:state={connectionsConfig.ENABLE_DIRECT_CONNECTIONS}
-									on:change={async () => {
-										updateConnectionsHandler();
-									}}
-								/>
-							</div>
+						<div class="mt-1 text-xs text-gray-400 dark:text-gray-500">
+							{$i18n.t('Trouble accessing Ollama?')}
+							<a
+								class=" text-gray-300 font-medium underline"
+								href="https://github.com/open-webui/open-webui#troubleshooting"
+								target="_blank"
+							>
+								{$i18n.t('Click here for help.')}
+							</a>
 						</div>
 					</div>
-
-					<div class="mt-1 text-xs text-gray-400 dark:text-gray-500">
-						{$i18n.t(
-							'Direct Connections allow users to connect to their own OpenAI compatible API endpoints.'
-						)}
-					</div>
-				</div>
-
-				<hr class=" border-gray-100/30 dark:border-gray-850/30 my-2" />
-
-				<div class="my-2">
-					<div class="flex justify-between items-center text-sm">
-						<div class=" text-xs font-medium">{$i18n.t('Cache Base Model List')}</div>
-
-						<div class="flex items-center">
-							<div class="">
-								<Switch
-									bind:state={connectionsConfig.ENABLE_BASE_MODELS_CACHE}
-									on:change={async () => {
-										updateConnectionsHandler();
-									}}
-								/>
-							</div>
-						</div>
-					</div>
-
-					<div class="mt-1 text-xs text-gray-400 dark:text-gray-500">
-						{$i18n.t(
-							'Base Model List Cache speeds up access by fetching base models only at startup or on settings save—faster, but may not show recent base model changes.'
-						)}
-					</div>
-				</div>
-			</div>
+				</Section>
+			{/if}
 		{:else}
-			<div class="flex h-full justify-center">
-				<div class="my-auto">
-					<Spinner className="size-6" />
-				</div>
+			<div class="flex justify-center py-6">
+				<Spinner className="size-6" />
 			</div>
 		{/if}
-	</div>
 
-	<div class="flex justify-end pt-3 text-sm font-medium">
-		<button
-			class="px-3.5 py-1.5 text-sm font-medium bg-black hover:bg-gray-900 text-white dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-lg"
-			type="submit"
-		>
-			{$i18n.t('Save')}
-		</button>
-	</div>
+		<svelte:fragment slot="actions">
+			<button
+				class="px-3.5 py-1.5 text-sm font-medium bg-black hover:bg-gray-900 text-white dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+				type="submit"
+			>
+				{$i18n.t('Save')}
+			</button>
+		</svelte:fragment>
+	</Pane>
 </form>

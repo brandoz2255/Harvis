@@ -55,6 +55,28 @@ export type WorkspaceEvent = {
 	// (coder ↔ reviewer review loop). Distinct from final_message — it's the agents talking,
 	// not the run's answer. Reuses `label`, `content`, `run_id` above.
 	role?: 'coder' | 'reviewer' | string;
+	// ── Agent Teammates (coordinator.py run_agent_coordinated) ──────────────
+	// agent_start   — {label, agent_id, agent_name}
+	// restated_goal — {restated_goal, status}: the goal in the teammate's own words
+	// plan          — {steps:[{role,label,model,task}], uniform}
+	// step_started  — {n, label, engine, status, step_run_id}. NOTE `run_id` is the
+	//                 PARENT lane's (to_sse overwrites it), so the child run id
+	//                 rides under `step_run_id` — that is what links a step's
+	//                 `agent_end` back to the step that started it.
+	// delivery      — {status, summary, artifacts, touched}
+	// propose_next  — {suggestions, status}: what is worth doing next
+	// approval_request / approval_resolved carry `action_id`, `risk`, `approved`.
+	agent_id?: string;
+	agent_name?: string;
+	restated_goal?: string;
+	status?: string;
+	step_run_id?: string;
+	n?: number;
+	engine?: string;
+	suggestions?: string[];
+	artifacts?: string[];
+	touched?: number;
+	unsupervised_shell?: boolean;
 	// final_message — {content} (reuses `content` above)
 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	[key: string]: any;

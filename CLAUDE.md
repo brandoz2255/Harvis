@@ -884,6 +884,8 @@ For backend authentication, also add to Python backend environment:
 - Main branch: `main`
 - Feature branches: Create from `main`
 - Use conventional commits: `feat:`, `fix:`, `docs:`, etc.
+- NEVER commit until the user has reviewed the changes — stage or
+  `git commit --dry-run` if useful, but the user commits, or explicitly says to.
 
 ## Testing
 - No specific test framework configured

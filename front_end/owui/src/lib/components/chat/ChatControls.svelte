@@ -45,6 +45,7 @@
 	import Controls from './Controls/Controls.svelte';
 	import OverviewPanel from './ChatControls/OverviewPanel.svelte';
 	import ArtifactsPanel from './ChatControls/ArtifactsPanel.svelte';
+	import ComputerPanel from '$lib/agents/ComputerPanel.svelte';
 	import SourcesPanel from './ChatControls/SourcesPanel.svelte';
 	import CallOverlay from './MessageInput/CallOverlay.svelte';
 	import Drawer from '../common/Drawer.svelte';
@@ -136,7 +137,7 @@
 	// own labels and tooltips.
 	$: visibleTabs = [
 		...(showFilesTab ? ['files'] : []),
-		...(showStudioTabs ? ['overview', 'activity', 'sources'] : []),
+		...(showStudioTabs ? ['overview', 'activity', 'sources', 'computer'] : []),
 		...(showCadTab ? ['cad'] : [])
 	];
 
@@ -526,6 +527,17 @@
 										{$i18n.t('Sources')}
 									</button>
 								{/if}
+								{#if showStudioTabs}
+									<button
+										class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
+										'computer'
+											? 'bg-gray-100 dark:bg-gray-800 font-medium text-gray-900 dark:text-white'
+											: 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'}"
+										on:click={() => (activeTab = 'computer')}
+									>
+										{$i18n.t('Computer')}
+									</button>
+								{/if}
 								{#if showCadTab}
 									<button
 										class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
@@ -557,7 +569,7 @@
 						</div>
 
 						<div
-							class="flex-1 min-h-0 {activeTab === 'view' || activeTab === 'cad'
+							class="flex-1 min-h-0 {activeTab === 'view' || activeTab === 'cad' || activeTab === 'computer'
 								? 'h-full'
 								: activeTab === 'overview'
 									? 'overflow-y-auto px-3 pt-1'
@@ -569,6 +581,8 @@
 								<ArtifactsPanel {history} />
 							{:else if activeTab === 'sources'}
 								<SourcesPanel {history} />
+							{:else if activeTab === 'computer'}
+								<ComputerPanel />
 							{:else if activeTab === 'cad'}
 								{#if CAD_TAB_IS_LAUNCHER_ONLY}
 									<CadTabLauncher />
@@ -731,6 +745,17 @@
 											{$i18n.t('Sources')}
 										</button>
 									{/if}
+									{#if showStudioTabs}
+										<button
+											class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
+											'computer'
+												? 'bg-gray-100 dark:bg-gray-800 font-medium text-gray-900 dark:text-white'
+												: 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'}"
+											on:click={() => (activeTab = 'computer')}
+										>
+											{$i18n.t('Computer')}
+										</button>
+									{/if}
 									{#if showCadTab}
 										<button
 											class="px-2.5 py-1 text-sm rounded-lg transition whitespace-nowrap {activeTab ===
@@ -762,7 +787,7 @@
 							</div>
 
 							<div
-								class="flex-1 min-h-0 {activeTab === 'view' || activeTab === 'cad'
+								class="flex-1 min-h-0 {activeTab === 'view' || activeTab === 'cad' || activeTab === 'computer'
 									? 'h-full'
 									: activeTab === 'overview'
 										? 'overflow-y-auto px-3 pt-1'
@@ -774,6 +799,8 @@
 									<ArtifactsPanel {history} />
 								{:else if activeTab === 'sources'}
 									<SourcesPanel {history} />
+								{:else if activeTab === 'computer'}
+									<ComputerPanel />
 								{:else if activeTab === 'cad'}
 									{#if CAD_TAB_IS_LAUNCHER_ONLY}
 										<CadTabLauncher />

@@ -11,6 +11,10 @@
 	import Textarea from '$lib/components/common/Textarea.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 
+	import Pane from './ui/Pane.svelte';
+	import Row from './ui/Row.svelte';
+	import Section from './ui/Section.svelte';
+
 	const dispatch = createEventDispatcher();
 
 	const i18n = getContext('i18n');
@@ -85,43 +89,20 @@
 
 {#if models !== null && taskConfig}
 	<form
-		class="flex flex-col h-full justify-between space-y-3 text-sm"
+		class="text-sm h-full"
 		on:submit|preventDefault={() => {
 			updateInterfaceHandler();
 			dispatch('save');
 		}}
 	>
-		<div class="  overflow-y-scroll scrollbar-hidden h-full pr-1.5">
-			<div class="mb-3.5">
-				<div class=" mt-0.5 mb-2.5 text-base font-medium">{$i18n.t('Tasks')}</div>
-
-				<hr class=" border-gray-100/30 dark:border-gray-850/30 my-2" />
-
-				<div class=" mb-2 font-medium flex items-center">
-					<div class=" text-xs mr-1">{$i18n.t('Task Model')}</div>
-					<Tooltip
-						content={$i18n.t(
-							'A task model is used when performing tasks such as generating titles for chats and web search queries'
-						)}
-					>
-						<svg
-							xmlns="http://www.w3.org/2000/svg"
-							fill="none"
-							viewBox="0 0 24 24"
-							stroke-width="1.5"
-							stroke="currentColor"
-							class="size-3.5"
-						>
-							<path
-								stroke-linecap="round"
-								stroke-linejoin="round"
-								d="m11.25 11.25.041-.02a.75.75 0 0 1 1.063.852l-.708 2.836a.75.75 0 0 0 1.063.853l.041-.021M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9-3.75h.008v.008H12V8.25Z"
-							/>
-						</svg>
-					</Tooltip>
-				</div>
-
-				<div class=" mb-2.5 flex w-full gap-2">
+		<Pane title={$i18n.t('Interface')}>
+			<Section
+				title={$i18n.t('Task Model')}
+				description={$i18n.t(
+					'A task model is used when performing tasks such as generating titles for chats and web search queries'
+				)}
+			>
+				<div class="py-3 flex w-full gap-2">
 					<div class="flex-1">
 						<div class=" text-xs mb-1">{$i18n.t('Local Task Model')}</div>
 						<select
@@ -208,17 +189,15 @@
 						</select>
 					</div>
 				</div>
+			</Section>
 
-				<div class="mb-2.5 flex w-full items-center justify-between">
-					<div class=" self-center text-xs font-medium">
-						{$i18n.t('Title Generation')}
-					</div>
-
+			<Section title={$i18n.t('Tasks')}>
+				<Row label={$i18n.t('Title Generation')}>
 					<Switch bind:state={taskConfig.ENABLE_TITLE_GENERATION} />
-				</div>
+				</Row>
 
 				{#if taskConfig.ENABLE_TITLE_GENERATION}
-					<div class="mb-2.5">
+					<div class="py-3">
 						<div class=" mb-1 text-xs font-medium">{$i18n.t('Title Generation Prompt')}</div>
 
 						<Tooltip
@@ -235,16 +214,12 @@
 					</div>
 				{/if}
 
-				<div class="mb-2.5 flex w-full items-center justify-between">
-					<div class=" self-center text-xs font-medium">
-						{$i18n.t('Voice Mode Prompt')}
-					</div>
-
+				<Row label={$i18n.t('Voice Mode Prompt')}>
 					<Switch bind:state={taskConfig.ENABLE_VOICE_MODE_PROMPT} />
-				</div>
+				</Row>
 
 				{#if taskConfig.ENABLE_VOICE_MODE_PROMPT}
-					<div class="mb-2.5">
+					<div class="py-3">
 						<div class=" mb-1 text-xs font-medium">{$i18n.t('Prompt Template')}</div>
 
 						<Tooltip
@@ -261,16 +236,12 @@
 					</div>
 				{/if}
 
-				<div class="mb-2.5 flex w-full items-center justify-between">
-					<div class=" self-center text-xs font-medium">
-						{$i18n.t('Follow Up Generation')}
-					</div>
-
+				<Row label={$i18n.t('Follow Up Generation')}>
 					<Switch bind:state={taskConfig.ENABLE_FOLLOW_UP_GENERATION} />
-				</div>
+				</Row>
 
 				{#if taskConfig.ENABLE_FOLLOW_UP_GENERATION}
-					<div class="mb-2.5">
+					<div class="py-3">
 						<div class=" mb-1 text-xs font-medium">{$i18n.t('Follow Up Generation Prompt')}</div>
 
 						<Tooltip
@@ -287,16 +258,12 @@
 					</div>
 				{/if}
 
-				<div class="mb-2.5 flex w-full items-center justify-between">
-					<div class=" self-center text-xs font-medium">
-						{$i18n.t('Tags Generation')}
-					</div>
-
+				<Row label={$i18n.t('Tags Generation')}>
 					<Switch bind:state={taskConfig.ENABLE_TAGS_GENERATION} />
-				</div>
+				</Row>
 
 				{#if taskConfig.ENABLE_TAGS_GENERATION}
-					<div class="mb-2.5">
+					<div class="py-3">
 						<div class=" mb-1 text-xs font-medium">{$i18n.t('Tags Generation Prompt')}</div>
 
 						<Tooltip
@@ -313,23 +280,15 @@
 					</div>
 				{/if}
 
-				<div class="mb-2.5 flex w-full items-center justify-between">
-					<div class=" self-center text-xs font-medium">
-						{$i18n.t('Retrieval Query Generation')}
-					</div>
-
+				<Row label={$i18n.t('Retrieval Query Generation')}>
 					<Switch bind:state={taskConfig.ENABLE_RETRIEVAL_QUERY_GENERATION} />
-				</div>
+				</Row>
 
-				<div class="mb-2.5 flex w-full items-center justify-between">
-					<div class=" self-center text-xs font-medium">
-						{$i18n.t('Web Search Query Generation')}
-					</div>
-
+				<Row label={$i18n.t('Web Search Query Generation')}>
 					<Switch bind:state={taskConfig.ENABLE_SEARCH_QUERY_GENERATION} />
-				</div>
+				</Row>
 
-				<div class="mb-2.5">
+				<div class="py-3">
 					<div class=" mb-1 text-xs font-medium">{$i18n.t('Query Generation Prompt')}</div>
 
 					<Tooltip
@@ -345,18 +304,14 @@
 					</Tooltip>
 				</div>
 
-				<div class="mb-2.5 flex w-full items-center justify-between">
-					<div class=" self-center text-xs font-medium">
-						{$i18n.t('Autocomplete Generation')}
-					</div>
-
+				<Row label={$i18n.t('Autocomplete Generation')}>
 					<Tooltip content={$i18n.t('Enable autocomplete generation for chat messages')}>
 						<Switch bind:state={taskConfig.ENABLE_AUTOCOMPLETE_GENERATION} />
 					</Tooltip>
-				</div>
+				</Row>
 
 				{#if taskConfig.ENABLE_AUTOCOMPLETE_GENERATION}
-					<div class="mb-2.5">
+					<div class="py-3">
 						<div class=" mb-1 text-xs font-medium">
 							{$i18n.t('Autocomplete Generation Input Max Length')}
 						</div>
@@ -373,8 +328,10 @@
 						</Tooltip>
 					</div>
 				{/if}
+			</Section>
 
-				<div class="mb-2.5">
+			<Section title={$i18n.t('Prompts')}>
+				<div class="py-3">
 					<div class=" mb-1 text-xs font-medium">{$i18n.t('Image Prompt Generation Prompt')}</div>
 
 					<Tooltip
@@ -390,7 +347,7 @@
 					</Tooltip>
 				</div>
 
-				<div class="mb-2.5">
+				<div class="py-3">
 					<div class=" mb-1 text-xs font-medium">{$i18n.t('Tools Function Calling Prompt')}</div>
 
 					<Tooltip
@@ -405,17 +362,17 @@
 						/>
 					</Tooltip>
 				</div>
-			</div>
-		</div>
+			</Section>
 
-		<div class="flex justify-end text-sm font-medium">
-			<button
-				class="px-3.5 py-1.5 text-sm font-medium bg-black hover:bg-gray-900 text-white dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-lg"
-				type="submit"
-			>
-				{$i18n.t('Save')}
-			</button>
-		</div>
+			<svelte:fragment slot="actions">
+				<button
+					class="px-3.5 py-1.5 text-sm font-medium bg-black hover:bg-gray-900 text-white dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+					type="submit"
+				>
+					{$i18n.t('Save')}
+				</button>
+			</svelte:fragment>
+		</Pane>
 	</form>
 {:else}
 	<div class=" h-full w-full flex justify-center items-center">

@@ -53,7 +53,7 @@ os.environ["OLLAMA_URL"] = HARVIS_LLM_BASE_URL
 # /api/health/services use this to tell "provider down" from "no provider".
 LLM_PROVIDER_EXPLICITLY_CONFIGURED = HARVIS_LLM_BASE_URL != _LLM_DEFAULT_BASE_URL
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 import asyncpg
@@ -284,6 +284,13 @@ class UserResponse(BaseModel):
     username: str
     email: str
     avatar: Optional[str] = None
+    # Profile fields from migration 017. All optional: rows written before it
+    # have NULL for every one of them, and `name` falling back to `username` is
+    # what keeps existing users showing the name they already had.
+    name: Optional[str] = None
+    bio: Optional[str] = None
+    gender: Optional[str] = None
+    date_of_birth: Optional[date] = None
 
 
 # ─── Authentication Utilities ───────────────────────────────────────────────────
@@ -350,12 +357,14 @@ async def get_current_user(
     if pool:
         async with pool.acquire() as conn:
             user = await conn.fetchrow(
-                "SELECT id, username, email, avatar FROM users WHERE id = $1", user_id
+                "SELECT id, username, email, avatar, name, bio, gender, date_of_birth "
+                "FROM users WHERE id = $1",
+                user_id,
             )
             if user is None:
                 logger.error(f"User not found for ID: {user_id}")
                 raise credentials_exception
-            logger.info(f"User found: {dict(user)}")
+            logger.info("User found: id=%s", user["id"])
             return UserResponse(**dict(user))
     else:
         # Fallback to direct connection if pool unavailable
@@ -363,12 +372,14 @@ async def get_current_user(
         conn = await asyncpg.connect(DATABASE_URL, timeout=10)
         try:
             user = await conn.fetchrow(
-                "SELECT id, username, email, avatar FROM users WHERE id = $1", user_id
+                "SELECT id, username, email, avatar, name, bio, gender, date_of_birth "
+                "FROM users WHERE id = $1",
+                user_id,
             )
             if user is None:
                 logger.error(f"User not found for ID: {user_id}")
                 raise credentials_exception
-            logger.info(f"User found: {dict(user)}")
+            logger.info("User found: id=%s", user["id"])
             return UserResponse(**dict(user))
         finally:
             await conn.close()
@@ -673,6 +684,8 @@ async def lifespan(app: FastAPI):
                     "014_cron_jobs.sql",
                     "015_user_soul.sql",
                     "016_inference_nodes.sql",
+                    "017_user_profile_fields.sql",
+                    "018_agent_teammates.sql",
                 ):
                     _mig_path = os.path.join(_mig_dir, _mig_name)
                     try:
@@ -697,7 +710,7 @@ async def lifespan(app: FastAPI):
                             _mig_name,
                             _mig_err,
                         )
-                logger.info("✅ Idempotent migrations 010-016 ensured")
+                logger.info("✅ Idempotent migrations 010-018 ensured")
 
                 # vibecoding_sessions. The /api/vibecode/sessions* routes are
                 # mounted on every boot and every one of them queries this table,
@@ -1848,10 +1861,12 @@ from plugins.soul.routes import router as soul_router
 from plugins.memory.routes import router as memory_router
 from plugins.cron.routes import router as cron_router
 from plugins.inference_nodes.routes import router as inference_nodes_router
+from plugins.agents.routes import router as agents_router
 app.include_router(soul_router)
 app.include_router(memory_router)
 app.include_router(cron_router)
 app.include_router(inference_nodes_router)
+app.include_router(agents_router)
 
 # SSH remote-access SCAFFOLD (Phase 7) — flagged OFF: HARVIS_SSH_ENABLED absent/0 (the
 # default) → every endpoint 403s; connect/test is additionally a hard 501 stub (no SSH I/O).

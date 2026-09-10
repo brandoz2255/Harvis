@@ -21,6 +21,7 @@
 	import Evaluations from './Settings/Evaluations.svelte';
 	import CodeExecution from './Settings/CodeExecution.svelte';
 	import Integrations from './Settings/Integrations.svelte';
+	import InferenceNodes from './Settings/InferenceNodes.svelte';
 
 	import ChartBar from '../icons/ChartBar.svelte';
 	import DocumentChartBar from '../icons/DocumentChartBar.svelte';
@@ -31,7 +32,20 @@
 
 	let selectedTab = 'general';
 
-	// Get current tab from URL pathname, default to 'general'
+	// Developer mode, from the boot payload (owui_compat/config.build_config),
+	// which resolves it through the same function the admin switch writes to.
+	// `!== false` rather than `=== true`: a backend that predates the key, or a
+	// config store that has not populated yet, keeps the old behaviour of
+	// showing everything instead of blanking the panel for a frame.
+	$: devMode = $config?.features?.enable_dev_mode !== false;
+
+	// Tabs gated on developer mode. Kept as a list so the next experimental
+	// surface joins by adding `dev: true` to its entry, not by another branch.
+	$: devTabs = devMode ? [] : ['inference-nodes'];
+
+	// Get current tab from URL pathname, default to 'general'.
+	// A hidden tab is dropped from the whitelist too, so its deep link falls
+	// back to General rather than rendering a pane the operator turned off.
 	$: {
 		const pathParts = $page.url.pathname.split('/');
 		const tabFromPath = pathParts[pathParts.length - 1];
@@ -39,6 +53,7 @@
 			'general',
 			'connections',
 			'models',
+			'inference-nodes',
 			'evaluations',
 			'integrations',
 			'documents',
@@ -49,7 +64,9 @@
 			'images',
 			'pipelines',
 			'db'
-		].includes(tabFromPath)
+		]
+			.filter((id) => !devTabs.includes(id))
+			.includes(tabFromPath)
 			? tabFromPath
 			: 'general';
 	}
@@ -80,7 +97,19 @@
 			// the panel was cut down to the settings Harvis actually enforces —
 			// searching for them and landing on a tab without them is its own
 			// small lie.
-			keywords: ['general', 'admin', 'settings', 'version', 'sign up', 'signup', 'registration']
+			keywords: [
+				'general',
+				'admin',
+				'settings',
+				'version',
+				'sign up',
+				'signup',
+				'registration',
+				'developer',
+				'developer mode',
+				'dev mode',
+				'experimental'
+			]
 		},
 		{
 			id: 'connections',
@@ -111,6 +140,25 @@
 				'gguf',
 				'import',
 				'export'
+			]
+		},
+		{
+			id: 'inference-nodes',
+			// Experimental: hidden unless developer mode is on. See the
+			// Developer Mode switch in Settings → General.
+			dev: true,
+			title: 'Inference Nodes',
+			route: '/admin/settings/inference-nodes',
+			keywords: [
+				'inference',
+				'nodes',
+				'freetoken',
+				'moe',
+				'mixture of experts',
+				'gpu',
+				'offload',
+				'power',
+				'vram'
 			]
 		},
 		{
@@ -236,6 +284,9 @@
 
 	const setFilteredSettings = () => {
 		filteredSettings = allSettings.filter((tab) => {
+			// Developer-mode tabs are dropped before the search test, so a
+			// hidden pane cannot be surfaced by typing its name either.
+			if (tab.dev && !devMode) return false;
 			const searchTerm = search.toLowerCase().trim();
 			return (
 				search === '' ||
@@ -244,6 +295,10 @@
 			);
 		});
 	};
+
+	// General's saveHandler refetches the boot config after a save, so flipping
+	// the switch adds or removes the tab immediately.
+	$: devMode, setFilteredSettings();
 
 	const searchDebounceHandler = () => {
 		if (searchDebounceTimeout) {
@@ -276,7 +331,7 @@
 <div class="flex flex-col lg:flex-row w-full h-full pb-2 lg:space-x-4">
 	<div
 		id="admin-settings-tabs-container"
-		class="tabs mx-[16px] lg:mx-0 lg:px-[16px] flex flex-row overflow-x-auto gap-2.5 max-w-full lg:gap-1 lg:flex-col lg:flex-none lg:w-50 dark:text-gray-200 text-sm font-medium text-left scrollbar-none"
+		class="tabs mx-[16px] lg:mx-0 lg:px-[16px] flex flex-row overflow-x-auto gap-2.5 max-w-full lg:gap-0.5 lg:flex-col lg:flex-none lg:w-56 lg:border-r lg:border-gray-100 lg:dark:border-gray-850 dark:text-gray-200 text-sm font-medium text-left scrollbar-none"
 	>
 		<div
 			class="hidden lg:flex w-full rounded-lg px-2.5 gap-2 bg-gray-100/80 dark:bg-gray-850/80 backdrop-blur-2xl my-1 -mx-1 mt-1.5"
@@ -313,10 +368,10 @@
 				id={tab.id}
 				href={tab.route}
 				draggable="false"
-				class="px-0.5 py-1 min-w-fit rounded-lg flex-1 lg:flex-none flex text-right transition select-none {selectedTab ===
+				class="px-2 py-1.5 min-w-fit rounded-lg flex-1 lg:flex-none flex transition select-none {selectedTab ===
 				tab.id
-					? ''
-					: ' text-gray-300 dark:text-gray-600 hover:text-gray-700 dark:hover:text-white'}"
+					? 'bg-gray-100 dark:bg-gray-850 text-gray-900 dark:text-white'
+					: ' text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-850/50 hover:text-gray-900 dark:hover:text-white'}"
 			>
 				<div class=" self-center mr-2">
 					{#if tab.id === 'general'}
@@ -353,6 +408,19 @@
 							<path
 								fill-rule="evenodd"
 								d="M10 1c3.866 0 7 1.79 7 4s-3.134 4-7 4-7-1.79-7-4 3.134-4 7-4zm5.694 8.13c.464-.264.91-.583 1.306-.952V10c0 2.21-3.134 4-7 4s-7-1.79-7-4V8.178c.396.37.842.688 1.306.953C5.838 10.006 7.854 10.5 10 10.5s4.162-.494 5.694-1.37zM3 13.179V15c0 2.21 3.134 4 7 4s7-1.79 7-4v-1.822c-.396.37-.842.688-1.306.953-1.532.875-3.548 1.369-5.694 1.369s-4.162-.494-5.694-1.37A7.009 7.009 0 013 13.179z"
+								clip-rule="evenodd"
+							/>
+						</svg>
+					{:else if tab.id === 'inference-nodes'}
+						<svg
+							xmlns="http://www.w3.org/2000/svg"
+							viewBox="0 0 20 20"
+							fill="currentColor"
+							class="w-4 h-4"
+						>
+							<path
+								fill-rule="evenodd"
+								d="M7 2a1 1 0 0 1 1 1v1h4V3a1 1 0 1 1 2 0v1a2 2 0 0 1 2 2h1a1 1 0 1 1 0 2h-1v4h1a1 1 0 1 1 0 2h-1a2 2 0 0 1-2 2v1a1 1 0 1 1-2 0v-1H8v1a1 1 0 1 1-2 0v-1a2 2 0 0 1-2-2H3a1 1 0 1 1 0-2h1V8H3a1 1 0 0 1 0-2h1a2 2 0 0 1 2-2V3a1 1 0 0 1 1-1Zm1 5a1 1 0 0 0-1 1v4a1 1 0 0 0 1 1h4a1 1 0 0 0 1-1V8a1 1 0 0 0-1-1H8Z"
 								clip-rule="evenodd"
 							/>
 						</svg>
@@ -492,8 +560,9 @@
 	</div>
 
 	<div
-		class="flex-1 mt-3 lg:mt-1 px-[16px] lg:pr-[16px] lg:pl-0 overflow-y-scroll scrollbar-hidden"
+		class="flex-1 min-w-0 mt-3 lg:mt-1 px-[16px] lg:px-6 overflow-y-auto scrollbar-hidden"
 	>
+		<div class="mx-auto w-full max-w-4xl h-full">
 		{#if selectedTab === 'general'}
 			<General
 				saveHandler={async () => {
@@ -511,6 +580,8 @@
 			/>
 		{:else if selectedTab === 'models'}
 			<Models />
+		{:else if selectedTab === 'inference-nodes' && devMode}
+			<InferenceNodes />
 		{:else if selectedTab === 'evaluations'}
 			<Evaluations />
 		{:else if selectedTab === 'integrations'}
@@ -573,5 +644,6 @@
 				}}
 			/>
 		{/if}
+		</div>
 	</div>
 </div>

@@ -1,0 +1,13 @@
+[Unit]
+Description=Watch for a Harvis power request for FreeToken
+Documentation=https://github.com/brandoz2255/Harvis/blob/main/docs/inference-nodes.md
+
+[Path]
+# Written by the backend container through the shared /tmp bind mount. systemd watches
+# the nearest existing ancestor, so this still arms itself when /tmp is cleared at boot
+# and the directory does not exist yet.
+PathChanged=/tmp/harvis-freetoken/desired.json
+Unit=freetoken-control.service
+
+[Install]
+WantedBy=default.target

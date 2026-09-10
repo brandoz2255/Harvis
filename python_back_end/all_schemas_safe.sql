@@ -14,7 +14,17 @@ CREATE TABLE IF NOT EXISTS users (
     username VARCHAR(255) UNIQUE NOT NULL,
     email VARCHAR(255) UNIQUE NOT NULL,
     password VARCHAR(255) NOT NULL,
-    avatar VARCHAR(255),
+    -- avatar is TEXT, not VARCHAR(255): Settings -> Account stores a cropped
+    -- upload as a data URI, which blows past 255 characters immediately.
+    avatar TEXT,
+    -- Profile fields edited from Settings -> Account. `name` is the display
+    -- name and is deliberately NOT `username`: username is UNIQUE and is the
+    -- login identity. NULL name means "never set" and the API falls back to
+    -- username. See migrations/017_user_profile_fields.sql.
+    name TEXT,
+    bio TEXT,
+    gender TEXT,
+    date_of_birth DATE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 

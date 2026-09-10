@@ -68,7 +68,11 @@ def _audio_config() -> dict:
     }
 
 
-def build_config(onboarding: bool = False, signup_enabled: bool | None = None) -> dict:
+def build_config(
+    onboarding: bool = False,
+    signup_enabled: bool | None = None,
+    dev_mode: bool | None = None,
+) -> dict:
     """Build the static-ish config dict OWUI reads at boot.
 
     ``onboarding`` is OWUI's stock setup-state signal: true ONLY while no
@@ -91,6 +95,12 @@ def build_config(onboarding: bool = False, signup_enabled: bool | None = None) -
         "images": False,
         "default_models": os.getenv("HARVIS_OWUI_DEFAULT_MODEL", ""),
         "default_prompt_suggestions": [],
+        # The sign-in page reads metadata.auth_logo_position. With the key
+        # absent it takes its fallback branch and pins the favicon to the
+        # top-left corner of the viewport, 2.5rem from the edge and nowhere
+        # near the centred sign-in card it is supposed to brand — it reads as
+        # a stray image, not a logo. "center" puts it above the form instead.
+        "metadata": {"auth_logo_position": "center"},
         "features": {
             "auth": True,
             "auth_trusted_header": False,
@@ -139,6 +149,24 @@ def build_config(onboarding: bool = False, signup_enabled: bool | None = None) -
             # should be handed. Hidden rather than deleted: SidebarMore.svelte
             # and its routes stay in the tree and this flag brings them back.
             "enable_sidebar_more": _env_bool("HARVIS_OWUI_SIDEBAR_MORE", False),
+            # Developer mode — the ADMIN-SETTABLE sibling of the flag above, and
+            # the only one on this list an operator can flip without shell access
+            # to the .env. It gates the experimental admin surfaces: today the
+            # Inference Nodes panel (FreeToken power switch + MoE detection),
+            # which is weeks old and not something a borrowed Harvis should
+            # present as finished. Resolved through admin_config.dev_mode_enabled
+            # so this flag and the panel's own switch cannot disagree; the env
+            # default (HARVIS_DEV_MODE, True pre-1.0) applies only when the
+            # caller has no database to ask.
+            #
+            # `enable_sidebar_more` above covers the same idea for the sidebar
+            # and stays env-only for now — folding it in here means changing the
+            # behaviour of a flag that already ships, which is a separate call.
+            "enable_dev_mode": (
+                dev_mode
+                if dev_mode is not None
+                else _env_bool("HARVIS_DEV_MODE", True)
+            ),
             "enable_admin_export": False,
             "enable_admin_chat_access": False,
             "enable_community_sharing": False,

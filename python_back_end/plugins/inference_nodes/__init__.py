@@ -6,6 +6,9 @@ an additional OpenAI-dialect server — FreeToken today — that ``model_proxy``
 first when a model name is not one Ollama knows. See ``docs/inference-nodes.md``.
 """
 
+from .control import AUTO_WAKE as auto_wake_enabled  # noqa: F401
+from .control import LOCAL_NODE as local_node_name  # noqa: F401
+from .control import installed as control_installed, wake as wake_node  # noqa: F401
 from .policy import shape_body as shape_body_for_node, thinking_mode  # noqa: F401
 from .probe import (  # noqa: F401
     attach,

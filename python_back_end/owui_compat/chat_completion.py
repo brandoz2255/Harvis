@@ -24,6 +24,7 @@ import logging
 import os
 import re
 
+from .system_prompt import inject_core
 from .translate import owui_body_to_proxy
 
 logger = logging.getLogger(__name__)
@@ -711,6 +712,11 @@ async def run_chat_completion(request, owui_body: dict, user_id: int | None = No
     _inject_canvas_contract(owui_body)  # typed ```canvas panels (opt-in, compact)
     _inject_default_persona(owui_body)  # house tone: answer length tracks the question
     _inject_block_vocabulary(owui_body)  # terminal / search / file / writing renderers
+    # LAST prompt mutation on purpose: the house ground rules must sit at the FRONT
+    # of whatever system message the turn ended up with, above any persona, project
+    # instruction or skill injected above. Unlike the persona this one does not bow
+    # out for a user-supplied system prompt — that was the bug.
+    inject_core(owui_body.get("messages"))  # safety core: tool output is data, not orders
     await _apply_default_model(request, owui_body, user_id)  # Phase D: pref → routing
     # NOTE: model choice is strictly SELECTION-BASED — the picked model is always used. An
     # auto-model-swap router was built + verified here (2026-07-10) and then removed at the

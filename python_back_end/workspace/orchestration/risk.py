@@ -8,6 +8,18 @@ action gets a risk tier (low | med | high); the rung maps (tier → decision):
     ask           allow    gate     gate
     auto-accept   allow    allow    gate       (the irreversible acknowledge-popup)
     full-auto     allow    allow    allow
+    agent         allow    allow    allow      (+ a fourth tier, see below)
+
+Agent teammates add one tier above 'high': ``hard`` — the four actions a
+teammate must never take on its own (sign in, pay, send, delete). The 'agent'
+rung exists because a teammate works in a throwaway clone with its own browser
+profile, so the ordinary high-tier commands (a `>` redirect, `mv`, `rm -rf`)
+are not destructive there and stopping on them would make the teammate stall
+constantly. What it may never do unsupervised is act outward — that is the
+``hard`` tier, and it gates under every rung. A hard limit the user has
+cleared is downgraded by the caller BEFORE the ladder sees it, so there is no
+'agent-override' rung: an override changes whether the agent keeps going, not
+what it is allowed to do.
 
 The runner consults ``gate_decision`` before every tool dispatch; on 'gate' it emits an
 ``approval_request`` event and blocks on an asyncio.Event until the UI resolves it
@@ -92,11 +104,47 @@ def classify_action_risk(tool: str, args: dict) -> str:
     return classify_action_risk_with_reason(tool, args)[0]
 
 
-def gate_decision_ex(tool: str, args: dict, permission_mode: str) -> tuple[str, str, str]:
+# The four outward-facing actions a teammate may never take on its own. The
+# caller (the agent computer gate) names which one an action matches; naming it
+# here rather than deriving it keeps the browser heuristics out of this module.
+HARD_LIMITS = ("sign_in", "pay", "send", "delete")
+
+_HARD_LIMIT_REASONS = {
+    "sign_in": "signs in to an account",
+    "pay": "spends money",
+    "send": "sends a message on your behalf",
+    "delete": "deletes something outside the sandbox",
+}
+
+
+def gate_decision_ex(
+    tool: str,
+    args: dict,
+    permission_mode: str,
+    hard_limit: str | None = None,
+) -> tuple[str, str, str]:
     """Return (decision, risk_tier, reason). decision ∈ {'allow', 'gate', 'block'}
-    per the ladder; reason = the matched-rule explanation (why this tier)."""
-    tier, reason = classify_action_risk_with_reason(tool, args)
+    per the ladder; reason = the matched-rule explanation (why this tier).
+
+    ``hard_limit`` names one of HARD_LIMITS when the caller has already decided
+    this action crosses it. That forces the ``hard`` tier, which gates under
+    every rung (and blocks under 'plan'). A limit the user cleared must be
+    passed as None — clearance is the caller's decision, not the ladder's.
+    """
     mode = (permission_mode or "ask").lower()
+
+    if hard_limit:
+        reason = _HARD_LIMIT_REASONS.get(hard_limit, f"hard limit: {hard_limit}")
+        # Deliberately not honouring full-auto: no session rung may pre-approve
+        # signing in, paying, sending or deleting. Only an explicit clearance
+        # (handled before this call) lets one of these through.
+        return ("block" if mode == "plan" else "gate"), "hard", reason
+
+    tier, reason = classify_action_risk_with_reason(tool, args)
+    if mode == "agent":
+        # Safe = anything that is not a hard limit, per the teammate design.
+        # The clone and the agent's own browser profile are the sandbox.
+        return "allow", tier, reason
     if mode == "full-auto":
         return "allow", tier, reason
     if mode == "plan":
@@ -107,9 +155,11 @@ def gate_decision_ex(tool: str, args: dict, permission_mode: str) -> tuple[str, 
     return ("allow" if tier == "low" else "gate"), tier, reason
 
 
-def gate_decision(tool: str, args: dict, permission_mode: str) -> tuple[str, str]:
+def gate_decision(
+    tool: str, args: dict, permission_mode: str, hard_limit: str | None = None
+) -> tuple[str, str]:
     """Return (decision, risk_tier). decision ∈ {'allow', 'gate', 'block'} per the ladder."""
-    decision, tier, _reason = gate_decision_ex(tool, args, permission_mode)
+    decision, tier, _reason = gate_decision_ex(tool, args, permission_mode, hard_limit)
     return decision, tier
 
 

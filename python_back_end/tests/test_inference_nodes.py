@@ -16,7 +16,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from plugins.inference_nodes import policy, probe, registry  # noqa: E402
+from plugins.inference_nodes import control, moe, policy, probe, provision, registry  # noqa: E402
 from plugins.inference_nodes.types import NodeSpec, NodeState  # noqa: E402
 
 
@@ -259,3 +259,216 @@ def test_shape_body_reads_the_probed_cache_size(monkeypatch):
     st.ctx["m"] = 262144
     out = policy.shape_body(body, spec)
     assert "chat_template_kwargs" not in out
+
+
+# --- provision -------------------------------------------------------------------
+# The generated script is what a second machine actually runs, so the things worth
+# pinning down are that it is valid bash, that it leaves no placeholder behind, and
+# that it does not carry this laptop's tuning numbers to a bigger card.
+
+
+def _bash_syntax_ok(script: str) -> bool:
+    import subprocess
+    import tempfile
+
+    with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as fh:
+        fh.write(script)
+        path = fh.name
+    try:
+        return subprocess.run(["bash", "-n", path], capture_output=True).returncode == 0
+    finally:
+        os.unlink(path)
+
+
+def test_provision_script_is_valid_bash_with_nothing_left_unsubstituted():
+    script = provision.render_script(node_name="rig1", port=2020, host="127.0.0.1")
+    assert "@@" not in script
+    assert "Node: rig1" in script and "127.0.0.1:2020" in script
+    assert "reverse_proxy 127.0.0.1:$FT_PORT" in script  # Caddy braces survived
+    assert ":2021 {" in script  # token proxy sits one port up
+    assert _bash_syntax_ok(script)
+
+
+def test_provision_script_sizes_the_target_box_instead_of_copying_ours():
+    script = provision.render_script()
+    # No FT_* tuning value is hardcoded into the env file the script writes; each one
+    # comes from the measurement block.
+    for var in ("FT_MEMORY_RATIO", "FT_KV_RESERVE", "FT_MAX_RUNNING", "FT_MOE_THREADS"):
+        assert f"{var}=$A_" in script
+    assert "nvidia-smi --query-gpu=memory.total,memory.used" in script
+    assert "# (nothing pinned by the operator" in script
+
+
+def test_provision_script_appends_only_the_pins_it_was_given():
+    script = provision.render_script(memory_ratio=0.85, max_running=4)
+    assert "# pinned by the operator" in script
+    assert "FT_MEMORY_RATIO=0.85" in script
+    assert "FT_MAX_RUNNING=4" in script
+    assert "FT_KV_RESERVE=None" not in script
+    assert "FT_MOE_THREADS=None" not in script
+    assert _bash_syntax_ok(script)
+
+
+def test_provision_sizing_block_matches_the_measured_laptop_settings():
+    """The inlined arithmetic is a copy of scripts/freetoken/autotune.sh. Run it."""
+    import subprocess
+    import textwrap
+
+    script = provision.render_script()
+    body = script.split("eval \"$(./venv/bin/python - ", 1)[1].split("<<'PY'\n", 1)[1]
+    sizing = body.split("\nPY\n", 1)[0]
+    # 8151 MiB card, 30 GB RAM, 8 physical cores, 21 GB checkpoint: this laptop, whose
+    # ratio 0.90 / kv 16384 / prefill 2048 were measured to survive a grounded prompt.
+    out = subprocess.run(
+        ["python3", "-c", textwrap.dedent(sizing), "8151", "30000", "8", "21000"],
+        capture_output=True,
+        text=True,
+    )
+    assert out.returncode == 0, out.stderr
+    got = dict(line.split("=", 1) for line in out.stdout.strip().splitlines())
+    assert got["A_RATIO"] == "0.89"
+    assert got["A_KV"] == "16384"
+    assert got["A_PREFILL"] == "2048"
+    assert got["A_RUNNING"] == "2"
+    assert got["A_THREADS"] == "6"
+    assert "RAM is workable but not roomy" in got["A_WARN"]
+
+    # A 24 GB card must not inherit the laptop's numbers.
+    out = subprocess.run(
+        ["python3", "-c", textwrap.dedent(sizing), "24564", "128000", "24", "21000"],
+        capture_output=True,
+        text=True,
+    )
+    big = dict(line.split("=", 1) for line in out.stdout.strip().splitlines())
+    assert big["A_PREFILL"] == "8192"
+    assert big["A_KV"] == "32768"
+    assert big["A_RUNNING"] == "4"
+
+
+# --- control: the power channel -------------------------------------------------
+#
+# The channel is two JSON files in a shared directory, so it is testable without a
+# host, a systemd bus or a container: point CONTROL_DIR at a tmpdir and play both
+# sides. What is under test is the contract the settings pane depends on — "no agent"
+# must never read as "node is off", and "loading" must never read as "on".
+
+
+@pytest.fixture
+def control_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(control, "CONTROL_DIR", str(tmp_path / "ctl"))
+    return tmp_path / "ctl"
+
+
+def _agent_says(control_dir, state, *, want_at=0.0, error=None):
+    """Stand in for the host agent writing status.json."""
+    import json
+    control_dir.mkdir(parents=True, exist_ok=True)
+    (control_dir / control.STATUS).write_text(json.dumps({
+        "state": state, "applied_at": time.time(),
+        "last_desired_at": want_at, "error": error, "unit": "freetoken.service",
+    }))
+
+
+def test_serving_waits_for_the_checkpoint_not_just_the_socket():
+    """FreeToken answers /v1/models while still loading; /health is the honest signal."""
+    assert control.serving({"status": "loading", "phase": "other"}) is False
+    assert control.serving({"status": "ok", "maintenance": "serving"}) is True
+    assert control.serving({"status": "ok", "maintenance": "draining"}) is False
+    # A node with no /health at all (vLLM, llama-server) is taken at its word.
+    assert control.serving({}) is True
+    assert control.serving(None) is True
+
+
+def test_power_state_without_an_agent_says_uncontrollable_not_off(control_dir):
+    out = control.power_state()
+    assert out["controllable"] is False
+    assert out["running"] is False
+    assert "install-user-units.sh" in out["hint"]
+
+
+def test_request_round_trips_through_the_shared_directory(control_dir):
+    rec = control.request("off", by="tester", reason="unit test")
+    assert rec["state"] == "off"
+    got = control.desired()
+    assert got["state"] == "off" and got["by"] == "tester"
+    # No leftover half-written file: the write is a rename, not a truncate-in-place.
+    assert not (control_dir / (control.DESIRED + ".tmp")).exists()
+    with pytest.raises(ValueError):
+        control.request("reboot")
+
+
+def test_power_state_reports_loading_separately_from_running(control_dir):
+    _agent_says(control_dir, "active")
+    loading = NodeState(spec=NodeSpec(name="freetoken", base_url="http://x:1919"))
+    loading.reachable = True
+    loading.health = {"status": "loading"}
+    out = control.power_state(loading)
+    assert out["running"] is False and out["loading"] is True
+
+    ready = NodeState(spec=NodeSpec(name="freetoken", base_url="http://x:1919"))
+    ready.reachable = True
+    ready.health = {"status": "ok", "maintenance": "serving"}
+    out = control.power_state(ready)
+    assert out["running"] is True and out["loading"] is False
+    assert out["controllable"] is True and out["unit_state"] == "active"
+
+
+def test_agent_stale_only_after_the_grace_period(control_dir):
+    now = time.time()
+    _agent_says(control_dir, "active", want_at=now)
+    control.request("on")
+    # Just asked: the agent has not had time to answer, so this is not staleness.
+    assert control.power_state()["agent_stale"] is False
+    _agent_says(control_dir, "inactive", want_at=0.0)
+    assert control._stale(control.agent_status(), now - control.AGENT_STALE_S - 5) is True
+
+
+# --- moe: which installed models are sparse ------------------------------------
+
+
+def _show(family="qwen35moe", total=256, active=8, params="35.1B"):
+    info = {f"{family}.block_count": 48}
+    if total is not None:
+        info[f"{family}.expert_count"] = total
+        info[f"{family}.expert_used_count"] = active
+    return {"model_info": info, "details": {"parameter_size": params, "family": family}}
+
+
+def test_expert_info_reads_gguf_metadata_not_the_model_name():
+    ex = moe.expert_info(_show())
+    assert ex == {"total": 256, "active": 8, "family": "qwen35moe"}
+    assert moe.expert_info(_show("gptoss", 32, 4, "20.9B"))["total"] == 32
+    # Dense: no expert keys at all, and the "1 expert" spelling some checkpoints use.
+    assert moe.expert_info(_show("llama", None, None, "8.0B")) is None
+    assert moe.expert_info(_show("llama", 1, 1, "8.0B")) is None
+    assert moe.expert_info({}) is None
+
+
+def test_param_and_active_param_counts():
+    assert moe.param_count(_show()) == 35.1e9
+    assert moe.param_count({"details": {"parameter_size": "nonsense"}}) is None
+    # 8 of 256 experts: roughly 1.1B active, the reason this runs on an 8 GB card.
+    assert moe.active_params(_show()) == pytest.approx(35.1e9 * 8 / 256)
+    assert moe.active_params(_show("llama", None, None, "8.0B")) is None
+
+
+def test_verdict_separates_worth_a_node_from_dense_and_already_served():
+    big = _show()
+    kind, why = moe.verdict("qwen3.6-35b", moe.expert_info(big), moe.param_count(big),
+                            set(), True)
+    assert kind == "node_would_help" and "8 of 256" in why
+
+    kind, _ = moe.verdict("qwen3.6-35b", moe.expert_info(big), moe.param_count(big),
+                          {"qwen3.6-35b"}, True)
+    assert kind == "served_by_node"
+
+    dense = _show("llama", None, None, "8.0B")
+    kind, _ = moe.verdict("llama3.1:8b", moe.expert_info(dense), moe.param_count(dense),
+                          set(), True)
+    assert kind == "dense"
+
+    # Sparse but small: Ollama handles it, so a node is not the answer.
+    small = _show("gptoss", 32, 4, "3.0B")
+    kind, _ = moe.verdict("tiny-moe", moe.expert_info(small), moe.param_count(small),
+                          set(), True)
+    assert kind == "fits_anyway"

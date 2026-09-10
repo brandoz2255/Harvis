@@ -8,6 +8,7 @@
 	import Cog6 from '$lib/components/icons/Cog6.svelte';
 	import AddToolServerModal from '$lib/components/AddToolServerModal.svelte';
 	import WrenchAlt from '$lib/components/icons/WrenchAlt.svelte';
+	import SettingRow from '../SettingRow.svelte';
 
 	export let onDelete = () => {};
 	export let onSubmit = () => {};
@@ -33,31 +34,33 @@
 	}}
 />
 
-<div class="flex w-full gap-2 items-center">
-	<Tooltip className="w-full relative" content={''} placement="top-start">
-		<div class="flex w-full">
-			<div
-				class="flex-1 relative flex gap-1.5 items-center {!(connection?.config?.enable ?? true)
-					? 'opacity-50'
-					: ''}"
-			>
-				<Tooltip content={connection?.type === 'mcp' ? $i18n.t('MCP') : $i18n.t('OpenAPI')}>
-					<WrenchAlt />
-				</Tooltip>
+<SettingRow>
+	<svelte:fragment slot="title">
+		<Tooltip className="w-full relative" content={''} placement="top-start">
+			<div class="flex w-full">
+				<div
+					class="flex-1 relative flex gap-1.5 items-center {!(connection?.config?.enable ?? true)
+						? 'opacity-50'
+						: ''}"
+				>
+					<Tooltip content={connection?.type === 'mcp' ? $i18n.t('MCP') : $i18n.t('OpenAPI')}>
+						<WrenchAlt />
+					</Tooltip>
 
-				{#if connection?.info?.name}
-					<div class=" capitalize outline-hidden w-full bg-transparent">
-						{connection?.info?.name ?? connection?.url}
-						<span class="text-gray-500">{connection?.info?.id ?? ''}</span>
-					</div>
-				{:else}
-					<div>
-						{connection?.url}
-					</div>
-				{/if}
+					{#if connection?.info?.name}
+						<div class=" capitalize outline-hidden w-full bg-transparent">
+							{connection?.info?.name ?? connection?.url}
+							<span class="font-normal text-gray-500">{connection?.info?.id ?? ''}</span>
+						</div>
+					{:else}
+						<div>
+							{connection?.url}
+						</div>
+					{/if}
+				</div>
 			</div>
-		</div>
-	</Tooltip>
+		</Tooltip>
+	</svelte:fragment>
 
 	<div class="flex gap-1 items-center">
 		<Tooltip content={$i18n.t('Configure')} className="self-start">
@@ -85,4 +88,4 @@
 			/>
 		</Tooltip>
 	</div>
-</div>
+</SettingRow>

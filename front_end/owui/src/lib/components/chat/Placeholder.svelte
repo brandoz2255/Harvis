@@ -19,8 +19,12 @@
 		temporaryChatEnabled,
 		selectedFolder,
 		chats,
-		currentChatPage
+		currentChatPage,
+		showControls,
+		workspaceControlsTab,
+		workMode
 	} from '$lib/stores';
+	import { applyWorkMode, readStoredWorkMode, teammatesFrom } from '$lib/agents/workMode';
 	import { sanitizeResponseContent, extractCurlyBraceWords } from '$lib/utils';
 	import { WEBUI_API_BASE_URL, WEBUI_BASE_URL } from '$lib/constants';
 	import { goto } from '$app/navigation';
@@ -30,6 +34,7 @@
 	import MessageInput from './MessageInput.svelte';
 	import FolderPlaceholder from './Placeholder/FolderPlaceholder.svelte';
 	import FolderTitle from './Placeholder/FolderTitle.svelte';
+	import TeammateTray from './Placeholder/TeammateTray.svelte';
 
 	const i18n = getContext('i18n');
 
@@ -88,38 +93,55 @@
 				]
 			: [])
 	];
-	const greeting = _greetings[Math.floor(Math.random() * _greetings.length)];
+	const chatGreeting = _greetings[Math.floor(Math.random() * _greetings.length)];
+	$: greeting = $workMode ? 'What should we work on?' : chatGreeting;
 
-	// ── Prototype launcher: connect-tools shadow tray + capability carousel ──
-	// Additive, dismissible, local-state only — the send/socket path is untouched.
-	let connectDismissed = false;
-	const connectBrands = [
-		{
-			name: 'GitHub',
-			svg: `<path fill="currentColor" d="M12 .5C5.73.5.5 5.73.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.56 0-.28-.01-1.02-.02-2-3.2.7-3.88-1.54-3.88-1.54-.52-1.33-1.28-1.68-1.28-1.68-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.68 0-1.25.45-2.28 1.19-3.08-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11 11 0 0 1 5.8 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.8 1.19 1.83 1.19 3.08 0 4.41-2.69 5.38-5.25 5.67.41.36.78 1.05.78 2.12 0 1.53-.01 2.76-.01 3.14 0 .31.21.68.8.56A11.51 11.51 0 0 0 23.5 12C23.5 5.73 18.27.5 12 .5z"/>`
-		},
-		{
-			name: 'Discord',
-			svg: `<path fill="#5865F2" d="M20.32 4.37A19.8 19.8 0 0 0 15.44 2.9c-.24.43-.52 1.01-.71 1.47a18.3 18.3 0 0 0-5.46 0A13 13 0 0 0 8.55 2.9a19.7 19.7 0 0 0-4.88 1.47C.9 8.35.32 12.24.6 16.08a19.9 19.9 0 0 0 6.01 3.04c.49-.66.92-1.36 1.29-2.1-.71-.27-1.39-.6-2.03-.99.17-.12.34-.25.5-.38a14.2 14.2 0 0 0 12.06 0c.16.14.33.26.5.38-.64.39-1.32.72-2.03.99.37.74.8 1.44 1.29 2.1a19.8 19.8 0 0 0 6.01-3.04c.34-4.45-.58-8.3-2.38-11.71zM8.5 13.7c-1.18 0-2.15-1.08-2.15-2.42S7.3 8.86 8.5 8.86s2.17 1.09 2.15 2.42c0 1.34-.96 2.42-2.15 2.42zm7 0c-1.18 0-2.15-1.08-2.15-2.42s.96-2.42 2.15-2.42 2.17 1.09 2.15 2.42c0 1.34-.96 2.42-2.15 2.42z"/>`
-		},
-		{
-			name: 'Notion',
-			svg: `<rect x="2.5" y="2.5" width="19" height="19" rx="4" fill="#fff" stroke="#111" stroke-width="1.1"/><path d="M8 16.5V7.5l7 9v-9" stroke="#111" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>`
-		},
-		{
-			name: 'Slack',
-			svg: `<rect x="10.5" y="2.5" width="3" height="8" rx="1.5" fill="#36C5F0"/><rect x="13.5" y="10.5" width="8" height="3" rx="1.5" fill="#2EB67D"/><rect x="10.5" y="13.5" width="3" height="8" rx="1.5" fill="#ECB22E"/><rect x="2.5" y="10.5" width="8" height="3" rx="1.5" fill="#E01E5A"/>`
-		},
-		{
-			name: 'Google Drive',
-			svg: `<path d="M8.7 3h6.6l6.2 11h-6.6z" fill="#FFCF63"/><path d="M8.7 3 2.5 14l3.3 6L12 9z" fill="#11A861"/><path d="M5.8 20h12.4l3.3-6H9.1z" fill="#5C87F5"/>`
-		},
-		{
-			name: 'Gmail',
-			svg: `<rect x="2.5" y="5" width="19" height="14" rx="2" fill="#fff" stroke="#EA4335" stroke-width="1.1"/><path d="M3.2 6.2 12 13l8.8-6.8" fill="none" stroke="#EA4335" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>`
+	// ── Chat | Work ───────────────────────────────────────────────────────────
+	// Work hands the composer to a teammate: the model becomes `agent:<id>`, its
+	// run gets the computer, and the screen docks on the right. Chat is the model
+	// you had. The switch itself is `WorkModeToggle`, shared with the navbar so
+	// the same choice can be made mid-conversation; this file keeps only what the
+	// landing screen adds — restoring the remembered mode and the teammate tray.
+	let mounted = false;
+	let workBusy = false;
+	let restoreWork = $workMode || readStoredWorkMode();
+
+	$: teammates = teammatesFrom($_models);
+	$: teammate = $workMode ? (teammates.find((m) => selectedModels.includes(m.id)) ?? null) : null;
+
+	const setMode = async (work: boolean) => {
+		if (workBusy) return;
+		workBusy = true;
+		try {
+			selectedModels = await applyWorkMode(work, selectedModels, localStorage.token);
+		} catch (e) {
+			toast.error(`${$i18n.t('Could not start Work mode')}: ${(e as Error).message}`);
+			workMode.set(false);
+		} finally {
+			workBusy = false;
 		}
-	];
+	};
 
+	// Restore runs once the parent has settled its own default model, so the
+	// teammate is not overwritten by the new-chat model selection a moment later.
+	$: if (restoreWork && mounted && selectedModels.length && selectedModels[0] !== '') {
+		restoreWork = false;
+		setMode(true);
+	}
+
+	const pickTeammate = (id: string) => {
+		selectedModels = [id];
+	};
+	const openComputer = () => {
+		workspaceControlsTab.set('computer');
+		showControls.set(true);
+	};
+
+	// ── Launcher tray + capability carousel ───────────────────────────────────
+	// The tray under the composer is the teammate's card: who will do the work,
+	// what it has (a computer, skills, memory), and what it always asks about.
+	// Dismissible, local-state only — the send/socket path is untouched.
+	let connectDismissed = false;
 	const _capAttrs =
 		'width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"';
 	const capabilities = [
@@ -157,6 +179,7 @@
 	let carousel = 0;
 	let _carTimer: any;
 	onMount(() => {
+		mounted = true;
 		const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
 		if (!reduce)
 			_carTimer = setInterval(() => {
@@ -166,7 +189,10 @@
 	onDestroy(() => clearInterval(_carTimer));
 </script>
 
-<div class="grid grid-rows-[1fr_auto] w-full h-full min-h-full px-5 pt-6 pb-6 text-center">
+<div class="grid grid-rows-[auto_1fr_auto] w-full h-full min-h-full px-5 pt-3 pb-6 text-center">
+	<!-- ROW 0: intentionally empty — the Chat | Work switch lives in the navbar
+	     now, so it is reachable here and mid-conversation from one component. -->
+	<div></div>
 	<!-- ROW 1: hero + composer (+ attached connect tray), centered. -->
 	<div class="launch-main flex flex-col items-center justify-center gap-[22px] w-full max-w-[780px] mx-auto">
 		{#if $temporaryChatEnabled}
@@ -230,7 +256,9 @@
 					{toolServers}
 					{stopResponse}
 					{createMessagePair}
-					placeholder={$i18n.t('Ask Harvis anything…')}
+					placeholder={$workMode
+						? $i18n.t('Give {{name}} something to do…', { name: teammate?.name || 'your teammate' })
+						: $i18n.t('Ask Harvis anything…')}
 					{onChange}
 					{onUpload}
 					on:submit={(e) => {
@@ -241,57 +269,17 @@
 			</div>
 
 			{#if !connectDismissed}
-				<div
-					class="relative z-0 -mt-[14px] mx-auto w-[calc(100%-34px)] pt-[22px] px-4 pb-[11px] flex items-center justify-between gap-2.5 bg-gray-50 dark:bg-gray-900 border border-t-0 border-gray-200 dark:border-gray-800 rounded-b-[18px] shadow-[0_8px_16px_-10px_rgba(0,0,0,0.25)]"
-				>
-					<span class="inline-flex items-center gap-1.5 text-[0.8125rem] text-gray-600 dark:text-gray-400">
-						<svg
-							xmlns="http://www.w3.org/2000/svg"
-							width="14"
-							height="14"
-							viewBox="0 0 24 24"
-							fill="none"
-							stroke="currentColor"
-							stroke-width="1.8"
-							stroke-linecap="round"
-							stroke-linejoin="round"
-						>
-							<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
-							<path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
-						</svg>
-						{$i18n.t('Connect your tools to Harvis')}
-					</span>
-					<div class="flex items-center gap-1.5">
-						{#each connectBrands as b}
-							<span
-								class="inline-flex items-center justify-center size-[26px] rounded-lg text-gray-500 dark:text-gray-400 bg-white dark:bg-gray-850 border border-gray-200 dark:border-gray-800"
-								title={b.name}
-							>
-								<svg width="16" height="16" viewBox="0 0 24 24" role="img" aria-label={b.name}
-									>{@html b.svg}</svg
-								>
-							</span>
-						{/each}
-						<button
-							type="button"
-							class="size-6 ml-0.5 inline-flex items-center justify-center rounded-lg text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-850 transition"
-							on:click={() => (connectDismissed = true)}
-							aria-label={$i18n.t('Dismiss')}
-						>
-							<svg
-								xmlns="http://www.w3.org/2000/svg"
-								width="14"
-								height="14"
-								viewBox="0 0 24 24"
-								fill="none"
-								stroke="currentColor"
-								stroke-width="2"
-								stroke-linecap="round"
-								stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12" /></svg
-							>
-						</button>
-					</div>
-				</div>
+				<TeammateTray
+					workMode={$workMode}
+					{workBusy}
+					{teammate}
+					{teammates}
+					{selectedModels}
+					on:pick={(e) => pickTeammate(e.detail)}
+					on:computer={openComputer}
+					on:work={() => setMode(true)}
+					on:dismiss={() => (connectDismissed = true)}
+				/>
 			{/if}
 		</div>
 

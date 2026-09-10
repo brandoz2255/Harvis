@@ -1,0 +1,10 @@
+[Unit]
+Description=Apply the Harvis power request for FreeToken
+Documentation=https://github.com/brandoz2255/Harvis/blob/main/docs/inference-nodes.md
+
+[Service]
+Type=oneshot
+EnvironmentFile=-%h/.config/freetoken.env
+ExecStart=%h/.local/bin/freetoken-control-agent
+# The container can only ever ask for on or off; the agent decides what that runs.
+Nice=0

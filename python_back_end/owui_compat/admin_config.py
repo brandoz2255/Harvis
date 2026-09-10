@@ -11,9 +11,14 @@ even had it rendered, wrote to nothing while enforcement went on reading
 
 The rule this follows is the one ``setup_flow.setup_preferences`` already
 states: a control that cannot change the thing it names is worse than no
-control. So this serves exactly the keys the backend enforces — today that is
-``ENABLE_SIGNUP`` and nothing else — and the rewritten panel renders exactly
+control. So this serves exactly the keys the backend enforces — today
+``ENABLE_SIGNUP`` and ``DEV_MODE`` — and the rewritten panel renders exactly
 those keys. Adding a key here means wiring its enforcement in the same commit.
+
+``DEV_MODE`` earns its place by that rule: it is not a label, it is the gate on
+which experimental surfaces exist at all. Turning it off removes the Inference
+Nodes panel from the settings list, from search, and from its own deep link —
+so a Harvis handed to someone else shows only the parts that are finished.
 
 Durability
 ----------
@@ -41,6 +46,7 @@ from .authz import make_require_admin
 logger = logging.getLogger(__name__)
 
 _SIGNUP_KEY = "enable_signup"
+_DEV_MODE_KEY = "dev_mode"
 _TRUTHY = {"1", "true", "yes", "on"}
 
 
@@ -52,6 +58,30 @@ def _env_signup_default() -> bool:
     return raw in _TRUTHY
 
 
+def _env_dev_mode_default() -> bool:
+    """The .env default for developer mode.
+
+    True in code, deliberately. Harvis is pre-1.0 and everything this gates
+    shipped in the last few weeks; defaulting to False would make an existing
+    install silently lose the Inference Nodes panel on upgrade, which is a
+    regression nobody asked for. Flipping this literal to False is the 1.0
+    gate — at that point experimental surfaces become opt-IN and a fresh deploy
+    shows only what is finished. Until then, set HARVIS_DEV_MODE=false on a
+    machine that should look shipped.
+    """
+    raw = os.getenv("HARVIS_DEV_MODE", "").strip().lower()
+    if not raw:
+        return True
+    return raw in _TRUTHY
+
+
+def _resolve(stored: str | None, env_default: Callable[[], bool]) -> bool:
+    """A stored row wins; absent or blank falls back to the .env default."""
+    if isinstance(stored, str) and stored.strip():
+        return stored.strip().lower() in _TRUTHY
+    return env_default()
+
+
 async def load_admin_config(conn) -> dict:
     """Stored admin config over the env defaults.
 
@@ -59,20 +89,20 @@ async def load_admin_config(conn) -> dict:
     one inside its transaction; acquiring a second there would contend with its
     own advisory lock.
     """
-    stored = None
+    stored: dict[str, str] = {}
     try:
-        stored = await conn.fetchval(
-            "SELECT value FROM instance_settings WHERE key = $1", _SIGNUP_KEY
+        rows = await conn.fetch(
+            "SELECT key, value FROM instance_settings WHERE key = ANY($1::text[])",
+            [_SIGNUP_KEY, _DEV_MODE_KEY],
         )
+        stored = {r["key"]: r["value"] for r in rows}
     except Exception:  # noqa: BLE001 - cold DB, table not created yet
         logger.debug("admin_config: instance_settings unreadable", exc_info=True)
 
-    if isinstance(stored, str) and stored.strip():
-        signup = stored.strip().lower() in _TRUTHY
-    else:
-        signup = _env_signup_default()
-
-    return {"ENABLE_SIGNUP": signup}
+    return {
+        "ENABLE_SIGNUP": _resolve(stored.get(_SIGNUP_KEY), _env_signup_default),
+        "DEV_MODE": _resolve(stored.get(_DEV_MODE_KEY), _env_dev_mode_default),
+    }
 
 
 async def signup_enabled(conn) -> bool:
@@ -100,6 +130,31 @@ async def signup_enabled_via_pool(pool) -> bool:
             return await signup_enabled(conn)
     except Exception:  # noqa: BLE001 - see docstring
         return _env_signup_default()
+
+
+async def dev_mode_enabled(conn) -> bool:
+    """The single source of truth for "are experimental surfaces visible".
+
+    Read by ``config.build_config`` so the boot payload the frontend gates on
+    and the value the admin panel writes can never disagree.
+    """
+    cfg = await load_admin_config(conn)
+    return bool(cfg["DEV_MODE"])
+
+
+async def dev_mode_enabled_via_pool(pool) -> bool:
+    """Pool-shaped wrapper for /api/config, which is boot-critical.
+
+    Falls back to the env default rather than to False: a DB blip must not make
+    a developer's panels vanish mid-session.
+    """
+    if pool is None:
+        return _env_dev_mode_default()
+    try:
+        async with pool.acquire() as conn:
+            return await dev_mode_enabled(conn)
+    except Exception:  # noqa: BLE001 - see docstring
+        return _env_dev_mode_default()
 
 
 def register_admin_config_routes(router: APIRouter, get_current_user: Callable) -> None:
@@ -130,9 +185,14 @@ def register_admin_config_routes(router: APIRouter, get_current_user: Callable) 
             # Only known-honored keys are stored. An unknown key is dropped
             # rather than persisted, so the table can never accumulate settings
             # nothing reads — which is the failure this module exists to end.
-            incoming = body.get("ENABLE_SIGNUP")
-            if isinstance(incoming, bool):
-                current["ENABLE_SIGNUP"] = incoming
+            for field, key in (
+                ("ENABLE_SIGNUP", _SIGNUP_KEY),
+                ("DEV_MODE", _DEV_MODE_KEY),
+            ):
+                incoming = body.get(field)
+                if not isinstance(incoming, bool):
+                    continue
+                current[field] = incoming
                 await conn.execute(
                     """
                     INSERT INTO instance_settings (key, value, updated_at)
@@ -140,7 +200,7 @@ def register_admin_config_routes(router: APIRouter, get_current_user: Callable) 
                     ON CONFLICT (key) DO UPDATE
                         SET value = EXCLUDED.value, updated_at = NOW()
                     """,
-                    _SIGNUP_KEY,
+                    key,
                     "true" if incoming else "false",
                 )
             return current

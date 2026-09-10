@@ -2,7 +2,11 @@
 	const i18n = getContext('i18n');
 	import { getContext } from 'svelte';
 	import { settings } from '$lib/stores';
-	export let id = 'password-input';
+	// Defaulted to a literal 'password-input', so any form with more than one
+	// (the change-password form has three) emitted duplicate ids and every
+	// sr-only <label for> resolved to the first field. Unique per instance
+	// unless the caller supplies one.
+	export let id = `sensitive-input-${Math.random().toString(36).slice(2, 10)}`;
 	export let value: string = '';
 	export let placeholder = '';
 	export let type = 'text';

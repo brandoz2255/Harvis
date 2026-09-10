@@ -125,12 +125,22 @@ def harvis_user_to_owui(user: dict, token: str, *, expires_at: Optional[int] = N
     """
     uid = user["id"]
     role = "admin" if int(uid) in _admin_user_ids() else "user"
+    # `name` is the display name from migration 017, NOT the login identity.
+    # It is NULL for every row written before that migration, and for anyone who
+    # has never opened Settings -> Account, so it falls back to `username` —
+    # which is exactly what this returned before the column existed.
+    dob = user.get("date_of_birth")
     return {
         "id": str(uid),
         "email": user.get("email"),
-        "name": user.get("username"),
+        "name": user.get("name") or user.get("username"),
         "role": role,
         "profile_image_url": user.get("avatar") or "/static/favicon.png",
+        "bio": user.get("bio"),
+        "gender": user.get("gender"),
+        # The Account pane binds this straight to <input type="date">, which
+        # only accepts YYYY-MM-DD. asyncpg hands back a datetime.date.
+        "date_of_birth": dob.isoformat() if hasattr(dob, "isoformat") else dob,
         "token": token,
         "token_type": "Bearer",
         "expires_at": expires_at,
