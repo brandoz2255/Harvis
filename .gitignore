@@ -255,3 +255,7 @@ python_back_end/research_cache/
 # database: user rows, password hashes, chat history, stored provider credentials.
 # The scripts are tracked; what they produce never is.
 database-backup/backups/
+
+# Hermes desktop UI: vite output (served by nginx via compose volume) and electron-builder output
+front_end/hermes-desktop-ui/dist/
+front_end/hermes-desktop-ui/release/
