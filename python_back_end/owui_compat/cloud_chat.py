@@ -564,7 +564,10 @@ async def proxy_cloud_chat(owui_body: dict, pool, user_id: Optional[int]):
     engine = _PROVIDER_ENGINE[provider]
     auth = None
     try:
-        auth = await get_verified_engine_auth(pool, user_id, engine) if (pool and user_id) else None
+        # No `pool and user_id` guard here: the getter is already defensive about both, and
+        # short-circuiting would skip its environment fallback — the one credential path that
+        # still works when the database is down, which is exactly when it is needed.
+        auth = await get_verified_engine_auth(pool, user_id, engine)
     except Exception:
         auth = None
     free = PROVIDERS_BY_ID.get(provider)
