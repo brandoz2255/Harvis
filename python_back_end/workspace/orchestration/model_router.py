@@ -24,9 +24,24 @@ from __future__ import annotations
 
 import logging
 
+import os
 import httpx
 
 logger = logging.getLogger(__name__)
+
+
+# Read timeout for one agent step. 240 s was not enough for a local model that
+# is partly on CPU (gemma4:e4b, qwen3:4b measured 2026-09-13: prompt eval plus
+# a few thousand reasoning tokens at ~20 tok/s). Tunable per install.
+DEFAULT_STEP_TIMEOUT_S = 360.0
+
+
+def step_timeout_s() -> float:
+    raw = (os.getenv("HARVIS_MODEL_STEP_TIMEOUT_S") or "").strip()
+    try:
+        return max(30.0, float(raw)) if raw else DEFAULT_STEP_TIMEOUT_S
+    except ValueError:
+        return DEFAULT_STEP_TIMEOUT_S
 
 
 class ModelRouter:
@@ -40,7 +55,7 @@ class ModelRouter:
         tools: list[dict] | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
-        timeout: float = 240.0,
+        timeout: float | None = None,
         pool=None,
         user_id: int | None = None,
     ) -> dict:
@@ -94,6 +109,8 @@ class ModelRouter:
         except Exception:
             logger.debug("model_router: node body shaping skipped", exc_info=True)
 
+        if timeout is None:
+            timeout = step_timeout_s()
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0)) as client:
             data = await _post_with_backoff(
                 client, target_url, body, headers, model_name=model_name
