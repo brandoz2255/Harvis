@@ -25,6 +25,7 @@ import asyncio
 import logging
 import os
 import time
+from datetime import datetime, timezone
 from typing import Callable, Optional
 
 import httpx
@@ -87,6 +88,31 @@ OAUTH_ENGINES = {"claude-code"}
 _CLAUDE_CODE_CONTAINER = os.getenv("HARVIS_CLAUDE_CODE_CONTAINER", "harvis-claude-code")
 
 
+# Deployment-supplied credential, used ONLY when the database has nothing for this engine.
+# Every getter below reads one store — Postgres — so when the pool is down or the box has not
+# been provisioned yet, the whole Integrations surface reports "not connected", the model picker
+# comes back empty, and the save endpoint answers 503 that the UI renders as a plain
+# "Verification failed". That is the wrong failure mode for a demo box or a first boot: an
+# OpenRouter key handed to the deployment is configuration, not user data, and it should not
+# need a healthy database to be usable.
+#
+# Checked in order, first non-empty wins:
+#   HARVIS_ENGINE_KEY_<ENGINE>   unambiguous, Harvis-namespaced (HARVIS_ENGINE_KEY_OPENROUTER)
+#   <ENGINE>_API_KEY             the vendor's own conventional name (OPENROUTER_API_KEY)
+#
+# The second form is deliberately conventional so an operator who already exports OPENROUTER_API_KEY
+# or GROQ_API_KEY gets the obvious behaviour; the trade is that such a variable exported for some
+# other purpose also connects that engine. The database always wins, so a user who saves their own
+# key is never overridden by the environment. NEVER log the return value.
+def _env_engine_key(engine: str) -> Optional[str]:
+    slug = engine.upper().replace("-", "_")
+    for var in (f"HARVIS_ENGINE_KEY_{slug}", f"{slug}_API_KEY"):
+        val = (os.getenv(var) or "").strip()
+        if val:
+            return val
+    return None
+
+
 async def _engine_auth_row(pool, user_id: int, engine: str):
     if pool is None:
         return None
@@ -102,9 +128,12 @@ async def _engine_auth_row(pool, user_id: int, engine: str):
 
 
 async def user_has_verified_engine(pool, user_id: int, engine: str) -> bool:
-    """True iff the user has a verified key for this engine (used by the readiness probe)."""
+    """True iff a verified credential exists for this engine (used by the readiness probe) —
+    the user's stored one, or failing that one supplied by the environment."""
     row = await _engine_auth_row(pool, user_id, engine)
-    return bool(row and row["verified_at"] is not None and row["api_key_encrypted"])
+    if row and row["verified_at"] is not None and row["api_key_encrypted"]:
+        return True
+    return _env_engine_key(engine) is not None
 
 
 async def get_verified_engine_key(pool, user_id: int, engine: str) -> Optional[str]:
@@ -120,17 +149,19 @@ async def get_verified_engine_auth(pool, user_id: int, engine: str) -> Optional[
     CLAUDE_CODE_OAUTH_TOKEN for ``oauth_token`` mode — never both. None if absent/unverified.
     NEVER log the secret."""
     row = await _engine_auth_row(pool, user_id, engine)
-    if not row or row["verified_at"] is None or not row["api_key_encrypted"]:
-        return None
-    try:
-        from main import decrypt_api_key
-        secret = decrypt_api_key(row["api_key_encrypted"])
-        if not secret:
-            return None
-        mode = (row["auth_mode"] or "api_key") if "auth_mode" in row else "api_key"
-        return secret, mode
-    except Exception:
-        return None
+    if row and row["verified_at"] is not None and row["api_key_encrypted"]:
+        try:
+            from main import decrypt_api_key
+            secret = decrypt_api_key(row["api_key_encrypted"])
+            if secret:
+                mode = (row["auth_mode"] or "api_key") if "auth_mode" in row else "api_key"
+                return secret, mode
+        except Exception:
+            pass
+    # No usable stored credential — fall through to the environment. An env-supplied key is
+    # always an API key; the OAuth/subscription modes are per-user and have no env form.
+    env_secret = _env_engine_key(engine)
+    return (env_secret, "api_key") if env_secret else None
 
 
 async def get_verified_auth_mode(pool, user_id: int, engine: str) -> Optional[str]:
@@ -139,7 +170,7 @@ async def get_verified_auth_mode(pool, user_id: int, engine: str) -> Optional[st
     model list to decide which catalog to surface without touching the encrypted key."""
     row = await _engine_auth_row(pool, user_id, engine)
     if not row or row["verified_at"] is None or not row["api_key_encrypted"]:
-        return None
+        return "api_key" if _env_engine_key(engine) else None
     return (row["auth_mode"] or "api_key") if "auth_mode" in row else "api_key"
 
 
@@ -275,6 +306,22 @@ def register_engine_auth_routes(router: APIRouter, get_current_user: Callable) -
         _check_engine(engine)
         pool = getattr(request.app.state, "pg_pool", None)
         row = await _engine_auth_row(pool, int(user.id), engine)
+        if not (row and row["api_key_encrypted"]):
+            env_key = _env_engine_key(engine)
+            if env_key:
+                # Report it as connected, because it IS: every read path resolves to this key.
+                # `verified_at` is the time of THIS check rather than a stored verification —
+                # nothing was persisted, and the card only tests it for truthiness. `source`
+                # lets the UI say where the credential came from; older clients ignore it.
+                return {
+                    "engine": engine,
+                    "api_key_saved": True,
+                    "auth_mode": "api_key",
+                    "supports_oauth": engine in OAUTH_ENGINES,
+                    "verified_at": datetime.now(timezone.utc).isoformat(),
+                    "last_error": None,
+                    "source": "env",
+                }
         return {
             "engine": engine,
             "api_key_saved": bool(row and row["api_key_encrypted"]),
@@ -282,6 +329,7 @@ def register_engine_auth_routes(router: APIRouter, get_current_user: Callable) -
             "supports_oauth": engine in OAUTH_ENGINES,  # Claude Code → subscription token mode
             "verified_at": row["verified_at"].isoformat() if row and row["verified_at"] else None,
             "last_error": (row["last_error"] if row else None),
+            "source": "db" if (row and row["api_key_encrypted"]) else None,
         }
 
     @router.post("/api/owui/engine-auth/{engine}")

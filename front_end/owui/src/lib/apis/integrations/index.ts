@@ -104,6 +104,18 @@ export type EngineAuthStatus = {
 	supports_oauth?: boolean; // true for claude-code (subscription token mode)
 	verified_at: string | null;
 	last_error: string | null;
+	source?: 'db' | 'env'; // 'env' = credential came from the deployment environment, not this user
+};
+
+// FastAPI raises HTTPException as `{detail: "..."}`, while these endpoints' own failures answer
+// `{ok: false, error: "..."}`. Reading only `error` meant every infrastructure failure — a 503
+// because the database pool is down being the one that actually happens — reached the user as the
+// generic "Verification failed", which reads as "your key is bad" and sends them to reissue a key
+// that was fine. Fall back to detail, then to the status line, so the cause is always named.
+const errText = (d: any, r: Response): string | undefined => {
+	const named = d?.error ?? d?.detail;
+	if (typeof named === 'string' && named.trim()) return named;
+	return r.ok ? undefined : `HTTP ${r.status}${r.statusText ? ` ${r.statusText}` : ''}`;
 };
 
 export const getEngineAuth = async (engine: string): Promise<EngineAuthStatus | null> => {
@@ -120,15 +132,16 @@ export const saveEngineKey = async (
 	engine: string,
 	credential: string,
 	authMode: string = 'api_key'
-): Promise<{ ok: boolean }> => {
+): Promise<{ ok: boolean; error?: string }> => {
 	try {
 		const r = await fetch(`/api/owui/engine-auth/${engine}`, {
 			method: 'POST', headers: hdr(), credentials: 'include',
 			body: JSON.stringify({ credential, auth_mode: authMode })
 		});
-		return { ok: r.ok };
+		const d = await r.json().catch(() => null);
+		return { ok: r.ok, error: r.ok ? undefined : errText(d, r) };
 	} catch (_) {
-		return { ok: false };
+		return { ok: false, error: 'request failed' };
 	}
 };
 
@@ -145,8 +158,8 @@ export const verifyEngineKey = async (
 			method: 'POST', headers: hdr(), credentials: 'include',
 			body: JSON.stringify(body)
 		});
-		const d = await r.json().catch(() => ({}));
-		return { ok: !!d?.ok, error: d?.error };
+		const d = await r.json().catch(() => null);
+		return { ok: !!d?.ok, error: d?.ok ? undefined : errText(d, r) };
 	} catch (_) {
 		return { ok: false, error: 'request failed' };
 	}

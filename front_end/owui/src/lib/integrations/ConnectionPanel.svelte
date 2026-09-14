@@ -242,12 +242,24 @@
 		}
 		eaBusy = true;
 		eaMsg = null;
-		await saveEngineKey(authEngine, engineKey.trim(), authMode);
-		const r = await verifyEngineKey(authEngine, engineKey.trim(), authMode);
-		eaBusy = false;
-		eaMsg = r.ok
-			? { text: $i18n.t('Connected & verified.'), ok: true }
-			: { text: r.error || $i18n.t('Verification failed'), ok: false };
+		try {
+			// The save answers 503 when the database pool is down. Its result used to be discarded,
+			// so the flow ran on to verify and reported "Verification failed" — naming the key as
+			// the problem when the key was never stored at all. Stop here and say what happened.
+			const saved = await saveEngineKey(authEngine, engineKey.trim(), authMode);
+			if (!saved.ok) {
+				eaMsg = { text: saved.error || $i18n.t('Could not save the key'), ok: false };
+				return;
+			}
+			const r = await verifyEngineKey(authEngine, engineKey.trim(), authMode);
+			eaMsg = r.ok
+				? { text: $i18n.t('Connected & verified.'), ok: true }
+				: { text: r.error || $i18n.t('Verification failed'), ok: false };
+		} finally {
+			// finally, not a trailing assignment: an unexpected throw here used to leave eaBusy
+			// true forever, which disables the button and looks exactly like a dead button.
+			eaBusy = false;
+		}
 		await loadEngineAuth();
 	};
 
