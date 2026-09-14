@@ -21,6 +21,7 @@ import time
 import uuid
 from pathlib import Path
 
+import os
 import httpx
 
 from .provider import GENERATE_TIMEOUT_S, PROBE_TIMEOUT_S, GenSpec
@@ -88,7 +89,39 @@ class ComfyUIProvider:
         sampler["seed"] = spec.seed if spec.seed is not None else random.randint(0, 2**31 - 1)
         return graph
 
+    async def release(self, client: httpx.AsyncClient | None = None) -> bool:
+        """Ask ComfyUI to unload its models and free VRAM. Best effort.
+
+        --lowvram keeps the checkpoint resident after a job (2.3 GB on the
+        laptop's 8 GB card), which pushed every Ollama model onto the CPU.
+        The next job reloads it in a few seconds, so idle VRAM is the better
+        trade. HARVIS_IMAGE_COMFYUI_RELEASE_VRAM=false keeps the old behaviour.
+        """
+        if (os.getenv("HARVIS_IMAGE_COMFYUI_RELEASE_VRAM") or "true").strip().lower() in ("0", "false", "no"):
+            return False
+        try:
+            own = client is None
+            client = client or httpx.AsyncClient(timeout=PROBE_TIMEOUT_S)
+            try:
+                resp = await client.post(
+                    f"{self.base_url}/free",
+                    json={"unload_models": True, "free_memory": True},
+                )
+                return resp.status_code == 200
+            finally:
+                if own:
+                    await client.aclose()
+        except Exception as exc:  # noqa: BLE001 — freeing is never worth failing a job
+            logger.debug("comfyui: release skipped: %s", exc)
+            return False
+
     async def txt2img(self, spec: GenSpec) -> bytes:
+        try:
+            return await self._txt2img(spec)
+        finally:
+            await self.release()
+
+    async def _txt2img(self, spec: GenSpec) -> bytes:
         async with httpx.AsyncClient(timeout=GENERATE_TIMEOUT_S) as client:
             # Resolve the checkpoint honestly: the requested model only if it is
             # actually installed, else the first available one (never a blind name
