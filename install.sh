@@ -259,7 +259,13 @@ detect_gpu_runtime() {
 
 # ── Model-server detection ──────────────────────────────────────────────────
 port_listening() { # /dev/tcp probe: succeeds iff something accepts on $1:$2
-  ( exec 3<>"/dev/tcp/$1/$2" ) 2>/dev/null
+  # Capped on purpose. A bare /dev/tcp connect has no timeout, so a host that
+  # silently drops packets — host.docker.internal resolving to something
+  # unroutable, or a firewalled default gateway — blocks for the kernel's full
+  # SYN-retry window, about 130 s. detect_provider runs this once per host/port
+  # pair with no output in between, so the installer just sat there after the
+  # banner for minutes. curl's -m 4 never helped: this gate runs before it.
+  timeout 2 bash -c 'exec 3<>"/dev/tcp/$0/$1"' "$1" "$2" 2>/dev/null
 }
 
 # Which compose project, if any, publishes host port $1. Empty when the holder
