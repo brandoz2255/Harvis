@@ -216,6 +216,31 @@ async def _resolve_route(model_name: str) -> tuple[str, dict, bool, bool, str | 
     First checks user-configured OpenClaw settings in database.
     Falls back to legacy hardcoded models if no config found.
     """
+    # Inference nodes (plugins/inference_nodes) go first. A registered OpenAI-dialect
+    # server — FreeToken today — is invisible to the Ollama-shaped probes below (it has
+    # no /api/tags), so the only way its models can be picked is to ask it before them.
+    # Fail-open: a broken plugin degrades to the old routing, it never takes chat down.
+    try:
+        from plugins.inference_nodes import resolve_node
+        _node, _node_reason = await resolve_node(model_name)
+    except Exception as _exc:
+        logger.warning("model_proxy: inference-node lookup failed (%s) — Ollama routing",
+                       type(_exc).__name__)
+        _node, _node_reason = None, "error"
+    if _node is not None:
+        logger.info("model_proxy: %s → inference node %s (%s)",
+                    model_name, _node.spec.name, _node.spec.base_url)
+        return _node.spec.chat_url, _node.spec.headers(), False, False, None
+    if _node_reason.startswith("unknown:"):
+        # The node that last served this model did not answer. Falling through would
+        # hand the name to Ollama, which never had it, and the user would read "model
+        # not found" for a box that is merely asleep.
+        raise HTTPException(
+            status_code=503,
+            detail=(f"Model '{model_name}' is served by inference node "
+                    f"'{_node_reason.split(':', 1)[1]}', which is unreachable right now."),
+        )
+
     # Try to get user-configured OpenClaw settings
     config = await _get_openclaw_config()
     
@@ -1084,7 +1109,24 @@ async def execute_chat_completion(request: Request, body: dict):
 
     # Local Ollama: disable thinking mode so qwen3.5 etc. put output in content,
     # and ensure the context window is large enough for tool schemas + conversation.
-    is_local_ollama = LOCAL_OLLAMA_URL and target_url.startswith(LOCAL_OLLAMA_URL.rstrip("/"))
+    # Inference-node route: OpenAI dialect end to end. Shape the body for it (Ollama-only
+    # keys dropped, thinking policy applied) and keep every Ollama-specific branch below
+    # off this path.
+    _node_spec = None
+    try:
+        from plugins.inference_nodes import node_for_url, shape_body_for_node
+        _node_spec = node_for_url(target_url)
+        if _node_spec is not None:
+            body = shape_body_for_node(body, _node_spec)
+            logger.info("model_proxy: node %s body shaped (thinking=%s)", _node_spec.name,
+                        (body.get("chat_template_kwargs") or {}).get("enable_thinking", "model-default"))
+    except Exception as _exc:
+        logger.warning("model_proxy: inference-node body shaping failed (%s)", type(_exc).__name__)
+    is_local_ollama = (
+        _node_spec is None
+        and LOCAL_OLLAMA_URL
+        and target_url.startswith(LOCAL_OLLAMA_URL.rstrip("/"))
+    )
     if is_local_ollama:
         OLLAMA_ALLOWED_KEYS = {
             "model", "messages", "stream", "tools", "tool_choice",
@@ -1154,7 +1196,7 @@ async def execute_chat_completion(request: Request, body: dict):
     # "32768" on a 24GB+ GPU).  Note: Ollama's OAI-compat endpoint may
     # ignore per-request options.num_ctx — the OLLAMA_CONTEXT_LENGTH env
     # var on the ollama container is the authoritative lever.
-    _is_ollama_route = ":11434" in target_url or "ollama" in target_url.lower()
+    _is_ollama_route = _node_spec is None and (":11434" in target_url or "ollama" in target_url.lower())
     # Remember what the CLIENT asked for. The upstream call is forced
     # non-streaming for Ollama (see below), but the response back to the
     # client must match the format it expects. If client asked stream=true

@@ -18,7 +18,7 @@ substitution these gates exist to prevent.
 from __future__ import annotations
 
 HELMET_HANGER_V1 = {
-    "schema_version": "0.1",
+    "schema_version": "0.3",
     "units": "mm",
     "name": "helmet_hanger_v1",
     "expected_solids": 1,
@@ -83,7 +83,7 @@ HELMET_HANGER_V1 = {
 
 
 STUDDED_BRICK_V1 = {
-    "schema_version": "0.1",
+    "schema_version": "0.3",
     "units": "mm",
     "name": "studded_brick_v1",
     "expected_solids": 1,

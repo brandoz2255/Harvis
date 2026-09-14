@@ -93,6 +93,9 @@ certs/
 # Deliberately broad — they must catch credential FILES wherever they land.
 **/*api-key*
 **/*token*
+# FreeToken is the inference server's name, not a secret: its unit files and the
+# FT_* env example carry no credentials (the real env lives in ~/.config).
+!scripts/freetoken/freetoken*
 **/credentials*
 # …but not at the cost of source code. A module with one of those words in its NAME is not a
 # secret; a secret INSIDE a file is, and that is what the pre-push secret scan is for. Without
@@ -248,7 +251,7 @@ python_back_end/research_cache/
 # SkillOpt corpus + candidates — mined from real user runs (task briefs are user content).
 # Regenerate with ./scripts/skillopt-offline.sh; never commit.
 /data/skillopt/
-
-# Database dumps -- real user data, password hashes and chat history.
-# backup.sh writes here; none of it belongs in the repo.
+# Database dumps written by database-backup/backup.sh — a full copy of the live
+# database: user rows, password hashes, chat history, stored provider credentials.
+# The scripts are tracked; what they produce never is.
 database-backup/backups/

@@ -39,8 +39,11 @@
 
 	const i18n: any = getContext('i18n');
 
-	// The five real seed collections — loaded lazily, one pill at a time.
+	// Seed collections — loaded lazily, one pill at a time. All but Hermes are GitHub repos
+	// fetched client-side; Hermes Agent is the LOCAL sidecar library, read through the backend
+	// (no rate limit, no network hop, and it only appears when the sidecar is running).
 	const COLLECTIONS = [
+		{ label: 'Hermes Agent', owner: 'hermes', repo: 'skills', local: true },
 		{ label: 'Anthropic', owner: 'anthropics', repo: 'skills' },
 		{ label: 'Block / Goose', owner: 'block', repo: 'agent-skills' },
 		{ label: 'Hugging Face', owner: 'huggingface', repo: 'skills' },
@@ -69,12 +72,85 @@
 	let installing = false;
 
 	const keyOf = (owner: string, repo: string) => `${owner}/${repo}`;
+	const HERMES_KEY = 'hermes/skills';
 	const rawUrlOf = (e: any) =>
-		`https://raw.githubusercontent.com/${e.owner}/${e.repo}/${encodeURIComponent(e.branch)}/` +
-		(e.dir ? e.dir.split('/').map(encodeURIComponent).join('/') + '/' : '') +
-		'SKILL.md';
+		e.local
+			? `/api/owui/skills/hermes/skill?dir=${encodeURIComponent(e.dir)}`
+			: `https://raw.githubusercontent.com/${e.owner}/${e.repo}/${encodeURIComponent(e.branch)}/` +
+				(e.dir ? e.dir.split('/').map(encodeURIComponent).join('/') + '/' : '') +
+				'SKILL.md';
+	// Provenance recorded on import. A Hermes skill has no public URL, so it records where it
+	// actually came from rather than a github.com link that would not resolve.
 	const canonicalUrl = (e: any) =>
-		`https://github.com/${e.owner}/${e.repo}/tree/${e.branch}${e.dir ? `/${e.dir}` : ''}`;
+		e.local
+			? `hermes-agent:${e.dir}`
+			: `https://github.com/${e.owner}/${e.repo}/tree/${e.branch}${e.dir ? `/${e.dir}` : ''}`;
+
+	// One text fetch for both sources — the local endpoint returns text/plain for exactly this
+	// reason, so the only difference is the auth header the backend requires.
+	const fetchSkillText = async (entry: any): Promise<string> => {
+		const url = rawUrlOf(entry);
+		if (mdCache.has(url)) return mdCache.get(url) as string;
+		const res = await fetch(
+			url,
+			entry.local ? { headers: { authorization: `Bearer ${token}` } } : {}
+		);
+		if (!res.ok) throw new Error(`SKILL.md fetch failed (${res.status})`);
+		const text = await res.text();
+		mdCache.set(url, text);
+		return text;
+	};
+
+	// The sidecar's bundled library, via the backend (it lives inside the Hermes container, not
+	// on any host path). An unavailable sidecar is a section-level message, not a thrown error.
+	const loadHermes = async () => {
+		if (repoCache.has(HERMES_KEY)) {
+			repoStates = { ...repoStates, [HERMES_KEY]: { status: 'ready', ...repoCache.get(HERMES_KEY) } };
+			return repoStates[HERMES_KEY];
+		}
+		repoStates = { ...repoStates, [HERMES_KEY]: { status: 'loading', entries: [] } };
+		try {
+			const res = await fetch('/api/owui/skills/hermes/catalog', {
+				headers: { authorization: `Bearer ${token}` }
+			});
+			if (!res.ok) throw new Error(`Hermes catalog (${res.status})`);
+			const data = await res.json();
+			if (!data?.available) {
+				repoStates = {
+					...repoStates,
+					[HERMES_KEY]: {
+						status: 'error',
+						error: data?.reason ?? 'The Hermes Agent skill library is unavailable.',
+						entries: []
+					}
+				};
+				return repoStates[HERMES_KEY];
+			}
+			const entries = (data.skills ?? []).map((sk: any) => ({
+				key: `${HERMES_KEY}/${sk.dir}`,
+				local: true,
+				owner: 'hermes',
+				repo: 'skills',
+				branch: '',
+				dir: sk.dir,
+				files: ['SKILL.md'],
+				extras: sk.extra_files ?? 0,
+				license: null,
+				fm: { name: sk.name ?? '', description: '' },
+				fmState: 'idle'
+			}));
+			const loaded = { branch: '', license: null, truncated: false, entries };
+			repoCache.set(HERMES_KEY, loaded);
+			repoStates = { ...repoStates, [HERMES_KEY]: { status: 'ready', ...loaded } };
+			return repoStates[HERMES_KEY];
+		} catch (e: any) {
+			repoStates = {
+				...repoStates,
+				[HERMES_KEY]: { status: 'error', error: e?.message ?? `${e}`, entries: [] }
+			};
+			return repoStates[HERMES_KEY];
+		}
+	};
 
 	const ghJson = async (url: string) => {
 		const res = await fetch(url, { headers: { Accept: 'application/vnd.github+json' } });
@@ -158,7 +234,8 @@
 		}
 		openKeys = [...openKeys, key];
 		visibleCounts = { ...visibleCounts, [key]: visibleCounts[key] ?? PAGE };
-		loadRepo(owner, repo).catch(() => {}); // error surfaced in the section
+		// error surfaced in the section, never thrown at the pill
+		(key === HERMES_KEY ? loadHermes() : loadRepo(owner, repo)).catch(() => {});
 	};
 
 	// Frontmatter (name/description) fetched on demand for visible rows only —
@@ -166,16 +243,8 @@
 	const ensureFrontmatter = (entry: any) => {
 		if (entry.fmState !== 'idle') return;
 		entry.fmState = 'loading';
-		const url = rawUrlOf(entry);
-		(mdCache.has(url)
-			? Promise.resolve(mdCache.get(url) as string)
-			: fetch(url).then((r) => {
-					if (!r.ok) throw new Error(`raw fetch ${r.status}`);
-					return r.text();
-				})
-		)
+		fetchSkillText(entry)
 			.then((text) => {
-				mdCache.set(url, text);
 				const fm: any = parseFrontmatter(text);
 				entry.fm = { name: fm.name || '', description: fm.description || '' };
 				entry.fmState = 'done';
@@ -325,16 +394,8 @@
 	const openPreview = (entry: any, el: HTMLElement | null) => {
 		previewTriggerEl = el;
 		preview = { entry, content: null, loading: true, error: '', viewMode: 'rendered', fm: null };
-		const url = rawUrlOf(entry);
-		(mdCache.has(url)
-			? Promise.resolve(mdCache.get(url) as string)
-			: fetch(url).then((r) => {
-					if (!r.ok) throw new Error(`SKILL.md fetch failed (${r.status})`);
-					return r.text();
-				})
-		)
+		fetchSkillText(entry)
 			.then((text) => {
-				mdCache.set(url, text);
 				if (!preview || preview.entry !== entry) return;
 				preview = { ...preview, content: text, loading: false, fm: parseFrontmatter(text) };
 			})
@@ -615,7 +676,7 @@
 			<div class="mt-3 flex flex-wrap gap-1.5">
 				{#each COLLECTIONS as c (c.owner + '/' + c.repo)}
 					{@const key = keyOf(c.owner, c.repo)}
-					<Tooltip content={`github.com/${key}`}>
+					<Tooltip content={c.local ? 'Bundled with your Hermes Agent sidecar' : `github.com/${key}`}>
 						<button
 							class="rounded-lg border px-2.5 py-1 text-xs font-medium transition {openKeys.includes(
 								key
@@ -633,7 +694,7 @@
 
 			{#if openKeys.length === 0}
 				<p class="mt-4 text-sm text-gray-500">
-					{$i18n.t('Pick a collection to load its skills from GitHub.')}
+					{$i18n.t('Pick a collection to load its skills.')}
 				</p>
 			{:else}
 				{#each sections as [key, s] (key)}
@@ -654,7 +715,7 @@
 						onRetry={() => {
 							repoCache.delete(key);
 							const [owner, repo] = key.split('/');
-							loadRepo(owner, repo).catch(() => {});
+							(key === HERMES_KEY ? loadHermes() : loadRepo(owner, repo)).catch(() => {});
 						}}
 					/>
 				{/each}

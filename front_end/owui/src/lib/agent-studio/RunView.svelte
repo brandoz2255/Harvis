@@ -137,12 +137,19 @@
 		return 'Working…';
 	})();
 
+	// Ask for THIS run by id, not the whole history list. The list deliberately omits
+	// VibeCode/Build turns, so scanning it left `status` empty for every Build run — and
+	// `finishedOnServer` below is what stops the "Working…" line, so it never stopped.
+	// One row is also cheaper than the 50 this used to fetch to find one.
 	const loadMeta = async (id: string) => {
 		try {
-			const res = await fetch(`${WEBUI_BASE_URL}/api/workspace/history`, {
-				headers: { Authorization: `Bearer ${localStorage.token}` },
-				credentials: 'include'
-			});
+			const res = await fetch(
+				`${WEBUI_BASE_URL}/api/workspace/history?run_id=${encodeURIComponent(id)}`,
+				{
+					headers: { Authorization: `Bearer ${localStorage.token}` },
+					credentials: 'include'
+				}
+			);
 			if (res.ok) {
 				const data = await res.json();
 				const run = (data?.runs ?? []).find((r: any) => r.id === id);
@@ -160,6 +167,20 @@
 		}
 	};
 
+	// The server status is fetched once at mount, which settles a view opened on an
+	// already-finished run. It does NOT settle one that was watching a LIVE run whose
+	// stream then went quiet without a terminal event — and that view is the one left
+	// pinned on "Working…". So re-ask, slowly, for exactly as long as it still looks
+	// live: one row per 15s, and it stops itself the moment the run reports terminal.
+	let _metaTimer: ReturnType<typeof setInterval> | null = null;
+	const stopMetaWatch = () => {
+		if (_metaTimer !== null) {
+			clearInterval(_metaTimer);
+			_metaTimer = null;
+		}
+	};
+	$: if (finishedOnServer) stopMetaWatch();
+
 	// (Re)start whenever the target run changes — lets the SAME instance (the dock) switch runs
 	// without a remount. Consumes via the SHARED, throttled per-run stream store (one connection
 	// + one batched pipeline across every view of the run), instead of opening its own.
@@ -173,8 +194,16 @@
 		taskBrief = '';
 		status = '';
 		activeId = id;
+		stopMetaWatch();
 		if (id) {
 			loadMeta(id);
+			_metaTimer = setInterval(() => {
+				if (finishedOnServer || activeId !== id) {
+					stopMetaWatch();
+					return;
+				}
+				loadMeta(id);
+			}, 15000);
 			_sub = subscribeRun(id);
 			_unsubStore = _sub.store.subscribe((s) => {
 				events = s.events;
@@ -201,6 +230,7 @@
 	};
 
 	onDestroy(() => {
+		stopMetaWatch();
 		_unsubStore?.();
 		_sub?.unsubscribe();
 	});

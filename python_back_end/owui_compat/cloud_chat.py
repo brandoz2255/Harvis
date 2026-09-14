@@ -62,24 +62,35 @@ def _api_model(facade_id: str) -> str:
 
 
 # Static metadata by REAL anthropic id — display name, context, pricing (USD per MILLION tokens),
-# and the extended-thinking cap. The catalog is fetched LIVE from Anthropic's /v1/models (ids +
-# display names); this table enriches each id with cost/context/effort. A model NOT listed here
-# still appears (via _CLAUDE_META_DEFAULT) so the list is genuinely self-updating — only its price
-# is unknown until added. `max_thinking` > 0 ⇒ the model supports the reasoning-effort control.
+# and a reference thinking figure. The catalog is fetched LIVE from Anthropic's /v1/models (ids +
+# display names); this table enriches each id with cost/context. A model NOT listed here still
+# appears (via _CLAUDE_META_DEFAULT) so the list is genuinely self-updating — only its price is
+# unknown until added. `max_thinking` is REFERENCE ONLY: it is hand-authored, it is not Anthropic's
+# authority, and nothing clamps against it. Every Claude takes a reasoning effort on both lanes.
 _CLAUDE_META: dict[str, dict] = {
     # `pin`/`pout` here are the Opus-line rate, not a separately confirmed Opus 5 price. They feed the
     # cost ESTIMATE only; a wrong number is visibly wrong, whereas leaving them None would silently
     # blank the meter for the flagship model, which reads as "this model is free".
+    # `ctx` is the CONTEXT WINDOW the usage meter divides by, and it must match what the
+    # engine actually gives the model — a wrong denominator is what made a healthy run look
+    # like a pegged red bar. Sonnet 5 and Fable 5 have NATIVE 1M windows; Claude Code compacts
+    # them at ~967K and the rest of the line at the 200K boundary, so 200K here understated
+    # the two by 5x. Nothing pins the CLI's compaction window — its per-model tuning IS the
+    # recommendation (see `_build_claude_command`), so this table only has to tell the truth.
+    # CAVEAT for the direct-API lane: 1M on Sonnet needs the `context-1m-2025-08-07` beta
+    # header, which this module does not send (`_ANTHROPIC_VERSION` only). Over 200K there
+    # Anthropic errors loudly rather than truncating, so the bar can read low before a visible
+    # failure — sending the header (and its above-200K pricing tier) is the follow-up.
     "claude-opus-5":              {"name": "Claude Opus 5",    "ctx": 200000, "pin": 15.0, "pout": 75.0, "max_thinking": 32000},
     "claude-opus-4-8":            {"name": "Claude Opus 4.8",  "ctx": 200000, "pin": 15.0, "pout": 75.0, "max_thinking": 32000},
     "claude-opus-4-7":            {"name": "Claude Opus 4.7",  "ctx": 200000, "pin": 15.0, "pout": 75.0, "max_thinking": 32000},
     "claude-opus-4-6":            {"name": "Claude Opus 4.6",  "ctx": 200000, "pin": 15.0, "pout": 75.0, "max_thinking": 32000},
     "claude-opus-4-5-20251101":   {"name": "Claude Opus 4.5",  "ctx": 200000, "pin": 15.0, "pout": 75.0, "max_thinking": 32000},
     "claude-opus-4-1-20250805":   {"name": "Claude Opus 4.1",  "ctx": 200000, "pin": 15.0, "pout": 75.0, "max_thinking": 32000},
-    "claude-sonnet-5":            {"name": "Claude Sonnet 5",  "ctx": 200000, "pin": 3.0,  "pout": 15.0, "max_thinking": 32000},
+    "claude-sonnet-5":            {"name": "Claude Sonnet 5",  "ctx": 1000000, "pin": 3.0,  "pout": 15.0, "max_thinking": 32000},
     "claude-sonnet-4-6":          {"name": "Claude Sonnet 4.6","ctx": 200000, "pin": 3.0,  "pout": 15.0, "max_thinking": 24000},
     "claude-sonnet-4-5-20250929": {"name": "Claude Sonnet 4.5","ctx": 200000, "pin": 3.0,  "pout": 15.0, "max_thinking": 24000},
-    "claude-fable-5":             {"name": "Claude Fable 5",   "ctx": 200000, "pin": 1.0,  "pout": 5.0,  "max_thinking": 24000},
+    "claude-fable-5":             {"name": "Claude Fable 5",   "ctx": 1000000, "pin": 1.0,  "pout": 5.0,  "max_thinking": 24000},
     "claude-haiku-4-5-20251001":  {"name": "Claude Haiku 4.5", "ctx": 200000, "pin": 1.0,  "pout": 5.0,  "max_thinking": 0},
 }
 
@@ -92,7 +103,7 @@ _CLAUDE_META_DEFAULT = {"name": None, "ctx": 200000, "pin": None, "pout": None, 
 def _claude_spec(model_id: str) -> dict:
     """Metadata for a facade Claude id (dynamic-safe): strip prefix → _CLAUDE_META, else default."""
     meta = _CLAUDE_META.get(_api_model(model_id), _CLAUDE_META_DEFAULT)
-    return {**meta, "supports_effort": bool(meta.get("max_thinking"))}
+    return {**meta, "supports_effort": True}
 
 
 # Static FALLBACK id lists — used ONLY when the live /v1/models fetch fails (network down / rate
@@ -197,8 +208,18 @@ _OPENAI_MODELS = [
 _OPENAI_BY_ID = {m["id"]: m for m in _OPENAI_MODELS}
 _ALL_OPENAI_IDS = {m["id"] for m in _OPENAI_MODELS}
 _OPENAI_URL = "https://api.openai.com/v1/chat/completions"
-# reasoning_effort is the OpenAI reasoning control (low|medium|high). "max" → "high" (no native ultra).
-_EFFORT_OPENAI = {"low": "low", "medium": "medium", "high": "high", "max": "high"}
+# reasoning_effort is the OpenAI reasoning control, and it has FOUR values: minimal|low|medium|high.
+# The picker offers seven, so everything above "high" collapses to "high" here — OpenAI has no
+# deeper level to send. The panel says so on those rows rather than pretending they differ.
+_EFFORT_OPENAI = {
+    "minimal": "minimal",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "extra_high": "high",
+    "max": "high",
+    "ultra": "high",
+}
 
 # Phase 3 — Moonshot / Kimi K2.5 (the ``kimi`` engine = the ORIGINAL Harvis workspace engine).
 # Same provider-prefix discipline (``moonshot/…``). Moonshot's API is OpenAI-compatible wire format,
@@ -237,7 +258,19 @@ _ALL_MOONSHOT_IDS = {m["id"] for m in _MOONSHOT_MODELS}
 _MOONSHOT_URL = f"{_MOONSHOT_BASE_URL.rstrip('/')}/chat/completions"
 
 # Effort → extended-thinking budget (Anthropic api_key path). "auto"/"none"/absent → no thinking.
-_EFFORT_BUDGET = {"low": 4000, "medium": 8000, "high": 16000, "max": 32000}
+# Every value is CLAMPED to the model's own ``max_thinking`` at the call site below, so the top of
+# this ladder is a request, not a promise: on a 24000-cap model (Sonnet 4.6/4.5, Fable 5) both
+# "max" and "ultra" land on 24000 and are genuinely the same run. The UI states that per model
+# instead of hiding it.
+_EFFORT_BUDGET = {
+    "minimal": 2000,
+    "low": 4000,
+    "medium": 8000,
+    "high": 16000,
+    "extra_high": 24000,
+    "max": 32000,
+    "ultra": 48000,
+}
 
 _CLAUDE_CODE_CONTAINER = os.getenv("HARVIS_CLAUDE_CODE_CONTAINER", "harvis-claude-code")
 
@@ -353,7 +386,13 @@ def _claude_entry_from_id(mid: str, display: Optional[str], mode: str) -> dict:
         name = f"{name} (subscription)"
     m = {
         "id": f"anthropic/{mid}", "name": name,
-        "supports_effort": bool(meta.get("max_thinking")),
+        # Subscription mode routes to _proxy_claude_cli, which takes no effort argument — the CLI
+        # exposes no thinking budget. Advertising support there offered a control whose value was
+        # silently discarded, so the flag is API-key-only.
+        # True on BOTH lanes. The api_key path sends a `thinking` block; the subscription path
+        # exports MAX_THINKING_TOKENS into the Claude Code CLI, which is the CLI's own control
+        # for the same budget. Neither discards it.
+        "supports_effort": True,
         "max_thinking": meta.get("max_thinking", 0),
         "ctx": meta.get("ctx"), "pin": meta.get("pin"), "pout": meta.get("pout"),
         "primary": mid in _CLAUDE_PRIMARY,
@@ -558,7 +597,7 @@ async def proxy_cloud_chat(owui_body: dict, pool, user_id: Optional[int]):
                 url=f"{KIMI_CODE_BASE_URL.rstrip('/')}/v1/messages",
             )
         if mode == "oauth_token":
-            return await _proxy_claude_cli(owui_body, model_id, secret, user_id)
+            return await _proxy_claude_cli(owui_body, model_id, secret, user_id, effort, budget_override)
         return await _proxy_claude_api(owui_body, model_id, secret, effort, budget_override)
     except Exception as exc:  # never leak the secret in the error
         logger.warning("cloud_chat: proxy failed (%s): %s", model_id, type(exc).__name__)
@@ -566,8 +605,11 @@ async def proxy_cloud_chat(owui_body: dict, pool, user_id: Optional[int]):
 
 
 def _normalize_effort(val) -> str:
+    """Any id the picker can save must be listed here. An id missing from this set falls through
+    to "none", which sends NO thinking block — the control reads as set and does nothing. Keep it
+    in lockstep with _EFFORT_BUDGET, _EFFORT_OPENAI and model_profiles._EFFORTS."""
     e = (str(val or "")).strip().lower()
-    return e if e in {"low", "medium", "high", "max"} else "none"
+    return e if e in _EFFORT_BUDGET else "none"
 
 
 # ── Anthropic Messages API path (api_key) ───────────────────────────────────────────────
@@ -607,7 +649,10 @@ def _to_anthropic_request(owui_body: dict, model_id: str, effort: str, budget_ov
     # A saved per-model thinking budget (profile) overrides the effort→budget mapping.
     budget = int(budget_override) if budget_override else _EFFORT_BUDGET.get(effort, 0)
     if budget and spec.get("supports_effort"):
-        budget = min(budget, int(spec.get("max_thinking") or budget))
+        # Sent as chosen — no local clamp. The per-model max_thinking figure is Harvis's own
+        # hand-authored table, not an authority, and clamping to it silently downgraded a level
+        # the user picked on purpose. If a model genuinely refuses this budget, Anthropic says so
+        # and names its real limit, which beats a quiet downgrade nobody can see.
         payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
         payload["temperature"] = 1.0  # required when thinking is enabled
         payload["max_tokens"] = budget + 8192
@@ -1301,6 +1346,13 @@ _CHAT_SANDBOX_SYSTEM = (
     "menu of things you could do unless you were asked.\n"
     "Do not touch the workspace unless the task needs files. A greeting, a definition or an "
     "opinion needs no tool call at all — just answer it.\n"
+    "YOU HAVE WEB ACCESS. This container reaches the public internet and you have WebSearch "
+    "and WebFetch. Never say you cannot browse, cannot search, or have no web access — that "
+    "is false here. If a question turns on something you do not recognise or cannot know "
+    "from training — slang, a meme, a person, a product, a release, a price, anything "
+    "current — SEARCH FOR IT instead of saying you do not know it or asking the user to "
+    "explain it. Say you don't know only after a search came back empty, and say that the "
+    "search is what came back empty.\n"
     "When a task DOES need files:\n"
     "- This directory PERSISTS across turns and you CAN write to it. SANDBOX.md and "
     "README.md here are your project docs — read them when the task involves this "
@@ -1312,13 +1364,13 @@ _CHAT_SANDBOX_SYSTEM = (
     "surfaces every file you create as a readable card under your answer, so say what "
     "you built and why, not where it lives on disk.\n"
     "- NEVER tell the user to open a local path or run a command on their machine.\n"
-    "- Do not browse the public web from this sandbox.\n"
     "Answer in Markdown. Do not narrate what you are about to do, and do not summarise what "
     "you just said."
 )
 
 
-async def _proxy_claude_cli(owui_body: dict, model_id: str, token: str, user_id=None):
+async def _proxy_claude_cli(owui_body: dict, model_id: str, token: str, user_id=None,
+                            effort: str = "none", budget_override=None):
     """Run `claude -p` in the sidecar on the user's subscription OAuth token.
 
     Streams Claude Code ``stream-json`` as OpenAI SSE deltas so the UI types the
@@ -1330,21 +1382,37 @@ async def _proxy_claude_cli(owui_body: dict, model_id: str, token: str, user_id=
 
     prompt = _flatten_to_prompt(owui_body)
     run_id = uuid.uuid4().hex  # credit-safety: lets us hard-kill THIS run's subtree by env marker
+    # Latency accounting. A slow turn on this lane has four possible owners — our sandbox
+    # setup, the container spawn, the model's think time, and generation — and until they
+    # are split apart every report is "it was slow", which is not actionable.
+    t_request = time.monotonic()
     workdir = "/tmp"
     if user_id:
         workdir = (await mkdir_workdir(user_id, run_id)) or "/tmp"
+    setup_ms = int((time.monotonic() - t_request) * 1000)
+    # Reasoning effort on this lane. The CLI has no --thinking flag; MAX_THINKING_TOKENS is its
+    # own env control for the extended-thinking budget, so the same seven levels mean the same
+    # thing here as on the API-key path. No budget → the variable is simply not exported and the
+    # CLI keeps its default behaviour.
+    thinking_budget = int(budget_override) if budget_override else _EFFORT_BUDGET.get(effort, 0)
     argv = [
         "docker", "exec",
         "-e", f"HARVIS_RUN_ID={run_id}",
         "-e", f"CLAUDE_CODE_OAUTH_TOKEN={token}",
         "-e", "CLAUDE_CODE_SIMPLE=",
+        *(["-e", f"MAX_THINKING_TOKENS={thinking_budget}"] if thinking_budget else []),
         "-u", "1001", "-w", workdir, _CLAUDE_CODE_CONTAINER,
         "claude", "-p", prompt,
         "--output-format", "stream-json", "--verbose",
         "--dangerously-skip-permissions",
         "--add-dir", workdir,
-        # File tools + Bash so it can run python3/node/harvis-check. No web from chat.
-        "--allowedTools", "Read,Write,Edit,MultiEdit,Bash,Glob,Grep",
+        # File tools + Bash so it can run python3/node/harvis-check, plus web lookup.
+        # WebSearch/WebFetch used to be withheld here, and the model correctly reported
+        # that as "I don't have web access in this sandbox" — which reads to the user as
+        # the assistant inventing an excuse. The container does have egress (verified
+        # against duckduckgo and wikipedia), so the restriction bought nothing and cost
+        # every question about anything past the training cutoff.
+        "--allowedTools", "Read,Write,Edit,MultiEdit,Bash,Glob,Grep,WebSearch,WebFetch",
         "--append-system-prompt", _CHAT_SANDBOX_SYSTEM,
         "--model", _api_model(model_id),
     ]
@@ -1380,12 +1448,16 @@ async def _proxy_claude_cli(owui_body: dict, model_id: str, token: str, user_id=
         proc = None
         stderr_buf: list[str] = []
         parts: list[str] = []
+        spawn_ms = -1
+        first_delta_ms = -1
         try:
             try:
+                t_spawn = time.monotonic()
                 proc = await asyncio.create_subprocess_exec(
                     *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                     limit=1024 * 1024,
                 )
+                spawn_ms = int((time.monotonic() - t_spawn) * 1000)
             except FileNotFoundError:
                 raise RuntimeError("Claude subscription chat unavailable (docker CLI missing).")
 
@@ -1430,6 +1502,8 @@ async def _proxy_claude_cli(owui_body: dict, model_id: str, token: str, user_id=
                         continue
                     delta = render.feed(obj)
                     if delta:
+                        if first_delta_ms < 0:
+                            first_delta_ms = int((time.monotonic() - t_request) * 1000)
                         parts.append(delta)
                         yield delta
             except asyncio.CancelledError:
@@ -1442,6 +1516,14 @@ async def _proxy_claude_cli(owui_body: dict, model_id: str, token: str, user_id=
                         await asyncio.wait_for(proc.wait(), timeout=8)
                     except Exception:
                         _hard_kill_claude(proc, run_id)
+                t = render.timing or {}
+                logger.info(
+                    "cloud_chat timing model=%s total_ms=%d setup_ms=%d spawn_ms=%d "
+                    "first_delta_ms=%d cli_ttft_ms=%s cli_api_ms=%s cli_wall_ms=%s turns=%s",
+                    model_id, int((time.monotonic() - t_request) * 1000), setup_ms,
+                    spawn_ms, first_delta_ms, t.get("ttft_ms"), t.get("duration_api_ms"),
+                    t.get("duration_ms"), t.get("num_turns"),
+                )
 
             tail = render.flush()
             if tail:

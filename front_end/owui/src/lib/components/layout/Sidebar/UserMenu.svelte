@@ -33,8 +33,6 @@
 	import Swatch from '$lib/components/icons/Swatch.svelte';
 	import Check from '$lib/components/icons/Check.svelte';
 	import ChevronRight from '$lib/components/icons/ChevronRight.svelte';
-	import Code from '$lib/components/icons/Code.svelte';
-	import UserGroup from '$lib/components/icons/UserGroup.svelte';
 	import SignOut from '$lib/components/icons/SignOut.svelte';
 	import FaceSmile from '$lib/components/icons/FaceSmile.svelte';
 	import UserStatusModal from './UserStatusModal.svelte';
@@ -382,31 +380,6 @@
 				{/if}
 			</div>
 
-			{#if role === 'admin'}
-				<a
-					href="/admin"
-					draggable="false"
-					class="flex rounded-xl py-1.5 px-3 w-full hover:bg-gray-50 dark:hover:bg-gray-800 transition cursor-pointer select-none"
-					on:click={async (e) => {
-						if (e.metaKey || e.ctrlKey || e.shiftKey || e.button === 1) {
-							return;
-						}
-						e.preventDefault();
-						show = false;
-						goto('/admin');
-						if ($mobile) {
-							await tick();
-							showSidebar.set(false);
-						}
-					}}
-				>
-					<div class=" self-center mr-3">
-						<UserGroup className="w-5 h-5" strokeWidth="1.5" />
-					</div>
-					<div class=" self-center truncate">{$i18n.t('Admin Panel')}</div>
-				</a>
-			{/if}
-
 			<button
 				class="flex rounded-xl py-1.5 px-3 w-full hover:bg-gray-50 dark:hover:bg-gray-800 transition cursor-pointer select-none"
 				type="button"
@@ -631,50 +604,6 @@
 								on:click|preventDefault|stopPropagation={() => togglePin('automations')}
 							>
 								{#if isPinned('automations')}
-									<PinSlash className="size-3.5" strokeWidth="1.5" />
-								{:else}
-									<Pin className="size-3.5" strokeWidth="1.5" />
-								{/if}
-							</button>
-						</Tooltip>
-					{/if}
-				</div>
-			{/if}
-
-			{#if role === 'admin'}
-				<div class="flex items-center w-full">
-					<a
-						href="/playground"
-						draggable="false"
-						class="flex flex-1 rounded-xl py-1.5 px-3 hover:bg-gray-50 dark:hover:bg-gray-800 transition cursor-pointer select-none"
-						on:click={async (e) => {
-							if (e.metaKey || e.ctrlKey || e.shiftKey || e.button === 1) return;
-							e.preventDefault();
-							show = false;
-							goto('/playground');
-							if ($mobile) {
-								await tick();
-								showSidebar.set(false);
-							}
-						}}
-					>
-						<div class="self-center mr-3">
-							<Code className="size-5" strokeWidth="1.5" />
-						</div>
-						<div class="self-center truncate">{$i18n.t('Playground')}</div>
-					</a>
-					{#if shiftKey}
-						<Tooltip
-							content={isPinned('playground')
-								? $i18n.t('Unpin from Sidebar')
-								: $i18n.t('Pin to Sidebar')}
-						>
-							<button
-								type="button"
-								class="p-1 mr-1 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition"
-								on:click|preventDefault|stopPropagation={() => togglePin('playground')}
-							>
-								{#if isPinned('playground')}
 									<PinSlash className="size-3.5" strokeWidth="1.5" />
 								{:else}
 									<Pin className="size-3.5" strokeWidth="1.5" />

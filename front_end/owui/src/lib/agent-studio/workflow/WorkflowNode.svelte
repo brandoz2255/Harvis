@@ -2,7 +2,7 @@
 	import { Handle, Position } from '@xyflow/svelte';
 	import { getContext } from 'svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
-	import { toolLabel } from './humanizeTool';
+	import { toolLabel, stepLabel } from './humanizeTool';
 	import type { WfNodeData } from './eventsToGraph';
 
 	const i18n: any = getContext('i18n');
@@ -53,7 +53,7 @@
 				{:else}
 					<span class="text-red-500 shrink-0">✗</span>
 				{/if}
-				<span class="font-medium text-gray-700 dark:text-gray-200 truncate">{toolLabel(d.tool)}</span>
+				<span class="font-medium text-gray-700 dark:text-gray-200 truncate">{stepLabel(d.tool, d.args)}</span>
 			</div>
 			{#if d.output}
 				<div class="mt-1 text-[10px] text-gray-400 line-clamp-2 break-words">{d.output}</div>

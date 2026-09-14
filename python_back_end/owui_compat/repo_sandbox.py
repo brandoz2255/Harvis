@@ -126,10 +126,22 @@ class RepoSandboxManager:
         safe = "".join(c if c.isalnum() or c in "_.-" else "-" for c in space_id)
         return f"harvis-repo-sbx-{safe[:40]}"
 
-    async def _spawn(self, space_id: str) -> int:
+    # Subclass hooks: the workspace runner reuses this whole lifecycle but labels its
+    # boxes differently, mounts a directory instead of cloning into an empty one, and
+    # keeps its dev log out of the mounted tree.
+    _ROLE = "repo-sandbox"
+    _LOG_PATH = _LOG
+
+    async def _spawn(self, space_id: str, volumes: Optional[dict] = None,
+                     user: Optional[str] = None) -> int:
         """Create the sandbox container with the dev port PUBLISHED to a docker
         auto-assigned host port (bound to 127.0.0.1 only). Returns that host port
-        (0 if docker didn't report one)."""
+        (0 if docker didn't report one).
+
+        ``volumes`` is the docker-py bind spec; None keeps the historical behaviour of
+        an empty container that gets a fresh ``git clone``. ``user`` ("uid:gid") is for
+        the bind-mounted case: capabilities are dropped, so root here has NO
+        CAP_DAC_OVERRIDE and cannot write into a directory owned by someone else."""
         name = self._name(space_id)
         # Remove any stale container with this name first (idempotent fresh run).
         try:
@@ -154,10 +166,12 @@ class RepoSandboxManager:
             # root is far less dangerous than a full-cap one.
             cap_drop=["ALL"],
             security_opt=["no-new-privileges"],
-            labels={"harvis.role": "repo-sandbox", "harvis.space_id": space_id},
+            labels={"harvis.role": self._ROLE, "harvis.space_id": space_id},
             working_dir="/repo",
             auto_remove=False,
+            volumes=volumes or {},
             ports={f"{_PORT}/tcp": ("127.0.0.1", None)},  # None = auto-assign a free host port
+            **({"user": user} if user else {}),
         )
         host_port = 0
         try:
@@ -194,7 +208,8 @@ class RepoSandboxManager:
         )
 
     async def _log_tail(self, name: str, lines: int = 40) -> str:
-        rc, out = await self._exec(name, f"tail -n {lines} {_LOG} 2>/dev/null || true", timeout=10)
+        rc, out = await self._exec(
+            name, f"tail -n {lines} {self._LOG_PATH} 2>/dev/null || true", timeout=10)
         return out.strip()
 
     async def _await_ready(self, space_id: str, name: str, port: int) -> tuple[bool, str]:

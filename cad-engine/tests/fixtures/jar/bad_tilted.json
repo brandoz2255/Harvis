@@ -1,0 +1,192 @@
+{
+  "schema_version": "0.3",
+  "units": "mm",
+  "name": "jar_bad_tilted",
+  "parameters": [
+    {
+      "name": "body_h",
+      "kind": "float",
+      "default": 115.0,
+      "min": 20.0,
+      "max": 400.0
+    },
+    {
+      "name": "body_r",
+      "kind": "float",
+      "default": 20.0,
+      "min": 5.0,
+      "max": 100.0
+    },
+    {
+      "name": "neck_wall",
+      "kind": "float",
+      "default": 2.5,
+      "min": 0.5,
+      "max": 20.0
+    },
+    {
+      "name": "base_t",
+      "kind": "float",
+      "default": 4.0,
+      "min": 0.5,
+      "max": 30.0
+    },
+    {
+      "name": "lid_bore_r",
+      "kind": "float",
+      "default": 20.15,
+      "min": 5.0,
+      "max": 110.0
+    },
+    {
+      "name": "lid_wall",
+      "kind": "float",
+      "default": 2.5,
+      "min": 0.5,
+      "max": 20.0
+    },
+    {
+      "name": "skirt_depth",
+      "kind": "float",
+      "default": 5.5,
+      "min": 1.0,
+      "max": 40.0
+    },
+    {
+      "name": "lid_top_t",
+      "kind": "float",
+      "default": 2.5,
+      "min": 0.5,
+      "max": 40.0
+    }
+  ],
+  "derived": [
+    {
+      "name": "bore_r",
+      "value": "body_r - neck_wall"
+    },
+    {
+      "name": "body_z1",
+      "value": "body_h / 2"
+    },
+    {
+      "name": "body_z0",
+      "value": "-body_h / 2"
+    },
+    {
+      "name": "cavity_floor_z",
+      "value": "body_z0 + base_t"
+    },
+    {
+      "name": "bore_h",
+      "value": "body_h - base_t + 1"
+    },
+    {
+      "name": "bore_center_z",
+      "value": "cavity_floor_z + bore_h / 2"
+    },
+    {
+      "name": "lid_r",
+      "value": "lid_bore_r + lid_wall"
+    },
+    {
+      "name": "lid_h",
+      "value": "skirt_depth + lid_top_t"
+    },
+    {
+      "name": "lid_z0",
+      "value": "body_z1 - skirt_depth"
+    },
+    {
+      "name": "lid_center_z",
+      "value": "lid_z0 + lid_h / 2"
+    },
+    {
+      "name": "cav_h",
+      "value": "skirt_depth + 1"
+    },
+    {
+      "name": "cav_center_z",
+      "value": "lid_z0 - 1 + cav_h / 2"
+    }
+  ],
+  "operations": [
+    {
+      "op": "cylinder",
+      "op_id": "body_outer",
+      "component": "jar_body",
+      "radius": "body_r",
+      "height": "body_h",
+      "at": {
+        "positions": [
+          [
+            0,
+            0,
+            0
+          ]
+        ]
+      }
+    },
+    {
+      "op": "cylinder",
+      "op_id": "body_bore",
+      "component": "jar_body",
+      "radius": "bore_r",
+      "height": "bore_h",
+      "mode": "subtract",
+      "at": {
+        "positions": [
+          [
+            0,
+            0,
+            "bore_center_z"
+          ]
+        ]
+      }
+    },
+    {
+      "op": "cylinder",
+      "op_id": "lid_outer",
+      "component": "lid",
+      "radius": "lid_r",
+      "height": "lid_h",
+      "at": {
+        "positions": [
+          [
+            0,
+            0,
+            "lid_center_z"
+          ]
+        ]
+      }
+    },
+    {
+      "op": "cylinder",
+      "op_id": "lid_skirt_bore",
+      "component": "lid",
+      "radius": "lid_bore_r",
+      "height": "cav_h",
+      "mode": "subtract",
+      "at": {
+        "positions": [
+          [
+            0,
+            0,
+            "cav_center_z"
+          ]
+        ]
+      }
+    }
+  ],
+  "placements": [
+    {
+      "component": "lid",
+      "rotate": [
+        2.0,
+        0.0,
+        0.0
+      ]
+    }
+  ],
+  "expected_solids": 2
+}

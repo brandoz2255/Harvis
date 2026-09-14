@@ -208,7 +208,15 @@
 			// and the whole tool result dumped into the chat until the closing tag catches
 			// up. Reveal the card whole, or not at all.
 			const detailsOpen = raw.indexOf('<details', renderContent.length);
-			if (detailsOpen !== -1 && detailsOpen < end) {
+			// The reasoning block is the one exception: the tokenizer renders an open
+			// `<details type="reasoning" done="false">` as the live "Thinking…" card, so
+			// letting it through is what makes thinking visible while it streams. Holding
+			// it back the way tool cards are held meant a bare cursor for the whole
+			// thinking phase (20–30 s on a local 35B) and the text appearing only at the
+			// close. Its opening tag still lands whole, via the branch below.
+			const reasoningOpen =
+				detailsOpen !== -1 && raw.startsWith('<details type="reasoning"', detailsOpen);
+			if (detailsOpen !== -1 && detailsOpen < end && !reasoningOpen) {
 				// The backend never nests these, so the first `</details>` is this card's.
 				const detailsClose = raw.indexOf('</details>', detailsOpen);
 				end = detailsClose === -1 ? detailsOpen : detailsClose + '</details>'.length;

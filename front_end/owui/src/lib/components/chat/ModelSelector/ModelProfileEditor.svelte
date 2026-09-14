@@ -122,7 +122,7 @@
 					{/each}
 				</div>
 				<div class="text-[11px] text-gray-400 mt-1">
-					{$i18n.t('Higher = deeper thinking, slower. Applied on API-key models; best-effort on subscription.')}
+					{$i18n.t('Higher = deeper thinking, slower. Only models that advertise effort support can take this — every Claude does, on an API key or a subscription; Kimi and local models do not.')}
 				</div>
 			{:else}
 				<div class="text-xs text-gray-400">

@@ -1,0 +1,10 @@
+name: inference_nodes
+version: 0.1.0
+description: >
+  Route chat to OpenAI-dialect inference servers (FreeToken, vLLM, llama-server) on
+  this box or another, with honest reachability in the model picker and a thinking
+  policy for Qwen3-style models. Configured by HARVIS_INFERENCE_NODES or the
+  /api/inference-nodes admin API. Inert when no node is configured.
+author: harvis
+requires_env: []
+hooks: []

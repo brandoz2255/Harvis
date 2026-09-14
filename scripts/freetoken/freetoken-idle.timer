@@ -1,0 +1,10 @@
+[Unit]
+Description=Check every 5 minutes whether FreeToken has gone idle (opt-in)
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=5min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

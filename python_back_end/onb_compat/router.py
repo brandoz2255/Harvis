@@ -1904,6 +1904,129 @@ async def onb_command_status(
     return {"job_id": command_id, "status": "completed"}
 
 
+# ─── Source quality for notebook web search ───────────────────────────────────
+# A notebook source has to be READ, not merely linked: the picked URL is ingested,
+# chunked and embedded. NotebookLM's Discover only offers documents its reader can
+# actually digest — articles, papers, documentation — and quietly drops forums,
+# social feeds, video and storefronts. Ours forwarded raw DuckDuckGo hits, so a
+# search handed back Reddit threads and YouTube pages that ingest into a source
+# with nothing readable in it.
+#
+# Two rules, applied in order:
+#
+#   1. NON_ARTICLE_HOSTS are DROPPED, not down-ranked. A Reddit thread is not a
+#      weak article; it is not an article. No relevance score should be able to
+#      promote it into a corpus meant to be cited.
+#   2. What survives is ordered by how document-shaped it is, so references and
+#      long-form pieces rise above thin listing pages.
+#
+# Deliberately NOT dropped: Stack Overflow, GitHub and the like. They are Q&A and
+# repository pages rather than prose, but they extract cleanly and are often the
+# best available source for a technical question — the thing the user is usually
+# researching here.
+
+_NON_ARTICLE_HOSTS = (
+    # discussion and social — no stable article body to extract
+    "reddit.com", "quora.com", "answers.yahoo.com",
+    "x.com", "twitter.com", "facebook.com", "instagram.com", "threads.net",
+    "tiktok.com", "pinterest.", "tumblr.com", "vk.com", "mastodon.",
+    "discord.com", "t.me", "telegram.me", "whatsapp.com",
+    # video and audio — the page carries a player, not a document
+    "youtube.com", "youtu.be", "vimeo.com", "twitch.tv", "dailymotion.com",
+    "soundcloud.com", "spotify.com",
+    # commerce and listings
+    "amazon.", "ebay.", "etsy.com", "walmart.com", "aliexpress.",
+    "indeed.com", "glassdoor.com", "yelp.com", "tripadvisor.",
+    # search engines and aggregators (a results page is never a source)
+    "google.com", "bing.com", "yahoo.com", "duckduckgo.com", "search.brave.com",
+    "news.google.com",
+)
+
+# Hosts whose pages are reference material almost by definition.
+_REFERENCE_HOSTS = (
+    "arxiv.org", "doi.org", "pubmed.ncbi.nlm.nih.gov", "ncbi.nlm.nih.gov",
+    "nature.com", "science.org", "sciencedirect.com", "springer.com",
+    "onlinelibrary.wiley.com", "jstor.org", "ieee.org", "dl.acm.org",
+    "biorxiv.org", "medrxiv.org", "journals.plos.org", "ssrn.com",
+    "wikipedia.org", "who.int", "oecd.org", "worldbank.org", "nih.gov",
+)
+
+# Path fragments that mark a page as a written piece rather than an index.
+_ARTICLE_PATH_HINTS = (
+    "/blog", "/article", "/post", "/news", "/story", "/docs", "/documentation",
+    "/guide", "/tutorial", "/research", "/paper", "/publication", "/report",
+    "/wiki/", "/journal", "/essay", "/analysis", "/explainer",
+)
+
+# Extensions that are a file to download, not a page to read. PDF is absent on
+# purpose: the ingester reads PDFs, and they are frequently the primary source.
+_NON_DOCUMENT_EXTS = (
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".ico",
+    ".mp4", ".webm", ".mov", ".avi", ".mp3", ".wav", ".m4a",
+    ".zip", ".tar", ".gz", ".rar", ".7z", ".exe", ".dmg", ".iso",
+)
+
+
+def _readable_source(url: str) -> bool:
+    """False for anything that would ingest into an unusable notebook source."""
+    u = (url or "").lower()
+    if not u.startswith(("http://", "https://")):
+        return False
+    try:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(u)
+        host, path = parsed.netloc, parsed.path
+    except Exception:
+        return False
+    if not host:
+        return False
+    # Strip the port and any leading www. before matching, so "reddit.com:443"
+    # and "www.reddit.com" are caught by the same entry.
+    host = host.split("@")[-1].split(":")[0]
+    if host.startswith("www."):
+        host = host[4:]
+    for bad in _NON_ARTICLE_HOSTS:
+        # Entries ending in "." are prefix rules (pinterest. → pinterest.co.uk).
+        if bad.endswith(".") and host.startswith(bad):
+            return False
+        if host == bad or host.endswith("." + bad):
+            return False
+    if path.endswith(_NON_DOCUMENT_EXTS):
+        return False
+    # A bare host with no path is a homepage: a feed, not a document.
+    if path in ("", "/"):
+        return False
+    return True
+
+
+def _article_shape_score(url: str, snippet: str) -> float:
+    """How document-shaped a surviving result looks. Ordering only — never a gate."""
+    u = (url or "").lower()
+    score = 0.0
+    if any(h in u for h in _REFERENCE_HOSTS):
+        score += 1.0
+    if u.endswith(".edu") or ".edu/" in u or u.endswith(".gov") or ".gov/" in u:
+        score += 0.6
+    if any(h in u for h in _ARTICLE_PATH_HINTS):
+        score += 0.5
+    if u.endswith(".pdf"):
+        score += 0.4
+    # A dated path (/2026/03/…) is the classic article permalink shape.
+    if re.search(r"/(19|20)\d{2}/", u):
+        score += 0.3
+    # A real summary means the crawler found prose on the page.
+    n = len((snippet or "").strip())
+    if n >= 240:
+        score += 0.4
+    elif n >= 120:
+        score += 0.2
+    # Deep query strings are usually app state, not a permalink.
+    if u.count("&") >= 3:
+        score -= 0.3
+    return score
+
+
 # ─── Web search for new sources (open-notebook "Search the web") ───────────────
 # The agent searches the web (Harvis WebSearchAgent / DuckDuckGo) and returns
 # candidate sources; the UI lets the user pick which to import (each becomes a
@@ -1923,16 +2046,20 @@ async def onb_source_web_search(
     except (ValueError, TypeError):
         max_results = 8
     max_results = max(1, min(max_results, 20))
+    # Over-fetch: the readability filter below removes whole classes of result, so
+    # asking for exactly max_results would routinely return a short list.
+    fetch_n = min(max_results * 4, 40)
     try:
         from research.web_search import WebSearchAgent
-        agent = WebSearchAgent(max_results=max_results)
-        results = await asyncio.to_thread(agent.search_web, query, max_results)
+        agent = WebSearchAgent(max_results=fetch_n)
+        results = await asyncio.to_thread(agent.search_web, query, fetch_n)
     except Exception as e:
         logger.warning(f"onb_compat web-search failed for '{query}': {e}")
         raise HTTPException(status_code=502, detail=f"Web search failed: {e}")
 
-    out: List[Dict[str, Any]] = []
+    kept: List[Dict[str, Any]] = []
     seen = set()
+    dropped = 0
     for r in (results or []):
         if not isinstance(r, dict):
             continue
@@ -1940,19 +2067,35 @@ async def onb_source_web_search(
         if not url or url in seen:
             continue
         seen.add(url)
-        out.append({
+        if not _readable_source(url):
+            dropped += 1
+            continue
+        snippet = r.get("snippet") or r.get("body") or r.get("description") or ""
+        kept.append({
             "title": r.get("title") or url,
             "url": url,
-            "snippet": r.get("snippet") or r.get("body") or r.get("description") or "",
+            "snippet": snippet,
             "source": r.get("source") or "",
+            "_shape": _article_shape_score(url, snippet),
         })
+
+    # Stable within equal scores: the search engine's own ranking is the tiebreak,
+    # so this reorders by document-shape without discarding relevance order.
+    kept.sort(key=lambda x: x["_shape"], reverse=True)
+    out = [{k: v for k, v in r.items() if k != "_shape"} for r in kept[:max_results]]
+    if dropped:
+        logger.info(
+            "onb_compat web-search '%s': dropped %d non-article result(s), returning %d",
+            query, dropped, len(out),
+        )
     return {"query": query, "results": out}
 
 
 # ─── Settings + Models + Credentials (open-notebook Settings / Models pages) ────
-# Harvis is local-first (Ollama). The Settings form + Default-Models selectors get a
-# real per-user JSONB store; the models list is the live Ollama tag list; credentials
-# (cloud API keys) are stubbed to minimal-real so the page loads instead of spinning.
+# The Settings form + Default-Models selectors get a real per-user JSONB store; the
+# models list is the same union `/api/models` serves the main chat (see _all_models);
+# credentials live in Harvis Integrations, so open-notebook's own key form is stubbed
+# minimal-real and the page loads instead of spinning.
 
 _SETTINGS_DEFAULTS: Dict[str, Any] = {
     "default_content_processing_engine_doc": "auto",
@@ -2056,16 +2199,85 @@ def _ollama_model_type(name: str) -> str:
     return "language"
 
 
-def _model_to_onb(name: str) -> Dict[str, Any]:
+def _model_to_onb(
+    name: str, provider: str = "ollama", display: Optional[str] = None
+) -> Dict[str, Any]:
     return {
         "id": name,
-        "name": name,
-        "provider": "ollama",
+        "name": display or name,
+        "provider": provider,
         "type": _ollama_model_type(name),
         "credential": None,
         "created": "",
         "updated": "",
     }
+
+
+async def _all_models(request: Request, user_id: Any) -> List[Dict[str, Any]]:
+    """Every model this user can actually pick, in open-notebook shape.
+
+    The notebook picker used to list the local Ollama tag list and nothing else, so a
+    user with a verified Claude (or other cloud) credential saw none of it here even
+    though the main chat picker did. This reads the SAME three sources `/api/models`
+    composes for the chat, so the two pickers cannot drift apart:
+
+      1. native  — Ollama, llama-server, vLLM, desktop and external hosts
+      2. cloud   — per-user, and only when the credential is VERIFIED in Integrations
+      3. Hermes  — when the engine flag is on and a Hermes is reachable
+
+    Every source is additive and fail-open: one being unreachable narrows the list,
+    it never empties it. The bare Ollama tag list runs last as the floor, so the
+    picker still works if the native lister itself is down.
+    """
+    out: List[Dict[str, Any]] = []
+    seen = set()
+
+    def _add(name: Any, provider: str, display: Any = None) -> None:
+        name = (name or "").strip() if isinstance(name, str) else ""
+        if not name or name in seen:
+            return
+        seen.add(name)
+        out.append(_model_to_onb(name, provider, display if isinstance(display, str) else None))
+
+    # 1. Native. list_models() reads current_user.id and nothing else off the user,
+    #    so a namespace with that one field is a faithful caller here.
+    try:
+        from types import SimpleNamespace
+        from main import list_models as _native_list_models
+
+        native = await _native_list_models(request, SimpleNamespace(id=user_id))
+        for m in (native or {}).get("models", []) or []:
+            _add(m.get("name"), m.get("provider") or "harvis", m.get("displayName"))
+    except Exception:
+        logger.warning("onb_compat: native model list unavailable", exc_info=True)
+
+    pool = getattr(request.app.state, "pg_pool", None)
+
+    # 2. Per-user cloud models. Fail-closed inside cloud_chat: no verified credential
+    #    means an empty list, never an error and never a decrypted secret.
+    try:
+        from owui_compat.cloud_chat import cloud_chat_model_entries
+
+        for m in await cloud_chat_model_entries(pool, user_id):
+            _add((m or {}).get("id"), (m or {}).get("owned_by") or "cloud", (m or {}).get("name"))
+    except Exception:
+        logger.warning("onb_compat: cloud model list unavailable", exc_info=True)
+
+    # 3. Hermes, when reachable.
+    try:
+        from owui_compat.hermes_chat import hermes_chat_model_entry
+
+        hm = await hermes_chat_model_entry(pool, user_id)
+        if hm:
+            _add(hm.get("id"), hm.get("owned_by") or "hermes-agent", hm.get("name"))
+    except Exception:
+        logger.warning("onb_compat: hermes model entry unavailable", exc_info=True)
+
+    # 4. Floor: the raw tag list, in case (1) failed outright.
+    for m in await _list_ollama_models():
+        _add(m.get("name") or m.get("model"), "ollama")
+
+    return out
 
 
 @router.get("/settings")
@@ -2099,13 +2311,7 @@ async def onb_list_models(
     request: Request,
     current_user: Dict = Depends(get_current_user_from_request),
 ):
-    models = await _list_ollama_models()
-    out = []
-    for m in models:
-        name = m.get("name") or m.get("model") or ""
-        if name:
-            out.append(_model_to_onb(name))
-    return out
+    return await _all_models(request, current_user["id"])
 
 
 @router.get("/models/defaults")
@@ -2138,10 +2344,22 @@ async def onb_model_providers(
     request: Request,
     current_user: Dict = Depends(get_current_user_from_request),
 ):
+    # Report the providers this user actually has models from, rather than asserting
+    # "ollama" on a box that may have none and three cloud engines connected.
+    models = await _all_models(request, current_user["id"])
+    available: List[str] = []
+    for m in models:
+        p = m.get("provider") or "ollama"
+        if p not in available:
+            available.append(p)
+    supported = {
+        p: sorted({m["type"] for m in models if (m.get("provider") or "ollama") == p})
+        for p in available
+    }
     return {
-        "available": ["ollama"],
+        "available": available,
         "unavailable": [],
-        "supported_types": {"ollama": ["language", "embedding"]},
+        "supported_types": supported,
     }
 
 
@@ -2151,10 +2369,9 @@ async def onb_models_auto_assign(
     current_user: Dict = Depends(get_current_user_from_request),
     manager: NotebookManager = Depends(get_notebook_manager),
 ):
-    models = await _list_ollama_models()
-    names = [m.get("name") or m.get("model") or "" for m in models]
-    langs = [n for n in names if n and _ollama_model_type(n) == "language"]
-    embs = [n for n in names if n and _ollama_model_type(n) == "embedding"]
+    models = await _all_models(request, current_user["id"])
+    langs = [m["id"] for m in models if m.get("type") == "language"]
+    embs = [m["id"] for m in models if m.get("type") == "embedding"]
     _, md = await _read_onb_settings(manager, current_user["id"])
     assigned: Dict[str, str] = {}
     skipped: List[str] = []
@@ -2182,10 +2399,15 @@ async def onb_models_sync(
     request: Request,
     current_user: Dict = Depends(get_current_user_from_request),
 ):
-    models = await _list_ollama_models()
-    n = len(models)
-    return {"results": {"ollama": {"provider": "ollama", "discovered": n, "new": 0, "existing": n}},
-            "total_discovered": n, "total_new": 0}
+    models = await _all_models(request, current_user["id"])
+    counts: Dict[str, int] = {}
+    for m in models:
+        p = m.get("provider") or "ollama"
+        counts[p] = counts.get(p, 0) + 1
+    results = {
+        p: {"provider": p, "discovered": n, "new": 0, "existing": n} for p, n in counts.items()
+    }
+    return {"results": results, "total_discovered": len(models), "total_new": 0}
 
 
 @router.post("/models/{model_id:path}/test")
@@ -2194,6 +2416,26 @@ async def onb_test_model(
     request: Request,
     current_user: Dict = Depends(get_current_user_from_request),
 ):
+    # Only a local model can be pinged here. Firing an Ollama /api/generate at a
+    # cloud id used to report every Claude model as broken; and a real cloud probe
+    # would decrypt a key and bill the user for a button labelled "test". So: ping
+    # what is local, and for everything else say precisely which check did pass.
+    provider = "ollama"
+    for m in await _all_models(request, current_user["id"]):
+        if m.get("id") == model_id:
+            provider = m.get("provider") or "ollama"
+            break
+
+    if provider != "ollama":
+        return {
+            "success": True,
+            "message": (
+                f"Not pinged — {model_id} is served by {provider}. It is listed because "
+                f"its credential is verified in Integrations; that check is what passed."
+            ),
+            "details": model_id,
+        }
+
     try:
         async with httpx.AsyncClient(timeout=30.0) as c:
             r = await c.post(
@@ -2227,7 +2469,9 @@ async def onb_create_model(
     return _model_to_onb(name)
 
 
-# ── Credentials: local-first stubs (Harvis uses Ollama; no per-user cloud keys) ──
+# ── Credentials: Harvis owns these in Integrations (owui_compat/engine_auth), not
+# here. The facade reports "configured" so open-notebook's own key UI stays out of
+# the way; the models it unlocks arrive through _all_models() instead. ──
 @router.get("/credentials/status")
 async def onb_cred_status(
     request: Request, current_user: Dict = Depends(get_current_user_from_request)

@@ -44,8 +44,8 @@ _REQUEST_TIMEOUT = int(os.getenv("HARVIS_SKILLOPT_TIMEOUT") or "600")
 _FALLBACK_TOOLS = {
     "read_file", "edit_file", "str_replace", "apply_patch", "exec", "run_tests",
     "run_code", "git_commit", "finish", "propose_skill", "screenshot_preview",
-    "generate_image", "agent_reach.web_search", "agent_reach.web_read",
-    "agent_reach.yt_transcript", "agent_reach.gh_view", "agent_reach.rss_read",
+    "generate_image", "agent_reach_web_search", "agent_reach_web_read",
+    "agent_reach_yt_transcript", "agent_reach_gh_view", "agent_reach_rss_read",
 }
 
 

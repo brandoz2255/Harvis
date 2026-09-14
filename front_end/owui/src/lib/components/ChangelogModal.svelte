@@ -51,7 +51,9 @@
 			<div class="text-sm dark:text-gray-200">{$i18n.t('Release Notes')}</div>
 			<div class="flex self-center w-[1px] h-6 mx-2.5 bg-gray-50/50 dark:bg-gray-850/50" />
 			<div class="text-sm dark:text-gray-200">
-				v{WEBUI_VERSION}
+				<!-- Harvis's version, not the vendored Open WebUI one — otherwise this header
+				     reads v0.9.5 above a list of Harvis releases numbered from 0.1.0. -->
+				v{$config?.version ?? WEBUI_VERSION}
 			</div>
 		</div>
 	</div>

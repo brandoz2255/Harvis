@@ -14,6 +14,11 @@
 		type VibecodeSession
 	} from '$lib/apis/agent-runs';
 	import SidebarMore from './SidebarMore.svelte';
+	import Spinner from '$lib/components/common/Spinner.svelte';
+	// The SAME store the main chat list reads. The sidebar's poller was already writing
+	// entries keyed on Build session ids (they pass its synthetic-prefix filter), but no row
+	// here rendered or cleared them — so a Build run you walked away from went unmarked.
+	import { chatActivity, clearChatActivity } from '$lib/utils/chatActivity';
 
 	const i18n: any = getContext('i18n');
 
@@ -43,7 +48,11 @@
 
 	const load = async () => {
 		sessions = await listVibecodeSessions();
-		if (activeSession) markViewed(activeSession);
+		if (activeSession) {
+			markViewed(activeSession);
+			// Landing here directly (a link, a reload) counts as reading it too.
+			if ($chatActivity[activeSession]?.state === 'done') clearChatActivity(activeSession);
+		}
 	};
 	const schedule = () => {
 		timer = setTimeout(async () => {
@@ -60,6 +69,7 @@
 	$: activeSession = $page?.url?.searchParams?.get('session') ?? '';
 	const open = (id: string) => {
 		markViewed(id);
+		clearChatActivity(id); // opening it IS reading it — same rule as a chat row
 		goto(`/harvis/vibecode?session=${id}`);
 	};
 	// Routines / Customize open as in-Build right drawers (the vibecode page reads
@@ -184,15 +194,28 @@
 							? 'text-gray-900 dark:text-gray-50 font-medium'
 							: 'text-gray-700 dark:text-gray-300'}"
 					>
+						<!-- Three states, the same three a chat row shows: a spinner while its agent
+						     is still working, a blue dot when it finished while you were elsewhere,
+						     and a hollow ring once you have read it. `unviewed` (updated_at vs last
+						     opened) still carries the dot for activity that predates this session. -->
 						<span
 							class="shrink-0 w-4 flex items-center justify-center"
-							title={unviewed.has(s.id) ? $i18n.t('New activity') : $i18n.t('Viewed')}
+							title={$chatActivity[s.id]?.state === 'running'
+								? $i18n.t('Still working on this session')
+								: $chatActivity[s.id]?.state === 'done' || unviewed.has(s.id)
+									? $i18n.t('Finished — open to read it')
+									: $i18n.t('Viewed')}
 						>
-							<span
-								class="size-2 rounded-full {unviewed.has(s.id)
-									? 'bg-blue-500 dark:bg-blue-400'
-									: 'border border-gray-300 dark:border-gray-600'}"
-							></span>
+							{#if $chatActivity[s.id]?.state === 'running'}
+								<Spinner className="size-3" />
+							{:else}
+								<span
+									class="size-2 rounded-full {$chatActivity[s.id]?.state === 'done' ||
+									unviewed.has(s.id)
+										? 'bg-blue-500 dark:bg-blue-400'
+										: 'border border-gray-300 dark:border-gray-600'}"
+								></span>
+							{/if}
 						</span>
 						<span class="flex-1 overflow-hidden whitespace-nowrap name-fade text-left translate-y-[0.5px]"
 							>{s.title || $i18n.t('Untitled session')}</span

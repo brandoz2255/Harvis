@@ -1,0 +1,463 @@
+{
+  "helmet_hanger_v1": {
+    "canonical_source_hash": "be298a99c38928569d4876fad23c8897e46caadb3ef64ecede21e3192472c21d",
+    "default_params": {
+      "arm_h_mm": 8.0,
+      "arm_len_mm": 100.0,
+      "arm_w_mm": 12.0,
+      "fillet_r_mm": 3.0,
+      "hook_h_mm": 18.0,
+      "plate_h_mm": 44.0,
+      "plate_t_mm": 6.0,
+      "plate_w_mm": 40.0,
+      "screw_count": 2,
+      "screw_d_mm": 4.0
+    },
+    "document": {
+      "derived": [],
+      "expected_solids": 1,
+      "name": "helmet_hanger_v1",
+      "operations": [
+        {
+          "at": {
+            "positions": [
+              [
+                "plate_t_mm / 2",
+                0.0,
+                0.0
+              ]
+            ]
+          },
+          "component": null,
+          "mode": "add",
+          "op": "box",
+          "op_id": "back_plate",
+          "rotation": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "size": [
+            "plate_t_mm",
+            "plate_w_mm",
+            "plate_h_mm"
+          ],
+          "when": null
+        },
+        {
+          "at": {
+            "positions": [
+              [
+                "plate_t_mm + arm_len_mm / 2",
+                0.0,
+                0.0
+              ]
+            ]
+          },
+          "component": null,
+          "mode": "add",
+          "op": "box",
+          "op_id": "arm",
+          "rotation": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "size": [
+            "arm_len_mm",
+            "arm_w_mm",
+            "arm_h_mm"
+          ],
+          "when": null
+        },
+        {
+          "at": {
+            "positions": [
+              [
+                "plate_t_mm + arm_len_mm - arm_h_mm / 2",
+                0.0,
+                "hook_h_mm / 2 + arm_h_mm / 2"
+              ]
+            ]
+          },
+          "component": null,
+          "mode": "add",
+          "op": "box",
+          "op_id": "hook_lip",
+          "rotation": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "size": [
+            "arm_h_mm",
+            "arm_w_mm",
+            "hook_h_mm"
+          ],
+          "when": null
+        },
+        {
+          "at": {
+            "center": [
+              "plate_t_mm / 2",
+              0,
+              0
+            ],
+            "count": [
+              1,
+              1,
+              "screw_count"
+            ],
+            "pitch": [
+              0,
+              0,
+              "plate_h_mm / (screw_count + 1)"
+            ]
+          },
+          "component": null,
+          "height": "plate_t_mm * 3",
+          "mode": "subtract",
+          "op": "cylinder",
+          "op_id": "screw_holes",
+          "radius": "max(0.5, screw_d_mm / 2)",
+          "rotation": [
+            0.0,
+            90.0,
+            0.0
+          ],
+          "when": "screw_count >= 1"
+        },
+        {
+          "component": null,
+          "op": "fillet",
+          "op_id": "root_fillet",
+          "optional": true,
+          "radius": "max(0.5, min(fillet_r_mm, arm_h_mm / 2 - 0.5))",
+          "select": {
+            "filter_by": "Y",
+            "sort_by": "X",
+            "take": [
+              0,
+              2
+            ]
+          },
+          "when": null
+        }
+      ],
+      "parameters": [
+        {
+          "default": 6.0,
+          "kind": "float",
+          "max": 40.0,
+          "min": 1.0,
+          "name": "plate_t_mm"
+        },
+        {
+          "default": 40.0,
+          "kind": "float",
+          "max": 300.0,
+          "min": 5.0,
+          "name": "plate_w_mm"
+        },
+        {
+          "default": 44.0,
+          "kind": "float",
+          "max": 300.0,
+          "min": 5.0,
+          "name": "plate_h_mm"
+        },
+        {
+          "default": 100.0,
+          "kind": "float",
+          "max": 500.0,
+          "min": 10.0,
+          "name": "arm_len_mm"
+        },
+        {
+          "default": 12.0,
+          "kind": "float",
+          "max": 80.0,
+          "min": 2.0,
+          "name": "arm_w_mm"
+        },
+        {
+          "default": 8.0,
+          "kind": "float",
+          "max": 80.0,
+          "min": 2.0,
+          "name": "arm_h_mm"
+        },
+        {
+          "default": 18.0,
+          "kind": "float",
+          "max": 150.0,
+          "min": 2.0,
+          "name": "hook_h_mm"
+        },
+        {
+          "default": 3.0,
+          "kind": "float",
+          "max": 20.0,
+          "min": 0.0,
+          "name": "fillet_r_mm"
+        },
+        {
+          "default": 4.0,
+          "kind": "float",
+          "max": 20.0,
+          "min": 1.0,
+          "name": "screw_d_mm"
+        },
+        {
+          "default": 2.0,
+          "kind": "int",
+          "max": 6.0,
+          "min": 0.0,
+          "name": "screw_count"
+        }
+      ],
+      "placements": [],
+      "schema_version": "0.3",
+      "units": "mm"
+    }
+  },
+  "studded_brick_v1": {
+    "canonical_source_hash": "a4d8c9ddd1a25d1160489a08021fed3bb606f9b23a7987b9edb23753e61f9205",
+    "default_params": {
+      "body_h_mm": 10.0,
+      "clearance_mm": 0.1,
+      "pitch_mm": 10.0,
+      "stud_d_mm": 5.0,
+      "stud_h_mm": 2.0,
+      "studs_x": 4,
+      "studs_y": 2,
+      "wall_t_mm": 1.6
+    },
+    "document": {
+      "derived": [
+        {
+          "name": "length",
+          "value": "studs_x * pitch_mm - 2 * clearance_mm"
+        },
+        {
+          "name": "width",
+          "value": "studs_y * pitch_mm - 2 * clearance_mm"
+        },
+        {
+          "name": "cavity_h",
+          "value": "body_h_mm - wall_t_mm"
+        },
+        {
+          "name": "tube_d",
+          "value": "0.8 * pitch_mm"
+        },
+        {
+          "name": "bore_d",
+          "value": "stud_d_mm + 2 * clearance_mm"
+        }
+      ],
+      "expected_solids": 1,
+      "name": "studded_brick_v1",
+      "operations": [
+        {
+          "at": null,
+          "component": null,
+          "mode": "add",
+          "op": "box",
+          "op_id": "shell",
+          "rotation": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "size": [
+            "length",
+            "width",
+            "body_h_mm"
+          ],
+          "when": null
+        },
+        {
+          "at": {
+            "positions": [
+              [
+                0.0,
+                0.0,
+                "-wall_t_mm / 2"
+              ]
+            ]
+          },
+          "component": null,
+          "mode": "subtract",
+          "op": "box",
+          "op_id": "cavity",
+          "rotation": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "size": [
+            "length - 2 * wall_t_mm",
+            "width - 2 * wall_t_mm",
+            "cavity_h"
+          ],
+          "when": null
+        },
+        {
+          "at": {
+            "center": [
+              0.0,
+              0.0,
+              "body_h_mm / 2 + stud_h_mm / 2"
+            ],
+            "count": [
+              "studs_x",
+              "studs_y",
+              1.0
+            ],
+            "pitch": [
+              "pitch_mm",
+              "pitch_mm",
+              0.0
+            ]
+          },
+          "component": null,
+          "height": "stud_h_mm",
+          "mode": "add",
+          "op": "cylinder",
+          "op_id": "studs",
+          "radius": "stud_d_mm / 2",
+          "rotation": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "when": null
+        },
+        {
+          "at": {
+            "center": [
+              0.0,
+              0.0,
+              "-wall_t_mm / 4"
+            ],
+            "count": [
+              "studs_x - 1",
+              "studs_y - 1",
+              1.0
+            ],
+            "pitch": [
+              "pitch_mm",
+              "pitch_mm",
+              0.0
+            ]
+          },
+          "component": null,
+          "height": "cavity_h + wall_t_mm / 2",
+          "mode": "add",
+          "op": "cylinder",
+          "op_id": "interlock_tubes",
+          "radius": "tube_d / 2",
+          "rotation": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "when": "studs_x > 1 and studs_y > 1"
+        },
+        {
+          "at": {
+            "center": [
+              0.0,
+              0.0,
+              "-wall_t_mm"
+            ],
+            "count": [
+              "studs_x - 1",
+              "studs_y - 1",
+              1.0
+            ],
+            "pitch": [
+              "pitch_mm",
+              "pitch_mm",
+              0.0
+            ]
+          },
+          "component": null,
+          "height": "body_h_mm",
+          "mode": "subtract",
+          "op": "cylinder",
+          "op_id": "interlock_bores",
+          "radius": "bore_d / 2",
+          "rotation": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "when": "studs_x > 1 and studs_y > 1"
+        }
+      ],
+      "parameters": [
+        {
+          "default": 4.0,
+          "kind": "int",
+          "max": 16.0,
+          "min": 1.0,
+          "name": "studs_x"
+        },
+        {
+          "default": 2.0,
+          "kind": "int",
+          "max": 16.0,
+          "min": 1.0,
+          "name": "studs_y"
+        },
+        {
+          "default": 10.0,
+          "kind": "float",
+          "max": 40.0,
+          "min": 4.0,
+          "name": "pitch_mm"
+        },
+        {
+          "default": 10.0,
+          "kind": "float",
+          "max": 60.0,
+          "min": 3.0,
+          "name": "body_h_mm"
+        },
+        {
+          "default": 1.6,
+          "kind": "float",
+          "max": 6.0,
+          "min": 0.8,
+          "name": "wall_t_mm"
+        },
+        {
+          "default": 5.0,
+          "kind": "float",
+          "max": 30.0,
+          "min": 1.0,
+          "name": "stud_d_mm"
+        },
+        {
+          "default": 2.0,
+          "kind": "float",
+          "max": 10.0,
+          "min": 0.5,
+          "name": "stud_h_mm"
+        },
+        {
+          "default": 0.1,
+          "kind": "float",
+          "max": 1.0,
+          "min": 0.0,
+          "name": "clearance_mm"
+        }
+      ],
+      "placements": [],
+      "schema_version": "0.3",
+      "units": "mm"
+    }
+  }
+}

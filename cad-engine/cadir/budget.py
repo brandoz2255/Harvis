@@ -25,12 +25,29 @@ from __future__ import annotations
 import math
 
 from . import expr as expr_mod
-from .schema import CadDocument, Grid, Points
+from .schema import CadDocument, Grid, Points, Polar
 
 # Per-instance weights. A cylinder costs more than a box because its curved surface is
 # what the mesher spends its time on; a fillet costs more than either because it
 # rebuilds the topology around every edge it touches.
-WEIGHT = {"box": 0.5, "cylinder": 1.0, "fillet": 5.0}
+#
+# The Gate 7D additions are ordered by how much surface the mesher has to tessellate,
+# not by how they read: a sphere and a cone are one curved face each and sit with the
+# cylinder; a torus is a closed sweep and costs half again; an extrude carries an
+# arbitrary profile boundary; a revolve carries that boundary *and* sweeps it, which is
+# the most expensive thing this grammar can ask for per instance. Chamfer matches
+# fillet because it rebuilds the same topology.
+#
+# Mirror and shell are whole-body operations, so their weight is not per instance in
+# the way a primitive's is — they run once each, over whatever is already there. Mirror
+# matches fillet: it reflects the body and then fuses it, one boolean across the whole
+# topology. Shell is dearer, because it offsets every face, and the closed-hollow case
+# does that *and* a subtraction.
+WEIGHT = {
+    "box": 0.5, "cylinder": 1.0, "sphere": 1.0, "cone": 1.0, "torus": 1.5,
+    "extrude": 1.5, "revolve": 2.0, "fillet": 5.0, "chamfer": 5.0,
+    "mirror": 5.0, "shell": 8.0,
+}
 
 MAX_COST = 400.0
 
@@ -151,6 +168,37 @@ def placements(op, env: dict[str, float]) -> list[tuple[float, float, float]]:
     if isinstance(at, Points):
         return [tuple(_value(c, env) for c in p) for p in at.positions]
 
+    if isinstance(at, Polar):
+        n = _count(at.count, env, op.op_id)
+        if n > MAX_INSTANCES_PER_OP:
+            raise BudgetError(
+                f"{op.op_id} expands to {n} instances, over the {MAX_INSTANCES_PER_OP} "
+                f"limit for a single operation",
+                float(n), float(MAX_INSTANCES_PER_OP),
+            )
+        radius = _value(at.radius, env)
+        start = _value(at.start_angle, env)
+        span = _value(at.angle_span, env)
+        center = [_value(c, env) for c in at.center]
+        # A full turn divides by n, so nothing lands twice at the seam; a partial arc
+        # divides by n-1, so both endpoints are on it. Anything else contradicts one of
+        # the two things people mean by "spaced around".
+        if n <= 1:
+            step = 0.0
+        elif abs(span) % 360 < 1e-9:
+            step = span / n
+        else:
+            step = span / (n - 1)
+        out = []
+        for i in range(n):
+            a = math.radians(start + i * step)
+            out.append((
+                center[0] + radius * math.cos(a),
+                center[1] + radius * math.sin(a),
+                center[2],
+            ))
+        return out
+
     assert isinstance(at, Grid)
     counts = [_count(c, env, op.op_id) for c in at.count]
     pitches = [_value(p, env) for p in at.pitch]
@@ -176,6 +224,41 @@ def placements(op, env: dict[str, float]) -> list[tuple[float, float, float]]:
     return out
 
 
+def profile_extent_x(profile, env: dict[str, float]) -> tuple[float, float]:
+    """The profile's span along its own X axis, including its ``origin`` offset.
+
+    Only revolve needs this, and it needs it before geometry: a profile that crosses
+    the axis of rotation sweeps through itself, and OpenCascade reports that as a
+    boolean failure whose message names neither the operation nor the dimension. This
+    is arithmetic on numbers already resolved, so the refusal costs nothing and names
+    both.
+    """
+    ox = _value(profile.origin[0], env)
+    if profile.kind == "rect":
+        half = abs(_value(profile.size[0], env)) / 2
+    elif profile.kind in ("circle", "regular_polygon"):
+        half = abs(_value(profile.radius, env))
+    elif profile.kind == "ellipse":
+        half = abs(_value(profile.radii[0], env))
+    elif profile.kind == "slot":
+        half = abs(_value(profile.length, env)) / 2
+    else:
+        xs = [_value(p[0], env) for p in profile.points]
+        return ox + min(xs), ox + max(xs)
+    return ox - half, ox + half
+
+
+def _profile_sides(profile) -> int:
+    """How many boundary segments a profile costs. A curve counts as one; a 64-gon
+    costs 64, and pretending otherwise is how a cheap-looking document becomes a slow
+    build."""
+    if profile.kind == "polygon":
+        return len(profile.points)
+    if profile.kind == "regular_polygon":
+        return profile.sides
+    return 1
+
+
 def plan(doc: CadDocument, env: dict[str, float]) -> list[tuple[object, list[tuple[float, float, float]]]]:
     """The operations that will actually run, with their expanded positions.
 
@@ -188,6 +271,15 @@ def plan(doc: CadDocument, env: dict[str, float]) -> list[tuple[object, list[tup
     for op in doc.operations:
         if not _truthy(op.when, env):
             continue
+        if op.op == "revolve":
+            lo, _hi = profile_extent_x(op.profile, env)
+            if lo < -1e-9:
+                raise ParamError(
+                    "invalid_profile",
+                    f"{op.op_id}: the profile reaches {lo:g} mm on the far side of the "
+                    f"axis it revolves about, so it would sweep through itself — shift "
+                    f"it with profile.origin so every x is at or above 0",
+                )
         pts = placements(op, env)
         if not pts:
             continue
@@ -197,8 +289,20 @@ def plan(doc: CadDocument, env: dict[str, float]) -> list[tuple[object, list[tup
 
 def estimate(steps) -> float:
     """Static complexity estimate over an already-planned document. Cheap arithmetic
-    only — if this had to build anything to decide, it would not be admission control."""
-    return round(sum(WEIGHT[op.op] * len(pts) for op, pts in steps), 3)
+    only — if this had to build anything to decide, it would not be admission control.
+
+    A profiled operation is charged for its boundary as well as its instances: eight
+    extrudes of a 64-sided polygon are not eight extrudes of a circle, and the flat
+    per-op weight would have admitted the first at the price of the second.
+    """
+    total = 0.0
+    for op, pts in steps:
+        cost = WEIGHT[op.op] * len(pts)
+        profile = getattr(op, "profile", None)
+        if profile is not None:
+            cost *= 1.0 + (_profile_sides(profile) - 1) / 32.0
+        total += cost
+    return round(total, 3)
 
 
 def check(doc: CadDocument, resolved: dict) -> tuple[dict[str, float], list, float]:

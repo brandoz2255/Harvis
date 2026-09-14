@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 
 HARVIS_OWUI_NAME = os.getenv("HARVIS_OWUI_NAME", "Harvis")
-HARVIS_OWUI_VERSION = os.getenv("HARVIS_OWUI_VERSION", "0.1.0")
+HARVIS_OWUI_VERSION = os.getenv("HARVIS_OWUI_VERSION", "0.2.0")
 
 
 def _env_bool(name: str, default: bool) -> bool:

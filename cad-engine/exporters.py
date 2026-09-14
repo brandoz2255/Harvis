@@ -77,14 +77,45 @@ def write_glb(part, path: str) -> None:
     )
 
 
+def _leaves(part) -> list:
+    """The individual bodies inside a part, in document order.
+
+    ``Mesher.add_shape`` flattens a compound itself, so passing the whole thing works
+    — right up until you also pass ``uuid_value``, because it then stamps that ONE
+    uuid onto every mesh object it creates and lib3mf rejects the second one with
+    "A UUID is not unique within a package". Flattening here is what lets each body
+    get its own identifier.
+    """
+    kids = list(getattr(part, "children", []) or [])
+    if not kids:
+        return [part]
+    out: list = []
+    for k in kids:
+        out.extend(_leaves(k))
+    return out
+
+
 def write_3mf(part, path: str, *, seed: str = "") -> None:
+    """One 3MF package, one mesh object per body.
+
+    The per-body uuid is derived from the seed, the body's index and its label, so it
+    is still a function of the input rather than of the clock — the Gate 2 property —
+    while being distinct within the package, which is what a multi-body part needs.
+    A single-body part is unaffected, which is exactly why this went unnoticed: every
+    3MF written before a document had more than one component was a one-mesh package.
+    """
     mesher = Mesher(unit=Unit.MM)
-    mesher.add_shape(
-        part,
-        linear_deflection=LINEAR_DEFLECTION,
-        angular_deflection=ANGULAR_DEFLECTION,
-        uuid_value=_stable_uuid(seed) if seed else None,
-    )
+    for index, body in enumerate(_leaves(part)):
+        mesher.add_shape(
+            body,
+            linear_deflection=LINEAR_DEFLECTION,
+            angular_deflection=ANGULAR_DEFLECTION,
+            uuid_value=(
+                _stable_uuid(f"{seed}#{index}:{getattr(body, 'label', '') or ''}")
+                if seed
+                else None
+            ),
+        )
     mesher.write(path)
 
 

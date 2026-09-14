@@ -86,7 +86,7 @@ def _lane_flag_enabled(lane: int, tool_name: str = "") -> bool:
                 os.getenv("HARVIS_VISION_SELF_CHECK_ENABLED") or ""
             ).strip().lower() in _TRUTHY
         # Agent Reach / research internet tools (lane-5, never OpenClaw egress).
-        if name.startswith("agent_reach.") or name.startswith("web_reach_"):
+        if name.startswith(("agent_reach_", "agent_reach.", "web_reach_")):
             return (
                 os.getenv("HARVIS_AGENT_REACH_ENABLED") or ""
             ).strip().lower() in _TRUTHY

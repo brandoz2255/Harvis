@@ -445,12 +445,28 @@ export interface VibecodeTurn {
 	analysis_md?: string | null; // Build Result Narrator: the full written analysis (the assistant message)
 	error_message?: string | null;
 	model_name?: string | null; // the model this turn ran on
-	prompt_tokens?: number | null; // ≈ context occupancy at the last step
+	prompt_tokens?: number | null; // BILLED input on the CLI lanes, last-step occupancy on the native one
 	completion_tokens?: number | null;
 	context_window?: number | null; // num_ctx the model ran with
+	// The same usage kept apart, because prompt_tokens above means two different things
+	// depending on the lane and the meter needs both answers. `context_tokens` is what the
+	// model was holding (the gauge); the three input classes are what it is charged for, and
+	// they bill at three different rates. `cost_usd` is the CLI's own figure when it gave one.
+	usage_detail?: {
+		input?: number;
+		cache_read?: number;
+		cache_write?: number;
+		output?: number;
+		context_tokens?: number;
+		cost_usd?: number | null;
+		source?: string;
+	} | null;
 	child_count?: number | null; // >0 ⇒ a multi-agent (orchestrated) turn → "Workflow · N agents"
 	// The user's original attachments (image/file refs) — rendered inline in the chat bubble.
 	attachments?: { url?: string; name?: string; mime_type?: string; file_id?: string }[] | null;
+	// Files in the workspace as of this turn (cumulative vs the session baseline, not the
+	// files this turn alone touched). Drives the file chips under the reply.
+	changed_files?: string[] | null;
 }
 
 export const createVibecodeSession = async (body: {
@@ -788,6 +804,82 @@ export const getVibecodeSessionFile = async (
 		return r.ok ? await r.json() : null;
 	} catch (_) {
 		return null;
+	}
+};
+
+// ── Run & Preview ──
+// Run the code the agent just wrote, in the same isolated sandbox the Repo Runner
+// uses. The preview is served from its OWN origin (a 127.0.0.1 host port docker
+// assigns) — never proxied through Harvis — so model-written JavaScript can't call
+// Harvis's API with the signed-in user's cookie.
+export interface VibecodePreviewState {
+	status: 'installing' | 'starting' | 'running' | 'failed' | 'stopped' | string;
+	port: number;
+	host_port: number;
+	framework: string;
+	error: string;
+	log_tail: string;
+}
+
+export interface VibecodeRunPlan {
+	stack: string | null;
+	framework: string | null;
+	web: boolean;
+	dev_cmd: string | null;
+	install: string | null;
+	port: number | null;
+	blocked_reason: string | null;
+}
+
+export interface VibecodePreview {
+	enabled: boolean;
+	reason: string;
+	plan: VibecodeRunPlan | null;
+	preview: VibecodePreviewState | null;
+}
+
+// What Run would do, and what it is doing. null = the fetch failed (an older backend
+// without these routes included) — callers keep their last state and stay quiet.
+export const getVibecodePreview = async (sessionId: string): Promise<VibecodePreview | null> => {
+	try {
+		const r = await fetch(`${BASE}/vibecode/session/${sessionId}/preview`, {
+			headers: headers(),
+			credentials: 'include'
+		});
+		return r.ok ? await r.json() : null;
+	} catch (_) {
+		return null;
+	}
+};
+
+// Start the session's app. `approved` is the per-run consent the backend requires —
+// this executes code, so it is never implied. Throws Error(detail) so the UI can show
+// the backend's own explanation ("nothing here serves a web page yet", …).
+export const runVibecodePreview = async (
+	sessionId: string
+): Promise<{ ok: boolean; preview: VibecodePreviewState }> => {
+	const r = await fetch(`${BASE}/vibecode/session/${sessionId}/run`, {
+		method: 'POST',
+		headers: headers(),
+		credentials: 'include',
+		body: JSON.stringify({ approved: true })
+	});
+	if (!r.ok) {
+		const detail = (await r.json().catch(() => null))?.detail;
+		throw new Error(detail || `HTTP ${r.status}`);
+	}
+	return await r.json();
+};
+
+export const stopVibecodePreview = async (sessionId: string): Promise<void> => {
+	try {
+		await fetch(`${BASE}/vibecode/session/${sessionId}/stop`, {
+			method: 'POST',
+			headers: headers(),
+			credentials: 'include'
+		});
+	} catch (_) {
+		/* best effort — the idle sweeper reaps it either way */
 	}
 };
 

@@ -64,6 +64,19 @@ def measure(part) -> dict:
             "y": round(float(bb.size.Y), 4),
             "z": round(float(bb.size.Z), 4),
         },
+        # Where the box is, not just how big it is (HE-1). The extents alone cannot say
+        # whether a lid sits above a rim or through it, and `bounding_box()` already
+        # computed both corners — the old shape discarded them.
+        "bbox_min_mm": {
+            "x": round(float(bb.min.X), 4),
+            "y": round(float(bb.min.Y), 4),
+            "z": round(float(bb.min.Z), 4),
+        },
+        "bbox_max_mm": {
+            "x": round(float(bb.max.X), 4),
+            "y": round(float(bb.max.Y), 4),
+            "z": round(float(bb.max.Z), 4),
+        },
         "center_of_mass_mm": {
             "x": round(float(com.X()), 4),
             "y": round(float(com.Y()), 4),
@@ -191,4 +204,46 @@ def verdict(metrics: dict, mesh: dict, expected_solids: int = 1) -> tuple[bool, 
             f"exported mesh is not watertight ({mesh.get('open_edges')} open edge(s), "
             f"{mesh.get('non_manifold_edges')} non-manifold edge(s))"
         )
+    return (not problems), problems
+
+
+def import_verdict(metrics: dict, mesh: dict, *, exact: bool) -> tuple[bool, list[str]]:
+    """The same job as :func:`verdict`, for geometry we did not author (Gate 8B).
+
+    Running the authored-geometry verdict on an import would fail correct files for
+    being what they are. Three of its checks assume a solid built to a spec:
+
+    * **solid count** — the caller cannot state an expectation, because the file
+      decides. A STEP carrying two bodies is not a defect; asserting "1" would reject
+      it.
+    * **volume** — an STL re-imports as a ``Face``. There is no volume to ask for. A
+      triangle soup without one is exactly what an STL is.
+    * **watertightness** — a reference mesh is allowed to be open. Scans and
+      decimations routinely are, and they are still useful for alignment and scale.
+      Calling an open one invalid would refuse the normal case.
+
+    What survives is what stays meaningful. A bounding box must be finite and positive
+    whatever the format: a file measuring zero on an axis gave us nothing to look at.
+    B-Rep validity and a positive volume are asserted only when ``exact`` — the parser
+    handed back a real solid (STEP, BREP, or a 3MF that lib3mf rebuilt into one), which
+    is the one case where invalid topology means the file is broken rather than coarse.
+
+    ``mesh`` is unused today and stays in the signature because the triangle report is
+    the natural home for any future import check, and a caller that already passes it
+    should not have to change when one arrives.
+    """
+    problems: list[str] = []
+    bb = metrics.get("bbox_mm") or {}
+    for axis in ("x", "y", "z"):
+        d = bb.get(axis)
+        if not isinstance(d, (int, float)) or d != d or d <= 0:
+            problems.append(f"bounding box {axis} extent is not a finite positive number")
+
+    if exact:
+        if not metrics.get("brep_valid"):
+            problems.append("B-Rep topology is not valid")
+        v = metrics.get("volume_mm3")
+        if not isinstance(v, (int, float)) or v != v or v <= 0:
+            problems.append("volume is not a finite positive number")
+
     return (not problems), problems

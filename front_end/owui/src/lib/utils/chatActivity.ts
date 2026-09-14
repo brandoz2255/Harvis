@@ -26,6 +26,13 @@ export type ChatActivityEntry = {
 	research?: string;
 	/** Workspace id of an agent run still in flight. */
 	workspace?: string;
+	/**
+	 * Which list owns this id. `vibecode` means it is a Build session, not an OWUI chat —
+	 * a different sidebar list renders it, and it is the one that gets auto-named on
+	 * completion. Recorded when the run is first seen, because by the time it finishes the
+	 * backend no longer lists it and there is nothing left to ask.
+	 */
+	kind?: 'vibecode';
 	at: number;
 };
 export type ChatActivityMap = Record<string, ChatActivityEntry>;
@@ -50,7 +57,13 @@ const readStored = (): ChatActivityMap => {
 			// rather than leaving a spinner turning forever on a dead run.
 			const resumable = v.research || v.workspace;
 			const state: ChatActivityState = v.state === 'running' && !resumable ? 'done' : v.state;
-			out[id] = { state, research: v.research, workspace: v.workspace, at: v.at };
+			out[id] = {
+				state,
+				research: v.research,
+				workspace: v.workspace,
+				kind: v.kind === 'vibecode' ? 'vibecode' : undefined,
+				at: v.at
+			};
 		}
 		return out;
 	} catch (_) {
@@ -72,7 +85,12 @@ const commit = (next: ChatActivityMap) => {
 	chatActivity.set(next);
 };
 
-export const markChatRunning = (chatId: string, research?: string, workspace?: string) => {
+export const markChatRunning = (
+	chatId: string,
+	research?: string,
+	workspace?: string,
+	kind?: 'vibecode'
+) => {
 	if (!chatId) return;
 	const cur = get(chatActivity);
 	const prev = cur[chatId];
@@ -86,6 +104,7 @@ export const markChatRunning = (chatId: string, research?: string, workspace?: s
 			state: 'running',
 			research: research ?? prev?.research,
 			workspace: workspace ?? prev?.workspace,
+			kind: kind ?? prev?.kind,
 			at: Date.now()
 		}
 	});

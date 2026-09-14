@@ -672,6 +672,7 @@ async def lifespan(app: FastAPI):
                     "013_mcp_servers.sql",
                     "014_cron_jobs.sql",
                     "015_user_soul.sql",
+                    "016_inference_nodes.sql",
                 ):
                     _mig_path = os.path.join(_mig_dir, _mig_name)
                     try:
@@ -696,7 +697,7 @@ async def lifespan(app: FastAPI):
                             _mig_name,
                             _mig_err,
                         )
-                logger.info("✅ Idempotent migrations 010-015 ensured")
+                logger.info("✅ Idempotent migrations 010-016 ensured")
 
                 # vibecoding_sessions. The /api/vibecode/sessions* routes are
                 # mounted on every boot and every one of them queries this table,
@@ -1196,6 +1197,13 @@ async def lifespan(app: FastAPI):
     # Default off so existing deployments are unchanged. Wrapped in try/except so
     # a broken cron runtime doesn't block backend startup.
     try:
+        # Inference nodes (plugins/inference_nodes): hand the plugin the app so DB-registered
+        # nodes can be read from the pool. Env-configured nodes work without this.
+        try:
+            from plugins.inference_nodes import attach as _attach_inference_nodes
+            _attach_inference_nodes(app)
+        except Exception as e:
+            logger.warning(f"⚠️ inference_nodes plugin attach failed: {e}")
         from plugins.cron.runtime import start_cron_tick_loop
         app.state.cron_tick_task = await start_cron_tick_loop(app)
     except Exception as e:
@@ -1212,6 +1220,22 @@ async def lifespan(app: FastAPI):
         logger.warning(f"⚠️ Repo-sandbox sweeper failed to start: {e}")
         app.state.repo_sandbox_sweeper_task = None
 
+    # VibeCode preview sweeper — same job for the Build/Code tab's own sandboxes.
+    # Only started when the feature is on: an always-running loop over an empty
+    # table is pure noise.
+    try:
+        from owui_compat import workspace_sandbox
+        if workspace_sandbox.run_enabled():
+            app.state.vibecode_sandbox_sweeper_task = asyncio.create_task(
+                workspace_sandbox.run_sweeper()
+            )
+            logger.info("🧹 VibeCode preview idle sweeper started")
+        else:
+            app.state.vibecode_sandbox_sweeper_task = None
+    except Exception as e:
+        logger.warning(f"⚠️ VibeCode preview sweeper failed to start: {e}")
+        app.state.vibecode_sandbox_sweeper_task = None
+
     yield
 
     # Shutdown: stop repo-sandbox sweeper
@@ -1219,6 +1243,9 @@ async def lifespan(app: FastAPI):
         sweeper_task = getattr(app.state, "repo_sandbox_sweeper_task", None)
         if sweeper_task is not None:
             sweeper_task.cancel()
+        vibe_task = getattr(app.state, "vibecode_sandbox_sweeper_task", None)
+        if vibe_task is not None:
+            vibe_task.cancel()
     except Exception as e:
         logger.warning(f"⚠️ Repo-sandbox sweeper shutdown error: {e}")
 
@@ -1402,6 +1429,53 @@ async def list_models(
                 )
     except Exception as e:
         logger.warning(f"Could not enumerate Ollama hosts: {e}")
+
+    # ── Inference nodes (plugins/inference_nodes): FreeToken / vLLM / llama-server boxes
+    # registered by env or through the admin API. Same honesty as the Ollama hosts above:
+    # a node that is down keeps its models listed, greyed out, rather than losing them.
+    try:
+        from plugins.inference_nodes import snapshot as _nodes_snapshot
+        from plugins.inference_nodes import unreachable_models as _nodes_unreachable
+
+        for _ns in (await _nodes_snapshot()).values():
+            if not _ns.reachable:
+                logger.warning("Inference node %s (%s) unreachable: %s",
+                               _ns.spec.name, _ns.spec.base_url, _ns.error)
+                continue
+            for model_name in sorted(_ns.models):
+                if not any(e["name"] == model_name for e in formatted_models):
+                    formatted_models.append(
+                        {
+                            "name": model_name,
+                            "displayName": f"{model_name} ({_ns.spec.label})",
+                            "size": "",
+                            "status": "available",
+                            "provider": "inference-node",
+                            "host": _ns.spec.name,
+                            "description": _ns.spec.hardware,
+                            # As reported by the node's /v1/models — FreeToken gives the
+                            # served window, not a trained one, so no cap is applied.
+                            "contextLength": _ns.ctx.get(model_name),
+                        }
+                    )
+            logger.info("Added %d models from inference node %s (%s)",
+                        len(_ns.models), _ns.spec.name, _ns.spec.base_url)
+
+        for model_name, _ns in await _nodes_unreachable():
+            if not any(e["name"] == model_name for e in formatted_models):
+                formatted_models.append(
+                    {
+                        "name": model_name,
+                        "displayName": f"{model_name} ({_ns.spec.label})",
+                        "size": "",
+                        "status": "unreachable",
+                        "provider": "inference-node",
+                        "host": _ns.spec.name,
+                        "description": f"{_ns.spec.label} is not answering ({_ns.error})",
+                    }
+                )
+    except Exception as e:
+        logger.warning(f"Could not enumerate inference nodes: {e}")
 
     # Fetch from llama-server (local GPU via llama.cpp)
     try:
@@ -1773,9 +1847,11 @@ app.include_router(messaging_router)
 from plugins.soul.routes import router as soul_router
 from plugins.memory.routes import router as memory_router
 from plugins.cron.routes import router as cron_router
+from plugins.inference_nodes.routes import router as inference_nodes_router
 app.include_router(soul_router)
 app.include_router(memory_router)
 app.include_router(cron_router)
+app.include_router(inference_nodes_router)
 
 # SSH remote-access SCAFFOLD (Phase 7) — flagged OFF: HARVIS_SSH_ENABLED absent/0 (the
 # default) → every endpoint 403s; connect/test is additionally a hard 501 stub (no SSH I/O).

@@ -10,8 +10,10 @@ for 43.269 s.
 Contract with the parent, deliberately file-based rather than pipe-based:
 
 * ``argv[1]`` is a workdir the PARENT created and the PARENT removes.
-* ``<workdir>/job.json``   in   ``{"recipe": str, "params": {...}, "step": bool,
-  "formats": ["stl", "step", ...]}``
+* ``<workdir>/job.json``   in   ``{"source_kind": "recipe"|"cadir", "recipe": str,
+  "document": {...}, "params": {...}, "step": bool, "formats": ["stl", "step", ...]}``
+  — ``source_kind`` defaults to ``"recipe"``; ``document`` is the CadIR source and is
+  read only when it is ``"cadir"``.
 * ``<workdir>/part.<ext>`` out  one file per requested format
 * ``<workdir>/result.json`` out ``{"ok": true, ...}`` or ``{"ok": false, "error_code", "message"}``
 * stdout/stderr go to ``<workdir>/worker.log``; nothing is written to a pipe.
@@ -117,9 +119,18 @@ def _cap_occt_thread_pool() -> None:
 _pin_to_allotted_cpus()
 _cap_occt_thread_pool()
 
+import cadir  # noqa: E402
 import exporters  # noqa: E402
+import importers  # noqa: E402
+import manifest  # noqa: E402
+import measure  # noqa: E402
+import measure_spec  # noqa: E402
 import recipes  # noqa: E402
+# Aliased because `_finish` takes a parameter called `targets` — the export paths — and
+# the name would otherwise be shadowed exactly where the module is needed.
+import targets as part_targets  # noqa: E402
 import validation  # noqa: E402
+from cadir import interpret as cadir_interpret  # noqa: E402
 
 
 def _peak_rss_bytes() -> int:
@@ -153,8 +164,36 @@ def _run_job(workdir: str) -> int:
     try:
         with open(os.path.join(workdir, "job.json"), encoding="utf-8") as fh:
             job = json.load(fh)
-        recipe = job["recipe"]
+        # Two source kinds, one job file. `recipe` names a vetted Python function;
+        # `cadir` carries a declarative document the interpreter walks. The default is
+        # `recipe` so every caller written before Gate 7 keeps meaning what it meant.
+        source_kind = job.get("source_kind") or "recipe"
+        if source_kind not in ("recipe", "cadir", "import"):
+            raise ValueError(f"unknown source_kind: {source_kind}")
+        document = job.get("document")
+        recipe = job.get("recipe")
+        asset = job.get("asset")
+        if source_kind == "cadir":
+            if not isinstance(document, dict):
+                raise ValueError("a cadir job needs a document object")
+        elif source_kind == "import":
+            # A bare filename, never a path. The parent wrote the bytes into this same
+            # workdir; letting the job name a path would let it name any path.
+            if not isinstance(asset, str) or not asset or os.path.basename(asset) != asset:
+                raise ValueError("an import job needs an asset filename")
+        elif not isinstance(recipe, str) or not recipe:
+            raise ValueError("a recipe job needs a recipe name")
         params = job.get("params") or {}
+        # What node ids are hashed from. The caller owns it because the alternative —
+        # the document's own `name` — is a field the authoring model writes freely, so
+        # a model that renamed the document between two turns silently reissued every
+        # id, resetting selection and the per-part colours keyed on them. A caller that
+        # sends nothing keeps the old behaviour, which is what the recipe path and every
+        # pre-CS-2 client still rely on.
+        scope_override = job.get("scope")
+        if scope_override is not None and (not isinstance(scope_override, str)
+                                           or not scope_override.strip()):
+            raise ValueError("scope must be a non-empty string when given")
         want_step = bool(job.get("step", True))
         requested = job.get("formats")
         if requested is None:
@@ -165,6 +204,11 @@ def _run_job(workdir: str) -> int:
         unknown = [f for f in formats if f not in exporters.FORMATS]
         if unknown:
             raise ValueError(f"unknown export format(s): {unknown}")
+        # Re-parsed here even though the server already validated it, for the same
+        # reason every other field on this job is: the inner layer never trusts the
+        # outer one. A malformed list is `invalid_job`, not a crash halfway through
+        # measuring, because a half-written measurement set reads as a verdict.
+        wanted = measure_spec.parse(job.get("measurements"))
     except Exception as e:
         traceback.print_exc()
         _write(workdir, {"ok": False, "error_code": "invalid_job",
@@ -175,35 +219,157 @@ def _run_job(workdir: str) -> int:
     targets = {f: os.path.join(workdir, f"part.{f}") for f in formats}
     stl_path = targets["stl"]
 
+    # Resolution and, for a document, the budget too. The parent ran both already;
+    # this is the inner layer re-checking rather than trusting the outer one, the same
+    # posture `recipes._finite` takes after the schema has already had its say.
+    # An import has no parameters to resolve and no budget to price — the file is the
+    # source. What it does have is a parser reading bytes we did not write, which is
+    # why it runs here, inside the process the parent can kill, rather than in the
+    # server. `importers` refuses structurally before OCCT sees anything.
+    provenance = None
+    doc = None
+    if source_kind == "import":
+        asset_path = os.path.join(workdir, asset)
+        try:
+            kind = importers.kind_for(asset)
+            facts = importers.precheck(kind, asset_path)
+            part, provenance = importers.load(kind, asset_path, facts=facts)
+        except importers.ImportRejected as e:
+            _write(workdir, {"ok": False, "error_code": e.code, "message": e.message})
+            return 1
+        except Exception as e:
+            traceback.print_exc()
+            _write(workdir, {"ok": False, "error_code": "import_malformed",
+                             "message": f"that file could not be imported "
+                                        f"({type(e).__name__})"})
+            return 1
+        resolved = {}
+        label = os.path.splitext(asset)[0] or "imported"
+        # The identity of an import is its bytes. Two uploads of the same file are the
+        # same source; a re-export from the same CAD package with a new timestamp is
+        # not, and pretending otherwise would let a stale reference masquerade as fresh.
+        source_hash = provenance.get("sha256") or ""
+        return _finish(workdir, part, label, formats, targets, stl_path,
+                       resolved, source_hash, provenance, scope=scope_override,
+                       wanted=wanted)
+
     try:
-        resolved = recipes.resolve_params(recipe, params)
-    except recipes.ParamError as e:
+        if source_kind == "cadir":
+            doc = cadir.parse(document)
+            resolved = cadir.resolve_params(doc, params)
+            env, steps, _cost = cadir.check(doc, resolved)
+            label = doc.name
+        else:
+            resolved = recipes.resolve_params(recipe, params)
+            label = recipe
+    except (recipes.ParamError, cadir.ParamError, cadir.ExprError, cadir.BudgetError) as e:
         # Reachable only if the parent's identical check was bypassed. Still
         # answered structurally rather than as a crash.
-        _write(workdir, {"ok": False, "error_code": e.code, "message": e.message})
+        code = getattr(e, "code", None) or "too_complex"
+        _write(workdir, {"ok": False, "error_code": code,
+                         "message": getattr(e, "message", str(e))})
+        return 1
+    except Exception as e:
+        # Pydantic's own ValidationError lands here. Its string form names every field
+        # it walked, which is more of the document's shape than an error message should
+        # carry back over the wire.
+        traceback.print_exc()
+        _write(workdir, {"ok": False, "error_code": "invalid_document",
+                         "message": f"the document could not be read ({type(e).__name__})"})
         return 1
 
     try:
-        part = recipes.build(recipe, resolved)
+        if doc is not None:
+            part = cadir_interpret.build(doc, resolved, steps=steps, env=env)
+        else:
+            part = recipes.build(recipe, resolved)
+    except cadir_interpret.CadIRRuntimeError as e:
+        # Our own diagnosis, naming an op_id the caller sent. Safe to echo, and the
+        # only form of this error a generator can actually repair — "geometry engine
+        # failed (ValueError)" tells it to guess.
+        traceback.print_exc()
+        _write(workdir, _failure("geometry_failed", str(e), doc, steps, label,
+                                 error_op_id=_failing_op(doc, e), scope=scope_override))
+        return 1
     except Exception as e:
         traceback.print_exc()
         _write(workdir, {"ok": False, "error_code": "geometry_failed",
                          "message": f"geometry engine failed ({type(e).__name__})"})
         return 1
 
-    source_hash = recipes.canonical_source_hash(recipe, resolved)
+    source_hash = (cadir.canonical_source_hash(doc, resolved) if doc is not None
+                   else recipes.canonical_source_hash(recipe, resolved))
 
+    return _finish(workdir, part, label, formats, targets, stl_path,
+                   resolved, source_hash, None, doc=doc, steps=steps if doc else None,
+                   scope=scope_override, wanted=wanted)
+
+
+def _failure(code: str, message: str, doc, steps, label: str, *,
+             error_op_id: str | None = None, part=None,
+             scope: str | None = None) -> dict:
+    """A failure result carrying the tree the engine was attempting, when it can build one.
+
+    A failed build is exactly when the workspace most needs a tree: it has to mark the
+    operation that broke, and there is no geometry left to derive one from. The document
+    is enough — everything but the bodies comes from it, and the bodies come from ``part``
+    when the failure happened late enough that one exists.
+
+    Every path here is best-effort. A manifest is a convenience; the error is the answer,
+    and the nicety must never turn a diagnosed failure into an undiagnosed one.
+    """
+    payload = {"ok": False, "error_code": code, "message": message}
     try:
-        meta, written = recipes.export(part, recipe, targets, seed=source_hash)
+        scope = scope or (doc.name if doc is not None else label)
+        payload["scene_manifest"] = manifest.compose(
+            scope=scope, label=label,
+            bodies=manifest.bodies_of(part) if part is not None else [label],
+            features=(manifest.plan(doc, steps, scope=scope, error_op_id=error_op_id)
+                      if doc is not None else []),
+            body_status="error")
+    except Exception:
+        traceback.print_exc()
+    return payload
+
+
+def _failing_op(doc, error) -> str | None:
+    """Which operation the interpreter blamed, if it blamed one.
+
+    ``CadIRRuntimeError`` messages are formatted ``f"{op.op_id}: …"`` — except the
+    no-geometry case, which uses the *document* name in the same position. Matching the
+    prefix against the declared op_ids is what keeps that one from marking a feature
+    that never failed, and keeps a future message format from inventing a node id.
+    """
+    head = str(error).split(":", 1)[0].strip()
+    return head if any(op.op_id == head for op in doc.operations) else None
+
+
+def _finish(workdir, part, label, formats, targets, stl_path,
+            resolved, source_hash, provenance, *, doc=None, steps=None,
+            scope: str | None = None, wanted=()) -> int:
+    """Export, measure, and write the result — the tail every source kind shares.
+
+    Shared on purpose. An imported body goes through the same exporters, the same
+    ``mesh_report`` and the same ``mesh_signature`` as one we generated, so a reference
+    part and a designed part are described in one vocabulary and can be compared. The
+    only thing an import adds is ``provenance``: where the geometry came from, whether
+    it is exact, and — always — that no feature history was recovered.
+    """
+    # These three exits carry a tree too, and deliberately blame no operation: the
+    # document ran to completion and broke at export or measurement, so naming a feature
+    # as the culprit would be an invention. The rows still say which operations ran and
+    # which their guards dropped, which is the part that is true.
+    try:
+        meta, written = recipes.export(part, label, targets, seed=source_hash)
     except Exception as e:
         traceback.print_exc()
-        _write(workdir, {"ok": False, "error_code": "export_failed",
-                         "message": f"export failed ({type(e).__name__})"})
+        _write(workdir, _failure("export_failed", f"export failed ({type(e).__name__})",
+                                 doc, steps, label, part=part, scope=scope))
         return 1
 
     if not os.path.exists(stl_path):
-        _write(workdir, {"ok": False, "error_code": "export_failed",
-                         "message": "the geometry engine produced no mesh"})
+        _write(workdir, _failure("export_failed", "the geometry engine produced no mesh",
+                                 doc, steps, label, part=part, scope=scope))
         return 1
 
     try:
@@ -212,13 +378,77 @@ def _run_job(workdir: str) -> int:
         signature = validation.mesh_signature(stl_path)
     except Exception as e:
         traceback.print_exc()
-        _write(workdir, {"ok": False, "error_code": "geometry_failed",
-                         "message": f"could not measure the result ({type(e).__name__})"})
+        _write(workdir, _failure("geometry_failed",
+                                 f"could not measure the result ({type(e).__name__})",
+                                 doc, steps, label, part=part, scope=scope))
         return 1
+
+    # The per-part classification HE-1 built but never published: one entry per body,
+    # keyed by the same `part_key` the scene manifest uses, carrying its fitted axis, the
+    # face filling each role, and whether it is a surface of revolution. HE-7's render
+    # recipes read it to decide which similarity warnings would be false ones.
+    #
+    # Additive and best-effort, like the scene tree below. A body OCCT will not classify
+    # must not cost a sound solid its build: classification is evidence, and thin
+    # evidence is not a defect.
+    try:
+        metrics["parts"] = part_targets.describe(part)
+    except Exception:
+        traceback.print_exc()
+
+    # HE-2. Here, in the killable child, because a Python deadline in the parent cannot
+    # interrupt an OpenCascade call already running — Gate 1B established that and the
+    # kill path exists because of it. If the group dies mid-measurement no result.json is
+    # written at all, which is the honest outcome: the parent reports a timeout and
+    # nothing grades on a half-measured build.
+    measurements = None
+    if wanted:
+        try:
+            measurements = measure.run(part, wanted, source_hash=source_hash)
+        except Exception:
+            # Evidence is additive. Losing it must not turn a sound solid into a failed
+            # build — the checks that wanted it grade `unverified`, which is what an
+            # absent measurement has always meant upstream.
+            traceback.print_exc()
+            measurements = None
+
+    # The semantic tree, and the ids that let a click in the viewport find a row in it.
+    # It has to happen here rather than in the backend for one reason: this is the only
+    # process that holds the built `part`, and how many bodies the GLB will contain is a
+    # property of that object — `Compound.children`, measured, not `solids()`.
+    scene = None
+    try:
+        bodies = manifest.bodies_of(part)
+        scope = scope or (doc.name if doc is not None else label)
+        scene = manifest.compose(
+            scope=scope, label=label, bodies=bodies,
+            features=manifest.plan(doc, steps, scope=scope) if doc is not None else [])
+        keys = [n["glb_pick_key"] for n in scene["nodes"] if n["kind"] == "body"]
+        glb_path = targets.get("glb")
+        if glb_path and "glb" in written and os.path.exists(glb_path):
+            landed = manifest.tag_glb(glb_path, keys)
+            # Whatever the exporter actually did wins. A row promising a pick key the
+            # GLB does not carry would highlight nothing when clicked, which reads as a
+            # broken viewport rather than as an honest "not selectable".
+            for node, key in zip([n for n in scene["nodes"] if n["kind"] == "body"], landed):
+                if not key:
+                    node["glb_pick_key"] = None
+                    node["selectable"] = False
+        else:
+            for node in scene["nodes"]:
+                if node["kind"] == "body":
+                    node["glb_pick_key"] = None
+                    node["selectable"] = False
+        manifest.write(os.path.join(workdir, "scene-manifest.json"), scene)
+    except Exception:
+        # Geometry succeeded; the tree is an extra. Losing it must not turn a good
+        # build into a failed one.
+        traceback.print_exc()
+        scene = None
 
     # No verdict here, and no size caps: those are policy, and policy stays in the
     # parent. This process only produces geometry and says what it measured.
-    _write(workdir, {
+    payload = {
         "ok": True,
         "meta": meta,
         "metrics": metrics,
@@ -232,7 +462,14 @@ def _run_job(workdir: str) -> int:
         "source_hash": source_hash,
         "mesh_signature": signature,
         "formats": written,
-    })
+    }
+    if measurements is not None:
+        payload["measurements"] = measurements
+    if provenance is not None:
+        payload["provenance"] = provenance
+    if scene is not None:
+        payload["scene_manifest"] = scene
+    _write(workdir, payload)
     return 0
 
 

@@ -132,7 +132,15 @@ export function eventsToGraph(events: WorkspaceEvent[]): { nodes: WfNode[]; edge
 			case 'tool_call': {
 				const n = rowInLane.get(laneKey) ?? 0; // row this node will take (id stays stable)
 				const id = `tool:${laneKey}:${n}`;
-				pushNode(laneKey, id, { kind: 'tool', tool: e.tool as string, status: 'running', output: '' });
+				// args ride along so the card can name the FILE, not just the tool — the graph
+				// showed a column of identical "Writing a file" cards without them.
+				pushNode(laneKey, id, {
+					kind: 'tool',
+					tool: e.tool as string,
+					args: (e as any).args,
+					status: 'running',
+					output: ''
+				});
 				pendingToolByLane.set(laneKey, id);
 				break;
 			}
