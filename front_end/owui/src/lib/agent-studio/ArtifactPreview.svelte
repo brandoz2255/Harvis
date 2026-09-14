@@ -1,6 +1,7 @@
 <script lang="ts">
 	import Markdown from '$lib/components/chat/Messages/Markdown.svelte';
 	import CadViewer from '$lib/cad/CadViewer.svelte';
+	import { bundlePreview, type PreviewFile } from './previewBundle';
 
 	// File-type router for an agent-produced artifact. Renders ONLY what the agent wrote.
 	//   html  → live sandboxed iframe        markdown → rendered
@@ -14,6 +15,11 @@
 	// `fill` makes the preview take its parent's full height (the Artifacts tab renders it
 	// full-bleed); otherwise it's a fixed-height card body.
 	export let fill = false;
+	// The REST of the project. A page split across files (`<link href="styles.css">`,
+	// `<script src="js/main.js">`) cannot load a single one of them from inside a srcdoc
+	// iframe — see previewBundle.ts. These get folded into the document so a multi-file
+	// build previews as the thing it actually is instead of a blank page with a title.
+	export let files: PreviewFile[] = [];
 
 	$: ext = (name.split('.').pop() || '').toLowerCase();
 	$: kind =
@@ -76,7 +82,73 @@
 		if (kind !== 'json') return '';
 		try { return JSON.stringify(JSON.parse(content), null, 2); } catch { return content; }
 	})();
+
+	// ── The preview reports why it is dead ──────────────────────────────────────
+	// A generated page whose <script> never closes its IIFE parses to nothing: no
+	// handler binds, and the START button only plays its CSS :active animation. The
+	// page looked merely unresponsive and the turn had already said "Done." — nothing
+	// anywhere told anyone it had failed. This reporter runs FIRST inside the frame and
+	// posts what the browser threw back out, so the preview can say it.
+	//
+	// The frame stays sandbox="allow-scripts" with no allow-same-origin, so it is an
+	// opaque origin and postMessage is the only channel it has. Messages are accepted
+	// ONLY from this component's own contentWindow and only the two string fields below
+	// are ever read — a page cannot use this to reach anything else in the parent.
+	let frameEl: HTMLIFrameElement | null = null;
+	let pageErrors: string[] = [];
+	let errorsDismissed = false;
+
+	const REPORTER = `<script>(function(){
+	var sent=0;
+	function post(m){ if(sent++>20||!m) return; try{ parent.postMessage({__harvisPreviewError:String(m).slice(0,300)},'*'); }catch(e){} }
+	addEventListener('error',function(e){
+		// Only genuine SCRIPT errors carry a message. A resource that failed to load
+		// (an image, a font) also fires here in the capture phase with e.target set to
+		// the element and no message — a working page raised one of those, and reporting
+		// it would have flagged a page that runs perfectly well.
+		if(!e.message) return;
+		post(e.message + (e.lineno ? ' (line '+e.lineno+')' : ''));
+	},true);
+	addEventListener('unhandledrejection',function(e){
+		post('Unhandled promise rejection: ' + ((e.reason && e.reason.message) || e.reason));
+	});
+	var ce=console.error;
+	console.error=function(){ post(Array.prototype.join.call(arguments,' ')); try{ ce.apply(console,arguments); }catch(e){} };
+}())<\/script>`;
+
+	/** Put the reporter ahead of the page's own scripts, whatever shape the page is. */
+	function withReporter(html: string): string {
+		const head = html.match(/<head\b[^>]*>/i);
+		if (head) return html.replace(head[0], head[0] + REPORTER);
+		const htmlTag = html.match(/<html\b[^>]*>/i);
+		if (htmlTag) return html.replace(htmlTag[0], htmlTag[0] + REPORTER);
+		return REPORTER + html;
+	}
+	// Fold the siblings in first, THEN prepend the reporter — the reporter must stay the
+	// document's first script, and inlining rewrites tags that come after it.
+	$: bundled =
+		kind === 'html'
+			? bundlePreview(content, files, name || 'index.html')
+			: { html: '', missing: [] as string[], inlined: [] as string[] };
+	$: previewHtml = kind === 'html' ? withReporter(bundled.html) : '';
+	$: missingRefs = kind === 'html' ? bundled.missing : [];
+	// A new page starts with a clean slate — otherwise a fixed version still shows the
+	// old error and reads as unfixed.
+	$: if (previewHtml) {
+		pageErrors = [];
+		errorsDismissed = false;
+	}
+
+	function onPreviewMessage(e: MessageEvent) {
+		if (!frameEl || e.source !== frameEl.contentWindow) return;
+		const msg = (e.data || {}).__harvisPreviewError;
+		if (typeof msg !== 'string' || !msg) return;
+		if (pageErrors.includes(msg) || pageErrors.length >= 5) return;
+		pageErrors = [...pageErrors, msg];
+	}
 </script>
+
+<svelte:window on:message={onPreviewMessage} />
 
 {#if kind === 'html'}
 	<!--
@@ -86,13 +158,53 @@
 		page, cookies, localStorage, or the user's session. Adding allow-same-origin alongside
 		allow-scripts would let the model's code escape the sandbox — do not.
 	-->
-	<iframe
-		title={name || 'preview'}
-		srcdoc={content}
-		sandbox="allow-scripts"
-		referrerpolicy="no-referrer"
-		class="w-full {fill ? 'h-full' : 'h-80'} rounded-lg border border-gray-100 dark:border-gray-850 bg-white"
-	></iframe>
+	<div class="relative w-full {fill ? 'h-full' : 'h-80'}">
+		<iframe
+			bind:this={frameEl}
+			title={name || 'preview'}
+			srcdoc={previewHtml}
+			sandbox="allow-scripts"
+			referrerpolicy="no-referrer"
+			class="w-full h-full rounded-lg border border-gray-100 dark:border-gray-850 bg-white"
+		></iframe>
+		{#if missingRefs.length && !errorsDismissed}
+			<!-- The page asks for files the run never wrote. Saying so beats a blank frame. -->
+			<div
+				class="absolute inset-x-1.5 top-1.5 rounded-lg border border-amber-300 dark:border-amber-500/40 bg-amber-50/95 dark:bg-amber-950/90 backdrop-blur px-2.5 py-1.5 text-[11px] text-amber-900 dark:text-amber-200 shadow-sm"
+			>
+				<div class="font-medium">
+					{missingRefs.length === 1
+						? 'This page references a file the preview could not load:'
+						: `This page references ${missingRefs.length} files the preview could not load:`}
+				</div>
+				<div class="font-mono break-words opacity-90">{missingRefs.join('  ·  ')}</div>
+			</div>
+		{/if}
+		{#if pageErrors.length && !errorsDismissed}
+			<div
+				class="absolute inset-x-1.5 bottom-1.5 rounded-lg border border-red-300 dark:border-red-500/40 bg-red-50/95 dark:bg-red-950/90 backdrop-blur px-2.5 py-1.5 text-[11px] text-red-800 dark:text-red-200 shadow-sm"
+			>
+				<div class="flex items-start gap-2">
+					<div class="flex-1 min-w-0">
+						<div class="font-medium">
+							{pageErrors.length === 1
+								? 'This page threw an error — that is why it does not respond.'
+								: `This page threw ${pageErrors.length} errors — that is why it does not respond.`}
+						</div>
+						{#each pageErrors as err}
+							<div class="font-mono break-words opacity-90">{err}</div>
+						{/each}
+					</div>
+					<button
+						type="button"
+						aria-label="Dismiss"
+						class="shrink-0 opacity-60 hover:opacity-100"
+						on:click={() => (errorsDismissed = true)}>✕</button
+					>
+				</div>
+			</div>
+		{/if}
+	</div>
 {:else if kind === 'markdown'}
 	<div
 		class="text-sm rounded-lg border border-gray-100 dark:border-gray-850 bg-white dark:bg-gray-900 p-3 overflow-auto {fill

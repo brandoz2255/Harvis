@@ -12,8 +12,15 @@
 	// If the lane is off, or the engine is not answering, this renders nothing at
 	// all. Offering to build a part on a server that cannot build it is worse than
 	// staying quiet.
+	// A third surface joined them in UX-D: the selection chip. It is shown whenever
+	// the workspace has a body selected, and it takes precedence over both, because
+	// a selected part is a fact about where THIS message is going that outranks any
+	// offer. What it renders is the label the scene manifest gave the node — the
+	// server re-reads that same label before a model sees it, so the chip and the
+	// brief cannot disagree.
 	import { getContext, onMount } from 'svelte';
 	import { getCadCapability } from '$lib/apis/cad';
+	import { cadSelection } from '$lib/stores';
 	import Cube from '$lib/components/icons/Cube.svelte';
 	import XMark from '$lib/components/icons/XMark.svelte';
 
@@ -79,7 +86,26 @@
 	}
 </script>
 
-{#if ready && markerPresent}
+{#if $cadSelection}
+	<div class="mx-2 mt-2.5 flex items-center">
+		<div
+			class="flex items-center gap-1.5 text-xs px-2 py-1 rounded-lg bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-300"
+		>
+			<Cube className="size-3.5" />
+			<span>{$i18n.t('Editing')}</span>
+			<span class="opacity-50">·</span>
+			<span class="font-medium">{$cadSelection.label}</span>
+			<button
+				type="button"
+				class="opacity-60 hover:opacity-100 transition"
+				aria-label={$i18n.t('Clear selection')}
+				on:click={() => cadSelection.set(null)}
+			>
+				<XMark className="size-3.5" />
+			</button>
+		</div>
+	</div>
+{:else if ready && markerPresent}
 	<div class="mx-2 mt-2.5 flex items-center">
 		<div
 			class="flex items-center gap-1.5 text-xs px-2 py-1 rounded-lg bg-gray-50 dark:bg-gray-850 text-gray-600 dark:text-gray-300"

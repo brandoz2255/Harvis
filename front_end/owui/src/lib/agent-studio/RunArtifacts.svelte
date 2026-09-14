@@ -42,6 +42,10 @@
 	// `rawUrl` object-URL fetched from /raw; text files carry their content.
 	let primary: { id?: string; name: string; content: string; is_binary?: boolean } | null = null;
 	let primaryRawUrl = '';
+	// EVERY file the run wrote, kept so (a) the preview can fold a multi-file project's
+	// siblings into the page and (b) the person can actually open the other files. Before
+	// this, `pickPrimary` chose one file and the rest were unreachable from the preview.
+	let files: { id?: string; name: string; content: string; is_binary?: boolean }[] = [];
 	let previewOpen = true;
 	const _revokeRaw = () => {
 		if (primaryRawUrl) {
@@ -114,6 +118,33 @@
 
 	const hasContent = (c: string) => !!c && c.trim() && c.trim() !== '(no changes)';
 
+	// Binary primary → fetch its bytes as an object URL for inline <img>/PDF preview.
+	const _syncRaw = async () => {
+		_revokeRaw();
+		if (primary?.is_binary && primary.id) {
+			try {
+				primaryRawUrl = await artifactRawBlobUrl(primary.id);
+			} catch (_) {}
+		}
+	};
+
+	// Open another file in the preview. The switcher is the answer to "there is no way to
+	// navigate to other files" — a build that wrote ten files used to show exactly one.
+	const pickFile = async (name: string) => {
+		const f = files.find((x) => x.name === name);
+		if (!f || f === primary) return;
+		primary = f;
+		await _syncRaw();
+	};
+
+	// html first (it is what a person means by "run it"), then the rest by path.
+	$: previewable = [...files]
+		.filter((f) => f.is_binary || (f.content && f.content.trim()))
+		.sort((a, b) => {
+			const h = (n: string) => (/\.html?$/i.test(n) ? 0 : 1);
+			return h(a.name) - h(b.name) || a.name.localeCompare(b.name);
+		});
+
 	const load = async () => {
 		if (!wsId) return;
 		artifacts = await getRunArtifacts(wsId);
@@ -137,7 +168,7 @@
 		// File artifacts → pick the primary to preview. Binary files (image/pdf) get bytes from /raw
 		// (a blob URL), not the JSON content — only fetch text content here.
 		const fileMetas = artifacts.filter((a) => a.artifact_type === 'file');
-		const files = await Promise.all(
+		files = await Promise.all(
 			fileMetas.map(async (a) => {
 				const isBin = !!a.is_binary;
 				return {
@@ -149,13 +180,7 @@
 			})
 		);
 		primary = pickPrimary(files);
-		// Binary primary → fetch its bytes once as an object URL for inline <img>/PDF preview.
-		_revokeRaw();
-		if (primary?.is_binary && primary.id) {
-			try {
-				primaryRawUrl = await artifactRawBlobUrl(primary.id);
-			} catch (_) {}
-		}
+		await _syncRaw();
 		loaded = true;
 		// Tell parents what's available so they can show/hide their cards.
 		const fl = changedFiles.split('\n').map((s) => s.trim()).filter(Boolean);
@@ -229,17 +254,30 @@
 		{/if}
 		{#if bare || previewOpen}
 			<div class={bare ? (fill ? 'flex-1 min-h-0 flex flex-col' : '') : 'px-3 pb-3'}>
-				{#if bare}
+				{#if previewable.length > 1}
+					<!-- One chip per file the run wrote. The preview is no longer a dead end. -->
+					<div class="flex flex-wrap gap-1 mb-1.5 {fill ? 'shrink-0' : ''}">
+						{#each previewable as f}
+							<button
+								type="button"
+								class="text-[11px] px-1.5 py-0.5 rounded font-mono transition {f.name === primary.name
+									? 'bg-blue-500/15 text-blue-600 dark:text-blue-300 ring-1 ring-blue-500/30'
+									: 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-750'}"
+								on:click={() => pickFile(f.name)}>{f.name}</button
+							>
+						{/each}
+					</div>
+				{:else if bare}
 					<div class="text-[11px] text-gray-400 font-mono truncate mb-1.5 {fill ? 'shrink-0' : ''}">
 						{primary.name}
 					</div>
 				{/if}
 				{#if fill}
 					<div class="flex-1 min-h-0">
-						<ArtifactPreview name={primary.name} content={primary.content} rawUrl={primaryRawUrl} {fill} />
+						<ArtifactPreview name={primary.name} content={primary.content} rawUrl={primaryRawUrl} {files} {fill} />
 					</div>
 				{:else}
-					<ArtifactPreview name={primary.name} content={primary.content} rawUrl={primaryRawUrl} />
+					<ArtifactPreview name={primary.name} content={primary.content} rawUrl={primaryRawUrl} {files} />
 				{/if}
 			</div>
 		{/if}

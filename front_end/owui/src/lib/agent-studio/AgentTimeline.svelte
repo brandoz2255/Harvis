@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { getContext, tick } from 'svelte';
-	import { toolLabel } from './workflow/humanizeTool';
+	import { toolLabel, stepLabel } from './workflow/humanizeTool';
 	import Collapsible from '$lib/components/common/Collapsible.svelte';
 	import Markdown from '$lib/components/chat/Messages/Markdown.svelte';
 	import type { WorkspaceEvent } from '$lib/apis/streaming/workspace-stream';
@@ -81,7 +81,9 @@
 					break;
 				}
 				case 'tool_call':
-					out.push({ kind: 'tool', label: toolLabel(e.tool), status: 'running' });
+					// stepLabel, not toolLabel: the event carries the call's args, so a row can say
+					// WHICH file. Twelve rows of "Writing a file" told a reader nothing.
+					out.push({ kind: 'tool', label: stepLabel(e.tool as string, (e as any).args), status: 'running' });
 					lastTool = out.length - 1;
 					break;
 				case 'tool_result':

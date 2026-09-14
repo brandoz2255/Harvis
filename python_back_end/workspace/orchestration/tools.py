@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import uuid
 from collections.abc import Iterable
 
@@ -24,6 +25,7 @@ from owui_compat.workspace_method import (
 )
 
 from .isolation import validate_agent_path
+from .syntax_gate import check_source
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,26 @@ _MAX_OUTPUT = 8000
 _EXEC_TIMEOUT = 60
 
 _FALSY = {"0", "false", "no", "off"}
+
+
+def _syntax_note(rel: str, content: str) -> str:
+    """A loud suffix for a write whose result cannot run — '' when it parses.
+
+    The write itself SUCCEEDED (the bytes are on disk), so this never turns into a
+    tool error; it rides along on the success message. The wording is imperative
+    because a warning phrased as an observation gets read past: a turn once wrote
+    an Asteroids page whose <script> was never closed, called finish, and reported
+    it as done — the browser ran none of it and the START button just flashed.
+    """
+    err = check_source(rel, content)
+    if not err:
+        return ""
+    return (
+        f"\n\n⚠ BUT {rel} DOES NOT PARSE — {err}.\n"
+        "Nothing in that file will run until this is fixed. Re-read it, find the "
+        "unbalanced or malformed part, and repair it NOW before you do anything "
+        "else. Do not call finish while this stands."
+    )
 
 
 def _isolated_runner_enabled() -> bool:
@@ -351,12 +373,12 @@ TOOL_SCHEMA = [
     {
         "type": "function",
         "function": {
-            "name": "agent_reach.web_search",
+            "name": "agent_reach_web_search",
             "description": (
                 "Search the web and get back numbered results (title, url, snippet) — no page "
                 "bodies. USE THIS FIRST for anything you cannot answer from memory: a release, a "
                 "version, a price, a model card, anything current. Never guess a URL for "
-                "agent_reach.web_read — search for it, then read the result you want. "
+                "agent_reach_web_read — search for it, then read the result you want. "
                 "Lane 5 / HARVIS_AGENT_REACH_ENABLED. Not available inside OpenClaw."
             ),
             "parameters": {
@@ -373,10 +395,10 @@ TOOL_SCHEMA = [
     {
         "type": "function",
         "function": {
-            "name": "agent_reach.web_read",
+            "name": "agent_reach_web_read",
             "description": (
                 "Read a public web page as text (Jina reader via Harvis backend). Pass a URL you "
-                "got from agent_reach.web_search — a URL assembled from memory is usually a 404. "
+                "got from agent_reach_web_search — a URL assembled from memory is usually a 404. "
                 "Lane 5 / HARVIS_AGENT_REACH_ENABLED. No cookies. Not available inside OpenClaw."
             ),
             "parameters": {
@@ -392,7 +414,7 @@ TOOL_SCHEMA = [
     {
         "type": "function",
         "function": {
-            "name": "agent_reach.yt_transcript",
+            "name": "agent_reach_yt_transcript",
             "description": (
                 "Fetch YouTube captions/transcript for a public video URL. "
                 "Requires HARVIS_AGENT_REACH_ENABLED."
@@ -410,7 +432,7 @@ TOOL_SCHEMA = [
     {
         "type": "function",
         "function": {
-            "name": "agent_reach.gh_view",
+            "name": "agent_reach_gh_view",
             "description": (
                 "Read a public GitHub file (raw). Pass a github.com/raw URL or "
                 "owner/repo/path[@ref]. Requires HARVIS_AGENT_REACH_ENABLED."
@@ -428,7 +450,7 @@ TOOL_SCHEMA = [
     {
         "type": "function",
         "function": {
-            "name": "agent_reach.rss_read",
+            "name": "agent_reach_rss_read",
             "description": (
                 "Read items from a public RSS/Atom feed URL. "
                 "Requires HARVIS_AGENT_REACH_ENABLED."
@@ -473,6 +495,20 @@ TOOL_SCHEMA = [
 WIRE_TOOL_SCHEMA = [
     {k: v for k, v in entry.items() if k != "lane"} for entry in TOOL_SCHEMA
 ]
+
+# Every wire name must match OpenAI's function-name grammar. Local Ollama does not
+# enforce it, so a name it accepts can still 400 on OpenRouter, Groq, Cerebras,
+# Mistral and OpenAI itself — the reason the agent_reach tools lost their dots.
+# Logged rather than raised: a bad name must not take the backend down at import.
+_WIRE_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+for _entry in WIRE_TOOL_SCHEMA:
+    _n = ((_entry.get("function") or {}).get("name") or "")
+    if not _WIRE_NAME_RE.match(_n):
+        logger.error(
+            "tools: wire tool name %r is not ^[a-zA-Z0-9_-]{1,64}$ — strict "
+            "OpenAI-compatible providers will reject the whole request",
+            _n,
+        )
 
 
 def wire_tool_names() -> set[str]:
@@ -572,7 +608,7 @@ async def dispatch_tool(
             os.makedirs(os.path.dirname(fp) or workspace_path, exist_ok=True)
             with open(fp, "w", encoding="utf-8") as f:
                 f.write(content)
-            return (f"Wrote {len(content)} bytes to {rel}", True)
+            return (f"Wrote {len(content)} bytes to {rel}" + _syntax_note(rel, content), True)
 
         if name == "str_replace":
             rel = str(args.get("path") or "")
@@ -602,9 +638,10 @@ async def dispatch_tool(
                     "is unique (exactly one match).",
                     False,
                 )
+            updated = data.replace(old, new, 1)
             with open(fp, "w", encoding="utf-8") as f:
-                f.write(data.replace(old, new, 1))
-            return (f"Replaced 1 occurrence in {rel}", True)
+                f.write(updated)
+            return (f"Replaced 1 occurrence in {rel}" + _syntax_note(rel, updated), True)
 
         if name == "apply_patch":
             # SESSION-ONLY (Phase 4): the tracked edit primitive. Same path safety
@@ -651,13 +688,18 @@ async def dispatch_tool(
                         "is unique (exactly one match).",
                         False,
                     )
+                updated = data.replace(old, new, 1)
                 with open(fp, "w", encoding="utf-8") as f:
-                    f.write(data.replace(old, new, 1))
+                    f.write(updated)
                 await _record_file_change(
                     pool, session_id, run_id, rel, "modify", patch_id,
                     before_sha, _git_blob_sha(fp),
                 )
-                return (f"Replaced 1 occurrence in {rel} (patch {patch_id})", True)
+                return (
+                    f"Replaced 1 occurrence in {rel} (patch {patch_id})"
+                    + _syntax_note(rel, updated),
+                    True,
+                )
 
             content = args.get("content")
             if content is None:
@@ -670,7 +712,11 @@ async def dispatch_tool(
                 pool, session_id, run_id, rel, ("modify" if existed else "add"),
                 patch_id, before_sha, _git_blob_sha(fp),
             )
-            return (f"Wrote {len(content)} bytes to {rel} (patch {patch_id})", True)
+            return (
+                f"Wrote {len(content)} bytes to {rel} (patch {patch_id})"
+                + _syntax_note(rel, content),
+                True,
+            )
 
         if name == "git_commit":
             # SESSION-ONLY (Phase 4): local commit on the session's work branch.
@@ -682,7 +728,7 @@ async def dispatch_tool(
                 return ("git_commit needs a non-empty `message`.", False)
             return await _git_commit_workspace(workspace_path, message)
 
-        if name.startswith("agent_reach."):
+        if name.startswith(("agent_reach_", "agent_reach.")):
             from agent_reach import dispatch_agent_reach
 
             out = await dispatch_agent_reach(name, args)

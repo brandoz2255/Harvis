@@ -15,32 +15,39 @@
 	// engine. There is no copy of them in this file: a slider that disagreed with the
 	// engine would offer values the engine refuses.
 	//
+	// What this file still owns is the *page*: which project is open, the viewport, the
+	// measured summary, creating a part from a template, and importing a file. The six
+	// editing panels underneath — Design, Parameters, Validate, History, Compare,
+	// Artifacts — are CadContextPanels, the same component the in-chat focus workspace
+	// mounts. They were duplicated once and drifted; there is one copy now.
+	//
 	// This component is host-independent — it lives in `$lib/cad`, not under
 	// ChatControls, because the CAD workspace is a place of its own (`/harvis/cad`)
 	// and chat is only one of the things that can point at it.
 	import { getContext, onMount, onDestroy } from 'svelte';
 	import { toast } from 'svelte-sonner';
 
+	import CadContextPanels, { CAD_PANELS, type CadPanelId } from './CadContextPanels.svelte';
 	import CadViewer from './CadViewer.svelte';
 	import {
 		CadApiError,
 		cadArtifactUrl,
+		cadNodeColors,
 		createCadProject,
 		createCadRevision,
 		downloadCadArtifact,
 		getCadCapability,
 		getCadProject,
-		getCadRecipeSource,
+		importCadAsset,
 		listCadProjects,
 		pollCadBuild,
-		restoreCadRevision,
 		type CadArtifact,
 		type CadCapability,
 		type CadFormat,
 		type CadProject,
-		type CadRecipeSource,
 		type CadRevision
 	} from '$lib/apis/cad';
+	import { uploadFile } from '$lib/apis/files';
 
 	const i18n: any = getContext('i18n');
 
@@ -61,24 +68,10 @@
 	let project: CadProject | null = null;
 	let selectedRevisionId = '';
 
-	type Tab = 'parameters' | 'features' | 'inspect' | 'validate' | 'versions' | 'source' | 'files';
-	const TABS: [Tab, string][] = [
-		['parameters', 'Parameters'],
-		['features', 'Features'],
-		['inspect', 'Inspect'],
-		['validate', 'Validate'],
-		['versions', 'Versions'],
-		['source', 'Source'],
-		['files', 'Files']
-	];
-	let tab: Tab = 'parameters';
-
-	// The CadIR document behind a recipe, fetched once per recipe and only when a tab
-	// that shows it is opened. Keyed by recipe name because that is what the document
-	// belongs to — every revision built from `studded_brick_v1` shows the same one.
-	let recipeSources: Record<string, CadRecipeSource> = {};
-	let sourceLoading = false;
-	let sourceError = '';
+	// The panels themselves live in CadContextPanels, which the in-chat focus workspace
+	// mounts too. This route keeps the strip because it also has a New-part flow and an
+	// import control, neither of which belongs in a shared panel component.
+	let tab: CadPanelId = 'parameters';
 
 	let loading = true;
 	let busy = false;
@@ -87,6 +80,17 @@
 	let newRecipe = '';
 	let params: Record<string, number> = {};
 	let creating = false;
+
+	// Import lives behind the server's own list of readable kinds rather than a constant
+	// here. `FORMATS` is what the engine WRITES, and it includes GLB — build123d exports
+	// glTF and ships no reader for it, so a picker built from `FORMATS` would offer a
+	// kind every choice of which the server refuses. An older backend that publishes no
+	// `import_kinds` shows no Import control at all, which is the honest reading of
+	// "this server cannot do that".
+	let importInput: HTMLInputElement;
+	let importing = false;
+	$: importKinds = capability?.import_kinds ?? [];
+	$: importAccept = importKinds.map((k) => `.${k}`).join(',');
 
 	let abort: AbortController | null = null;
 
@@ -102,39 +106,25 @@
 				null)
 			: null;
 	$: viewUrl = latestBuild && viewable ? cadArtifactUrl(latestBuild.id, viewable.id) : '';
-	$: paramSpec =
-		(selectedRevision?.recipe_name &&
-			capability?.recipe_params?.[selectedRevision.recipe_name]?.parameters) ||
-		[];
+	// Per-part colours come from the build's own manifest (CS-2), so this panel and the
+	// focus workspace paint the same part the same colour.
+	$: nodeColors = cadNodeColors(latestBuild?.scene_manifest);
+	/** A body the Code panel or a build error asked the viewport to point at. This is a
+	 *  highlight, not a selection: this surface has no composer, so revealing a part must
+	 *  not manufacture a chip the user never clicked. Cleared when the revision changes,
+	 *  because node ids belong to the build that produced them. */
+	let revealedNodeId = '';
+	$: if (latestBuild?.id) revealedNodeId = '';
 	$: measurements = (latestBuild?.validation ?? null) as Record<string, any> | null;
 	// The triangle-level report is nested under `mesh`, and `parsed: false` is a real
 	// state: the engine refuses to give a watertight/manifold verdict on a file it could
 	// not read, and this panel must not turn that silence into a pass.
 	$: mesh = (measurements?.mesh ?? null) as Record<string, any> | null;
-	$: recipeName = selectedRevision?.recipe_name ?? '';
-	$: recipeSource = recipeName ? (recipeSources[recipeName] ?? null) : null;
-
-	// Fetch the CadIR document the first time a tab that needs it is opened. Guarded on
-	// both the cache and the in-flight flag so re-running this statement — which Svelte
-	// does on every `tab` or revision change — cannot start a second request.
-	$: if (
-		(tab === 'features' || tab === 'source') &&
-		recipeName &&
-		!recipeSources[recipeName] &&
-		!sourceLoading
-	) {
-		loadRecipeSource(recipeName);
-	}
 
 	const fmt = (n: number | null | undefined, digits = 1) =>
 		typeof n === 'number' && isFinite(n) ? n.toFixed(digits) : '—';
 
 	const mb = (n: number) => `${(n / 1024 / 1024).toFixed(1)} MB`;
-
-	/** Artifact sizes, unlike the storage quota, are usually kilobytes — a GLB of a
-	 *  bracket is a few KB, and `mb()` renders every one of them as "0.0 MB". */
-	const size = (n: number) =>
-		n >= 1024 * 1024 ? mb(n) : n >= 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} B`;
 
 	const statusTone = (s?: string) =>
 		s === 'succeeded'
@@ -157,21 +147,6 @@
 			next[p.name] = typeof v === 'number' ? v : p.default;
 		}
 		params = next;
-	};
-
-	const loadRecipeSource = async (recipe: string) => {
-		sourceLoading = true;
-		sourceError = '';
-		try {
-			const doc = await getCadRecipeSource(recipe);
-			recipeSources = { ...recipeSources, [recipe]: doc };
-		} catch (e: any) {
-			// Shown in place rather than raised as a toast: the rest of the studio still
-			// works, and a part whose source cannot be read is a fact about one tab.
-			sourceError = e?.message ?? `${e}`;
-		} finally {
-			sourceLoading = false;
-		}
 	};
 
 	const loadCapability = async () => {
@@ -268,6 +243,77 @@
 		}
 	};
 
+	/** Upload a STEP/STL/3MF/BREP file and turn it into a part of its own.
+	 *
+	 *  The bytes go to OWUI's file store first and the CAD route is given only the id it
+	 *  gets back, which the backend resolves through the ownership-checked attachment
+	 *  path. The browser never hands geometry to the CAD lane directly, and the id is
+	 *  useless to anyone who does not own the upload.
+	 *
+	 *  `process: false` on the upload is deliberate: the processing pass is RAG text
+	 *  extraction, and running it over a binary solid model does nothing but burn time
+	 *  and log a parse failure.
+	 *
+	 *  An import always creates its own project rather than appending to the open one. An
+	 *  imported body has no parameters and cannot be rebuilt — dropping one into the
+	 *  middle of a parametric part's history would leave a head that the Parameters tab
+	 *  cannot edit and Restore cannot reproduce. */
+	const importAsset = async (event: Event) => {
+		const input = event.target as HTMLInputElement;
+		const file = input.files?.[0];
+		// Reset immediately: picking the same file twice in a row fires no `change` event
+		// otherwise, and a failed import is exactly when someone retries the same file.
+		input.value = '';
+		if (!file) return;
+
+		const ext = file.name.includes('.') ? file.name.split('.').pop()!.toLowerCase() : '';
+		if (!importKinds.includes(ext)) {
+			toast.error(
+				$i18n.t('Harvis cannot read that file — supported: {{kinds}}', {
+					kinds: importKinds.map((k) => `.${k}`).join(', ')
+				})
+			);
+			return;
+		}
+		const cap = capability?.import_max_bytes ?? 0;
+		if (cap && file.size > cap) {
+			toast.error(
+				$i18n.t('That file is {{mb}} MB, over the {{cap}} MB limit.', {
+					mb: (file.size / 1048576).toFixed(1),
+					cap: Math.floor(cap / 1048576)
+				})
+			);
+			return;
+		}
+
+		importing = true;
+		statusLine = $i18n.t('Uploading…');
+		try {
+			const uploaded = await uploadFile(localStorage.token, file, null, false);
+			if (!uploaded?.id) throw new Error($i18n.t('The upload did not return a file id.'));
+			const accepted = await importCadAsset({
+				attachment: {
+					name: file.name,
+					file_id: uploaded.id,
+					mime_type: file.type || undefined
+				},
+				// No `formats`: which exports an imported body may claim is the server's
+				// call, not this panel's. It withholds STEP from a mesh import on purpose,
+				// and restating that rule here would give it two places to drift.
+				title: file.name.replace(/\.[^.]+$/, '') || file.name
+			});
+			await loadProjects();
+			await openProject(accepted.project_id);
+			selectedRevisionId = accepted.revision_id;
+			await followBuild(accepted.build_id, $i18n.t('Imported {{name}}', { name: file.name }));
+		} catch (e: any) {
+			statusLine = '';
+			toast.error(e?.message ?? `${e}`);
+		} finally {
+			importing = false;
+		}
+	};
+
 	/** Append a revision carrying `overrides` on top of `rev`'s parameters, and build
 	 *  it. A 409 means someone else moved the head — say so instead of forking. */
 	const buildFrom = async (rev: CadRevision | null, overrides: Record<string, number>) => {
@@ -288,28 +334,6 @@
 			} else {
 				toast.error(e?.message ?? `${e}`);
 			}
-		}
-	};
-
-	const applyParameters = async () => {
-		if (!selectedRevision) return;
-		// Build from the head, not from the revision on screen: appending to an older
-		// revision is what the 409 exists to prevent.
-		const head = revisions.find((r) => r.id === project?.head_revision) ?? revisions[0];
-		await buildFrom(head, params);
-	};
-
-	const restore = async (rev: CadRevision) => {
-		if (!project) return;
-		try {
-			const accepted = await restoreCadRevision(project.id, rev.id);
-			selectedRevisionId = accepted.revision_id;
-			await followBuild(
-				accepted.build_id,
-				$i18n.t('Restored revision {{seq}}', { seq: rev.seq })
-			);
-		} catch (e: any) {
-			toast.error(e?.message ?? `${e}`);
 		}
 	};
 
@@ -377,8 +401,22 @@
 					>rev {selectedRevision.seq}</span
 				>
 			{/if}
+			{#if selectedRevision?.state === 'proposal'}
+				<!-- Said here, at the top, because it changes what every other control on
+				     this panel means: a proposal is not the project, and a parameter edit
+				     will not build from it until someone accepts it. -->
+				<span
+					class="text-[11px] px-1.5 py-0.5 rounded-md bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300"
+					>{$i18n.t('proposal')}</span
+				>
+			{/if}
 			{#if latestBuild}
 				<span class="text-[11px] {statusTone(latestBuild.status)}">{latestBuild.status}</span>
+			{/if}
+			{#if latestBuild?.conformance_status === 'failed'}
+				<span class="text-[11px] text-red-500 dark:text-red-400"
+					>{$i18n.t("doesn't match the request")}</span
+				>
 			{/if}
 			{#if statusLine}
 				<span class="text-[11px] text-gray-500 dark:text-gray-400">{statusLine}</span>
@@ -388,7 +426,33 @@
 					>{$i18n.t('engine unreachable')}</span
 				>
 			{/if}
+
+			{#if importKinds.length}
+				<!-- Always reachable, unlike the new-part block, which only exists while
+				     nothing is open. Importing a file is not "starting from a template" and
+				     should not be hidden behind having no part open. -->
+				<button
+					class="ml-auto text-[11px] px-2 py-1 rounded-lg bg-gray-50 dark:bg-gray-850 text-gray-600 dark:text-gray-300 disabled:opacity-50"
+					disabled={importing || busy || !capability.engine_reachable}
+					title={$i18n.t('Import {{kinds}}', {
+						kinds: importKinds.map((k) => `.${k}`).join(' ')
+					})}
+					on:click={() => importInput?.click()}
+					>{importing ? $i18n.t('Importing…') : $i18n.t('Import file')}</button
+				>
+			{/if}
 		</div>
+
+		<!-- One input for both entry points. `accept` comes from the server's readable
+		     kinds, and the same list is re-checked in `importAsset` — `accept` is a picker
+		     filter a user can defeat by typing a name, not a validation. -->
+		<input
+			bind:this={importInput}
+			class="hidden"
+			type="file"
+			accept={importAccept}
+			on:change={importAsset}
+		/>
 
 		<div class="flex-1 overflow-y-auto px-3 py-3 flex flex-col gap-3">
 			{#if !project}
@@ -416,12 +480,32 @@
 						on:click={createProject}
 						>{creating ? $i18n.t('Creating…') : $i18n.t('Create part')}</button
 					>
+
+					{#if importKinds.length}
+						<div class="pt-1 text-xs text-gray-500 dark:text-gray-400">
+							{$i18n.t(
+								'Or import a file you already have. It opens as reference geometry — measurable and exportable, with no editable dimensions recovered from it.'
+							)}
+						</div>
+						<button
+							class="self-start text-xs px-3 py-1.5 rounded-lg bg-gray-50 dark:bg-gray-850 text-gray-700 dark:text-gray-200 disabled:opacity-50"
+							disabled={importing || !capability.engine_reachable}
+							on:click={() => importInput?.click()}
+							>{importing
+								? $i18n.t('Importing…')
+								: $i18n.t('Import {{kinds}}', {
+										kinds: importKinds.map((k) => `.${k}`).join(' ')
+									})}</button
+						>
+					{/if}
 				</div>
 			{:else}
 				<CadViewer
 					url={viewUrl}
 					format={viewable?.format === 'stl' ? 'stl' : 'glb'}
 					height={viewerHeight}
+					{nodeColors}
+					selectedNodeId={revealedNodeId}
 				/>
 
 				{#if latestBuild?.status === 'failed'}
@@ -450,14 +534,18 @@
 					</div>
 				{/if}
 
-				<!-- Seven tabs is more than fits a narrow rail, which is part of why the
-				     studio moved to its own route. It scrolls rather than wrapping so the
-				     strip stays one line at any width. -->
+				<!-- Six panels is more than fits a narrow rail, which is part of why the
+				     studio moved to its own route. The strip scrolls rather than wrapping so
+				     it stays one line at any width. The panels themselves are the shared
+				     component — the in-chat focus workspace renders the same six. -->
 				<div
 					class="flex gap-1 border-b border-gray-100 dark:border-gray-850 overflow-x-auto scrollbar-none"
+					role="tablist"
 				>
-					{#each TABS as [t, label]}
+					{#each CAD_PANELS as [t, label]}
 						<button
+							role="tab"
+							aria-selected={tab === t}
 							class="px-2.5 py-1 text-xs rounded-t-lg transition shrink-0 {tab === t
 								? 'font-medium text-gray-900 dark:text-white border-b-2 border-gray-900 dark:border-white'
 								: 'text-gray-500 dark:text-gray-400'}"
@@ -466,337 +554,20 @@
 					{/each}
 				</div>
 
-				{#if tab === 'parameters'}
-					{#if !paramSpec.length}
-						<div class="text-xs text-gray-500 dark:text-gray-400">
-							{$i18n.t('Parameter ranges are unavailable while the engine is unreachable.')}
-						</div>
-					{:else}
-						<div class="flex flex-col gap-2.5">
-							{#each paramSpec as p}
-								<div class="flex flex-col gap-1">
-									<div class="flex items-center justify-between text-[11px]">
-										<span class="text-gray-600 dark:text-gray-300">{p.name}</span>
-										<span class="text-gray-500 dark:text-gray-400 tabular-nums"
-											>{params[p.name]}</span
-										>
-									</div>
-									<input
-										type="range"
-										class="w-full accent-gray-900 dark:accent-white"
-										min={p.min}
-										max={p.max}
-										step={p.kind === 'int' ? 1 : (p.max - p.min) / 100}
-										bind:value={params[p.name]}
-										disabled={busy}
-									/>
-								</div>
-							{/each}
-							<div class="flex items-center gap-2">
-								<button
-									class="text-xs px-3 py-1.5 rounded-lg bg-gray-900 text-white dark:bg-white dark:text-gray-900 disabled:opacity-50"
-									disabled={busy || !capability.engine_reachable}
-									on:click={applyParameters}
-									>{busy ? $i18n.t('Building…') : $i18n.t('Build revision')}</button
-								>
-								<button
-									class="text-xs px-3 py-1.5 rounded-lg border border-gray-200 dark:border-gray-800 text-gray-600 dark:text-gray-300"
-									disabled={busy}
-									on:click={() => seedParams(selectedRevision)}>{$i18n.t('Reset')}</button
-								>
-							</div>
-						</div>
-					{/if}
-				{:else if tab === 'versions'}
-					<div class="flex flex-col gap-1">
-						{#each revisions as rev}
-							<div
-								class="flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs {rev.id ===
-								selectedRevision?.id
-									? 'bg-gray-100 dark:bg-gray-850'
-									: 'hover:bg-gray-50 dark:hover:bg-gray-900'}"
-							>
-								<button class="flex-1 text-left" on:click={() => selectRevision(rev.id)}>
-									<span class="font-medium">rev {rev.seq}</span>
-									<span class="text-gray-500 dark:text-gray-400"> · {rev.created_by}</span>
-									{#if rev.latest_build}
-										<span class="{statusTone(rev.latest_build.status)}">
-											· {rev.latest_build.status}</span
-										>
-									{:else}
-										<span class="text-gray-400 dark:text-gray-500"> · {$i18n.t('not built')}</span
-										>
-									{/if}
-								</button>
-								{#if rev.id !== project.head_revision}
-									<button
-										class="text-[11px] px-2 py-0.5 rounded-md border border-gray-200 dark:border-gray-800 text-gray-600 dark:text-gray-300 disabled:opacity-50"
-										disabled={busy}
-										on:click={() => restore(rev)}>{$i18n.t('Restore')}</button
-									>
-								{:else if !rev.latest_build}
-									<button
-										class="text-[11px] px-2 py-0.5 rounded-md border border-gray-200 dark:border-gray-800 text-gray-600 dark:text-gray-300 disabled:opacity-50"
-										disabled={busy}
-										on:click={() => buildFrom(rev, {})}>{$i18n.t('Build')}</button
-									>
-								{/if}
-							</div>
-						{/each}
-					</div>
-				{:else if tab === 'features'}
-					{#if sourceLoading}
-						<div class="text-xs text-gray-500 dark:text-gray-400">{$i18n.t('Loading…')}</div>
-					{:else if sourceError}
-						<div class="text-xs text-amber-600 dark:text-amber-400">{sourceError}</div>
-					{:else if !recipeSource}
-						<div class="text-xs text-gray-500 dark:text-gray-400">
-							{$i18n.t('This part has no feature list — it was not built from a template.')}
-						</div>
-					{:else}
-						<div class="flex flex-col gap-1">
-							{#each recipeSource.features as f}
-								<div
-									class="flex items-baseline gap-2 px-2 py-1.5 rounded-lg text-xs bg-gray-50 dark:bg-gray-900"
-								>
-									<span class="font-medium text-gray-800 dark:text-gray-100">{f.op_id}</span>
-									<span class="text-[11px] text-gray-500 dark:text-gray-400">{f.op}</span>
-									{#if f.mode && f.mode !== 'add'}
-										<span class="text-[11px] text-gray-500 dark:text-gray-400">· {f.mode}</span>
-									{/if}
-									{#if f.when}
-										<span class="text-[11px] text-gray-400 dark:text-gray-500 truncate"
-											>· {$i18n.t('when')} {f.when}</span
-										>
-									{/if}
-								</div>
-							{/each}
-						</div>
-						<!-- Said plainly rather than left to be discovered by clicking. The spike
-						     behind Gate 5 showed the mapping is possible — one glTF primitive per
-						     B-Rep face — but nothing emits the manifest yet, so every feature here
-						     reports selectable: false and the viewport selects whole bodies. -->
-						<div class="text-[11px] text-gray-400 dark:text-gray-500">
-							{$i18n.t(
-								'Selecting an individual face in the viewport is not available yet — selection is whole-body.'
-							)}
-						</div>
-					{/if}
-				{:else if tab === 'inspect'}
-					{#if !measurements}
-						<div class="text-xs text-gray-500 dark:text-gray-400">
-							{$i18n.t('Nothing to measure — this revision has not been built.')}
-						</div>
-					{:else}
-						<!-- Every number here was measured by the engine off the built solid.
-						     None of it is predicted, and none of it comes from the model. -->
-						<div class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
-							<span class="text-gray-500 dark:text-gray-400">{$i18n.t('Bounding box')}</span>
-							<span class="tabular-nums"
-								>{fmt(measurements.bbox_mm?.x, 2)} × {fmt(measurements.bbox_mm?.y, 2)} × {fmt(
-									measurements.bbox_mm?.z,
-									2
-								)} mm</span
-							>
-							<span class="text-gray-500 dark:text-gray-400">{$i18n.t('Volume')}</span>
-							<span class="tabular-nums">{fmt(measurements.volume_mm3, 1)} mm³</span>
-							<span class="text-gray-500 dark:text-gray-400">{$i18n.t('Surface area')}</span>
-							<span class="tabular-nums">{fmt(measurements.surface_area_mm2, 1)} mm²</span>
-							<span class="text-gray-500 dark:text-gray-400">{$i18n.t('Center of mass')}</span>
-							<span class="tabular-nums"
-								>{fmt(measurements.center_of_mass_mm?.x, 2)}, {fmt(
-									measurements.center_of_mass_mm?.y,
-									2
-								)}, {fmt(measurements.center_of_mass_mm?.z, 2)} mm</span
-							>
-							<span class="text-gray-500 dark:text-gray-400">{$i18n.t('Solids')}</span>
-							<span class="tabular-nums">{measurements.solid_count ?? '—'}</span>
-							<span class="text-gray-500 dark:text-gray-400">{$i18n.t('Triangles')}</span>
-							<span class="tabular-nums">{mesh?.triangle_count ?? '—'}</span>
-							<span class="text-gray-500 dark:text-gray-400">{$i18n.t('Build time')}</span>
-							<span class="tabular-nums">{fmt(measurements.duration_ms, 0)} ms</span>
-							{#if measurements.peak_rss_bytes}
-								<span class="text-gray-500 dark:text-gray-400">{$i18n.t('Peak memory')}</span>
-								<span class="tabular-nums">{mb(measurements.peak_rss_bytes)}</span>
-							{/if}
-						</div>
-						<!-- The two identities Gate 2 settled on. `source_hash` is what two
-						     revisions are compared on; `mesh_signature` is what proves two builds
-						     of the same input produced the same shape. Neither is a file hash —
-						     STEP embeds a wall-clock timestamp and 3MF is a ZIP. -->
-						{#if measurements.source_hash || measurements.mesh_signature}
-							<div class="flex flex-col gap-0.5 text-[11px] text-gray-400 dark:text-gray-500">
-								{#if measurements.source_hash}
-									<span class="font-mono truncate"
-										>{$i18n.t('source')} {measurements.source_hash}</span
-									>
-								{/if}
-								{#if measurements.mesh_signature}
-									<span class="font-mono truncate"
-										>{$i18n.t('shape')} {measurements.mesh_signature}</span
-									>
-								{/if}
-							</div>
-						{/if}
-					{/if}
-				{:else if tab === 'validate'}
-					{#if !measurements}
-						<div class="text-xs text-gray-500 dark:text-gray-400">
-							{$i18n.t('Nothing to check — this revision has not been built.')}
-						</div>
-					{:else}
-						{@const expected =
-							(recipeName && capability.recipe_params?.[recipeName]?.expected_solids) ?? null}
-						<div class="flex flex-col gap-1 text-xs">
-							<div class="flex items-center gap-2">
-								<span
-									class={measurements.brep_valid
-										? 'text-green-600 dark:text-green-400'
-										: 'text-red-500 dark:text-red-400'}
-									>{measurements.brep_valid ? '✓' : '✕'}</span
-								>
-								<span
-									>{$i18n.t('B-Rep valid')}{measurements.brep_valid
-										? ''
-										: ` — ${$i18n.t('the solid failed OpenCascade’s validity check')}`}</span
-								>
-							</div>
-							<div class="flex items-center gap-2">
-								<span
-									class={expected === null || measurements.solid_count === expected
-										? 'text-green-600 dark:text-green-400'
-										: 'text-amber-600 dark:text-amber-400'}
-									>{expected === null || measurements.solid_count === expected ? '✓' : '!'}</span
-								>
-								<span
-									>{$i18n.t('Solids')}: {measurements.solid_count}{expected === null
-										? ''
-										: ` / ${expected} ${$i18n.t('expected')}`}</span
-								>
-							</div>
-							{#if mesh?.parsed === false}
-								<!-- The engine declined to give a verdict because it could not read the
-								     exported mesh. That is not a pass, and it must not look like one. -->
-								<div class="flex items-center gap-2 text-amber-600 dark:text-amber-400">
-									<span>?</span>
-									<span
-										>{$i18n.t('Mesh not checked')}{mesh.reason ? ` — ${mesh.reason}` : ''}</span
-									>
-								</div>
-							{:else if mesh}
-								<div class="flex items-center gap-2">
-									<span
-										class={mesh.watertight
-											? 'text-green-600 dark:text-green-400'
-											: 'text-amber-600 dark:text-amber-400'}>{mesh.watertight ? '✓' : '!'}</span
-									>
-									<span
-										>{$i18n.t('Watertight')}{mesh.watertight
-											? ''
-											: ` — ${mesh.open_edges} ${$i18n.t('open edges')}`}</span
-									>
-								</div>
-								<div class="flex items-center gap-2">
-									<span
-										class={mesh.manifold
-											? 'text-green-600 dark:text-green-400'
-											: 'text-amber-600 dark:text-amber-400'}>{mesh.manifold ? '✓' : '!'}</span
-									>
-									<span
-										>{$i18n.t('Manifold')}{mesh.manifold
-											? ''
-											: ` — ${mesh.non_manifold_edges} ${$i18n.t('edges shared by three or more triangles')}`}</span
-									>
-								</div>
-								{#if mesh.degenerate_triangles}
-									<div class="flex items-center gap-2 text-amber-600 dark:text-amber-400">
-										<span>!</span>
-										<span
-											>{mesh.degenerate_triangles}
-											{$i18n.t('degenerate triangles')}</span
-										>
-									</div>
-								{/if}
-							{/if}
-						</div>
-						<!-- Three separate statements, never merged. -->
-						<div class="text-[11px] text-gray-400 dark:text-gray-500">
-							{$i18n.t(
-								'These checks say the geometry is well-formed. They do not say the part is printable, strong, or safe.'
-							)}
-						</div>
-					{/if}
-				{:else if tab === 'source'}
-					{#if sourceLoading}
-						<div class="text-xs text-gray-500 dark:text-gray-400">{$i18n.t('Loading…')}</div>
-					{:else if sourceError}
-						<div class="text-xs text-amber-600 dark:text-amber-400">{sourceError}</div>
-					{:else if !recipeSource}
-						<div class="text-xs text-gray-500 dark:text-gray-400">
-							{$i18n.t('This part has no source document — it was not built from a template.')}
-						</div>
-					{:else}
-						<div class="flex flex-col gap-2">
-							<div class="text-[11px] text-gray-500 dark:text-gray-400">
-								{recipeSource.recipe} · CadIR {recipeSource.schema_version} · {recipeSource.units}
-							</div>
-							{#if selectedRevision && Object.keys(selectedRevision.parameters ?? {}).length}
-								<!-- The document is shared by every revision of this recipe; these are
-								     the values THIS revision resolved it with. -->
-								<div class="grid grid-cols-[auto_1fr] gap-x-3 text-[11px]">
-									{#each Object.entries(selectedRevision.parameters ?? {}) as [k, v]}
-										<span class="text-gray-500 dark:text-gray-400">{k}</span>
-										<span class="tabular-nums">{v}</span>
-									{/each}
-								</div>
-							{:else}
-								<!-- Revisions built before the studio started sending resolved defaults
-								     recorded an empty map. Naming the values used would be a guess; an
-								     empty map means exactly "the defaults in the document below". -->
-								<div class="text-[11px] text-gray-500 dark:text-gray-400">
-									{$i18n.t(
-										'This revision recorded no explicit values — it was built with the defaults below.'
-									)}
-								</div>
-							{/if}
-							<pre
-								class="text-[11px] font-mono whitespace-pre overflow-x-auto p-2 rounded-lg bg-gray-50 dark:bg-gray-900">{JSON.stringify(
-									recipeSource.document,
-									null,
-									2
-								)}</pre>
-						</div>
-					{/if}
-				{:else if tab === 'files'}
-					{#if !artifacts.length}
-						<div class="text-xs text-gray-500 dark:text-gray-400">
-							{$i18n.t('No files — this revision has not been built.')}
-						</div>
-					{:else}
-						<div class="flex flex-col gap-1">
-							{#each artifacts as a}
-								<div
-									class="flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs hover:bg-gray-50 dark:hover:bg-gray-900"
-								>
-									<span class="font-medium w-12 shrink-0">{a.format.toUpperCase()}</span>
-									<span class="text-gray-500 dark:text-gray-400 tabular-nums shrink-0"
-										>{size(a.size_bytes)}</span
-									>
-									<span
-										class="text-[11px] font-mono text-gray-400 dark:text-gray-500 truncate flex-1"
-										title={a.sha256}>{a.sha256.slice(0, 16)}…</span
-									>
-									<button
-										class="text-[11px] px-2 py-0.5 rounded-md border border-gray-200 dark:border-gray-800 text-gray-600 dark:text-gray-300 shrink-0"
-										on:click={() => download(a)}>{$i18n.t('Download')}</button
-									>
-								</div>
-							{/each}
-						</div>
-					{/if}
-				{/if}
+				<CadContextPanels
+					{tab}
+					{project}
+					{capability}
+					{selectedRevisionId}
+					onSelectRevision={selectRevision}
+					onRevealNode={(nodeId) => (revealedNodeId = nodeId)}
+					onChanged={async () => {
+						if (project) await openProject(project.id);
+					}}
+					bind:busy
+				/>
 
-				{#if artifacts.length && tab !== 'files'}
+				{#if artifacts.length && tab !== 'artifacts'}
 					<div class="flex flex-wrap items-center gap-1 pt-1">
 						<span class="text-[11px] text-gray-500 dark:text-gray-400 mr-1"
 							>{$i18n.t('Export')}</span

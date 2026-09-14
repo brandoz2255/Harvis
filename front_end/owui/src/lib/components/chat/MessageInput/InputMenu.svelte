@@ -190,7 +190,7 @@
 						}}
 					>
 						<GlobeAlt />
-						<div class="line-clamp-1 flex-1 text-left">{$i18n.t('Force Web Search')}</div>
+						<div class="line-clamp-1 flex-1 text-left">{$i18n.t('Web Search')}</div>
 						{#if webSearchEnabled}
 							<div
 								class="shrink-0 text-[10px] font-medium uppercase tracking-wide text-blue-600 dark:text-blue-400"

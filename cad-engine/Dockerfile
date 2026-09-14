@@ -30,7 +30,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 COPY recipes.py server.py validation.py runner.py worker_main.py admission.py \
-     exporters.py pool.py /app/
+     exporters.py pool.py importers.py schema_doc.py manifest.py \
+     targets.py measure_spec.py measure.py /app/
 # CadIR (Gate 5b). Present but wired into nothing: /cad/execute and /cad/v2/build
 # still run the named recipes, and switching them over is a separate reviewable
 # change. It ships now so the tests proving it reproduces those recipes' geometry run

@@ -135,14 +135,9 @@
 		orchestrate: 'bg-purple-500'
 	};
 	let showModeMenu = false;
-	// "Browse all models…" expands the capped composer model menu IN PLACE (the old goto pointed
-	// at the admin /workspace/models page, which isn't a model picker). Reset when the menu closes.
-	let showAllModels = false;
-	$: if (!showModeMenu) {
-		showAllModels = false;
-		modelSearch = '';
-	}
-
+	// The picker keeps its own search/expanded state; clear it when the menu closes.
+	let composerMenu: any = null;
+	$: if (!showModeMenu) composerMenu?.resetView();
 	// The composer always Auto-routes by default; the mode pill shows the active model name.
 	onMount(() => chatMode.set('auto'));
 
@@ -167,12 +162,11 @@
 	import InputVariablesModal from './MessageInput/InputVariablesModal.svelte';
 	import Voice from '../icons/Voice.svelte';
 	import Terminal from '../icons/Terminal.svelte';
+	import ComposerModelMenu from './ModelSelector/ComposerModelMenu.svelte';
 	import TerminalMenu from './MessageInput/TerminalMenu.svelte';
 	import PlusAlt from '../icons/PlusAlt.svelte';
 	import Folder from '../icons/Folder.svelte';
 	import Dropdown from '../common/Dropdown.svelte';
-	import ModelProfileEditor from './ModelSelector/ModelProfileEditor.svelte';
-	import EffortSlider from './ModelSelector/EffortSlider.svelte';
 
 	import CommandSuggestionList from './MessageInput/CommandSuggestionList.svelte';
 	import Knobs from '../icons/Knobs.svelte';
@@ -212,88 +206,35 @@
 		($models ?? []).find((m) => m.id === (selectedModels?.[0] ?? ''))?.name ??
 		(selectedModels?.[0] || 'Auto');
 
-	// Context window, shown beside each model id in the picker. Several vendor catalogues
-	// carry families that differ only in the tail of the id (gemini-2.5-flash-lite vs
-	// -flash-lite-preview-09-2025), and the window is often the thing that actually
-	// separates them. Blank when the provider never reported one.
-	const modelContext = (m: any) => {
-		const n = Number(m?.info?.meta?.context_length || 0);
-		if (!n) return '';
-		return n >= 1_000_000 ? `${Math.round(n / 1_000_000)}M ctx` : `${Math.round(n / 1024)}K ctx`;
+	// Abbreviations for the effort shown on the composer pill (the picker has its own copy for
+	// the model rows). No saved effort = thinking is off, which reads as "Auto": the model
+	// decides. Blank for models that can't take an effort at all.
+	const EFFORT_SHORT: Record<string, string> = {
+		minimal: 'Min',
+		low: 'Low',
+		medium: 'Med',
+		high: 'High',
+		extra_high: 'X-High',
+		max: 'Max',
+		ultra: 'Ultra'
 	};
-
-	// Cap the composer model menu; a footer links to the full list. Phase F: connected cloud
-	// models (Claude/GPT) float to the TOP — when you've connected a cloud provider it becomes
-	// the primary set, with local Ollama models below (still reachable, never stranded).
-	// Cursor-style picker helpers: cloud models (Claude/OpenAI) carry a mode (reasoning effort) +
-	// an editable profile; local Ollama models don't.
-	let modelSearch = '';
-	let showModelEditor = false;
-	let editorModel: any = null;
-	let showEffortSlider = false;
-	let effortSliderModel: any = null;
-	// % position of a model's current effort on the Faster→Smarter mini-slider (default: medium).
-	const effortPct = (m: any) => {
-		const L = ['low', 'medium', 'high', 'max'];
-		return (Math.max(0, L.indexOf(m?.info?.meta?.profile_effort ?? 'medium')) / 3) * 100;
-	};
-	const isCloudModel = (m) => ['anthropic', 'openai'].includes(m?.owned_by);
 	const effortLabelOf = (m) => {
 		const e = m?.info?.meta?.profile_effort;
-		if (e) return e.charAt(0).toUpperCase() + e.slice(1);
+		if (e) return EFFORT_SHORT[e] ?? e;
 		return m?.info?.meta?.supports_effort ? 'Auto' : '';
 	};
-	// The "show all Claude models" gate is a persisted user setting, managed in
-	// Settings → Interface (not in this dropdown). The picker just reads it below.
-	$: modelMenuList = (() => {
-		const all = $models ?? [];
-		const q = modelSearch.trim().toLowerCase();
-		const match = (m) =>
-			!q || (m?.name ?? '').toLowerCase().includes(q) || (m?.id ?? '').toLowerCase().includes(q);
-		const isCloud = (m) => ['anthropic', 'openai'].includes(m?.owned_by);
-		// Claude is limited to the current-generation flagship 4 (meta.primary) unless the user has
-		// opted into the full catalog in settings; OpenAI + local are unaffected.
-		const showAllClaude = $settings?.showAllCloudModels === true;
-		const claude = all.filter((m) => m?.owned_by === 'anthropic');
-		const claudeShown = showAllClaude ? claude : claude.filter((m) => m?.info?.meta?.primary);
-		const openai = all.filter((m) => m?.owned_by === 'openai');
-		const local = all.filter((m) => !isCloud(m));
-		const ordered = [...claudeShown, ...openai, ...local]; // cloud-first
-		const cur = selectedModels?.[0];
-		const curModel = all.find((m) => m.id === cur);
-		// Float the active model to the very top (so the current pick is visible) without
-		// disturbing the cloud-first ordering of the rest.
-		const withCur = curModel ? [curModel, ...ordered.filter((m) => m.id !== cur)] : ordered;
-		const filtered = withCur.filter(match);
-		// Capped to 7 by default; a search OR "Show all models" expands to the full list.
-		return showAllModels || q ? filtered : filtered.slice(0, 7);
-	})();
 
-	// Phase F: reasoning-effort control. Shown only when the active model advertises support
-	// (cloud reasoning models). 'auto' → no forced thinking; others map to a thinking budget.
-	const EFFORT_OPTIONS = [
-		{ id: 'auto', label: 'Auto' },
-		{ id: 'low', label: 'Low' },
-		{ id: 'medium', label: 'Medium' },
-		{ id: 'high', label: 'High' },
-		{ id: 'max', label: 'Max' }
-	];
-	let showEffortMenu = false;
+	// The active model, for the effort shown on the composer pill. Only models that advertise
+	// support have one (Claude on an API key, the GPT-5 reasoning models); everything else shows
+	// the model name alone. Effort is SET from the Options panel attached to the picker, not from
+	// a second dropdown out here — one control, next to the model it belongs to.
 	$: effortModel = ($models ?? []).find(
 		(m) => m.id === (atSelectedModel?.id ?? selectedModels?.[0] ?? '')
 	);
 	$: effortCapable = !!effortModel?.info?.meta?.supports_effort;
-	// The composer effort button (next to Send) reflects the ACTIVE model's effort level.
-	$: composerEffortLabel = (() => {
-		const e = effortModel?.info?.meta?.profile_effort;
-		const M: Record<string, string> = { low: 'Low', medium: 'Medium', high: 'High', max: 'Max' };
-		return e ? M[e] : 'Auto';
-	})();
-	$: composerEffortPct = (() => {
-		const L = ['low', 'medium', 'high', 'max'];
-		const e = effortModel?.info?.meta?.profile_effort;
-		return e ? (L.indexOf(e) / 3) * 100 : 50; // 'Auto' (unset) → mid
-	})();
+	// What rides on the composer pill after the model name: `Opus 4.6 · Med`. Empty on a model
+	// with no effort axis at all, so the pill is just the model name there.
+	$: composerEffortShort = effortCapable ? effortLabelOf(effortModel) : '';
 
 	// Mic dropdown — detect input devices + the chosen one (threaded into recording).
 	let showMicMenu = false;
@@ -2234,7 +2175,7 @@
 												bind:show={showModeMenu}
 												side="bottom"
 												align="start"
-												contentClass="rounded-xl border border-gray-100 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-lg p-1 w-[30rem] max-w-[calc(100vw-2rem)] text-sm"
+												contentClass="rounded-lg border border-gray-150 dark:border-gray-850 bg-white dark:bg-gray-900 shadow-xl p-1 w-72 max-w-[calc(100vw-2rem)] text-sm"
 											>
 												<button
 													type="button"
@@ -2248,78 +2189,25 @@
 														title={$chatMode === 'auto' ? composerModel : CHAT_MODE_META[$chatMode]?.label}
 														>{$chatMode === 'auto' ? composerModel : CHAT_MODE_META[$chatMode]?.label}</span
 													>
+													{#if $chatMode === 'auto' && composerEffortShort}
+														<span class="shrink-0 opacity-60">· {composerEffortShort}</span>
+													{/if}
 													<svg class="size-3 opacity-70" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6" /></svg>
 												</button>
 
 												<svelte:fragment slot="content">
-													<div class="flex items-center gap-2 px-2.5 py-1.5 border-b border-gray-100 dark:border-gray-800 mb-0.5">
-														<svg class="size-3.5 text-gray-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/></svg>
-														<input bind:value={modelSearch} placeholder={$i18n.t("Search models")} autocomplete="off" class="w-full bg-transparent outline-none text-sm" on:click|stopPropagation />
-													</div>
-													<div class="max-h-72 overflow-y-auto">
-														{#each modelMenuList as m}
-															<div class="w-full flex items-start gap-1 group/mrow rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800 transition">
-																<button type="button" class="flex-1 min-w-0 flex flex-col gap-0.5 px-2.5 py-1.5 text-left" on:click={() => { selectedModels = [m.id]; showModeMenu = false; }}>
-																	<span class="text-gray-800 dark:text-gray-100 break-words leading-snug">{m.name}</span>
-																	<span class="flex items-center gap-1.5 text-[11px] leading-none text-gray-400 dark:text-gray-500">
-																		{#if m.id !== m.name}
-																			<span class="font-mono break-all">{m.id}</span>
-																		{/if}
-																		{#if modelContext(m)}
-																			<span class="shrink-0">· {modelContext(m)}</span>
-																		{/if}
-																	</span>
-																</button>
-																{#if isCloudModel(m)}
-																	<button type="button" class="shrink-0 text-xs text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 px-1.5 py-1.5 opacity-0 group-hover/mrow:opacity-100 transition" aria-label={$i18n.t("Edit model profile")} on:click|stopPropagation={() => { editorModel = m; showModelEditor = true; }}>{$i18n.t('Edit')}</button>
-																{/if}
-																{#if (selectedModels?.[0] ?? '') === m.id}
-																	<svg class="size-4 text-blue-500 shrink-0 mr-1" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
-																{/if}
-															</div>
-														{/each}
-													</div>
-													{#if !showAllModels && !modelSearch.trim() && ($models ?? []).length > 7}
-														<div class="my-1 border-t border-gray-100 dark:border-gray-800"></div>
-														<button
-															type="button"
-															class="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-left text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800 transition"
-															on:click={() => (showAllModels = true)}
-														>
-															<span class="flex-1">{$i18n.t('Show all models')} ({($models ?? []).length})</span>
-															<svg class="size-3.5 opacity-60 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
-														</button>
-													{/if}
+													<ComposerModelMenu
+														bind:this={composerMenu}
+														items={$models ?? []}
+														selectedId={selectedModels?.[0] ?? ''}
+														on:select={(e) => { selectedModels = [e.detail]; showModeMenu = false; }}
+														on:close={() => (showModeMenu = false)}
+													/>
 												</svelte:fragment>
 											</Dropdown>
 										</div>
 
-										{#if editorModel}
-											<ModelProfileEditor bind:show={showModelEditor} model={editorModel} on:saved={() => models.update((ms) => [...ms])} />
-										{/if}
-
-										<!-- Phase F: reasoning-effort dropdown — same UI as the model pill, shown only
-										     when the active cloud model supports it (Claude via API key, GPT reasoning). -->
-										{#if effortCapable}
-											<div class="flex items-center">
-												<Dropdown
-													bind:show={showEffortMenu}
-													side="top"
-													align="end"
-													contentClass="rounded-xl border border-gray-100 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-lg w-64"
-												>
-													<button type="button" class="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-gray-850 hover:bg-gray-200 dark:hover:bg-gray-800 transition" tabindex="-1" aria-label={$i18n.t("Reasoning effort")}>
-														<span class="max-w-[7rem] truncate">{composerEffortLabel}</span>
-														<svg class="size-3 opacity-70" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6" /></svg>
-													</button>
-													<svelte:fragment slot="content">
-														<EffortSlider model={effortModel} on:changed={() => models.update((ms) => [...ms])} />
-													</svelte:fragment>
-												</Dropdown>
-											</div>
-										{/if}
-
-										{#if prompt === '' && files.length === 0 && ($_user?.role === 'admin' || ($_user?.permissions?.chat?.call ?? true))}
+{#if prompt === '' && files.length === 0 && ($_user?.role === 'admin' || ($_user?.permissions?.chat?.call ?? true))}
 											<div class=" flex items-center">
 												<!-- {$i18n.t('Call')} -->
 												<Tooltip content={$i18n.t('Voice mode')}>

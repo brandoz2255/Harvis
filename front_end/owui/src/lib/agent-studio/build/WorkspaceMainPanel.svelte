@@ -5,7 +5,7 @@
 	const i18n: any = getContext('i18n');
 
 	// The dominant center workspace. Pure props — no fetch, no stores.
-	export let tab: 'chat' | 'diff' | 'logs' | 'editor' | 'preview' = 'chat';
+	export let tab: 'chat' | 'diff' | 'logs' | 'editor' | 'preview' | 'run' = 'chat';
 	export let selectedFile = '';
 	// Unified-diff hunk lines for the selected file (DIFF view; EDITOR falls back to
 	// these only when no real content was supplied).
@@ -31,10 +31,15 @@
 	// primary artifact, rendered big. It stays hidden until the parent says one exists, so
 	// the tab is never a permanent empty promise. Editor still follows file selection.
 	export let hasPreview = false;
+	// The RUN tab hosts a live dev server for the session's own code. Present whenever
+	// the session has a workspace — it explains itself when there is nothing to run yet,
+	// which is more useful than a tab that appears only once you already knew to look.
+	export let hasRun = false;
 	$: hasFile = !!selectedFile;
 	$: tabs = [
 		...(showChat ? [{ id: 'chat', label: $i18n.t('Chat') }] : []),
 		...(hasPreview ? [{ id: 'preview', label: $i18n.t('Preview') }] : []),
+		...(hasRun ? [{ id: 'run', label: $i18n.t('Run') }] : []),
 		{ id: 'diff', label: $i18n.t('Diff') },
 		{ id: 'logs', label: $i18n.t('Logs') },
 		...(hasFile ? [{ id: 'editor', label: $i18n.t('Editor') }] : [])
@@ -42,8 +47,9 @@
 	// In dock mode never sit on the (now-absent) Chat tab.
 	$: if (!showChat && tab === 'chat') tab = 'diff';
 	$: if (!hasPreview && tab === 'preview') tab = hasFile ? 'editor' : 'diff';
+	$: if (!hasRun && tab === 'run') tab = hasFile ? 'editor' : 'diff';
 
-	const selectTab = (id: 'chat' | 'diff' | 'logs' | 'editor' | 'preview') => {
+	const selectTab = (id: 'chat' | 'diff' | 'logs' | 'editor' | 'preview' | 'run') => {
 		tab = id;
 		dispatch('tab', { tab: id });
 	};
@@ -233,6 +239,10 @@
 					</div>
 				</div>
 			{/if}
+		{:else if tab === 'run'}
+			<div class="h-full min-h-0">
+				<slot name="run" />
+			</div>
 		{:else if tab === 'preview'}
 			<div class="h-full min-h-0">
 				<slot name="preview">

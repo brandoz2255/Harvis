@@ -187,14 +187,14 @@
 							{/each}
 						</ol>
 					{/if}
-					{#if def.commands.install}
-						<CommandBlock label={$i18n.t('Install')} command={def.commands.install} />
+					{#if def.commands?.install}
+						<CommandBlock label={$i18n.t('Install')} command={def.commands?.install} />
 					{/if}
-					{#if def.commands.launch}
-						<CommandBlock label={$i18n.t('Launch')} command={applyTemplate(def.commands.launch, def.model?.preferred)} />
+					{#if def.commands?.launch}
+						<CommandBlock label={$i18n.t('Launch')} command={applyTemplate(def.commands?.launch, def.model?.preferred)} />
 					{/if}
-					{#if def.commands.check}
-						<CommandBlock label={$i18n.t('Check')} command={def.commands.check} />
+					{#if def.commands?.check}
+						<CommandBlock label={$i18n.t('Check')} command={def.commands?.check} />
 					{/if}
 				</div>
 			{/if}

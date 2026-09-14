@@ -116,6 +116,15 @@
 				{def.freeTier ? $i18n.t('Get a free key') : $i18n.t('Get a key')} ↗
 			</a>
 		{/if}
+		{#if def.freeTier}
+			<button
+				type="button"
+				class="text-xs font-medium px-3 py-1.5 rounded-lg border border-blue-500/30 text-blue-600 dark:text-blue-300 hover:bg-blue-500/10 transition"
+				on:click={() => dispatch('freeKeys')}
+			>
+				{$i18n.t('More keys')}
+			</button>
+		{/if}
 		{#if def.signupRequires}
 			<span class="text-[11px] text-gray-500 dark:text-gray-400"
 				>{$i18n.t('Sign-up needs')}: {$i18n.t(def.signupRequires)}</span

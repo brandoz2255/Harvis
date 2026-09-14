@@ -33,6 +33,12 @@ from typing import AsyncGenerator, Optional
 
 from ..openclaw_client import OpenClawEvent
 from .isolation import SESSION_WORKSPACE_ROOT, WorkspaceIsolationManager
+from .syntax_gate import (
+    PROJECT_LAYOUT_CONTRACT,
+    SYNTAX_REPAIR_ROUNDS,
+    gate_check,
+    repair_task,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -324,6 +330,21 @@ def _cad_write_tool_names() -> list[str]:
 # is safe: the throwaway clone is the sandbox (same posture as native clone-mode), and
 # the container can't run the CLIs' bubblewrap sandbox (no namespace caps) anyway.
 
+# The picker sends a namespaced id — `anthropic/claude-sonnet-4-5`, `openai/gpt-5-codex` —
+# because the model list has to keep two providers' identically-named models apart. The CLIs
+# have no such problem and reject the prefix, so it comes off here. Only these exact prefixes
+# are stripped: a model whose real name contains a slash keeps it.
+_MODEL_NS = ("anthropic/", "openai/", "claude-code/", "codex/", "kimi-code/", "moonshot/")
+
+
+def _bare_model(model_name: str) -> str:
+    m = (model_name or "").strip()
+    for ns in _MODEL_NS:
+        if m.startswith(ns):
+            return m[len(ns):]
+    return m
+
+
 def _build_opencode_command(container, workspace_path, task_brief, model_name, api_key, user_id=0, auth_mode="api_key"):
     model = (model_name or os.getenv("HARVIS_OPENCODE_DEFAULT_MODEL", "qwen3:4b")).strip() or "qwen3:4b"
     model_id = model if model.startswith("ollama/") else f"ollama/{model}"
@@ -339,10 +360,28 @@ def _build_codex_command(container, workspace_path, task_brief, model_name, api_
     cmd = ["docker", "exec", "-e", f"OPENAI_API_KEY={api_key or ''}",
            "-u", "1001", "-w", workspace_path, container,
            "codex", "exec", "--json", "-s", "danger-full-access", "--skip-git-repo-check"]
-    if _CODEX_DEFAULT_MODEL:
-        cmd += ["-m", _CODEX_DEFAULT_MODEL]
+    # The picked model, then the env default, then whatever the CLI chooses for itself.
+    # It used to be env-only, and that env var is unset everywhere — so the picker in the
+    # Build composer selected a model and the sidecar quietly ran its own default instead.
+    model = _bare_model(model_name) or _CODEX_DEFAULT_MODEL
+    if model:
+        cmd += ["-m", model]
     cmd += [task_brief]
-    return cmd, (_CODEX_DEFAULT_MODEL or "codex/default")
+    return cmd, (model or "codex/default")
+
+
+# Claude Code auto-compacts on its OWN schedule, from an ABSOLUTE token count — and its
+# per-model tuned defaults ARE the recommendation, so this lane deliberately pins NOTHING.
+# Sonnet 5 and Fable 5 have native 1M windows and compact at ~967K; Opus 5 / Opus 4.8 /
+# Sonnet 4.6 / Opus 4.6 compact at the 200K boundary; anything else compacts at its own
+# context limit. Exporting CLAUDE_CODE_AUTO_COMPACT_WINDOW here would OVERRIDE that tuning
+# with a number from Harvis's static table — which is exactly how a 1M-window Sonnet ends up
+# compacting at 200K for no reason. The catalog's `ctx` is what the usage meter divides by,
+# so the two are kept honest by fixing the CATALOG, not by capping the CLI.
+#
+# Kimi (`_build_kimi_code_command`) still pins, and must: the CLI cannot infer a Kimi window
+# from an Anthropic model id. `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` on the sidecar is the
+# supported way to force the 200K boundary back, if that is ever wanted.
 
 
 def _build_claude_command(container, workspace_path, task_brief, model_name, api_key, user_id=0, auth_mode="api_key"):
@@ -355,15 +394,19 @@ def _build_claude_command(container, workspace_path, task_brief, model_name, api
         cred = ["-e", f"CLAUDE_CODE_OAUTH_TOKEN={api_key or ''}", "-e", "CLAUDE_CODE_SIMPLE="]
     else:
         cred = ["-e", f"ANTHROPIC_API_KEY={api_key or ''}", "-e", "CLAUDE_CODE_SIMPLE=1"]
+    # Same fix as codex: honour the picker first. `--model` is safe on both auth modes —
+    # a subscription is entitled to whichever models its plan covers, and the CLI errors
+    # loudly on one it is not, which beats silently answering as a different model.
+    model = _bare_model(model_name) or _CLAUDE_DEFAULT_MODEL
     cmd = ["docker", "exec", *cred,
            "-u", "1001", "-w", workspace_path, container,
            "claude", "-p", task_brief,
            "--output-format", "stream-json", "--verbose",
            "--add-dir", workspace_path, "--dangerously-skip-permissions"]
     cmd += _cad_mcp_args(user_id)
-    if _CLAUDE_DEFAULT_MODEL:
-        cmd += ["--model", _CLAUDE_DEFAULT_MODEL]
-    return cmd, (_CLAUDE_DEFAULT_MODEL or "claude/default")
+    if model:
+        cmd += ["--model", model]
+    return cmd, (model or "claude/default")
 
 
 def _build_kimi_code_command(container, workspace_path, task_brief, model_name, api_key, user_id=0, auth_mode="api_key"):
@@ -544,26 +587,67 @@ _MAPPERS = {
 }
 
 
-def _extract_usage(engine: str, obj: dict):
-    """Best-effort (prompt_tokens, completion_tokens) from a streamed engine line — so the Build
-    usage meter has real token counts for the cloud engines. Claude's `result` line carries
-    `usage`; others may not (then None → no capture, free/local engines just show 0). Cumulative
-    cache-read/creation input tokens count toward the prompt (they bill as input)."""
+def _split_usage(u: dict) -> dict:
+    """The three input classes kept APART, because they bill at three different rates.
+
+    Anthropic charges a cache READ at a tenth of the base input rate and a cache WRITE at a
+    quarter above it. Collapsing all three into one "prompt tokens" number and pricing it at
+    the base rate is not a rounding error: a long agent run is almost entirely cache reads,
+    so the estimate came out close to an order of magnitude high.
+    """
+    return {
+        "input": int(u.get("input_tokens") or u.get("prompt_tokens") or 0),
+        "cache_read": int(u.get("cache_read_input_tokens") or 0),
+        "cache_write": int(u.get("cache_creation_input_tokens") or 0),
+        "output": int(u.get("output_tokens") or u.get("completion_tokens") or 0),
+    }
+
+
+def _usage_from_line(engine: str, obj: dict):
+    """Token usage off one streamed engine line, tagged with WHICH question it answers.
+
+    The CLI reports two different quantities under the same word, and the Build meter needs
+    them kept apart:
+
+    ``kind="step"`` — an ``assistant`` message's own usage. Its input classes sum to what the
+    model was holding at that moment, so the LAST one is the run's real context occupancy.
+    That is the number a context gauge is asking for.
+
+    ``kind="final"`` — the ``result`` line's cumulative usage for the whole run. Every step
+    re-sends the conversation, so this is the BILLED total and it climbs far past any context
+    window: a measured Claude run reported 1,014,460 input tokens against a 200,000 window.
+    Feeding that to a context gauge produced 507%, clamped to a permanently full red bar.
+
+    The result line also carries the CLI's own ``total_cost_usd`` — the vendor's arithmetic on
+    the vendor's current rates, which beats any table we keep. When it is present it wins, and
+    our per-class pricing is only the fallback.
+    """
     try:
-        # kimi-code runs the same CLI, so its `result` line carries the same usage shape.
-        if engine in ("claude-code", "kimi-code") and obj.get("type") == "result":
-            u = obj.get("usage") or {}
-            p = (int(u.get("input_tokens") or 0) + int(u.get("cache_read_input_tokens") or 0)
-                 + int(u.get("cache_creation_input_tokens") or 0))
-            c = int(u.get("output_tokens") or 0)
-            if p or c:
-                return p, c
+        # kimi-code runs the same CLI, so its lines carry the same usage shape.
+        cli = engine in ("claude-code", "kimi-code")
+        etype = obj.get("type")
+        if cli and etype == "assistant":
+            u = (obj.get("message") or {}).get("usage")
+            if isinstance(u, dict):
+                out = _split_usage(u)
+                if any(out.values()):
+                    return {"kind": "step", **out}
+            return None
+        if cli and etype == "result":
+            out = _split_usage(obj.get("usage") or {})
+            try:
+                raw = obj.get("total_cost_usd")
+                cost = float(raw) if raw is not None else None
+            except (TypeError, ValueError):
+                cost = None
+            if any(out.values()) or cost:
+                return {"kind": "final", "cost_usd": cost, **out}
+            return None
         u = obj.get("usage")  # generic fallback (codex/opencode if they emit it)
         if isinstance(u, dict):
-            p = int(u.get("input_tokens") or u.get("prompt_tokens") or 0)
-            c = int(u.get("output_tokens") or u.get("completion_tokens") or 0)
-            if p or c:
-                return p, c
+            out = _split_usage(u)
+            if any(out.values()):
+                return {"kind": "final", "cost_usd": None, **out}
     except Exception:
         pass
     return None
@@ -723,6 +807,17 @@ async def run_external_engine_adapter(
     # the other one") is unreadable without it, so the prompt carries both.
     task_brief = _conversation_prefix(task_brief, chat_history)
 
+    # And the layout contract, which the native lane has had all along and this one never
+    # did. An external CLI launches with the user's brief and nothing else, so "build me a
+    # site where I can play Asteroids" arrived with no statement of how Harvis serves the
+    # result — and every engine answered with one self-contained index.html, because that is
+    # the safest guess when nobody says otherwise. Only for a session with no source repo:
+    # a run against a real checkout must not be told there has to be an index.html at its
+    # root. Only three engines take --append-system-prompt, so it rides the brief, which is
+    # the one channel all five share.
+    if not repo_path:
+        task_brief = f"{PROJECT_LAYOUT_CONTRACT}\n\n---\n\n{task_brief}"
+
     cmd, model_id = _BUILDERS[engine](container, workspace_path, task_brief, model_name, api_key, user_id=user_id, auth_mode=auth_mode)
     # Credit-safety: tag THIS run's docker-exec env so Stop/timeout can hard-kill its process
     # subtree (children inherit the env) even when argv/cwd matching misses. All builders emit
@@ -740,8 +835,13 @@ async def run_external_engine_adapter(
     cli_error: str = ""
     cli_error_status: int = 0
     tool_calls = 0
-    usage_p = 0  # captured input tokens (cloud engines: the result line's `usage`) — for the meter
-    usage_c = 0  # captured output tokens
+    usage_p = 0  # BILLED input tokens, cumulative over the run — spend, not context occupancy
+    usage_c = 0  # billed output tokens
+    # Kept beside the flat columns because they answer different questions: `context_tokens` is
+    # what the model was holding on its last step (the gauge), the three input classes are what
+    # the run is charged for (the cost), and they bill at three different rates.
+    usage_detail: dict = {"input": 0, "cache_read": 0, "cache_write": 0, "output": 0,
+                          "context_tokens": 0, "cost_usd": None, "source": engine}
     final_text_parts: list[str] = []
     streamed_text = False
     is_text_engine = engine in _TEXT_ENGINES   # plain-text stdout (Hermes) → log lines + tail summary
@@ -759,99 +859,228 @@ async def run_external_engine_adapter(
         except Exception:
             pass
 
-    try:
+    launch_failed = False
+
+    async def _run_cli(run_cmd: list) -> AsyncGenerator[OpenClawEvent, None]:
+        """One full CLI invocation, streamed. Called again for each repair round.
+
+        This used to be straight-line code, on the assumption that a Build turn is one
+        process. The gate broke that assumption: when the engine leaves a page linking
+        files it never wrote, the fix is another invocation against the same clone. The
+        accumulators are deliberately NOT reset — tool calls and billed tokens are the
+        turn's totals across every round — but the per-attempt outcome fields are, or a
+        repair round would inherit the first attempt's error and report a fixed workspace
+        as broken.
+        """
+        nonlocal proc, cli_error, cli_error_status, tool_calls, usage_p, usage_c
+        nonlocal final_text_parts, streamed_text, timed_out, launch_failed
+        proc, cli_error, cli_error_status, timed_out = None, "", 0, False
+
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, limit=_STREAM_LIMIT,
-            )
-        except Exception as exc:
-            yield root_ev("error", {
-                "message": f"Could not start the {label} engine: {exc}",
-                "fix_hint": _engine_install_hint(engine, container),
-            })
-            return
-
-        stderr_task = asyncio.create_task(_drain_stderr(proc))
-        hard_deadline = time.monotonic() + _MAX_RUN_S
-        idle_deadline = time.monotonic() + _IDLE_TIMEOUT_S
-        while True:
-            now = time.monotonic()
-            hit_hard = hard_deadline <= idle_deadline
-            remaining = (hard_deadline if hit_hard else idle_deadline) - now
-            if remaining <= 0:
-                timed_out = "max" if hit_hard else "idle"
-                break
             try:
-                raw = await asyncio.wait_for(proc.stdout.readline(), timeout=remaining)  # type: ignore[union-attr]
-            except asyncio.TimeoutError:
-                continue
-            if not raw:
-                break
-            # The engine is alive: push the idle deadline out. The hard ceiling does not move.
+                proc = await asyncio.create_subprocess_exec(
+                    *run_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, limit=_STREAM_LIMIT,
+                )
+            except Exception as exc:
+                launch_failed = True
+                yield root_ev("error", {
+                    "message": f"Could not start the {label} engine: {exc}",
+                    "fix_hint": _engine_install_hint(engine, container),
+                })
+                return
+
+            stderr_task = asyncio.create_task(_drain_stderr(proc))
+            hard_deadline = time.monotonic() + _MAX_RUN_S
             idle_deadline = time.monotonic() + _IDLE_TIMEOUT_S
-            line = raw.decode("utf-8", "replace").strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except Exception:
-                yield root_ev("log", {"message": line[:500]})
-                if is_text_engine:
-                    text_tail.append(line)
-                    if len(text_tail) > 16:
-                        del text_tail[: len(text_tail) - 16]
-                continue
-            _u = _extract_usage(engine, obj)
-            if _u:
-                usage_p, usage_c = _u
-            if obj.get("type") == "result" and obj.get("is_error"):
-                cli_error = str(obj.get("result") or "").strip()
+            while True:
+                now = time.monotonic()
+                hit_hard = hard_deadline <= idle_deadline
+                remaining = (hard_deadline if hit_hard else idle_deadline) - now
+                if remaining <= 0:
+                    timed_out = "max" if hit_hard else "idle"
+                    break
                 try:
-                    cli_error_status = int(obj.get("api_error_status") or 0)
+                    raw = await asyncio.wait_for(proc.stdout.readline(), timeout=remaining)  # type: ignore[union-attr]
+                except asyncio.TimeoutError:
+                    continue
+                if not raw:
+                    break
+                # The engine is alive: push the idle deadline out. The hard ceiling does not move.
+                idle_deadline = time.monotonic() + _IDLE_TIMEOUT_S
+                line = raw.decode("utf-8", "replace").strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
                 except Exception:
-                    cli_error_status = 0
-            try:
-                for ev in mapper(obj, root_ev):
-                    if ev.type == "tool_call":
-                        tool_calls += 1
-                    elif ev.type == "token":
-                        text = str((ev.data or {}).get("content") or "")
-                        if (ev.data or {}).get("final"):
-                            final_text_parts = [text]
-                            if streamed_text:
-                                continue  # already shown live; don't render it a second time
-                        else:
-                            streamed_text = True
-                            final_text_parts.append(text)
-                    yield ev
-            except Exception:
-                yield root_ev("log", {"message": line[:300]})
+                    yield root_ev("log", {"message": line[:500]})
+                    if is_text_engine:
+                        text_tail.append(line)
+                        if len(text_tail) > 16:
+                            del text_tail[: len(text_tail) - 16]
+                    continue
+                _u = _usage_from_line(engine, obj)
+                if _u:
+                    if _u["kind"] == "step":
+                        # One assistant message's own footprint. The last one standing is what the
+                        # model was actually holding, which is the only honest context reading.
+                        usage_detail["context_tokens"] = _u["input"] + _u["cache_read"] + _u["cache_write"]
+                    else:
+                        for _k in ("input", "cache_read", "cache_write", "output"):
+                            usage_detail[_k] = _u[_k]
+                        if _u.get("cost_usd") is not None:
+                            usage_detail["cost_usd"] = _u["cost_usd"]
+                        usage_p = _u["input"] + _u["cache_read"] + _u["cache_write"]
+                        usage_c = _u["output"]
+                if obj.get("type") == "result" and obj.get("is_error"):
+                    cli_error = str(obj.get("result") or "").strip()
+                    try:
+                        cli_error_status = int(obj.get("api_error_status") or 0)
+                    except Exception:
+                        cli_error_status = 0
+                try:
+                    for ev in mapper(obj, root_ev):
+                        if ev.type == "tool_call":
+                            tool_calls += 1
+                        elif ev.type == "token":
+                            text = str((ev.data or {}).get("content") or "")
+                            if (ev.data or {}).get("final"):
+                                final_text_parts = [text]
+                                if streamed_text:
+                                    continue  # already shown live; don't render it a second time
+                            else:
+                                streamed_text = True
+                                final_text_parts.append(text)
+                        yield ev
+                except Exception:
+                    yield root_ev("log", {"message": line[:300]})
 
-        if not timed_out:
+            if not timed_out:
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=10)
+                except Exception:
+                    pass
+            stderr_task.cancel()
+        finally:
             try:
-                await asyncio.wait_for(proc.wait(), timeout=10)
+                if proc is not None and proc.returncode is None:
+                    proc.kill()
             except Exception:
                 pass
-        stderr_task.cancel()
+            if container and workspace_path:
+                _kill_run(container, workspace_path)          # graceful TERM, argv/cwd-keyed
+            if container and run_id:
+                kill_run_by_marker(container, run_id)         # SIGKILL backstop, env-marker-keyed
+
+    # Explicitly closed rather than just iterated: the process-kill guarantee lives in
+    # _run_cli's `finally`, and when the CLIENT aborts this turn the GeneratorExit lands on
+    # THIS frame, not the inner one. Without the aclose the sidecar would keep burning
+    # credits until the loop got round to finalizing an abandoned generator.
+    _gen = _run_cli(cmd)
+    try:
+        async for ev in _gen:
+            yield ev
     finally:
-        try:
-            if proc is not None and proc.returncode is None:
-                proc.kill()
-        except Exception:
-            pass
-        if container and workspace_path:
-            _kill_run(container, workspace_path)          # graceful TERM, argv/cwd-keyed
-        if container and run_id:
-            kill_run_by_marker(container, run_id)         # SIGKILL backstop, env-marker-keyed
+        await _gen.aclose()
+    if launch_failed:
+        return
+
+    # The FIRST attempt's outcome, pinned before any repair round can overwrite it. Every
+    # verdict below — timed out, credential rejected, made no changes — is a statement about
+    # the build, and a repair round that dies must not be allowed to turn a successful build
+    # into a reported failure and throw the user's files away.
+    first_rc = proc.returncode if proc is not None else None
+    first_error, first_error_status = cli_error, cli_error_status
+    first_timed_out, first_stderr = timed_out, list(stderr_buf)
 
     # Collect the cumulative diff (working tree vs base_sha) — even on a non-zero exit.
-    try:
-        diff = await iso.collect_diff(workspace_path)
-        files = await iso.collect_changed_files(workspace_path)
-        contents = await iso.collect_file_contents(workspace_path)
-    except Exception as exc:
-        logger.warning("engine_adapter: diff collection failed: %s", exc, exc_info=True)
-        diff, files, contents = "", [], {}
+    async def _collect():
+        try:
+            return (
+                await iso.collect_diff(workspace_path),
+                await iso.collect_changed_files(workspace_path),
+                await iso.collect_file_contents(workspace_path),
+            )
+        except Exception as exc:
+            logger.warning("engine_adapter: diff collection failed: %s", exc, exc_info=True)
+            return "", [], {}
+
+    diff, files, contents = await _collect()
+
+    # ── Syntax + link gate ───────────────────────────────────────────────────
+    # The same gate the native lane has run since the dead-Asteroids turn, now on this one
+    # too. It is if anything MORE needed here: these engines are the capable ones, they are
+    # the ones users point at "build me a site", and a menu page linking two games nobody
+    # wrote is exactly what came back — rendering perfectly, every card a dead end, and a
+    # confident summary over the top. Only after a clean run: a timed-out or unauthenticated
+    # attempt has a broken workspace for a reason repair cannot touch.
+    base_parts = list(final_text_parts)
+    first_broken: dict = {}
+    broken: dict = {}
+    repair_round = 0
+    repair_summary = ""
+    if SYNTAX_REPAIR_ROUNDS > 0 and not first_timed_out and not first_error and first_rc in (0, None):
+        broken, weight = gate_check(contents, files, workspace_path)
+        first_broken = dict(broken)
+        while broken and repair_round < SYNTAX_REPAIR_ROUNDS:
+            repair_round += 1
+            listed = ", ".join(sorted(broken))
+            logger.info(
+                "engine_adapter: %s left %d broken file(s) (%s) — repair round %d/%d",
+                parent_workspace_id, len(broken), listed, repair_round, SYNTAX_REPAIR_ROUNDS,
+            )
+            yield root_ev("log", {
+                "message": (f"Code check failed on {listed} — repair round {repair_round} "
+                            f"of {SYNTAX_REPAIR_ROUNDS}."),
+            })
+            # A bare defect list, with neither the conversation prefix nor the layout
+            # contract: this round has one job, and re-stating the original request is how a
+            # repair turns into a rewrite of the working parts.
+            rcmd, _ = _BUILDERS[engine](
+                container, workspace_path, repair_task(broken, native=False),
+                model_name, api_key, user_id=user_id, auth_mode=auth_mode,
+            )
+            if run_id and len(rcmd) >= 2 and rcmd[0] == "docker" and rcmd[1] == "exec":
+                rcmd = [rcmd[0], rcmd[1], "-e", f"HARVIS_RUN_ID={run_id}", *rcmd[2:]]
+            final_text_parts, streamed_text = [], False
+            _rgen = _run_cli(rcmd)
+            try:
+                async for ev in _rgen:
+                    yield ev
+            finally:
+                await _rgen.aclose()
+            if launch_failed:
+                break
+            repair_summary = " ".join(x for x in final_text_parts if x).strip() or repair_summary
+            diff, files, contents = await _collect()
+            still, still_weight = gate_check(contents, files, workspace_path)
+            if still and still_weight >= weight:
+                # Not one defect fewer than this round started with. Another round costs a
+                # real request and repeats the same failure.
+                logger.info("engine_adapter: %s repair round %d made no progress (%d -> %d)",
+                            parent_workspace_id, repair_round, weight, still_weight)
+                broken = still
+                break
+            broken, weight = still, still_weight
+        final_text_parts = base_parts
+
+    gate_note = ""
+    if first_broken:
+        if broken:
+            # Say so plainly. A summary claiming success over a page the browser will not
+            # run is the exact failure this gate exists to end.
+            detail = "; ".join(f"{rel} ({err})" for rel, err in sorted(broken.items()))
+            gate_note = (
+                f"⚠ Heads up: {detail}. The page will not work in a browser until that is "
+                f"resolved — I tried {repair_round} time{'s' if repair_round != 1 else ''} "
+                "and could not. Ask me to try again, or open the files and fix it directly."
+            )
+            yield root_ev("log", {"message": f"Still broken after repair: {detail}"})
+        else:
+            fixed = ", ".join(sorted(first_broken))
+            if repair_summary:
+                gate_note = f"Then I caught and fixed a problem in {fixed}: {repair_summary}"
+            yield root_ev("log", {"message": f"Repaired {fixed}."})
 
     repo_name = os.path.basename((repo_path or workspace_path).rstrip("/")) or "session"
     await _db_save_artifact(pool, parent_workspace_id, "diff", path=f"{label} · {repo_name}", content=diff or "(no changes)")
@@ -861,11 +1090,15 @@ async def run_external_engine_adapter(
 
     try:
         async with pool.acquire() as conn:
+            _captured = any(usage_detail[k] for k in
+                            ("input", "cache_read", "cache_write", "output", "context_tokens"))
+            _detail = json.dumps(usage_detail) if (_captured or usage_detail["cost_usd"]) else None
             await conn.execute(
                 "UPDATE workspace_runs SET model_name=COALESCE(NULLIF($2,''), model_name), "
                 "prompt_tokens=COALESCE(NULLIF($3,0), prompt_tokens), "
-                "completion_tokens=COALESCE(NULLIF($4,0), completion_tokens) WHERE id=$1",
-                parent_workspace_id, model_id, int(usage_p or 0), int(usage_c or 0),
+                "completion_tokens=COALESCE(NULLIF($4,0), completion_tokens), "
+                "usage_detail=COALESCE($5::jsonb, usage_detail) WHERE id=$1",
+                parent_workspace_id, model_id, int(usage_p or 0), int(usage_c or 0), _detail,
             )
     except Exception:
         pass
@@ -874,8 +1107,8 @@ async def run_external_engine_adapter(
     logger.info("engine_adapter: %s done (engine=%s model=%s, %d tool_calls, %d files, %.1fs)",
                 parent_workspace_id, engine, model_id, tool_calls, n, time.monotonic() - started)
 
-    if timed_out:
-        yield root_ev("error", _timeout_event(label, timed_out))
+    if first_timed_out:
+        yield root_ev("error", _timeout_event(label, first_timed_out))
         return
     # `n == 0` alone can't distinguish the three ways a run ends with nothing changed:
     # the engine ran and had nothing to do (fine), the sidecar was never there (install gap),
@@ -885,26 +1118,26 @@ async def run_external_engine_adapter(
     # A non-zero exit is only FATAL when nothing came of the run. If the engine changed files
     # before dying, the diff is real and already saved — dropping it to show an error would
     # lose the user's work, so that case surfaces as a warning alongside the normal result.
-    rc = proc.returncode if proc is not None else None
-    if rc not in (0, None) and n > 0 and not cli_error:
+    rc = first_rc
+    if rc not in (0, None) and n > 0 and not first_error:
         yield root_ev("log", {
             "message": f"{label} exited with code {rc} after changing {n} file(s) — "
                        f"review the diff before applying."
         })
-    elif cli_error or rc not in (0, None) or (n == 0 and stderr_buf):
-        if _missing_sidecar(stderr_buf, container):
+    elif first_error or rc not in (0, None) or (n == 0 and first_stderr):
+        if _missing_sidecar(first_stderr, container):
             yield root_ev("error", {
                 "message": f"{label} isn't installed on this Harvis.",
                 "fix_hint": _engine_install_hint(engine, container),
             })
             return
-        if cli_error_status in (401, 403):
+        if first_error_status in (401, 403):
             yield root_ev("error", {
-                "message": f"{label} rejected the credential: {cli_error[:300]}",
+                "message": f"{label} rejected the credential: {first_error[:300]}",
                 "fix_hint": f"Re-verify the {label} credential in Integrations.",
             })
             return
-        detail = cli_error or (stderr_buf[-1] if stderr_buf else f"exit code {rc}")
+        detail = first_error or (first_stderr[-1] if first_stderr else f"exit code {rc}")
         yield root_ev("error", {
             "message": f"{label} made no changes. {detail[:300]}",
             "fix_hint": "Check the engine is connected/authenticated and the task is actionable.",
@@ -916,6 +1149,10 @@ async def run_external_engine_adapter(
         # Hermes `-z` prints the final response as plain text — use the output tail.
         wrap = "\n".join(text_tail[-8:]).strip()
     summary = (wrap[:1500] if wrap else "") or f"{label} finished — {n} file(s) changed."
+    # Appended AFTER the truncation, never before: the gate's verdict is the one line the
+    # user most needs and the one a 1500-char clip would take off the end.
+    if gate_note:
+        summary = f"{summary}\n\n{gate_note}"
     yield root_ev("done", {"summary": summary, "changed_files": files})
 
 

@@ -138,12 +138,23 @@
 
 	// ── details drawer ──────────────────────────────────────────────────────────────────
 	let showDetail = false;
+	// Hold the ID; DERIVE the definition. Polling re-merges every 7s, and deriving is what keeps
+	// an open drawer current without anyone writing to it.
+	//
+	// This used to be `$: if (showDetail && detailDef) detailDef = merged.find(…)` — a reactive
+	// statement that read detailDef and also assigned it. Svelte compares with safe_not_equal,
+	// which reports EVERY object as changed even when it is the identical reference, so that
+	// assignment re-armed its own effect forever and the update-depth guard killed the page
+	// (`effect_update_depth_exceeded`). It stayed dormant until showDetail flipped true — which is
+	// exactly why clicking any card (Manage API key, Discord, anything) froze every button on the
+	// tab instead of opening the drawer.
+	let detailId = '';
 	let detailDef: IntegrationDefinition | null = null;
+	$: detailDef = detailId ? (merged.find((d) => d.id === detailId) ?? null) : null;
 	const openModal = (id: string) => {
-		detailDef = merged.find((d) => d.id === id) ?? null;
-		showDetail = !!detailDef;
+		detailId = id;
+		showDetail = merged.some((d) => d.id === id);
 	};
-	$: if (showDetail && detailDef) detailDef = merged.find((d) => d.id === detailDef!.id) ?? detailDef;
 	// Refetch when the drawer closes (catches connect/verify/disconnect done inside it).
 	let wasOpen = false;
 	$: {
@@ -290,12 +301,6 @@
 					>
 						{$i18n.t('Refresh')}
 					</button>
-					<button
-						class="text-xs px-2.5 py-1 rounded-lg border border-blue-500/30 text-blue-600 dark:text-blue-300 hover:bg-blue-500/10 transition"
-						on:click={() => (showFreeKeys = true)}
-					>
-						{$i18n.t('Get free API keys')}
-					</button>
 				</div>
 			</div>
 
@@ -430,7 +435,12 @@
 							{@const lead = leadOf(cardsInSection(s))}
 							{#if lead}
 								<div class="mt-1 mb-2">
-									<FeaturedProviderCard def={lead} {engineReadiness} on:open={(e) => openModal(e.detail)} />
+									<FeaturedProviderCard
+										def={lead}
+										{engineReadiness}
+										on:open={(e) => openModal(e.detail)}
+										on:freeKeys={() => (showFreeKeys = true)}
+									/>
 								</div>
 							{/if}
 							<div class="grid grid-cols-1 md:grid-cols-2 gap-x-4 mt-0.5">
@@ -455,7 +465,12 @@
 		{:else}
 			{@const flatLead = leadOf(flatCards)}
 			{#if flatLead}
-				<FeaturedProviderCard def={flatLead} {engineReadiness} on:open={(e) => openModal(e.detail)} />
+				<FeaturedProviderCard
+					def={flatLead}
+					{engineReadiness}
+					on:open={(e) => openModal(e.detail)}
+					on:freeKeys={() => (showFreeKeys = true)}
+				/>
 			{/if}
 			<div class="grid grid-cols-1 md:grid-cols-2 gap-x-4">
 				{#each restOf(flatCards) as def (def.id)}

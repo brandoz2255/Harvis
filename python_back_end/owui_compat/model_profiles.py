@@ -19,7 +19,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 logger = logging.getLogger(__name__)
 
-_EFFORTS = {"low", "medium", "high", "max"}
+# Must stay in lockstep with the picker's level list and with cloud_chat._EFFORT_BUDGET /
+# _EFFORT_OPENAI — an id missing here is rejected as invalid and the save 400s.
+_EFFORTS = {"minimal", "low", "medium", "high", "extra_high", "max", "ultra"}
 _NAME_MAX = 60
 _BUDGET_MAX = 200000
 

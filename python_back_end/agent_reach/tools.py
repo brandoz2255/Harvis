@@ -433,26 +433,32 @@ async def rss_read(url: str, *, max_items: int = 10) -> dict[str, Any]:
 
 
 async def dispatch_agent_reach(name: str, args: dict) -> str:
-    """Run one agent_reach.* tool. Returns text for the model. Never raises."""
+    """Run one agent_reach_* tool. Returns text for the model. Never raises."""
     if not agent_reach_enabled():
         return (
             "DENIED: Agent Reach is disabled "
             "(set HARVIS_AGENT_REACH_ENABLED=1). Never install Agent Reach inside OpenClaw."
         )
     args = args if isinstance(args, dict) else {}
+    # These tools were named with a dot until the wire schema moved to underscores
+    # (OpenAI's function-name grammar is ^[a-zA-Z0-9_-]{1,64}$, so a dotted name is a
+    # 400 on every strict OpenAI-compatible provider). Old run history and any prompt
+    # that quotes it still carry the dotted form, so accept both spellings.
+    if name.startswith("agent_reach."):
+        name = "agent_reach_" + name[len("agent_reach.") :]
     try:
-        if name == "agent_reach.web_search":
+        if name == "agent_reach_web_search":
             out = await web_search(
                 str(args.get("query") or args.get("q") or ""),
                 max_results=int(args.get("max_results") or 5),
             )
-        elif name == "agent_reach.web_read":
+        elif name == "agent_reach_web_read":
             out = await web_read(str(args.get("url") or ""))
-        elif name == "agent_reach.yt_transcript":
+        elif name == "agent_reach_yt_transcript":
             out = await yt_transcript(str(args.get("url") or ""))
-        elif name == "agent_reach.gh_view":
+        elif name == "agent_reach_gh_view":
             out = await gh_view(str(args.get("url") or args.get("path") or ""))
-        elif name == "agent_reach.rss_read":
+        elif name == "agent_reach_rss_read":
             out = await rss_read(
                 str(args.get("url") or ""),
                 max_items=int(args.get("max_items") or 10),

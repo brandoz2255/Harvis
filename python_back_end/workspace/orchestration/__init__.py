@@ -35,6 +35,14 @@ ALTER TABLE workspace_runs ADD COLUMN IF NOT EXISTS source         TEXT;
 ALTER TABLE workspace_runs ADD COLUMN IF NOT EXISTS prompt_tokens     INTEGER;
 ALTER TABLE workspace_runs ADD COLUMN IF NOT EXISTS completion_tokens INTEGER;
 ALTER TABLE workspace_runs ADD COLUMN IF NOT EXISTS context_window    INTEGER;
+-- The same usage kept APART instead of summed, because prompt_tokens answers two different
+-- questions depending on the lane and the meter needs both: on the CLI lanes it is the
+-- CUMULATIVE billed input for the whole run (a measured Claude run: 1,014,460 against a
+-- 200,000 window), on the native lane it is last-step occupancy. Shape:
+--   {input, cache_read, cache_write, output, context_tokens, cost_usd, source}
+-- The three input classes bill at three different rates (a cache read is a tenth of base,
+-- a cache write a quarter above it), so one summed number cannot price a run.
+ALTER TABLE workspace_runs ADD COLUMN IF NOT EXISTS usage_detail      JSONB;
 
 -- The user's original attachments (image/file refs) for a turn, so the chat thread can
 -- render them inline (the agent's brief carries the machine-readable refs separately).

@@ -24,10 +24,18 @@
 			<SettingRow title={$i18n.t('Product')}>
 				<span class="text-sm text-gray-800 dark:text-gray-100 font-medium">{$WEBUI_NAME}</span>
 			</SettingRow>
+			<!-- Harvis's version is the one the server reports (/api/config). WEBUI_VERSION is
+			     the vendored Open WebUI package version — a different project's number, kept
+			     because tool/function manifests still compatibility-check against it. -->
 			<SettingRow title={$i18n.t('Version')}>
 				<Tooltip content={WEBUI_BUILD_HASH || $i18n.t('Build hash unavailable')}>
-					<span class="text-sm text-gray-700 dark:text-gray-200">v{WEBUI_VERSION}</span>
+					<span class="text-sm text-gray-700 dark:text-gray-200"
+						>v{$config?.version ?? WEBUI_VERSION}</span
+					>
 				</Tooltip>
+			</SettingRow>
+			<SettingRow title={$i18n.t('Open WebUI base')}>
+				<span class="text-sm text-gray-700 dark:text-gray-200">v{WEBUI_VERSION}</span>
 			</SettingRow>
 			{#if ollamaVersion}
 				<SettingRow title={$i18n.t('Ollama')}>

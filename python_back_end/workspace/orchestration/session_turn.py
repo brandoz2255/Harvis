@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import re
@@ -31,9 +32,23 @@ from typing import AsyncGenerator
 from ..openclaw_client import OpenClawEvent
 from .conversation import conversation_prefix
 from .isolation import SESSION_WORKSPACE_ROOT, WorkspaceIsolationManager
+from .syntax_gate import SYNTAX_REPAIR_ROUNDS, gate_check, repair_task
 from .runner import SubAgentRunner
 
 logger = logging.getLogger(__name__)
+
+# How every vibecode turn is required to sign off, shared by both system prompts
+# below so the two can never drift on the one thing the chat bubble renders.
+_FINISH_CONTRACT = (
+    "When the task is fully done, call finish with `summary` — a warm, "
+    "talkative wrap-up written as a MESSAGE TO THE USER (several sentences, not a "
+    "log line). Walk through what you changed and why, go file by file when more "
+    "than one changed, mention the result of any tests or commands you ran "
+    "(passing/failing counts), call out anything worth knowing, and recommend a "
+    "sensible next step. Finish by clearly stating whether the task is complete. "
+    "Be conversational and thorough — like a teammate explaining their work — "
+    "never a terse \"done\"."
+)
 
 # Session-variant system prompt: the runner's default says "initially-empty
 # workspace"; here the workspace is an existing repo tree that prior turns may have
@@ -49,15 +64,75 @@ _VIBECODE_SYSTEM = (
     "file — it OVERWRITES the whole file, so using it on an existing file deletes "
     "everything you don't re-type. Run exec / run_tests to check your work. Build "
     "on the current state — do NOT recreate files that already exist. Do NOT ask "
-    "questions. When the task is fully done, call finish with `summary` — a warm, "
-    "talkative wrap-up written as a MESSAGE TO THE USER (several sentences, not a "
-    "log line). Walk through what you changed and why, go file by file when more "
-    "than one changed, mention the result of any tests or commands you ran "
-    "(passing/failing counts), call out anything worth knowing, and recommend a "
-    "sensible next step. Finish by clearly stating whether the task is complete. "
-    "Be conversational and thorough — like a teammate explaining their work — "
-    "never a terse \"done\"."
+    "questions. " + _FINISH_CONTRACT
 )
+
+# Scratch variant: a Build/Code session started with no repo at all, on a turn where
+# nothing has been written yet. The prompt above opens by asserting an EXISTING repo,
+# which is simply false here — and a model told to "read what is there before you
+# edit" does exactly that, finds an empty directory, and reports on it instead of
+# building. That is the whole of "I've reviewed the current state of the workspace".
+#
+# The runnability rules are not style advice: the Run tab serves a root index.html
+# with `python3 -m http.server` and no install step, so a page that needs a bundler
+# is the difference between code that runs in Harvis and code that only exists in
+# Harvis.
+#
+# But "self-contained" used to be written first and read as "put it all in one file",
+# so every build came back as a single 900-line index.html with the styles and the
+# whole game inlined — unreadable in the editor, unreviewable in the diff, and one
+# stray brace away from taking the entire app down with it. The real constraint was
+# never "one file"; it is "no build step". Sibling .css and .js files load over plain
+# HTTP with no install step at all, so ask for the project a person would actually
+# write and state the two limits that genuinely matter.
+_VIBECODE_SYSTEM_SCRATCH = (
+    "You are {label}, an autonomous coding agent working in an EMPTY workspace. "
+    "There is no existing project here and nothing to read first — your job is to "
+    "CREATE the files this task needs, from nothing. You can ONLY use the provided "
+    "tools, and ONLY write files inside the workspace using RELATIVE paths. Use "
+    "edit_file to create each new file with its complete contents; once a file "
+    "exists, change it with str_replace rather than rewriting the whole thing. "
+    "Start writing immediately — do NOT explore the workspace, do NOT report that "
+    "it is empty, and do NOT ask questions. "
+    "Write a REAL project laid out in SEPARATE FILES, the way you would in an "
+    "editor — not one enormous file with everything inlined. For anything web that "
+    "means index.html for the markup only, styles.css for the styling, and one or "
+    "more .js files for the behaviour, as sibling files at the workspace root "
+    "linked with relative paths: <link rel=\"stylesheet\" href=\"styles.css\"> and "
+    "<script src=\"game.js\"></script> before </body>. Once a piece of the program "
+    "is big enough to have a name, give it its own file. "
+    "Exactly two hard limits, because of how the Run tab serves what you write: "
+    "there MUST be an index.html at the workspace ROOT, and the whole thing must "
+    "open in a browser with NO build step and NO packages installed — no npm "
+    "imports, no bundler, and no CDN, because the sandbox has no internet. Plain "
+    "ES modules (<script type=\"module\" src=\"main.js\">) are fine and load over "
+    "the same static server. "
+    "Then make it actually WORK end to end: every control you draw must be wired "
+    "to real behaviour before you finish. Run exec to check your work — at minimum "
+    "list the files you wrote and confirm index.html references each one by the "
+    "name you actually used. "
+    + _FINISH_CONTRACT
+)
+
+
+
+
+def _workspace_is_scratch(workspace_path: str, repo_path: str) -> bool:
+    """True when this turn is starting from literally nothing.
+
+    Both halves matter. No `repo_path` means the session was created with no source
+    repo — Harvis's answer to "code without a repo, like VS Code". An otherwise empty
+    tree means no earlier turn has written anything yet: the isolation manager still
+    `git init`s the directory, so `.git` is present from the start and is not content.
+    On the next turn the files exist and the normal existing-tree prompt takes over,
+    which is what keeps a follow-up from recreating what turn one wrote.
+    """
+    if repo_path:
+        return False
+    try:
+        return not [e for e in os.listdir(workspace_path) if e != ".git"]
+    except OSError:
+        return False  # unreadable ⇒ assume the established path, never the new one
 
 # Per-session locks — serialize turns so two never edit one working tree at once.
 _session_locks: dict[str, asyncio.Lock] = {}
@@ -313,7 +388,14 @@ async def run_vibecode_turn(
     # clone-only, so every rung must work there). plan = read-only; ask/auto-accept =
     # the per-action approval gate; full-auto (or unset) = run freely with no gate.
     gate_mode = permission_mode if permission_mode in ("plan", "ask", "auto-accept") else None
-    sys_prompt = _VIBECODE_SYSTEM
+    _scratch = _workspace_is_scratch(workspace_path, repo_path)
+    _base_system = _VIBECODE_SYSTEM_SCRATCH if _scratch else _VIBECODE_SYSTEM
+    if _scratch:
+        logger.info(
+            "vibecode: turn %s starts from an empty workspace — scratch system prompt",
+            parent_workspace_id,
+        )
+    sys_prompt = _base_system
     # Seed default Build skill discipline into every vibecode turn (filesystem).
     try:
         from owui_compat.skills import load_bundled_skill_body
@@ -321,7 +403,7 @@ async def run_vibecode_turn(
         _build_skill = load_bundled_skill_body("harvis-build")
         if _build_skill:
             sys_prompt = (
-                _VIBECODE_SYSTEM
+                _base_system
                 + "\n\n## Bundled skill: harvis-build\n\n"
                 + _build_skill
             )
@@ -411,6 +493,7 @@ async def run_vibecode_turn(
                     "prompt_tokens": d.get("prompt_tokens"),
                     "completion_tokens": d.get("completion_tokens"),
                     "context_window": d.get("context_window"),
+                    "usage_detail": d.get("usage_detail"),
                 }
             yield ev
 
@@ -424,6 +507,130 @@ async def run_vibecode_turn(
         except Exception as exc:
             logger.warning("vibecode: diff collection failed: %s", exc, exc_info=True)
             diff, files, contents = "", [], {}
+
+        # ── Syntax gate ──────────────────────────────────────────────────────
+        # The agent can finish a turn convinced it succeeded while the file it wrote
+        # cannot be parsed at all — every tool call returned OK, the diff was clean,
+        # and the page was dead. Check what actually landed, and spend one round
+        # fixing it rather than handing the user a confident summary over broken code.
+        #
+        # `check_links` is the same failure reached the other way round, and asking
+        # for a multi-file project makes it the LIKELIER of the two: a measured run
+        # wrote an index.html correctly linking styles.css and main.js, rewrote that
+        # same index.html seven times, and never created either sibling. Both defects
+        # go into one map so a page missing its script and holding a broken brace is
+        # one repair round, not two.
+        broken, weight = gate_check(contents, files, workspace_path)
+        first_broken = dict(broken)
+        repair_round = 0
+        repair_summary = ""
+        # Repair until the workspace is clean, it stops improving, or the budget runs
+        # out. A LOOP rather than the single round this started as, because the two
+        # defect kinds fail differently: a model that cannot close its own brace on
+        # the first re-read will not close it on the third, but a model writing the
+        # files it forgot makes real, additive progress every round — a measured run
+        # produced styles.css on round one and would have produced main.js on round
+        # two, and stopping at one handed the user a page that still did nothing. The
+        # no-progress break is what keeps the stuck case from paying for the additive
+        # one: strictly fewer broken files, or the loop ends.
+        while broken and repair_round < SYNTAX_REPAIR_ROUNDS and gate_mode != "plan":
+            repair_round += 1
+            listed = ", ".join(sorted(broken))
+            logger.info(
+                "vibecode: turn %s left %d broken file(s) (%s) — repair round %d/%d",
+                parent_workspace_id, len(broken), listed,
+                repair_round, SYNTAX_REPAIR_ROUNDS,
+            )
+            yield root_ev("log", {
+                "message": (
+                    f"Code check failed on {listed} — repair round {repair_round} "
+                    f"of {SYNTAX_REPAIR_ROUNDS}."
+                ),
+            })
+            async for ev in runner.run(
+                run_id=run_id,
+                parent_run_id=run_id,
+                label=label,
+                task=repair_task(broken, native=True),
+                model_name=model_name,
+                workspace_path=workspace_path,
+                system_prompt=sys_prompt,
+                permission_mode=gate_mode,
+                launch_mode=launch_mode,
+                pool=pool,
+                user_id=user_id,
+                session_id=vibecode_session_id or None,
+            ):
+                if ev.type == "tool_call":
+                    tool_calls += 1
+                elif ev.type == "agent_end":
+                    d = ev.data or {}
+                    repair_summary = d.get("summary") or ""
+                    # Tokens are cumulative for the turn; the context window is a
+                    # ceiling, not a total, so it takes the larger of the two.
+                    for k in ("prompt_tokens", "completion_tokens"):
+                        if d.get(k):
+                            turn_usage[k] = (turn_usage.get(k) or 0) + d[k]
+                    if d.get("context_window"):
+                        turn_usage["context_window"] = max(
+                            turn_usage.get("context_window") or 0, d["context_window"]
+                        )
+                    # Billed tokens add up across rounds; occupancy does NOT — a repair
+                    # round is its own conversation, so the LAST round's reading is the
+                    # current one. Summing them made a 3-round turn look 3× as full.
+                    _rd = d.get("usage_detail")
+                    if isinstance(_rd, dict):
+                        _acc = turn_usage.get("usage_detail")
+                        if not isinstance(_acc, dict):
+                            turn_usage["usage_detail"] = dict(_rd)
+                        else:
+                            for k in ("input", "cache_read", "cache_write", "output"):
+                                _acc[k] = (_acc.get(k) or 0) + (_rd.get(k) or 0)
+                            _acc["context_tokens"] = _rd.get("context_tokens") or _acc.get("context_tokens")
+                            if _rd.get("cost_usd") is not None:
+                                _acc["cost_usd"] = (_acc.get("cost_usd") or 0) + _rd["cost_usd"]
+                yield ev
+            try:
+                diff = await iso.collect_diff(workspace_path)
+                files = await iso.collect_changed_files(workspace_path)
+                contents = await iso.collect_file_contents(workspace_path)
+            except Exception as exc:
+                logger.warning("vibecode: post-repair diff failed: %s", exc, exc_info=True)
+            still, still_weight = gate_check(contents, files, workspace_path)
+            if still and still_weight >= weight:
+                # No fewer defects than we started this round with — another round
+                # would cost a request and repeat the same failure. Stop.
+                logger.info(
+                    "vibecode: turn %s repair round %d made no progress (%d -> %d)",
+                    parent_workspace_id, repair_round, weight, still_weight,
+                )
+                broken = still
+                break
+            broken, weight = still, still_weight
+
+        if SYNTAX_REPAIR_ROUNDS > 0 and gate_mode != "plan" and first_broken:
+            still = broken
+            if still:
+                # Say so plainly. A summary that claims success over a file the browser
+                # will refuse to run is the exact failure this gate exists to end.
+                detail = "; ".join(f"{rel} ({err})" for rel, err in sorted(still.items()))
+                final_summary = (
+                    (final_summary + "\n\n") if final_summary else ""
+                ) + (
+                    f"⚠ Heads up: {detail}. The page will not work in a browser until "
+                    f"that is resolved — I tried {repair_round} "
+                    f"time{'s' if repair_round != 1 else ''} and could not. Ask me to "
+                    "try again, or open the files and fix it directly."
+                )
+                ok_overall = False
+                yield root_ev("log", {"message": f"Still broken after repair: {detail}"})
+            else:
+                fixed = ", ".join(sorted(first_broken))
+                if repair_summary:
+                    final_summary = (
+                        (final_summary + "\n\n") if final_summary else ""
+                    ) + f"Then I caught and fixed a problem in {fixed}: {repair_summary}"
+                yield root_ev("log", {"message": f"Repaired {fixed}."})
 
     repo_name = os.path.basename((repo_path or workspace_path).rstrip("/")) or "session"
     await _db_save_artifact(
@@ -455,15 +662,18 @@ async def run_vibecode_turn(
     # context/token gauge reads these straight off the turn rows.
     try:
         async with pool.acquire() as conn:
+            _detail = turn_usage.get("usage_detail")
             await conn.execute(
                 "UPDATE workspace_runs SET prompt_tokens = $2, completion_tokens = $3, "
-                "context_window = $4, model_name = COALESCE(NULLIF($5, ''), model_name) "
+                "context_window = $4, model_name = COALESCE(NULLIF($5, ''), model_name), "
+                "usage_detail = COALESCE($6::jsonb, usage_detail) "
                 "WHERE id = $1",
                 parent_workspace_id,
                 turn_usage.get("prompt_tokens"),
                 turn_usage.get("completion_tokens"),
                 turn_usage.get("context_window"),
                 model_name,
+                json.dumps(_detail) if isinstance(_detail, dict) else None,
             )
     except Exception as exc:
         logger.warning("vibecode: token usage persist failed: %s", exc)

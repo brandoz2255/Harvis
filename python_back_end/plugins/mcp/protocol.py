@@ -242,15 +242,32 @@ class McpSession(_McpMethods):
         self._writer.write(line)
         await self._writer.drain()
 
+    async def _drain_frame(self) -> bool:
+        """Consume THROUGH the next newline after an oversized frame.
+
+        readuntil() leaves the oversized data in the buffer, and a fixed-size
+        read stops at an arbitrary offset — the tail of the dropped frame then
+        comes back as if it were a fresh line, which is the desync this is
+        supposed to prevent. Returns False at EOF.
+        """
+        while True:
+            try:
+                await self._reader.readuntil(b"\n")
+                return True
+            except asyncio.LimitOverrunError:
+                await self._reader.read(_MAX_LINE)
+            except (asyncio.IncompleteReadError, ConnectionError):
+                return False
+
     async def _read_loop(self) -> None:
         try:
             while not self._closed:
                 try:
                     line = await self._reader.readuntil(b"\n")
                 except asyncio.LimitOverrunError:
-                    # Oversized frame: drain it rather than desync the stream.
                     logger.warning("mcp[%s]: oversized frame dropped", self._label)
-                    await self._reader.read(_MAX_LINE)
+                    if not await self._drain_frame():
+                        break
                     continue
                 except (asyncio.IncompleteReadError, ConnectionError):
                     break

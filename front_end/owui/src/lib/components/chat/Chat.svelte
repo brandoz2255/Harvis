@@ -3982,16 +3982,6 @@
 		if (!($settings?.title?.auto ?? true)) return;
 		if (autoTitledChatIds.has(_chatId)) return;
 
-		// `autoTitledChatIds` only remembers this page load, so a chat that was named in an
-		// earlier session used to get renamed again on its next save — spending a model call
-		// to overwrite a title the user already has. The server's title is the durable
-		// record of "this has been named"; anything but the placeholder means leave it.
-		const _named = (_existingTitle || '').trim();
-		if (_named && _named !== $i18n.t('New Chat')) {
-			autoTitledChatIds.add(_chatId);
-			return;
-		}
-
 		// Same torn pair that corrupts saves: this used to read the LIVE `history`, so a
 		// title requested for the chat being saved was generated from whichever chat the
 		// user had navigated to. That is how a chat ends up named after someone else's
@@ -4002,6 +3992,37 @@
 			role: m.role,
 			content: typeof m.content === 'string' ? m.content : (m.content ?? '')
 		}));
+
+		// `autoTitledChatIds` only remembers this page load, so a chat that was named in an
+		// earlier session used to get renamed again on its next save — spending a model call
+		// to overwrite a title the user already has. The server's title is the durable
+		// record of "this has been named".
+		//
+		// But it is NOT always a name. The backend derives a placeholder from the first user
+		// message on any save that lands while the chat is still called "New Chat"
+		// (`_derive_title` in owui_compat/persistence.py), and a turn saves mid-stream — so on
+		// a slow lane the placeholder is ALWAYS written before the reply finishes. This guard
+		// then read it as "already named" and returned without ever calling the titler, which
+		// is why every recent Claude-subscription chat is sitting in the sidebar wearing its
+		// own raw prompt. Reproduce the server's derivation exactly; if the stored title IS
+		// that string, the chat is unnamed and titling should proceed.
+		const _derivePlaceholder = (s) => {
+			const norm = `${s ?? ''}`
+				.replace(/\s+/g, ' ')
+				.trim()
+				.replace(/^\/?workspace\s+/i, '');
+			return norm.length > 60 ? `${norm.slice(0, 60).replace(/\s+$/, '')}…` : norm;
+		};
+		const _named = (_existingTitle || '').trim();
+		const _firstUserContent = _msgs.find((m) => m.role === 'user')?.content ?? '';
+		if (
+			_named &&
+			_named !== $i18n.t('New Chat') &&
+			_named !== _derivePlaceholder(_firstUserContent)
+		) {
+			autoTitledChatIds.add(_chatId);
+			return;
+		}
 
 		// Only the first exchange, and only once the assistant has actually said
 		// something — naming a half-streamed reply produces a title about nothing.
