@@ -144,6 +144,14 @@ class Connection(SettingsMethods):
     async def m_approval_respond(self, rid, params):
         return _ok(rid, {"ok": True})
 
+    async def m_approval_received(self, rid, params):
+        # The desktop acks that it displayed an approval prompt (prompts.ts
+        # receiveApprovalRequest → gateway.request('approval.received', …)).
+        # There is no Harvis-side bookkeeping for it yet, but the UI awaits the
+        # call, so a missing handler rejected it with -32601 and stalled the
+        # approval overlay. Ack in the reference gateway's shape instead.
+        return _ok(rid, {"ok": True})
+
     # ── Desktop-only extras the shell polls after a session opens. None of
     # these have a Harvis counterpart yet; answer with the reference gateway's
     # empty shapes so the UI keeps its normal code paths instead of erroring.
