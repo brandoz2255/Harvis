@@ -49,6 +49,7 @@ from vison_models.llm_connector import (
 
 # Import workspace (Harvis Workspaces / OpenClaw integration)
 from workspace import workspace_router
+from workspace.openclaw_tasks_router import openclaw_tasks_router
 from workspace.model_proxy import model_proxy_router
 from workspace.github_proxy import github_proxy_router
 from workspace.rag_proxy import rag_proxy_router
@@ -1195,6 +1196,14 @@ app.include_router(artifact_router)
 
 # Include workspace router (Harvis Workspaces — OpenClaw agent integration)
 app.include_router(workspace_router)
+# Include OpenClaw task/instance REST + /ws/openclaw WebSocket surface consumed
+# by newjfrontend's OpenClaw UI (hooks/useOpenClawAPI.ts, useOpenClawWebSocket.ts).
+# Thin translation layer over the workspace engine above.
+app.include_router(openclaw_tasks_router)
+# Mount the TTS voice-library router (api/tts_routes.py, prefix /api/tts). It was
+# defined + imported but never included, so /api/tts/* returned 404.
+from api import tts_router
+app.include_router(tts_router)
 # Include workspace terminal router — per-session dockerized shell that lives
 # on openclaw-internal so the agent can `curl` it for `exec` calls. Persistent
 # named volume per workspace_id (see workspace/terminal_container.py).
