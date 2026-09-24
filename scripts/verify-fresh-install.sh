@@ -117,10 +117,17 @@ note "script after exercising voice if you want the warmed-up figure."
 
 say "Check 2a — the default set is actually up"
 
-EXPECTED="artifact-init backend browser-runner harvis-mcp nginx owui-builder pgsql voice-onnx"
-RENDERED=$(docker compose config --services 2>/dev/null | sort | tr '\n' ' ' | sed 's/ $//')
+# What a clean deploy gets. Grew from 8 to 10 on 2026-09-15: `llmfit` arrived
+# with the FreeToken inference-node work and `preview-runner` with the
+# multi-file build preview. Both are unprofiled in docker-compose.yaml, so a
+# fresh `./install.sh` starts them. Update this list when that file changes.
+EXPECTED="artifact-init backend browser-runner harvis-mcp llmfit nginx owui-builder pgsql preview-runner voice-onnx"
+# -f pins this to the file we SHIP. Without it Compose silently merges
+# docker-compose.override.yml, which is gitignored and personal — on a
+# developer box that makes this check measure their machine, not the deploy.
+RENDERED=$(docker compose -f docker-compose.yaml config --services 2>/dev/null | sort | tr '\n' ' ' | sed 's/ $//')
 if [ "$RENDERED" = "$(echo $EXPECTED | tr ' ' '\n' | sort | tr '\n' ' ' | sed 's/ $//')" ]; then
-  pass "compose renders exactly the 8 default services"
+  pass "compose renders exactly the 10 default services"
 else
   fail "default service set changed"
   note "expected: $EXPECTED"
@@ -129,7 +136,7 @@ fi
 
 # artifact-init and owui-builder are one-shot: they populate a bind mount and
 # exit 0. Treating their absence from `ps` as a failure would be wrong.
-for svc in backend browser-runner harvis-mcp nginx pgsql voice-onnx; do
+for svc in backend browser-runner harvis-mcp llmfit nginx pgsql preview-runner voice-onnx; do
   state=$(docker compose ps --format '{{.Service}} {{.State}}' 2>/dev/null | awk -v s="$svc" '$1==s {print $2}')
   case "$state" in
     running) pass "$svc running" ;;
@@ -138,7 +145,7 @@ for svc in backend browser-runner harvis-mcp nginx pgsql voice-onnx; do
   esac
 done
 
-for svc in artifact-init owui-builder; do
+for svc in artifact-init owui-builder hermes-ui-builder; do
   code=$(docker compose ps -a --format '{{.Service}} {{.ExitCode}}' 2>/dev/null | awk -v s="$svc" '$1==s {print $2}')
   if [ "$code" = "0" ]; then pass "$svc completed (exit 0)"
   else fail "$svc exit code '$code' (expected 0)"; fi
@@ -146,11 +153,26 @@ done
 
 say "Check 2b — the UI loads"
 
-if curl -fsS --max-time 20 "$UI_URL" -o /dev/null 2>/dev/null; then
+# `/` is a redirect to the Hermes shell now, and an unsigned-in visitor is
+# redirected again to the account screen. Follow both: without -L this check
+# passes on the 302 alone and never touches a real page, which is exactly how a
+# broken shell would slip through.
+if curl -fsSL --max-time 20 "$UI_URL" -o /dev/null 2>/dev/null; then
   pass "nginx serves $UI_URL"
 else
   fail "$UI_URL did not answer — nginx up but no frontend? check owui-builder's bind mount"
 fi
+
+# The front door must land a signed-out visitor on the account screen. A 500
+# here means the Hermes session gate is pointed at an endpoint the backend does
+# not serve: nginx turns any auth_request answer that is not 2xx/401/403 into a
+# 500, and `nginx -t` cannot see it.
+GATE=$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' --max-time 20 "$UI_URL/hermes/" 2>/dev/null)
+case "$GATE" in
+  302*"/auth"*) pass "signed-out /hermes/ redirects to the account screen" ;;
+  200*)         pass "/hermes/ served (an existing session is signed in)" ;;
+  *)            fail "/hermes/ answered '$GATE' — expected a 302 to /auth or a 200" ;;
+esac
 
 # ------------------------------------------------------- the no-engine case
 
@@ -183,14 +205,32 @@ else
   fail "/api/ollama-models did not answer — the API should degrade, not fall over"
 fi
 
-if docker compose logs --tail 400 backend 2>/dev/null | python3 -c '
-import sys
-bad = [l for l in sys.stdin if "traceback" in l.lower() or "unhandled" in l.lower()]
-print("\n".join(l.rstrip() for l in bad[:5]))
-sys.exit(1 if bad else 0)'; then
-  pass "no traceback in the last 400 backend log lines"
+# Two different faults were sharing one assertion. The old grep matched
+# "traceback" OR "unhandled", so a routine `unhandled RPC <method>` warning from
+# the Hermes facade reported itself as "backend logs contain a traceback" — a
+# real finding wearing the wrong name, which is how it went unread. Split.
+LOGS=$(docker compose logs --tail 400 backend 2>/dev/null)
+
+if printf '%s' "$LOGS" | grep -qi "traceback"; then
+  fail "backend logs contain a traceback"
+  printf '%s' "$LOGS" | grep -i -A4 "traceback" | head -20 | sed 's/^/        /'
 else
-  fail "backend logs contain a traceback — read them before calling this a pass"
+  pass "no traceback in the last 400 backend log lines"
+fi
+
+# The Hermes UI speaks JSON-RPC to a facade that answers only the methods it
+# implements (python_back_end/plugins/hermes_ui/ws.py). Anything else logs an
+# unhandled warning and returns -32601 to a UI that asked in earnest, so the
+# feature behind it is simply dead on screen. Name the methods.
+MISSING_RPC=$(printf '%s' "$LOGS" \
+  | grep -o "unhandled RPC [A-Za-z0-9._-]*" \
+  | awk '{print $3}' | sort -u | tr '\n' ' ' | sed 's/ $//')
+if [ -n "$MISSING_RPC" ]; then
+  fail "the Hermes facade does not implement every RPC the UI calls"
+  note "unimplemented: $MISSING_RPC"
+  note "each one is a -32601 to the UI — the feature behind it cannot work"
+else
+  pass "no unimplemented RPC calls in the last 400 backend log lines"
 fi
 
 # ------------------------------------------------------------- human steps

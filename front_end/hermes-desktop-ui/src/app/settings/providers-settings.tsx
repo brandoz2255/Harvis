@@ -45,8 +45,9 @@ function GroupLabel({ children }: { children: ReactNode }) {
   )
 }
 
-// Sub-views surfaced as a sidebar subnav: account sign-in vs raw API keys.
-export const PROVIDER_VIEWS = ['accounts', 'keys', 'custom-endpoints'] as const
+// Sub-views surfaced as a sidebar subnav. 'harvis' (model providers + free
+// hosted keys) and 'engines' (coding engines) render from settings/index.tsx.
+export const PROVIDER_VIEWS = ['harvis', 'engines', 'accounts', 'keys', 'custom-endpoints'] as const
 
 export type ProviderView = (typeof PROVIDER_VIEWS)[number]
 

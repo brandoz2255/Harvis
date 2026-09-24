@@ -147,12 +147,77 @@ export function activeProfileKey(): string {
   return normalizeProfileKey($activeGatewayProfile.get())
 }
 
+// ── Browser flows ────────────────────────────────────────────────────────────
+// On the web there is no native save/open dialog and no shared filesystem, so a
+// Harvis profile travels as the JSON document the backend's export returns
+// (soul + model + description, never a secret): downloaded, then re-uploaded.
+
+async function downloadProfileDocument(target: string): Promise<null | string> {
+  try {
+    const { archive } = await exportProfileArchive(target)
+    const blob = new Blob([JSON.stringify(archive, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    const filename = `${target}.harvis-profile.json`
+    link.href = url
+    link.download = filename
+    link.click()
+    URL.revokeObjectURL(url)
+    notify({ kind: 'success', title: translateNow('profiles.exported'), message: filename })
+
+    return filename
+  } catch (error) {
+    notifyError(error, translateNow('profiles.failedExport'))
+
+    return null
+  }
+}
+
+function pickJsonFile(): Promise<File | null> {
+  return new Promise(resolve => {
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.accept = 'application/json,.json'
+    input.addEventListener('change', () => resolve(input.files?.[0] ?? null), { once: true })
+    input.addEventListener('cancel', () => resolve(null), { once: true })
+    input.click()
+  })
+}
+
+async function uploadProfileDocument(): Promise<null | string> {
+  const file = await pickJsonFile()
+
+  if (!file) {
+    return null
+  }
+
+  try {
+    const parsed = JSON.parse(await file.text()) as unknown
+
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('That file is not a Harvis profile export.')
+    }
+
+    // The backend import takes the exported document itself in `archive`.
+    const name = await importProfileBundle(parsed as never)
+    notify({ kind: 'success', title: translateNow('profiles.imported'), message: name })
+    await refreshActiveProfile()
+    selectProfile(name)
+
+    return name
+  } catch (error) {
+    notifyError(error, translateNow('profiles.failedImport'))
+
+    return null
+  }
+}
+
 // ── Dialog-driven flows ──────────────────────────────────────────────────────
 // One store function per user verb (⌘K row, rail button, and any future menu
 // item all funnel here). Toasts via the shared notification store; strings via
 // translateNow so the flows stay callable from non-React surfaces.
 
-const ARCHIVE_FILTERS = [{ extensions: ['tar.gz', 'tgz'], name: 'Hermes profile' }]
+const ARCHIVE_FILTERS = [{ extensions: ['tar.gz', 'tgz'], name: 'Harvis profile' }]
 
 /** Pick a save location and export `profile` (default: the active one).
  *  Returns the archive path, or null when the user cancelled. */
@@ -161,7 +226,7 @@ export async function runExportProfileFlow(profile?: string): Promise<null | str
   const pick = window.hermesDesktop?.selectSavePath
 
   if (!pick) {
-    return null
+    return downloadProfileDocument(target)
   }
 
   const output = await pick({
@@ -189,6 +254,10 @@ export async function runExportProfileFlow(profile?: string): Promise<null | str
 /** Pick an archive and import it as a new profile; lands the user in it on a
  *  fresh chat. Returns the new profile name, or null when cancelled/failed. */
 export async function runImportProfileFlow(): Promise<null | string> {
+  if (!window.hermesDesktop?.selectPaths) {
+    return uploadProfileDocument()
+  }
+
   const paths = await window.hermesDesktop?.selectPaths?.({
     title: translateNow('profiles.importProfile'),
     multiple: false,

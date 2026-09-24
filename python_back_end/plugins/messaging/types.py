@@ -17,6 +17,9 @@ class Platform(str, Enum):
     TELEGRAM = "telegram"
     EMAIL = "email"
     SMS = "sms"
+    MATRIX = "matrix"
+    WHATSAPP_CLOUD = "whatsapp_cloud"
+    SIGNAL = "signal"
     STUB = "stub"
 
 

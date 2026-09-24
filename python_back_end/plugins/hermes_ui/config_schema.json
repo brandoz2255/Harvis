@@ -1,0 +1,4686 @@
+{
+ "fields": {
+  "model": {
+   "type": "string",
+   "description": "Default model (e.g. anthropic/claude-sonnet-4.6)",
+   "category": "general"
+  },
+  "model_context_length": {
+   "type": "number",
+   "description": "Context window override (0 = auto-detect from model metadata)",
+   "category": "general"
+  },
+  "fallback_providers": {
+   "type": "list",
+   "description": "Fallback Providers",
+   "category": "general"
+  },
+  "toolsets": {
+   "type": "list",
+   "description": "Toolsets",
+   "category": "general"
+  },
+  "database.journal_mode": {
+   "type": "string",
+   "description": "Database → Journal Mode",
+   "category": "database"
+  },
+  "database.wal_autocheckpoint": {
+   "type": "string",
+   "description": "Database → Wal Autocheckpoint",
+   "category": "database"
+  },
+  "database.journal_size_limit": {
+   "type": "string",
+   "description": "Database → Journal Size Limit",
+   "category": "database"
+  },
+  "runtime.nofile_soft_limit": {
+   "type": "number",
+   "description": "Runtime → Nofile Soft Limit",
+   "category": "agent"
+  },
+  "max_concurrent_sessions": {
+   "type": "string",
+   "description": "Max Concurrent Sessions",
+   "category": "general"
+  },
+  "max_live_sessions": {
+   "type": "number",
+   "description": "Max Live Sessions",
+   "category": "general"
+  },
+  "session.terminal_continue": {
+   "type": "boolean",
+   "description": "Session → Terminal Continue",
+   "category": "general"
+  },
+  "agent.max_turns": {
+   "type": "string",
+   "description": "Agent → Max Turns",
+   "category": "agent"
+  },
+  "agent.run_budget_seconds": {
+   "type": "string",
+   "description": "Agent → Run Budget Seconds",
+   "category": "agent"
+  },
+  "agent.gateway_timeout": {
+   "type": "number",
+   "description": "Agent → Gateway Timeout",
+   "category": "agent"
+  },
+  "agent.gateway_turn_lease_timeout": {
+   "type": "number",
+   "description": "Agent → Gateway Turn Lease Timeout",
+   "category": "agent"
+  },
+  "agent.agent_cache.max_size": {
+   "type": "number",
+   "description": "Agent → Agent Cache → Max Size",
+   "category": "agent"
+  },
+  "agent.agent_cache.idle_ttl_secs": {
+   "type": "number",
+   "description": "Agent → Agent Cache → Idle Ttl Secs",
+   "category": "agent"
+  },
+  "agent.agent_cache.memory_high_mb": {
+   "type": "string",
+   "description": "Agent → Agent Cache → Memory High Mb",
+   "category": "agent"
+  },
+  "agent.agent_cache.max_evictions_per_pass": {
+   "type": "number",
+   "description": "Agent → Agent Cache → Max Evictions Per Pass",
+   "category": "agent"
+  },
+  "agent.agent_cache.protect_recent": {
+   "type": "number",
+   "description": "Agent → Agent Cache → Protect Recent",
+   "category": "agent"
+  },
+  "agent.restart_drain_timeout": {
+   "type": "number",
+   "description": "Agent → Restart Drain Timeout",
+   "category": "agent"
+  },
+  "agent.cron_drain_timeout": {
+   "type": "number",
+   "description": "Agent → Cron Drain Timeout",
+   "category": "agent"
+  },
+  "agent.restart_after_turn_timeout": {
+   "type": "number",
+   "description": "Agent → Restart After Turn Timeout",
+   "category": "agent"
+  },
+  "agent.build_wait_timeout": {
+   "type": "number",
+   "description": "Agent → Build Wait Timeout",
+   "category": "agent"
+  },
+  "agent.api_max_retries": {
+   "type": "number",
+   "description": "Agent → Api Max Retries",
+   "category": "agent"
+  },
+  "agent.empty_response_guard.enabled": {
+   "type": "boolean",
+   "description": "Agent → Empty Response Guard → Enabled",
+   "category": "agent"
+  },
+  "agent.empty_response_guard.cost_threshold_usd": {
+   "type": "number",
+   "description": "Agent → Empty Response Guard → Cost Threshold Usd",
+   "category": "agent"
+  },
+  "agent.service_tier": {
+   "type": "select",
+   "description": "API service tier (OpenAI/Anthropic)",
+   "category": "agent",
+   "options": [
+    "",
+    "auto",
+    "default",
+    "flex"
+   ]
+  },
+  "agent.tool_use_enforcement": {
+   "type": "string",
+   "description": "Agent → Tool Use Enforcement",
+   "category": "agent"
+  },
+  "agent.execution_guidance": {
+   "type": "string",
+   "description": "Agent → Execution Guidance",
+   "category": "agent"
+  },
+  "agent.intent_ack_continuation": {
+   "type": "string",
+   "description": "Agent → Intent Ack Continuation",
+   "category": "agent"
+  },
+  "agent.stall_guards": {
+   "type": "boolean",
+   "description": "Agent → Stall Guards",
+   "category": "agent"
+  },
+  "agent.task_completion_guidance": {
+   "type": "boolean",
+   "description": "Agent → Task Completion Guidance",
+   "category": "agent"
+  },
+  "agent.parallel_tool_call_guidance": {
+   "type": "boolean",
+   "description": "Agent → Parallel Tool Call Guidance",
+   "category": "agent"
+  },
+  "agent.environment_probe": {
+   "type": "boolean",
+   "description": "Agent → Environment Probe",
+   "category": "agent"
+  },
+  "agent.bot_mode_protocol": {
+   "type": "boolean",
+   "description": "Agent → Bot Mode Protocol",
+   "category": "agent"
+  },
+  "agent.environment_hint": {
+   "type": "string",
+   "description": "Agent → Environment Hint",
+   "category": "agent"
+  },
+  "agent.coding_context": {
+   "type": "string",
+   "description": "Agent → Coding Context",
+   "category": "agent"
+  },
+  "agent.coding_instructions": {
+   "type": "string",
+   "description": "Agent → Coding Instructions",
+   "category": "agent"
+  },
+  "agent.verify_guidance": {
+   "type": "boolean",
+   "description": "Agent → Verify Guidance",
+   "category": "agent"
+  },
+  "agent.max_verify_nudges": {
+   "type": "number",
+   "description": "Agent → Max Verify Nudges",
+   "category": "agent"
+  },
+  "agent.verify_on_stop": {
+   "type": "boolean",
+   "description": "Agent → Verify On Stop",
+   "category": "agent"
+  },
+  "agent.gateway_timeout_warning": {
+   "type": "number",
+   "description": "Agent → Gateway Timeout Warning",
+   "category": "agent"
+  },
+  "agent.clarify_timeout": {
+   "type": "number",
+   "description": "Agent → Clarify Timeout",
+   "category": "agent"
+  },
+  "agent.gateway_notify_interval": {
+   "type": "number",
+   "description": "Agent → Gateway Notify Interval",
+   "category": "agent"
+  },
+  "agent.session_stall_timeout": {
+   "type": "number",
+   "description": "Agent → Session Stall Timeout",
+   "category": "agent"
+  },
+  "agent.reconnect_attention_after": {
+   "type": "number",
+   "description": "Agent → Reconnect Attention After",
+   "category": "agent"
+  },
+  "agent.gateway_auto_continue_freshness": {
+   "type": "number",
+   "description": "Agent → Gateway Auto Continue Freshness",
+   "category": "agent"
+  },
+  "agent.gateway_startup_restore_drain_timeout": {
+   "type": "number",
+   "description": "Agent → Gateway Startup Restore Drain Timeout",
+   "category": "agent"
+  },
+  "agent.gateway_startup_warmup_timeout": {
+   "type": "number",
+   "description": "Agent → Gateway Startup Warmup Timeout",
+   "category": "agent"
+  },
+  "agent.local_stream_stale_timeout": {
+   "type": "number",
+   "description": "Agent → Local Stream Stale Timeout",
+   "category": "agent"
+  },
+  "agent.image_input_mode": {
+   "type": "string",
+   "description": "Agent → Image Input Mode",
+   "category": "agent"
+  },
+  "agent.disabled_toolsets": {
+   "type": "list",
+   "description": "Agent → Disabled Toolsets",
+   "category": "agent"
+  },
+  "agent.reasoning_echo": {
+   "type": "boolean",
+   "description": "Agent → Reasoning Echo",
+   "category": "agent"
+  },
+  "terminal.backend": {
+   "type": "select",
+   "description": "Terminal execution backend",
+   "category": "terminal",
+   "options": [
+    "local",
+    "docker",
+    "ssh",
+    "modal",
+    "daytona",
+    "vercel_sandbox",
+    "singularity"
+   ]
+  },
+  "terminal.modal_mode": {
+   "type": "select",
+   "description": "Modal sandbox mode",
+   "category": "terminal",
+   "options": [
+    "sandbox",
+    "function"
+   ]
+  },
+  "terminal.degraded_mode": {
+   "type": "string",
+   "description": "Terminal → Degraded Mode",
+   "category": "terminal"
+  },
+  "terminal.cwd": {
+   "type": "string",
+   "description": "Terminal → Cwd",
+   "category": "terminal"
+  },
+  "terminal.temp_dir": {
+   "type": "string",
+   "description": "Terminal → Temp Dir",
+   "category": "terminal"
+  },
+  "terminal.font_family": {
+   "type": "string",
+   "description": "Terminal → Font Family",
+   "category": "terminal"
+  },
+  "terminal.timeout": {
+   "type": "number",
+   "description": "Terminal → Timeout",
+   "category": "terminal"
+  },
+  "terminal.daemon_term_grace_seconds": {
+   "type": "number",
+   "description": "Terminal → Daemon Term Grace Seconds",
+   "category": "terminal"
+  },
+  "terminal.oneshot_completion_wait_seconds": {
+   "type": "number",
+   "description": "Terminal → Oneshot Completion Wait Seconds",
+   "category": "terminal"
+  },
+  "terminal.env_passthrough": {
+   "type": "list",
+   "description": "Terminal → Env Passthrough",
+   "category": "terminal"
+  },
+  "terminal.home_mode": {
+   "type": "string",
+   "description": "Terminal → Home Mode",
+   "category": "terminal"
+  },
+  "terminal.shell_init_files": {
+   "type": "list",
+   "description": "Terminal → Shell Init Files",
+   "category": "terminal"
+  },
+  "terminal.auto_source_bashrc": {
+   "type": "boolean",
+   "description": "Terminal → Auto Source Bashrc",
+   "category": "terminal"
+  },
+  "terminal.docker_image": {
+   "type": "string",
+   "description": "Terminal → Docker Image",
+   "category": "terminal"
+  },
+  "terminal.docker_forward_env": {
+   "type": "list",
+   "description": "Terminal → Docker Forward Env",
+   "category": "terminal"
+  },
+  "terminal.singularity_image": {
+   "type": "string",
+   "description": "Terminal → Singularity Image",
+   "category": "terminal"
+  },
+  "terminal.modal_image": {
+   "type": "string",
+   "description": "Terminal → Modal Image",
+   "category": "terminal"
+  },
+  "terminal.daytona_image": {
+   "type": "string",
+   "description": "Terminal → Daytona Image",
+   "category": "terminal"
+  },
+  "terminal.vercel_runtime": {
+   "type": "select",
+   "description": "Vercel Sandbox runtime",
+   "category": "terminal",
+   "options": [
+    "node24",
+    "node22",
+    "python3.13"
+   ]
+  },
+  "terminal.container_cpu": {
+   "type": "number",
+   "description": "Terminal → Container Cpu",
+   "category": "terminal"
+  },
+  "terminal.container_memory": {
+   "type": "number",
+   "description": "Terminal → Container Memory",
+   "category": "terminal"
+  },
+  "terminal.container_disk": {
+   "type": "number",
+   "description": "Terminal → Container Disk",
+   "category": "terminal"
+  },
+  "terminal.container_persistent": {
+   "type": "boolean",
+   "description": "Terminal → Container Persistent",
+   "category": "terminal"
+  },
+  "terminal.docker_volumes": {
+   "type": "list",
+   "description": "Terminal → Docker Volumes",
+   "category": "terminal"
+  },
+  "terminal.docker_mount_cwd_to_workspace": {
+   "type": "boolean",
+   "description": "Terminal → Docker Mount Cwd To Workspace",
+   "category": "terminal"
+  },
+  "terminal.docker_network": {
+   "type": "boolean",
+   "description": "Terminal → Docker Network",
+   "category": "terminal"
+  },
+  "terminal.docker_extra_args": {
+   "type": "list",
+   "description": "Terminal → Docker Extra Args",
+   "category": "terminal"
+  },
+  "terminal.docker_shm_size": {
+   "type": "string",
+   "description": "Terminal → Docker Shm Size",
+   "category": "terminal"
+  },
+  "terminal.docker_run_as_host_user": {
+   "type": "boolean",
+   "description": "Terminal → Docker Run As Host User",
+   "category": "terminal"
+  },
+  "terminal.docker_shared_container_key": {
+   "type": "string",
+   "description": "Terminal → Docker Shared Container Key",
+   "category": "terminal"
+  },
+  "terminal.persistent_shell": {
+   "type": "boolean",
+   "description": "Terminal → Persistent Shell",
+   "category": "terminal"
+  },
+  "web.backend": {
+   "type": "string",
+   "description": "Web → Backend",
+   "category": "web"
+  },
+  "web.search_backend": {
+   "type": "string",
+   "description": "Web → Search Backend",
+   "category": "web"
+  },
+  "web.extract_backend": {
+   "type": "string",
+   "description": "Web → Extract Backend",
+   "category": "web"
+  },
+  "web.extract_char_limit": {
+   "type": "number",
+   "description": "Web → Extract Char Limit",
+   "category": "web"
+  },
+  "web.keyless_fallback": {
+   "type": "boolean",
+   "description": "Web → Keyless Fallback",
+   "category": "web"
+  },
+  "web.keyless_rescue": {
+   "type": "boolean",
+   "description": "Web → Keyless Rescue",
+   "category": "web"
+  },
+  "web.cache_enabled": {
+   "type": "boolean",
+   "description": "Web → Cache Enabled",
+   "category": "web"
+  },
+  "web.cache_ttl_minutes": {
+   "type": "number",
+   "description": "Web → Cache Ttl Minutes",
+   "category": "web"
+  },
+  "web.cache_exempt_hosts": {
+   "type": "list",
+   "description": "Web → Cache Exempt Hosts",
+   "category": "web"
+  },
+  "browser.backend": {
+   "type": "string",
+   "description": "Browser → Backend",
+   "category": "browser"
+  },
+  "browser.inactivity_timeout": {
+   "type": "number",
+   "description": "Browser → Inactivity Timeout",
+   "category": "browser"
+  },
+  "browser.command_timeout": {
+   "type": "number",
+   "description": "Browser → Command Timeout",
+   "category": "browser"
+  },
+  "browser.snapshot_threshold": {
+   "type": "number",
+   "description": "Browser → Snapshot Threshold",
+   "category": "browser"
+  },
+  "browser.record_sessions": {
+   "type": "boolean",
+   "description": "Browser → Record Sessions",
+   "category": "browser"
+  },
+  "browser.headed": {
+   "type": "boolean",
+   "description": "Run the local browser in headed mode (visible window). Also keeps the window open between turns; idle sessions are still reaped after browser.inactivity_timeout.",
+   "category": "browser"
+  },
+  "browser.allow_private_urls": {
+   "type": "boolean",
+   "description": "Browser → Allow Private Urls",
+   "category": "browser"
+  },
+  "browser.engine": {
+   "type": "string",
+   "description": "Browser → Engine",
+   "category": "browser"
+  },
+  "browser.auto_local_for_private_urls": {
+   "type": "boolean",
+   "description": "Browser → Auto Local For Private Urls",
+   "category": "browser"
+  },
+  "browser.cdp_url": {
+   "type": "string",
+   "description": "Browser → Cdp Url",
+   "category": "browser"
+  },
+  "browser.use_real_profile": {
+   "type": "boolean",
+   "description": "Browser → Use Real Profile",
+   "category": "browser"
+  },
+  "browser.real_profile_autoclose": {
+   "type": "boolean",
+   "description": "Browser → Real Profile Autoclose",
+   "category": "browser"
+  },
+  "browser.real_profile_pin": {
+   "type": "string",
+   "description": "Browser → Real Profile Pin",
+   "category": "browser"
+  },
+  "browser.allow_unsafe_evaluate": {
+   "type": "boolean",
+   "description": "Browser → Allow Unsafe Evaluate",
+   "category": "browser"
+  },
+  "browser.restrict_evaluate": {
+   "type": "boolean",
+   "description": "Browser → Restrict Evaluate",
+   "category": "browser"
+  },
+  "browser.dialog_policy": {
+   "type": "string",
+   "description": "Browser → Dialog Policy",
+   "category": "browser"
+  },
+  "browser.dialog_timeout_s": {
+   "type": "number",
+   "description": "Browser → Dialog Timeout S",
+   "category": "browser"
+  },
+  "browser.camofox.managed_persistence": {
+   "type": "boolean",
+   "description": "Browser → Camofox → Managed Persistence",
+   "category": "browser"
+  },
+  "browser.camofox.user_id": {
+   "type": "string",
+   "description": "Browser → Camofox → User Id",
+   "category": "browser"
+  },
+  "browser.camofox.session_key": {
+   "type": "string",
+   "description": "Browser → Camofox → Session Key",
+   "category": "browser"
+  },
+  "browser.camofox.adopt_existing_tab": {
+   "type": "boolean",
+   "description": "Browser → Camofox → Adopt Existing Tab",
+   "category": "browser"
+  },
+  "browser.camofox.rewrite_loopback_urls": {
+   "type": "boolean",
+   "description": "Browser → Camofox → Rewrite Loopback Urls",
+   "category": "browser"
+  },
+  "browser.camofox.loopback_host_alias": {
+   "type": "string",
+   "description": "Browser → Camofox → Loopback Host Alias",
+   "category": "browser"
+  },
+  "browser.extension_control.enabled": {
+   "type": "boolean",
+   "description": "Browser → Extension Control → Enabled",
+   "category": "browser"
+  },
+  "browser.extension_control.developer_mode": {
+   "type": "boolean",
+   "description": "Browser → Extension Control → Developer Mode",
+   "category": "browser"
+  },
+  "checkpoints.enabled": {
+   "type": "boolean",
+   "description": "Checkpoints → Enabled",
+   "category": "agent"
+  },
+  "checkpoints.max_snapshots": {
+   "type": "number",
+   "description": "Checkpoints → Max Snapshots",
+   "category": "agent"
+  },
+  "checkpoints.max_total_size_mb": {
+   "type": "number",
+   "description": "Checkpoints → Max Total Size Mb",
+   "category": "agent"
+  },
+  "checkpoints.max_file_size_mb": {
+   "type": "number",
+   "description": "Checkpoints → Max File Size Mb",
+   "category": "agent"
+  },
+  "checkpoints.auto_prune": {
+   "type": "boolean",
+   "description": "Checkpoints → Auto Prune",
+   "category": "agent"
+  },
+  "checkpoints.retention_days": {
+   "type": "number",
+   "description": "Checkpoints → Retention Days",
+   "category": "agent"
+  },
+  "checkpoints.min_interval_hours": {
+   "type": "number",
+   "description": "Checkpoints → Min Interval Hours",
+   "category": "agent"
+  },
+  "context_file_max_chars": {
+   "type": "string",
+   "description": "Context File Max Chars",
+   "category": "general"
+  },
+  "file_read_max_chars": {
+   "type": "number",
+   "description": "File Read Max Chars",
+   "category": "general"
+  },
+  "mcp_discovery_timeout": {
+   "type": "number",
+   "description": "Mcp Discovery Timeout",
+   "category": "general"
+  },
+  "mcp_single_query_discovery_timeout": {
+   "type": "number",
+   "description": "Mcp Single Query Discovery Timeout",
+   "category": "general"
+  },
+  "mcp.auto_reload_on_config_change": {
+   "type": "boolean",
+   "description": "Mcp → Auto Reload On Config Change",
+   "category": "agent"
+  },
+  "tool_output.max_bytes": {
+   "type": "number",
+   "description": "Tool Output → Max Bytes",
+   "category": "tool_output"
+  },
+  "tool_output.max_lines": {
+   "type": "number",
+   "description": "Tool Output → Max Lines",
+   "category": "tool_output"
+  },
+  "tool_output.max_line_length": {
+   "type": "number",
+   "description": "Tool Output → Max Line Length",
+   "category": "tool_output"
+  },
+  "tool_loop_guardrails.warnings_enabled": {
+   "type": "boolean",
+   "description": "Tool Loop Guardrails → Warnings Enabled",
+   "category": "tool_loop_guardrails"
+  },
+  "tool_loop_guardrails.hard_stop_enabled": {
+   "type": "boolean",
+   "description": "Tool Loop Guardrails → Hard Stop Enabled",
+   "category": "tool_loop_guardrails"
+  },
+  "tool_loop_guardrails.warn_after.exact_failure": {
+   "type": "number",
+   "description": "Tool Loop Guardrails → Warn After → Exact Failure",
+   "category": "tool_loop_guardrails"
+  },
+  "tool_loop_guardrails.warn_after.same_tool_failure": {
+   "type": "number",
+   "description": "Tool Loop Guardrails → Warn After → Same Tool Failure",
+   "category": "tool_loop_guardrails"
+  },
+  "tool_loop_guardrails.warn_after.idempotent_no_progress": {
+   "type": "number",
+   "description": "Tool Loop Guardrails → Warn After → Idempotent No Progress",
+   "category": "tool_loop_guardrails"
+  },
+  "tool_loop_guardrails.hard_stop_after.exact_failure": {
+   "type": "number",
+   "description": "Tool Loop Guardrails → Hard Stop After → Exact Failure",
+   "category": "tool_loop_guardrails"
+  },
+  "tool_loop_guardrails.hard_stop_after.same_tool_failure": {
+   "type": "number",
+   "description": "Tool Loop Guardrails → Hard Stop After → Same Tool Failure",
+   "category": "tool_loop_guardrails"
+  },
+  "tool_loop_guardrails.hard_stop_after.idempotent_no_progress": {
+   "type": "number",
+   "description": "Tool Loop Guardrails → Hard Stop After → Idempotent No Progress",
+   "category": "tool_loop_guardrails"
+  },
+  "tool_loop_guardrails.loop_caps.max_web_searches": {
+   "type": "number",
+   "description": "Tool Loop Guardrails → Loop Caps → Max Web Searches",
+   "category": "tool_loop_guardrails"
+  },
+  "tool_loop_guardrails.loop_caps.max_subagents": {
+   "type": "number",
+   "description": "Tool Loop Guardrails → Loop Caps → Max Subagents",
+   "category": "tool_loop_guardrails"
+  },
+  "compression.enabled": {
+   "type": "boolean",
+   "description": "Compression → Enabled",
+   "category": "compression"
+  },
+  "compression.checkpoint_required": {
+   "type": "boolean",
+   "description": "Compression → Checkpoint Required",
+   "category": "compression"
+  },
+  "compression.progress_notices": {
+   "type": "boolean",
+   "description": "Compression → Progress Notices",
+   "category": "compression"
+  },
+  "compression.threshold": {
+   "type": "number",
+   "description": "Compression → Threshold",
+   "category": "compression"
+  },
+  "compression.threshold_tokens": {
+   "type": "string",
+   "description": "Compression → Threshold Tokens",
+   "category": "compression"
+  },
+  "compression.target_ratio": {
+   "type": "number",
+   "description": "Compression → Target Ratio",
+   "category": "compression"
+  },
+  "compression.tail_mode": {
+   "type": "string",
+   "description": "Compression → Tail Mode",
+   "category": "compression"
+  },
+  "compression.protect_last_n": {
+   "type": "number",
+   "description": "Compression → Protect Last N",
+   "category": "compression"
+  },
+  "compression.min_tail_user_messages": {
+   "type": "number",
+   "description": "Compression → Min Tail User Messages",
+   "category": "compression"
+  },
+  "compression.max_attempts": {
+   "type": "number",
+   "description": "Compression → Max Attempts",
+   "category": "compression"
+  },
+  "compression.proactive_prune_tokens": {
+   "type": "number",
+   "description": "Compression → Proactive Prune Tokens",
+   "category": "compression"
+  },
+  "compression.proactive_prune_min_result_chars": {
+   "type": "number",
+   "description": "Compression → Proactive Prune Min Result Chars",
+   "category": "compression"
+  },
+  "compression.proactive_prune_min_reclaim_tokens": {
+   "type": "number",
+   "description": "Compression → Proactive Prune Min Reclaim Tokens",
+   "category": "compression"
+  },
+  "compression.micro_compact": {
+   "type": "boolean",
+   "description": "Compression → Micro Compact",
+   "category": "compression"
+  },
+  "compression.micro_compact_every_n_turns": {
+   "type": "number",
+   "description": "Compression → Micro Compact Every N Turns",
+   "category": "compression"
+  },
+  "compression.micro_compact_defrag_threshold_tokens": {
+   "type": "number",
+   "description": "Compression → Micro Compact Defrag Threshold Tokens",
+   "category": "compression"
+  },
+  "compression.hygiene_hard_message_limit": {
+   "type": "number",
+   "description": "Compression → Hygiene Hard Message Limit",
+   "category": "compression"
+  },
+  "compression.hygiene_timeout_seconds": {
+   "type": "number",
+   "description": "Compression → Hygiene Timeout Seconds",
+   "category": "compression"
+  },
+  "compression.hygiene_total_ceiling_seconds": {
+   "type": "number",
+   "description": "Compression → Hygiene Total Ceiling Seconds",
+   "category": "compression"
+  },
+  "compression.hygiene_failure_cooldown_seconds": {
+   "type": "number",
+   "description": "Compression → Hygiene Failure Cooldown Seconds",
+   "category": "compression"
+  },
+  "compression.hygiene_max_turn_hold_seconds": {
+   "type": "number",
+   "description": "Compression → Hygiene Max Turn Hold Seconds",
+   "category": "compression"
+  },
+  "compression.context_timeout_seconds": {
+   "type": "number",
+   "description": "Compression → Context Timeout Seconds",
+   "category": "compression"
+  },
+  "compression.context_total_ceiling_seconds": {
+   "type": "number",
+   "description": "Compression → Context Total Ceiling Seconds",
+   "category": "compression"
+  },
+  "compression.protect_first_n": {
+   "type": "number",
+   "description": "Compression → Protect First N",
+   "category": "compression"
+  },
+  "compression.abort_on_summary_failure": {
+   "type": "boolean",
+   "description": "Compression → Abort On Summary Failure",
+   "category": "compression"
+  },
+  "compression.codex_gpt55_autoraise": {
+   "type": "boolean",
+   "description": "Compression → Codex Gpt55 Autoraise",
+   "category": "compression"
+  },
+  "compression.codex_gpt55_autoraise_notice": {
+   "type": "boolean",
+   "description": "Compression → Codex Gpt55 Autoraise Notice",
+   "category": "compression"
+  },
+  "compression.codex_app_server_auto": {
+   "type": "string",
+   "description": "Compression → Codex App Server Auto",
+   "category": "compression"
+  },
+  "compression.codex_responses_native": {
+   "type": "boolean",
+   "description": "Compression → Codex Responses Native",
+   "category": "compression"
+  },
+  "compression.codex_responses_compact_threshold": {
+   "type": "string",
+   "description": "Compression → Codex Responses Compact Threshold",
+   "category": "compression"
+  },
+  "compression.in_place": {
+   "type": "boolean",
+   "description": "Compression → In Place",
+   "category": "compression"
+  },
+  "compression.idle_compact_after_seconds": {
+   "type": "number",
+   "description": "Compression → Idle Compact After Seconds",
+   "category": "compression"
+  },
+  "prompt_caching.cache_ttl": {
+   "type": "string",
+   "description": "Prompt Caching → Cache Ttl",
+   "category": "agent"
+  },
+  "openrouter.response_cache": {
+   "type": "boolean",
+   "description": "Openrouter → Response Cache",
+   "category": "openrouter"
+  },
+  "openrouter.response_cache_ttl": {
+   "type": "number",
+   "description": "Openrouter → Response Cache Ttl",
+   "category": "openrouter"
+  },
+  "openrouter.min_coding_score": {
+   "type": "number",
+   "description": "Openrouter → Min Coding Score",
+   "category": "openrouter"
+  },
+  "bedrock.region": {
+   "type": "string",
+   "description": "Bedrock → Region",
+   "category": "bedrock"
+  },
+  "bedrock.discovery.enabled": {
+   "type": "boolean",
+   "description": "Bedrock → Discovery → Enabled",
+   "category": "bedrock"
+  },
+  "bedrock.discovery.provider_filter": {
+   "type": "list",
+   "description": "Bedrock → Discovery → Provider Filter",
+   "category": "bedrock"
+  },
+  "bedrock.discovery.refresh_interval": {
+   "type": "number",
+   "description": "Bedrock → Discovery → Refresh Interval",
+   "category": "bedrock"
+  },
+  "bedrock.guardrail.guardrail_identifier": {
+   "type": "string",
+   "description": "Bedrock → Guardrail → Guardrail Identifier",
+   "category": "bedrock"
+  },
+  "bedrock.guardrail.guardrail_version": {
+   "type": "string",
+   "description": "Bedrock → Guardrail → Guardrail Version",
+   "category": "bedrock"
+  },
+  "bedrock.guardrail.stream_processing_mode": {
+   "type": "string",
+   "description": "Bedrock → Guardrail → Stream Processing Mode",
+   "category": "bedrock"
+  },
+  "bedrock.guardrail.trace": {
+   "type": "string",
+   "description": "Bedrock → Guardrail → Trace",
+   "category": "bedrock"
+  },
+  "auxiliary.transient_retries": {
+   "type": "number",
+   "description": "Auxiliary → Transient Retries",
+   "category": "auxiliary"
+  },
+  "auxiliary.free_only": {
+   "type": "boolean",
+   "description": "Auxiliary → Free Only",
+   "category": "auxiliary"
+  },
+  "auxiliary.openrouter_model": {
+   "type": "string",
+   "description": "Auxiliary → Openrouter Model",
+   "category": "auxiliary"
+  },
+  "auxiliary.stream_only_base_urls": {
+   "type": "list",
+   "description": "Auxiliary → Stream Only Base Urls",
+   "category": "auxiliary"
+  },
+  "auxiliary.vision.provider": {
+   "type": "string",
+   "description": "Auxiliary → Vision → Provider",
+   "category": "auxiliary"
+  },
+  "auxiliary.vision.model": {
+   "type": "string",
+   "description": "Auxiliary → Vision → Model",
+   "category": "auxiliary"
+  },
+  "auxiliary.vision.base_url": {
+   "type": "string",
+   "description": "Auxiliary → Vision → Base Url",
+   "category": "auxiliary"
+  },
+  "auxiliary.vision.api_key": {
+   "type": "string",
+   "description": "Auxiliary → Vision → Api Key",
+   "category": "auxiliary"
+  },
+  "auxiliary.vision.timeout": {
+   "type": "number",
+   "description": "Auxiliary → Vision → Timeout",
+   "category": "auxiliary"
+  },
+  "auxiliary.vision.reasoning_effort": {
+   "type": "string",
+   "description": "Auxiliary → Vision → Reasoning Effort",
+   "category": "auxiliary"
+  },
+  "auxiliary.vision.download_timeout": {
+   "type": "number",
+   "description": "Auxiliary → Vision → Download Timeout",
+   "category": "auxiliary"
+  },
+  "auxiliary.compression.provider": {
+   "type": "string",
+   "description": "Auxiliary → Compression → Provider",
+   "category": "auxiliary"
+  },
+  "auxiliary.compression.model": {
+   "type": "string",
+   "description": "Auxiliary → Compression → Model",
+   "category": "auxiliary"
+  },
+  "auxiliary.compression.base_url": {
+   "type": "string",
+   "description": "Auxiliary → Compression → Base Url",
+   "category": "auxiliary"
+  },
+  "auxiliary.compression.api_key": {
+   "type": "string",
+   "description": "Auxiliary → Compression → Api Key",
+   "category": "auxiliary"
+  },
+  "auxiliary.compression.timeout": {
+   "type": "number",
+   "description": "Auxiliary → Compression → Timeout",
+   "category": "auxiliary"
+  },
+  "auxiliary.compression.reasoning_effort": {
+   "type": "string",
+   "description": "Auxiliary → Compression → Reasoning Effort",
+   "category": "auxiliary"
+  },
+  "auxiliary.compression.max_output_tokens": {
+   "type": "number",
+   "description": "Auxiliary → Compression → Max Output Tokens",
+   "category": "auxiliary"
+  },
+  "auxiliary.skills_hub.provider": {
+   "type": "string",
+   "description": "Auxiliary → Skills Hub → Provider",
+   "category": "auxiliary"
+  },
+  "auxiliary.skills_hub.model": {
+   "type": "string",
+   "description": "Auxiliary → Skills Hub → Model",
+   "category": "auxiliary"
+  },
+  "auxiliary.skills_hub.base_url": {
+   "type": "string",
+   "description": "Auxiliary → Skills Hub → Base Url",
+   "category": "auxiliary"
+  },
+  "auxiliary.skills_hub.api_key": {
+   "type": "string",
+   "description": "Auxiliary → Skills Hub → Api Key",
+   "category": "auxiliary"
+  },
+  "auxiliary.skills_hub.timeout": {
+   "type": "number",
+   "description": "Auxiliary → Skills Hub → Timeout",
+   "category": "auxiliary"
+  },
+  "auxiliary.skills_hub.reasoning_effort": {
+   "type": "string",
+   "description": "Auxiliary → Skills Hub → Reasoning Effort",
+   "category": "auxiliary"
+  },
+  "auxiliary.approval.provider": {
+   "type": "string",
+   "description": "Auxiliary → Approval → Provider",
+   "category": "auxiliary"
+  },
+  "auxiliary.approval.model": {
+   "type": "string",
+   "description": "Auxiliary → Approval → Model",
+   "category": "auxiliary"
+  },
+  "auxiliary.approval.base_url": {
+   "type": "string",
+   "description": "Auxiliary → Approval → Base Url",
+   "category": "auxiliary"
+  },
+  "auxiliary.approval.api_key": {
+   "type": "string",
+   "description": "Auxiliary → Approval → Api Key",
+   "category": "auxiliary"
+  },
+  "auxiliary.approval.timeout": {
+   "type": "number",
+   "description": "Auxiliary → Approval → Timeout",
+   "category": "auxiliary"
+  },
+  "auxiliary.approval.reasoning_effort": {
+   "type": "string",
+   "description": "Auxiliary → Approval → Reasoning Effort",
+   "category": "auxiliary"
+  },
+  "auxiliary.review.provider": {
+   "type": "string",
+   "description": "Auxiliary → Review → Provider",
+   "category": "auxiliary"
+  },
+  "auxiliary.review.model": {
+   "type": "string",
+   "description": "Auxiliary → Review → Model",
+   "category": "auxiliary"
+  },
+  "auxiliary.review.base_url": {
+   "type": "string",
+   "description": "Auxiliary → Review → Base Url",
+   "category": "auxiliary"
+  },
+  "auxiliary.review.api_key": {
+   "type": "string",
+   "description": "Auxiliary → Review → Api Key",
+   "category": "auxiliary"
+  },
+  "auxiliary.review.api_mode": {
+   "type": "string",
+   "description": "Auxiliary → Review → Api Mode",
+   "category": "auxiliary"
+  },
+  "auxiliary.mcp.provider": {
+   "type": "string",
+   "description": "Auxiliary → Mcp → Provider",
+   "category": "auxiliary"
+  },
+  "auxiliary.mcp.model": {
+   "type": "string",
+   "description": "Auxiliary → Mcp → Model",
+   "category": "auxiliary"
+  },
+  "auxiliary.mcp.base_url": {
+   "type": "string",
+   "description": "Auxiliary → Mcp → Base Url",
+   "category": "auxiliary"
+  },
+  "auxiliary.mcp.api_key": {
+   "type": "string",
+   "description": "Auxiliary → Mcp → Api Key",
+   "category": "auxiliary"
+  },
+  "auxiliary.mcp.timeout": {
+   "type": "number",
+   "description": "Auxiliary → Mcp → Timeout",
+   "category": "auxiliary"
+  },
+  "auxiliary.mcp.reasoning_effort": {
+   "type": "string",
+   "description": "Auxiliary → Mcp → Reasoning Effort",
+   "category": "auxiliary"
+  },
+  "auxiliary.title_generation.enabled": {
+   "type": "boolean",
+   "description": "Auxiliary → Title Generation → Enabled",
+   "category": "auxiliary"
+  },
+  "auxiliary.title_generation.provider": {
+   "type": "string",
+   "description": "Auxiliary → Title Generation → Provider",
+   "category": "auxiliary"
+  },
+  "auxiliary.title_generation.model": {
+   "type": "string",
+   "description": "Auxiliary → Title Generation → Model",
+   "category": "auxiliary"
+  },
+  "auxiliary.title_generation.prefer_fast_model": {
+   "type": "boolean",
+   "description": "Auxiliary → Title Generation → Prefer Fast Model",
+   "category": "auxiliary"
+  },
+  "auxiliary.title_generation.base_url": {
+   "type": "string",
+   "description": "Auxiliary → Title Generation → Base Url",
+   "category": "auxiliary"
+  },
+  "auxiliary.title_generation.api_key": {
+   "type": "string",
+   "description": "Auxiliary → Title Generation → Api Key",
+   "category": "auxiliary"
+  },
+  "auxiliary.title_generation.timeout": {
+   "type": "number",
+   "description": "Auxiliary → Title Generation → Timeout",
+   "category": "auxiliary"
+  },
+  "auxiliary.title_generation.reasoning_effort": {
+   "type": "string",
+   "description": "Auxiliary → Title Generation → Reasoning Effort",
+   "category": "auxiliary"
+  },
+  "auxiliary.title_generation.language": {
+   "type": "string",
+   "description": "Auxiliary → Title Generation → Language",
+   "category": "auxiliary"
+  },
+  "auxiliary.memory_query_rewrite.provider": {
+   "type": "string",
+   "description": "Auxiliary → Memory Query Rewrite → Provider",
+   "category": "auxiliary"
+  },
+  "auxiliary.memory_query_rewrite.model": {
+   "type": "string",
+   "description": "Auxiliary → Memory Query Rewrite → Model",
+   "category": "auxiliary"
+  },
+  "auxiliary.memory_query_rewrite.base_url": {
+   "type": "string",
+   "description": "Auxiliary → Memory Query Rewrite → Base Url",
+   "category": "auxiliary"
+  },
+  "auxiliary.memory_query_rewrite.api_key": {
+   "type": "string",
+   "description": "Auxiliary → Memory Query Rewrite → Api Key",
+   "category": "auxiliary"
+  },
+  "auxiliary.memory_query_rewrite.timeout": {
+   "type": "number",
+   "description": "Auxiliary → Memory Query Rewrite → Timeout",
+   "category": "auxiliary"
+  },
+  "auxiliary.tts_audio_tags.provider": {
+   "type": "string",
+   "description": "Auxiliary → Tts Audio Tags → Provider",
+   "category": "auxiliary"
+  },
+  "auxiliary.tts_audio_tags.model": {
+   "type": "string",
+   "description": "Auxiliary → Tts Audio Tags → Model",
+   "category": "auxiliary"
+  },
+  "auxiliary.tts_audio_tags.base_url": {
+   "type": "string",
+   "description": "Auxiliary → Tts Audio Tags → Base Url",
+   "category": "auxiliary"
+  },
+  "auxiliary.tts_audio_tags.api_key": {
+   "type": "string",
+   "description": "Auxiliary → Tts Audio Tags → Api Key",
+   "category": "auxiliary"
+  },
+  "auxiliary.tts_audio_tags.timeout": {
+   "type": "number",
+   "description": "Auxiliary → Tts Audio Tags → Timeout",
+   "category": "auxiliary"
+  },
+  "auxiliary.tts_audio_tags.reasoning_effort": {
+   "type": "string",
+   "description": "Auxiliary → Tts Audio Tags → Reasoning Effort",
+   "category": "auxiliary"
+  },
+  "auxiliary.triage_specifier.provider": {
+   "type": "string",
+   "description": "Auxiliary → Triage Specifier → Provider",
+   "category": "auxiliary"
+  },
+  "auxiliary.triage_specifier.model": {
+   "type": "string",
+   "description": "Auxiliary → Triage Specifier → Model",
+   "category": "auxiliary"
+  },
+  "auxiliary.triage_specifier.base_url": {
+   "type": "string",
+   "description": "Auxiliary → Triage Specifier → Base Url",
+   "category": "auxiliary"
+  },
+  "auxiliary.triage_specifier.api_key": {
+   "type": "string",
+   "description": "Auxiliary → Triage Specifier → Api Key",
+   "category": "auxiliary"
+  },
+  "auxiliary.triage_specifier.timeout": {
+   "type": "number",
+   "description": "Auxiliary → Triage Specifier → Timeout",
+   "category": "auxiliary"
+  },
+  "auxiliary.triage_specifier.reasoning_effort": {
+   "type": "string",
+   "description": "Auxiliary → Triage Specifier → Reasoning Effort",
+   "category": "auxiliary"
+  },
+  "auxiliary.kanban_decomposer.provider": {
+   "type": "string",
+   "description": "Auxiliary → Kanban Decomposer → Provider",
+   "category": "auxiliary"
+  },
+  "auxiliary.kanban_decomposer.model": {
+   "type": "string",
+   "description": "Auxiliary → Kanban Decomposer → Model",
+   "category": "auxiliary"
+  },
+  "auxiliary.kanban_decomposer.base_url": {
+   "type": "string",
+   "description": "Auxiliary → Kanban Decomposer → Base Url",
+   "category": "auxiliary"
+  },
+  "auxiliary.kanban_decomposer.api_key": {
+   "type": "string",
+   "description": "Auxiliary → Kanban Decomposer → Api Key",
+   "category": "auxiliary"
+  },
+  "auxiliary.kanban_decomposer.timeout": {
+   "type": "number",
+   "description": "Auxiliary → Kanban Decomposer → Timeout",
+   "category": "auxiliary"
+  },
+  "auxiliary.kanban_decomposer.reasoning_effort": {
+   "type": "string",
+   "description": "Auxiliary → Kanban Decomposer → Reasoning Effort",
+   "category": "auxiliary"
+  },
+  "auxiliary.profile_describer.provider": {
+   "type": "string",
+   "description": "Auxiliary → Profile Describer → Provider",
+   "category": "auxiliary"
+  },
+  "auxiliary.profile_describer.model": {
+   "type": "string",
+   "description": "Auxiliary → Profile Describer → Model",
+   "category": "auxiliary"
+  },
+  "auxiliary.profile_describer.base_url": {
+   "type": "string",
+   "description": "Auxiliary → Profile Describer → Base Url",
+   "category": "auxiliary"
+  },
+  "auxiliary.profile_describer.api_key": {
+   "type": "string",
+   "description": "Auxiliary → Profile Describer → Api Key",
+   "category": "auxiliary"
+  },
+  "auxiliary.profile_describer.timeout": {
+   "type": "number",
+   "description": "Auxiliary → Profile Describer → Timeout",
+   "category": "auxiliary"
+  },
+  "auxiliary.profile_describer.reasoning_effort": {
+   "type": "string",
+   "description": "Auxiliary → Profile Describer → Reasoning Effort",
+   "category": "auxiliary"
+  },
+  "auxiliary.goal_judge.provider": {
+   "type": "string",
+   "description": "Auxiliary → Goal Judge → Provider",
+   "category": "auxiliary"
+  },
+  "auxiliary.goal_judge.model": {
+   "type": "string",
+   "description": "Auxiliary → Goal Judge → Model",
+   "category": "auxiliary"
+  },
+  "auxiliary.goal_judge.base_url": {
+   "type": "string",
+   "description": "Auxiliary → Goal Judge → Base Url",
+   "category": "auxiliary"
+  },
+  "auxiliary.goal_judge.api_key": {
+   "type": "string",
+   "description": "Auxiliary → Goal Judge → Api Key",
+   "category": "auxiliary"
+  },
+  "auxiliary.goal_judge.timeout": {
+   "type": "number",
+   "description": "Auxiliary → Goal Judge → Timeout",
+   "category": "auxiliary"
+  },
+  "auxiliary.goal_judge.reasoning_effort": {
+   "type": "string",
+   "description": "Auxiliary → Goal Judge → Reasoning Effort",
+   "category": "auxiliary"
+  },
+  "auxiliary.curator.provider": {
+   "type": "string",
+   "description": "Auxiliary → Curator → Provider",
+   "category": "auxiliary"
+  },
+  "auxiliary.curator.model": {
+   "type": "string",
+   "description": "Auxiliary → Curator → Model",
+   "category": "auxiliary"
+  },
+  "auxiliary.curator.base_url": {
+   "type": "string",
+   "description": "Auxiliary → Curator → Base Url",
+   "category": "auxiliary"
+  },
+  "auxiliary.curator.api_key": {
+   "type": "string",
+   "description": "Auxiliary → Curator → Api Key",
+   "category": "auxiliary"
+  },
+  "auxiliary.curator.timeout": {
+   "type": "number",
+   "description": "Auxiliary → Curator → Timeout",
+   "category": "auxiliary"
+  },
+  "auxiliary.curator.reasoning_effort": {
+   "type": "string",
+   "description": "Auxiliary → Curator → Reasoning Effort",
+   "category": "auxiliary"
+  },
+  "auxiliary.monitor.provider": {
+   "type": "string",
+   "description": "Auxiliary → Monitor → Provider",
+   "category": "auxiliary"
+  },
+  "auxiliary.monitor.model": {
+   "type": "string",
+   "description": "Auxiliary → Monitor → Model",
+   "category": "auxiliary"
+  },
+  "auxiliary.monitor.base_url": {
+   "type": "string",
+   "description": "Auxiliary → Monitor → Base Url",
+   "category": "auxiliary"
+  },
+  "auxiliary.monitor.api_key": {
+   "type": "string",
+   "description": "Auxiliary → Monitor → Api Key",
+   "category": "auxiliary"
+  },
+  "auxiliary.monitor.timeout": {
+   "type": "number",
+   "description": "Auxiliary → Monitor → Timeout",
+   "category": "auxiliary"
+  },
+  "auxiliary.monitor.reasoning_effort": {
+   "type": "string",
+   "description": "Auxiliary → Monitor → Reasoning Effort",
+   "category": "auxiliary"
+  },
+  "auxiliary.background_review.enabled": {
+   "type": "boolean",
+   "description": "Auxiliary → Background Review → Enabled",
+   "category": "auxiliary"
+  },
+  "auxiliary.background_review.provider": {
+   "type": "string",
+   "description": "Auxiliary → Background Review → Provider",
+   "category": "auxiliary"
+  },
+  "auxiliary.background_review.model": {
+   "type": "string",
+   "description": "Auxiliary → Background Review → Model",
+   "category": "auxiliary"
+  },
+  "auxiliary.background_review.base_url": {
+   "type": "string",
+   "description": "Auxiliary → Background Review → Base Url",
+   "category": "auxiliary"
+  },
+  "auxiliary.background_review.api_key": {
+   "type": "string",
+   "description": "Auxiliary → Background Review → Api Key",
+   "category": "auxiliary"
+  },
+  "auxiliary.background_review.timeout": {
+   "type": "number",
+   "description": "Auxiliary → Background Review → Timeout",
+   "category": "auxiliary"
+  },
+  "auxiliary.background_review.reasoning_effort": {
+   "type": "string",
+   "description": "Auxiliary → Background Review → Reasoning Effort",
+   "category": "auxiliary"
+  },
+  "auxiliary.background_review.max_input_tokens": {
+   "type": "number",
+   "description": "Auxiliary → Background Review → Max Input Tokens",
+   "category": "auxiliary"
+  },
+  "auxiliary.moa_reference.provider": {
+   "type": "string",
+   "description": "Auxiliary → Moa Reference → Provider",
+   "category": "auxiliary"
+  },
+  "auxiliary.moa_reference.model": {
+   "type": "string",
+   "description": "Auxiliary → Moa Reference → Model",
+   "category": "auxiliary"
+  },
+  "auxiliary.moa_reference.base_url": {
+   "type": "string",
+   "description": "Auxiliary → Moa Reference → Base Url",
+   "category": "auxiliary"
+  },
+  "auxiliary.moa_reference.api_key": {
+   "type": "string",
+   "description": "Auxiliary → Moa Reference → Api Key",
+   "category": "auxiliary"
+  },
+  "auxiliary.moa_reference.timeout": {
+   "type": "number",
+   "description": "Auxiliary → Moa Reference → Timeout",
+   "category": "auxiliary"
+  },
+  "auxiliary.moa_aggregator.provider": {
+   "type": "string",
+   "description": "Auxiliary → Moa Aggregator → Provider",
+   "category": "auxiliary"
+  },
+  "auxiliary.moa_aggregator.model": {
+   "type": "string",
+   "description": "Auxiliary → Moa Aggregator → Model",
+   "category": "auxiliary"
+  },
+  "auxiliary.moa_aggregator.base_url": {
+   "type": "string",
+   "description": "Auxiliary → Moa Aggregator → Base Url",
+   "category": "auxiliary"
+  },
+  "auxiliary.moa_aggregator.api_key": {
+   "type": "string",
+   "description": "Auxiliary → Moa Aggregator → Api Key",
+   "category": "auxiliary"
+  },
+  "auxiliary.moa_aggregator.timeout": {
+   "type": "number",
+   "description": "Auxiliary → Moa Aggregator → Timeout",
+   "category": "auxiliary"
+  },
+  "display.compact": {
+   "type": "boolean",
+   "description": "Display → Compact",
+   "category": "display"
+  },
+  "display.personality": {
+   "type": "string",
+   "description": "Display → Personality",
+   "category": "display"
+  },
+  "display.resume_display": {
+   "type": "select",
+   "description": "How resumed sessions display history",
+   "category": "display",
+   "options": [
+    "minimal",
+    "full",
+    "off"
+   ]
+  },
+  "display.resume_exchanges": {
+   "type": "number",
+   "description": "Display → Resume Exchanges",
+   "category": "display"
+  },
+  "display.resume_max_user_chars": {
+   "type": "number",
+   "description": "Display → Resume Max User Chars",
+   "category": "display"
+  },
+  "display.resume_max_assistant_chars": {
+   "type": "number",
+   "description": "Display → Resume Max Assistant Chars",
+   "category": "display"
+  },
+  "display.resume_max_assistant_lines": {
+   "type": "number",
+   "description": "Display → Resume Max Assistant Lines",
+   "category": "display"
+  },
+  "display.resume_skip_tool_only": {
+   "type": "boolean",
+   "description": "Display → Resume Skip Tool Only",
+   "category": "display"
+  },
+  "display.busy_input_mode": {
+   "type": "select",
+   "description": "Input behavior while agent is running",
+   "category": "display",
+   "options": [
+    "interrupt",
+    "queue",
+    "steer"
+   ]
+  },
+  "display.busy_steer_ack_enabled": {
+   "type": "boolean",
+   "description": "Display → Busy Steer Ack Enabled",
+   "category": "display"
+  },
+  "display.cli_multiline_shortcuts": {
+   "type": "boolean",
+   "description": "Display → Cli Multiline Shortcuts",
+   "category": "display"
+  },
+  "display.interface": {
+   "type": "string",
+   "description": "Display → Interface",
+   "category": "display"
+  },
+  "display.tui_auto_resume_recent": {
+   "type": "boolean",
+   "description": "Display → Tui Auto Resume Recent",
+   "category": "display"
+  },
+  "display.tui_agents_nudge": {
+   "type": "boolean",
+   "description": "Display → Tui Agents Nudge",
+   "category": "display"
+  },
+  "display.bell_on_complete": {
+   "type": "boolean",
+   "description": "Display → Bell On Complete",
+   "category": "display"
+  },
+  "display.show_reasoning": {
+   "type": "boolean",
+   "description": "Display → Show Reasoning",
+   "category": "display"
+  },
+  "display.reasoning_full": {
+   "type": "boolean",
+   "description": "Display → Reasoning Full",
+   "category": "display"
+  },
+  "display.memory_notifications": {
+   "type": "string",
+   "description": "Display → Memory Notifications",
+   "category": "display"
+  },
+  "display.background_process_notifications": {
+   "type": "string",
+   "description": "Display → Background Process Notifications",
+   "category": "display"
+  },
+  "display.streaming": {
+   "type": "boolean",
+   "description": "Display → Streaming",
+   "category": "display"
+  },
+  "display.timestamps": {
+   "type": "boolean",
+   "description": "Display → Timestamps",
+   "category": "display"
+  },
+  "display.timestamp_format": {
+   "type": "string",
+   "description": "Display → Timestamp Format",
+   "category": "display"
+  },
+  "display.final_response_markdown": {
+   "type": "string",
+   "description": "Display → Final Response Markdown",
+   "category": "display"
+  },
+  "display.persistent_output": {
+   "type": "boolean",
+   "description": "Display → Persistent Output",
+   "category": "display"
+  },
+  "display.persistent_output_max_lines": {
+   "type": "number",
+   "description": "Display → Persistent Output Max Lines",
+   "category": "display"
+  },
+  "display.cli_rebuild_scrollback_on_redraw": {
+   "type": "boolean",
+   "description": "Display → Cli Rebuild Scrollback On Redraw",
+   "category": "display"
+  },
+  "display.persist_prompts": {
+   "type": "boolean",
+   "description": "Display → Persist Prompts",
+   "category": "display"
+  },
+  "display.inline_diffs": {
+   "type": "boolean",
+   "description": "Display → Inline Diffs",
+   "category": "display"
+  },
+  "display.file_mutation_verifier": {
+   "type": "boolean",
+   "description": "Display → File Mutation Verifier",
+   "category": "display"
+  },
+  "display.credits_notices": {
+   "type": "boolean",
+   "description": "Display → Credits Notices",
+   "category": "display"
+  },
+  "display.turn_completion_explainer": {
+   "type": "boolean",
+   "description": "Display → Turn Completion Explainer",
+   "category": "display"
+  },
+  "display.show_cost": {
+   "type": "boolean",
+   "description": "Display → Show Cost",
+   "category": "display"
+  },
+  "display.battery": {
+   "type": "boolean",
+   "description": "Display → Battery",
+   "category": "display"
+  },
+  "display.focus_view": {
+   "type": "boolean",
+   "description": "Display → Focus View",
+   "category": "display"
+  },
+  "display.focus_saved_tool_progress": {
+   "type": "string",
+   "description": "Display → Focus Saved Tool Progress",
+   "category": "display"
+  },
+  "display.skin": {
+   "type": "select",
+   "description": "CLI visual theme",
+   "category": "display",
+   "options": [
+    "default",
+    "ares",
+    "mono",
+    "slate"
+   ]
+  },
+  "display.language": {
+   "type": "string",
+   "description": "Display → Language",
+   "category": "display"
+  },
+  "display.tui_status_indicator": {
+   "type": "string",
+   "description": "Display → Tui Status Indicator",
+   "category": "display"
+  },
+  "display.cli_refresh_interval": {
+   "type": "number",
+   "description": "Display → Cli Refresh Interval",
+   "category": "display"
+  },
+  "display.user_message_preview.first_lines": {
+   "type": "number",
+   "description": "Display → User Message Preview → First Lines",
+   "category": "display"
+  },
+  "display.user_message_preview.last_lines": {
+   "type": "number",
+   "description": "Display → User Message Preview → Last Lines",
+   "category": "display"
+  },
+  "display.interim_assistant_messages": {
+   "type": "boolean",
+   "description": "Display → Interim Assistant Messages",
+   "category": "display"
+  },
+  "display.show_commentary": {
+   "type": "boolean",
+   "description": "Display → Show Commentary",
+   "category": "display"
+  },
+  "display.tool_progress_command": {
+   "type": "boolean",
+   "description": "Display → Tool Progress Command",
+   "category": "display"
+  },
+  "display.tool_preview_length": {
+   "type": "number",
+   "description": "Display → Tool Preview Length",
+   "category": "display"
+  },
+  "display.friendly_tool_labels": {
+   "type": "boolean",
+   "description": "Display → Friendly Tool Labels",
+   "category": "display"
+  },
+  "display.turn_summary": {
+   "type": "boolean",
+   "description": "Display → Turn Summary",
+   "category": "display"
+  },
+  "display.spinner_token_flow": {
+   "type": "boolean",
+   "description": "Display → Spinner Token Flow",
+   "category": "display"
+  },
+  "display.tool_progress_grouping": {
+   "type": "string",
+   "description": "Display → Tool Progress Grouping",
+   "category": "display"
+  },
+  "display.reasoning_style": {
+   "type": "string",
+   "description": "Display → Reasoning Style",
+   "category": "display"
+  },
+  "display.ephemeral_system_ttl": {
+   "type": "number",
+   "description": "Display → Ephemeral System Ttl",
+   "category": "display"
+  },
+  "display.platforms.telegram.streaming": {
+   "type": "boolean",
+   "description": "Display → Platforms → Telegram → Streaming",
+   "category": "display"
+  },
+  "display.platforms.discord.streaming": {
+   "type": "boolean",
+   "description": "Display → Platforms → Discord → Streaming",
+   "category": "display"
+  },
+  "display.platforms.slack.streaming": {
+   "type": "boolean",
+   "description": "Display → Platforms → Slack → Streaming",
+   "category": "display"
+  },
+  "display.platforms.wecom.streaming": {
+   "type": "boolean",
+   "description": "Display → Platforms → Wecom → Streaming",
+   "category": "display"
+  },
+  "display.runtime_footer.enabled": {
+   "type": "boolean",
+   "description": "Display → Runtime Footer → Enabled",
+   "category": "display"
+  },
+  "display.runtime_footer.fields": {
+   "type": "list",
+   "description": "Display → Runtime Footer → Fields",
+   "category": "display"
+  },
+  "display.status_bar.fields": {
+   "type": "list",
+   "description": "Display → Status Bar → Fields",
+   "category": "display"
+  },
+  "display.copy_shortcut": {
+   "type": "string",
+   "description": "Display → Copy Shortcut",
+   "category": "display"
+  },
+  "display.pet.enabled": {
+   "type": "boolean",
+   "description": "Display → Pet → Enabled",
+   "category": "display"
+  },
+  "display.pet.slug": {
+   "type": "string",
+   "description": "Display → Pet → Slug",
+   "category": "display"
+  },
+  "display.pet.render_mode": {
+   "type": "string",
+   "description": "Display → Pet → Render Mode",
+   "category": "display"
+  },
+  "display.pet.scale": {
+   "type": "number",
+   "description": "Display → Pet → Scale",
+   "category": "display"
+  },
+  "display.pet.unicode_cols": {
+   "type": "number",
+   "description": "Display → Pet → Unicode Cols",
+   "category": "display"
+  },
+  "dashboard.theme": {
+   "type": "select",
+   "description": "Web dashboard visual theme",
+   "category": "display",
+   "options": [
+    "default",
+    "midnight",
+    "ember",
+    "mono",
+    "cyberpunk",
+    "rose"
+   ]
+  },
+  "dashboard.turn_isolation": {
+   "type": "boolean",
+   "description": "Dashboard → Turn Isolation",
+   "category": "display"
+  },
+  "dashboard.compute_host_heartbeat_secs": {
+   "type": "number",
+   "description": "Dashboard → Compute Host Heartbeat Secs",
+   "category": "display"
+  },
+  "dashboard.compute_host_respawn_max": {
+   "type": "number",
+   "description": "Dashboard → Compute Host Respawn Max",
+   "category": "display"
+  },
+  "dashboard.show_token_analytics": {
+   "type": "boolean",
+   "description": "Dashboard → Show Token Analytics",
+   "category": "display"
+  },
+  "dashboard.trusted_proxies": {
+   "type": "list",
+   "description": "Dashboard → Trusted Proxies",
+   "category": "display"
+  },
+  "dashboard.ws_ping_interval": {
+   "type": "number",
+   "description": "Dashboard → Ws Ping Interval",
+   "category": "display"
+  },
+  "dashboard.ws_ping_timeout": {
+   "type": "number",
+   "description": "Dashboard → Ws Ping Timeout",
+   "category": "display"
+  },
+  "dashboard.ws_orphan_reap_grace_s": {
+   "type": "number",
+   "description": "Dashboard → Ws Orphan Reap Grace S",
+   "category": "display"
+  },
+  "dashboard.startup_orphan_sweep": {
+   "type": "boolean",
+   "description": "Dashboard → Startup Orphan Sweep",
+   "category": "display"
+  },
+  "dashboard.oauth.client_id": {
+   "type": "string",
+   "description": "Dashboard → Oauth → Client Id",
+   "category": "display"
+  },
+  "dashboard.oauth.portal_url": {
+   "type": "string",
+   "description": "Dashboard → Oauth → Portal Url",
+   "category": "display"
+  },
+  "dashboard.basic_auth.username": {
+   "type": "string",
+   "description": "Dashboard → Basic Auth → Username",
+   "category": "display"
+  },
+  "dashboard.basic_auth.password_hash": {
+   "type": "string",
+   "description": "Dashboard → Basic Auth → Password Hash",
+   "category": "display"
+  },
+  "dashboard.basic_auth.password": {
+   "type": "string",
+   "description": "Dashboard → Basic Auth → Password",
+   "category": "display"
+  },
+  "dashboard.basic_auth.secret": {
+   "type": "string",
+   "description": "Dashboard → Basic Auth → Secret",
+   "category": "display"
+  },
+  "dashboard.basic_auth.session_ttl_seconds": {
+   "type": "number",
+   "description": "Dashboard → Basic Auth → Session Ttl Seconds",
+   "category": "display"
+  },
+  "dashboard.drain_auth.scope": {
+   "type": "string",
+   "description": "Dashboard → Drain Auth → Scope",
+   "category": "display"
+  },
+  "dashboard.drain_auth.min_secret_chars": {
+   "type": "number",
+   "description": "Dashboard → Drain Auth → Min Secret Chars",
+   "category": "display"
+  },
+  "dashboard.public_url": {
+   "type": "string",
+   "description": "Dashboard → Public Url",
+   "category": "display"
+  },
+  "privacy.redact_pii": {
+   "type": "boolean",
+   "description": "Privacy → Redact Pii",
+   "category": "security"
+  },
+  "tts.provider": {
+   "type": "select",
+   "description": "Text-to-speech provider",
+   "category": "tts",
+   "options": [
+    "edge",
+    "elevenlabs",
+    "openai",
+    "xai",
+    "minimax",
+    "mistral",
+    "gemini",
+    "neutts",
+    "kittentts",
+    "piper"
+   ]
+  },
+  "tts.edge.voice": {
+   "type": "string",
+   "description": "Tts → Edge → Voice",
+   "category": "tts"
+  },
+  "tts.elevenlabs.voice_id": {
+   "type": "string",
+   "description": "Tts → Elevenlabs → Voice Id",
+   "category": "tts"
+  },
+  "tts.elevenlabs.model_id": {
+   "type": "string",
+   "description": "Tts → Elevenlabs → Model Id",
+   "category": "tts"
+  },
+  "tts.openai.model": {
+   "type": "string",
+   "description": "Tts → Openai → Model",
+   "category": "tts"
+  },
+  "tts.openai.voice": {
+   "type": "string",
+   "description": "Tts → Openai → Voice",
+   "category": "tts"
+  },
+  "tts.gemini.model": {
+   "type": "string",
+   "description": "Tts → Gemini → Model",
+   "category": "tts"
+  },
+  "tts.gemini.voice": {
+   "type": "string",
+   "description": "Tts → Gemini → Voice",
+   "category": "tts"
+  },
+  "tts.gemini.audio_tags": {
+   "type": "boolean",
+   "description": "Tts → Gemini → Audio Tags",
+   "category": "tts"
+  },
+  "tts.gemini.persona_prompt_file": {
+   "type": "string",
+   "description": "Tts → Gemini → Persona Prompt File",
+   "category": "tts"
+  },
+  "tts.xai.voice_id": {
+   "type": "string",
+   "description": "Tts → Xai → Voice Id",
+   "category": "tts"
+  },
+  "tts.xai.language": {
+   "type": "string",
+   "description": "Tts → Xai → Language",
+   "category": "tts"
+  },
+  "tts.xai.speed": {
+   "type": "number",
+   "description": "Tts → Xai → Speed",
+   "category": "tts"
+  },
+  "tts.xai.auto_speech_tags": {
+   "type": "boolean",
+   "description": "Tts → Xai → Auto Speech Tags",
+   "category": "tts"
+  },
+  "tts.xai.optimize_streaming_latency": {
+   "type": "number",
+   "description": "Tts → Xai → Optimize Streaming Latency",
+   "category": "tts"
+  },
+  "tts.xai.sample_rate": {
+   "type": "number",
+   "description": "Tts → Xai → Sample Rate",
+   "category": "tts"
+  },
+  "tts.xai.bit_rate": {
+   "type": "number",
+   "description": "Tts → Xai → Bit Rate",
+   "category": "tts"
+  },
+  "tts.mistral.model": {
+   "type": "string",
+   "description": "Tts → Mistral → Model",
+   "category": "tts"
+  },
+  "tts.mistral.voice_id": {
+   "type": "string",
+   "description": "Tts → Mistral → Voice Id",
+   "category": "tts"
+  },
+  "tts.minimax.model": {
+   "type": "string",
+   "description": "Tts → Minimax → Model",
+   "category": "tts"
+  },
+  "tts.minimax.voice_id": {
+   "type": "string",
+   "description": "Tts → Minimax → Voice Id",
+   "category": "tts"
+  },
+  "tts.kittentts.model": {
+   "type": "string",
+   "description": "Tts → Kittentts → Model",
+   "category": "tts"
+  },
+  "tts.kittentts.voice": {
+   "type": "string",
+   "description": "Tts → Kittentts → Voice",
+   "category": "tts"
+  },
+  "tts.neutts.ref_audio": {
+   "type": "string",
+   "description": "Tts → Neutts → Ref Audio",
+   "category": "tts"
+  },
+  "tts.neutts.ref_text": {
+   "type": "string",
+   "description": "Tts → Neutts → Ref Text",
+   "category": "tts"
+  },
+  "tts.neutts.model": {
+   "type": "string",
+   "description": "Tts → Neutts → Model",
+   "category": "tts"
+  },
+  "tts.neutts.device": {
+   "type": "string",
+   "description": "Tts → Neutts → Device",
+   "category": "tts"
+  },
+  "tts.piper.voice": {
+   "type": "string",
+   "description": "Tts → Piper → Voice",
+   "category": "tts"
+  },
+  "tts.deepinfra.model": {
+   "type": "string",
+   "description": "Tts → Deepinfra → Model",
+   "category": "tts"
+  },
+  "tts.deepinfra.voice": {
+   "type": "string",
+   "description": "Tts → Deepinfra → Voice",
+   "category": "tts"
+  },
+  "stt.provider": {
+   "type": "select",
+   "description": "Speech-to-text provider",
+   "category": "stt",
+   "options": ["local", "local_command", "groq", "openai", "mistral", "xai", "elevenlabs", "deepinfra"]
+  },
+  "stt.enabled": {
+   "type": "boolean",
+   "description": "Stt → Enabled",
+   "category": "stt"
+  },
+  "stt.echo_transcripts": {
+   "type": "boolean",
+   "description": "Stt → Echo Transcripts",
+   "category": "stt"
+  },
+  "stt.language": {
+   "type": "string",
+   "description": "Stt → Language",
+   "category": "stt"
+  },
+  "stt.cloud_trim_silence": {
+   "type": "boolean",
+   "description": "Stt → Cloud Trim Silence",
+   "category": "stt"
+  },
+  "stt.cloud_trim_threshold_db": {
+   "type": "number",
+   "description": "Stt → Cloud Trim Threshold Db",
+   "category": "stt"
+  },
+  "stt.cloud_trim_keep_ms": {
+   "type": "number",
+   "description": "Stt → Cloud Trim Keep Ms",
+   "category": "stt"
+  },
+  "stt.local.model": {
+   "type": "select",
+   "description": "Local faster-whisper model size",
+   "category": "stt",
+   "options": [
+    "tiny",
+    "base",
+    "small",
+    "medium",
+    "large-v3"
+   ]
+  },
+  "stt.local.language": {
+   "type": "string",
+   "description": "Stt → Local → Language",
+   "category": "stt"
+  },
+  "stt.local.initial_prompt": {
+   "type": "string",
+   "description": "Stt → Local → Initial Prompt",
+   "category": "stt"
+  },
+  "stt.local.vad": {
+   "type": "boolean",
+   "description": "Stt → Local → Vad",
+   "category": "stt"
+  },
+  "stt.local.vad_min_silence_ms": {
+   "type": "number",
+   "description": "Stt → Local → Vad Min Silence Ms",
+   "category": "stt"
+  },
+  "stt.local.no_speech_prob_threshold": {
+   "type": "number",
+   "description": "Stt → Local → No Speech Prob Threshold",
+   "category": "stt"
+  },
+  "stt.local.logprob_threshold": {
+   "type": "number",
+   "description": "Stt → Local → Logprob Threshold",
+   "category": "stt"
+  },
+  "stt.local.unload_after_idle_seconds": {
+   "type": "number",
+   "description": "Stt → Local → Unload After Idle Seconds",
+   "category": "stt"
+  },
+  "stt.groq.model": {
+   "type": "select",
+   "description": "Groq Whisper model",
+   "category": "stt",
+   "options": [
+    "whisper-large-v3-turbo",
+    "whisper-large-v3",
+    "distil-whisper-large-v3-en"
+   ]
+  },
+  "stt.groq.language": {
+   "type": "string",
+   "description": "Stt → Groq → Language",
+   "category": "stt"
+  },
+  "stt.openai.model": {
+   "type": "select",
+   "description": "OpenAI transcription model",
+   "category": "stt",
+   "options": [
+    "whisper-1",
+    "gpt-4o-mini-transcribe",
+    "gpt-4o-transcribe",
+    "gpt-transcribe"
+   ]
+  },
+  "stt.openai.language": {
+   "type": "string",
+   "description": "Stt → Openai → Language",
+   "category": "stt"
+  },
+  "stt.mistral.model": {
+   "type": "string",
+   "description": "Stt → Mistral → Model",
+   "category": "stt"
+  },
+  "stt.mistral.language": {
+   "type": "string",
+   "description": "Stt → Mistral → Language",
+   "category": "stt"
+  },
+  "stt.xai.language": {
+   "type": "string",
+   "description": "Stt → Xai → Language",
+   "category": "stt"
+  },
+  "stt.elevenlabs.model_id": {
+   "type": "select",
+   "description": "ElevenLabs Scribe model",
+   "category": "stt",
+   "options": [
+    "scribe_v2",
+    "scribe_v1"
+   ]
+  },
+  "stt.elevenlabs.language_code": {
+   "type": "string",
+   "description": "Stt → Elevenlabs → Language Code",
+   "category": "stt"
+  },
+  "stt.elevenlabs.tag_audio_events": {
+   "type": "boolean",
+   "description": "Stt → Elevenlabs → Tag Audio Events",
+   "category": "stt"
+  },
+  "stt.elevenlabs.diarize": {
+   "type": "boolean",
+   "description": "Stt → Elevenlabs → Diarize",
+   "category": "stt"
+  },
+  "stt.deepinfra.model": {
+   "type": "string",
+   "description": "Stt → Deepinfra → Model",
+   "category": "stt"
+  },
+  "voice.record_key": {
+   "type": "string",
+   "description": "Voice → Record Key",
+   "category": "voice"
+  },
+  "voice.submit_mode": {
+   "type": "string",
+   "description": "Voice → Submit Mode",
+   "category": "voice"
+  },
+  "voice.max_recording_seconds": {
+   "type": "number",
+   "description": "Voice → Max Recording Seconds",
+   "category": "voice"
+  },
+  "voice.auto_tts": {
+   "type": "boolean",
+   "description": "Voice → Auto Tts",
+   "category": "voice"
+  },
+  "voice.client_direct": {
+   "type": "boolean",
+   "description": "Voice → Client Direct",
+   "category": "voice"
+  },
+  "voice.beep_enabled": {
+   "type": "boolean",
+   "description": "Voice → Beep Enabled",
+   "category": "voice"
+  },
+  "voice.beep_volume": {
+   "type": "number",
+   "description": "Voice → Beep Volume",
+   "category": "voice"
+  },
+  "voice.thinking_sound": {
+   "type": "boolean",
+   "description": "Voice → Thinking Sound",
+   "category": "voice"
+  },
+  "voice.silence_threshold": {
+   "type": "number",
+   "description": "Voice → Silence Threshold",
+   "category": "voice"
+  },
+  "voice.silence_duration": {
+   "type": "number",
+   "description": "Voice → Silence Duration",
+   "category": "voice"
+  },
+  "voice.barge_in": {
+   "type": "boolean",
+   "description": "Voice → Barge In",
+   "category": "voice"
+  },
+  "voice.barge_in_grace_seconds": {
+   "type": "number",
+   "description": "Voice → Barge In Grace Seconds",
+   "category": "voice"
+  },
+  "voice.barge_in_threshold_multiplier": {
+   "type": "number",
+   "description": "Voice → Barge In Threshold Multiplier",
+   "category": "voice"
+  },
+  "voice.stop_phrases": {
+   "type": "list",
+   "description": "Voice → Stop Phrases",
+   "category": "voice"
+  },
+  "wake_word.enabled": {
+   "type": "boolean",
+   "description": "Wake Word → Enabled",
+   "category": "wake_word"
+  },
+  "wake_word.surface": {
+   "type": "string",
+   "description": "Wake Word → Surface",
+   "category": "wake_word"
+  },
+  "wake_word.input_device": {
+   "type": "string",
+   "description": "Wake Word → Input Device",
+   "category": "wake_word"
+  },
+  "wake_word.capture": {
+   "type": "string",
+   "description": "Wake Word → Capture",
+   "category": "wake_word"
+  },
+  "wake_word.provider": {
+   "type": "string",
+   "description": "Wake Word → Provider",
+   "category": "wake_word"
+  },
+  "wake_word.phrase": {
+   "type": "string",
+   "description": "Wake Word → Phrase",
+   "category": "wake_word"
+  },
+  "wake_word.sensitivity": {
+   "type": "number",
+   "description": "Wake Word → Sensitivity",
+   "category": "wake_word"
+  },
+  "wake_word.confirmation_frames": {
+   "type": "number",
+   "description": "Wake Word → Confirmation Frames",
+   "category": "wake_word"
+  },
+  "wake_word.start_new_session": {
+   "type": "boolean",
+   "description": "Wake Word → Start New Session",
+   "category": "wake_word"
+  },
+  "wake_word.profile_routing": {
+   "type": "boolean",
+   "description": "Wake Word → Profile Routing",
+   "category": "wake_word"
+  },
+  "wake_word.openwakeword.model": {
+   "type": "string",
+   "description": "Wake Word → Openwakeword → Model",
+   "category": "wake_word"
+  },
+  "wake_word.openwakeword.inference_framework": {
+   "type": "string",
+   "description": "Wake Word → Openwakeword → Inference Framework",
+   "category": "wake_word"
+  },
+  "wake_word.sherpa.model_dir": {
+   "type": "string",
+   "description": "Wake Word → Sherpa → Model Dir",
+   "category": "wake_word"
+  },
+  "wake_word.porcupine.keyword": {
+   "type": "string",
+   "description": "Wake Word → Porcupine → Keyword",
+   "category": "wake_word"
+  },
+  "human_delay.mode": {
+   "type": "select",
+   "description": "Simulated typing delay mode",
+   "category": "display",
+   "options": [
+    "off",
+    "typing",
+    "fixed"
+   ]
+  },
+  "human_delay.min_ms": {
+   "type": "number",
+   "description": "Human Delay → Min Ms",
+   "category": "display"
+  },
+  "human_delay.max_ms": {
+   "type": "number",
+   "description": "Human Delay → Max Ms",
+   "category": "display"
+  },
+  "context.engine": {
+   "type": "select",
+   "description": "Context management engine",
+   "category": "agent",
+   "options": [
+    "default",
+    "custom"
+   ]
+  },
+  "context.memory_trim.enabled": {
+   "type": "boolean",
+   "description": "Context → Memory Trim → Enabled",
+   "category": "agent"
+  },
+  "context.memory_trim.cooldown_seconds": {
+   "type": "number",
+   "description": "Context → Memory Trim → Cooldown Seconds",
+   "category": "agent"
+  },
+  "context.memory_trim.log_every_n": {
+   "type": "number",
+   "description": "Context → Memory Trim → Log Every N",
+   "category": "agent"
+  },
+  "context.memory_trim.info_log_min_delta_mb": {
+   "type": "number",
+   "description": "Context → Memory Trim → Info Log Min Delta Mb",
+   "category": "agent"
+  },
+  "memory.memory_enabled": {
+   "type": "boolean",
+   "description": "Memory → Memory Enabled",
+   "category": "memory"
+  },
+  "memory.user_profile_enabled": {
+   "type": "boolean",
+   "description": "Memory → User Profile Enabled",
+   "category": "memory"
+  },
+  "memory.write_approval": {
+   "type": "boolean",
+   "description": "Memory → Write Approval",
+   "category": "memory"
+  },
+  "memory.memory_char_limit": {
+   "type": "number",
+   "description": "Memory → Memory Char Limit",
+   "category": "memory"
+  },
+  "memory.user_char_limit": {
+   "type": "number",
+   "description": "Memory → User Char Limit",
+   "category": "memory"
+  },
+  "memory.nudge_interval": {
+   "type": "number",
+   "description": "Memory → Nudge Interval",
+   "category": "memory"
+  },
+  "memory.provider": {
+   "type": "select",
+   "description": "Memory provider plugin",
+   "category": "memory",
+   "options": [
+    "",
+    "byterover",
+    "hindsight",
+    "holographic",
+    "honcho",
+    "mem0",
+    "openviking",
+    "retaindb",
+    "supermemory"
+   ]
+  },
+  "delegation.model": {
+   "type": "string",
+   "description": "Delegation → Model",
+   "category": "delegation"
+  },
+  "delegation.provider": {
+   "type": "string",
+   "description": "Delegation → Provider",
+   "category": "delegation"
+  },
+  "delegation.base_url": {
+   "type": "string",
+   "description": "Delegation → Base Url",
+   "category": "delegation"
+  },
+  "delegation.api_key": {
+   "type": "string",
+   "description": "Delegation → Api Key",
+   "category": "delegation"
+  },
+  "delegation.api_mode": {
+   "type": "string",
+   "description": "Delegation → Api Mode",
+   "category": "delegation"
+  },
+  "delegation.inherit_mcp_toolsets": {
+   "type": "boolean",
+   "description": "Delegation → Inherit Mcp Toolsets",
+   "category": "delegation"
+  },
+  "delegation.max_iterations": {
+   "type": "number",
+   "description": "Delegation → Max Iterations",
+   "category": "delegation"
+  },
+  "delegation.max_summary_chars": {
+   "type": "number",
+   "description": "Delegation → Max Summary Chars",
+   "category": "delegation"
+  },
+  "delegation.child_timeout_seconds": {
+   "type": "number",
+   "description": "Delegation → Child Timeout Seconds",
+   "category": "delegation"
+  },
+  "delegation.reasoning_effort": {
+   "type": "select",
+   "description": "Reasoning effort for delegated subagents",
+   "category": "delegation",
+   "options": [
+    "",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+    "ultra"
+   ]
+  },
+  "delegation.max_concurrent_children": {
+   "type": "number",
+   "description": "Delegation → Max Concurrent Children",
+   "category": "delegation"
+  },
+  "delegation.max_spawn_depth": {
+   "type": "number",
+   "description": "Delegation → Max Spawn Depth",
+   "category": "delegation"
+  },
+  "delegation.orchestrator_enabled": {
+   "type": "boolean",
+   "description": "Delegation → Orchestrator Enabled",
+   "category": "delegation"
+  },
+  "delegation.subagent_auto_approve": {
+   "type": "boolean",
+   "description": "Delegation → Subagent Auto Approve",
+   "category": "delegation"
+  },
+  "delegation.surface_child_process_notifications": {
+   "type": "boolean",
+   "description": "Delegation → Surface Child Process Notifications",
+   "category": "delegation"
+  },
+  "prefill_messages_file": {
+   "type": "string",
+   "description": "Prefill Messages File",
+   "category": "general"
+  },
+  "goals.max_turns": {
+   "type": "number",
+   "description": "Goals → Max Turns",
+   "category": "agent"
+  },
+  "loops.min_interval_seconds": {
+   "type": "number",
+   "description": "Loops → Min Interval Seconds",
+   "category": "loops"
+  },
+  "loops.max_ticks": {
+   "type": "number",
+   "description": "Loops → Max Ticks",
+   "category": "loops"
+  },
+  "loops.self_paced_floor_seconds": {
+   "type": "number",
+   "description": "Loops → Self Paced Floor Seconds",
+   "category": "loops"
+  },
+  "loops.self_paced_ceiling_seconds": {
+   "type": "number",
+   "description": "Loops → Self Paced Ceiling Seconds",
+   "category": "loops"
+  },
+  "moa.default_preset": {
+   "type": "string",
+   "description": "Moa → Default Preset",
+   "category": "moa"
+  },
+  "moa.active_preset": {
+   "type": "string",
+   "description": "Moa → Active Preset",
+   "category": "moa"
+  },
+  "moa.save_traces": {
+   "type": "boolean",
+   "description": "Moa → Save Traces",
+   "category": "moa"
+  },
+  "moa.trace_dir": {
+   "type": "string",
+   "description": "Moa → Trace Dir",
+   "category": "moa"
+  },
+  "moa.privacy_filter": {
+   "type": "string",
+   "description": "Moa → Privacy Filter",
+   "category": "moa"
+  },
+  "moa.presets.default.reference_models": {
+   "type": "list",
+   "description": "Moa → Presets → Default → Reference Models",
+   "category": "moa"
+  },
+  "moa.presets.default.aggregator.provider": {
+   "type": "string",
+   "description": "Moa → Presets → Default → Aggregator → Provider",
+   "category": "moa"
+  },
+  "moa.presets.default.aggregator.model": {
+   "type": "string",
+   "description": "Moa → Presets → Default → Aggregator → Model",
+   "category": "moa"
+  },
+  "moa.presets.default.max_tokens": {
+   "type": "number",
+   "description": "Moa → Presets → Default → Max Tokens",
+   "category": "moa"
+  },
+  "moa.presets.default.enabled": {
+   "type": "boolean",
+   "description": "Moa → Presets → Default → Enabled",
+   "category": "moa"
+  },
+  "skills.external_dirs": {
+   "type": "list",
+   "description": "Skills → External Dirs",
+   "category": "agent"
+  },
+  "skills.project_discovery": {
+   "type": "boolean",
+   "description": "Skills → Project Discovery",
+   "category": "agent"
+  },
+  "skills.trusted_project_dirs": {
+   "type": "list",
+   "description": "Skills → Trusted Project Dirs",
+   "category": "agent"
+  },
+  "skills.template_vars": {
+   "type": "boolean",
+   "description": "Skills → Template Vars",
+   "category": "agent"
+  },
+  "skills.inline_shell": {
+   "type": "boolean",
+   "description": "Skills → Inline Shell",
+   "category": "agent"
+  },
+  "skills.inline_shell_timeout": {
+   "type": "number",
+   "description": "Skills → Inline Shell Timeout",
+   "category": "agent"
+  },
+  "skills.guard_agent_created": {
+   "type": "boolean",
+   "description": "Skills → Guard Agent Created",
+   "category": "agent"
+  },
+  "skills.tier1_advisory": {
+   "type": "boolean",
+   "description": "Skills → Tier1 Advisory",
+   "category": "agent"
+  },
+  "skills.write_approval": {
+   "type": "boolean",
+   "description": "Skills → Write Approval",
+   "category": "agent"
+  },
+  "skills.ledger": {
+   "type": "boolean",
+   "description": "Skills → Ledger",
+   "category": "agent"
+  },
+  "curator.enabled": {
+   "type": "boolean",
+   "description": "Curator → Enabled",
+   "category": "curator"
+  },
+  "curator.interval_hours": {
+   "type": "number",
+   "description": "Curator → Interval Hours",
+   "category": "curator"
+  },
+  "curator.min_idle_hours": {
+   "type": "number",
+   "description": "Curator → Min Idle Hours",
+   "category": "curator"
+  },
+  "curator.stale_after_days": {
+   "type": "number",
+   "description": "Curator → Stale After Days",
+   "category": "curator"
+  },
+  "curator.archive_after_days": {
+   "type": "number",
+   "description": "Curator → Archive After Days",
+   "category": "curator"
+  },
+  "curator.consolidate": {
+   "type": "boolean",
+   "description": "Curator → Consolidate",
+   "category": "curator"
+  },
+  "curator.prune_builtins": {
+   "type": "boolean",
+   "description": "Curator → Prune Builtins",
+   "category": "curator"
+  },
+  "curator.archive_ttl_days": {
+   "type": "number",
+   "description": "Curator → Archive Ttl Days",
+   "category": "curator"
+  },
+  "curator.backup.enabled": {
+   "type": "boolean",
+   "description": "Curator → Backup → Enabled",
+   "category": "curator"
+  },
+  "curator.backup.keep": {
+   "type": "number",
+   "description": "Curator → Backup → Keep",
+   "category": "curator"
+  },
+  "timezone": {
+   "type": "select",
+   "description": "IANA timezone (e.g. America/New_York). Blank uses the system timezone.",
+   "category": "general",
+   "options": [
+    "Africa/Abidjan",
+    "Africa/Accra",
+    "Africa/Addis_Ababa",
+    "Africa/Algiers",
+    "Africa/Asmara",
+    "Africa/Asmera",
+    "Africa/Bamako",
+    "Africa/Bangui",
+    "Africa/Banjul",
+    "Africa/Bissau",
+    "Africa/Blantyre",
+    "Africa/Brazzaville",
+    "Africa/Bujumbura",
+    "Africa/Cairo",
+    "Africa/Casablanca",
+    "Africa/Ceuta",
+    "Africa/Conakry",
+    "Africa/Dakar",
+    "Africa/Dar_es_Salaam",
+    "Africa/Djibouti",
+    "Africa/Douala",
+    "Africa/El_Aaiun",
+    "Africa/Freetown",
+    "Africa/Gaborone",
+    "Africa/Harare",
+    "Africa/Johannesburg",
+    "Africa/Juba",
+    "Africa/Kampala",
+    "Africa/Khartoum",
+    "Africa/Kigali",
+    "Africa/Kinshasa",
+    "Africa/Lagos",
+    "Africa/Libreville",
+    "Africa/Lome",
+    "Africa/Luanda",
+    "Africa/Lubumbashi",
+    "Africa/Lusaka",
+    "Africa/Malabo",
+    "Africa/Maputo",
+    "Africa/Maseru",
+    "Africa/Mbabane",
+    "Africa/Mogadishu",
+    "Africa/Monrovia",
+    "Africa/Nairobi",
+    "Africa/Ndjamena",
+    "Africa/Niamey",
+    "Africa/Nouakchott",
+    "Africa/Ouagadougou",
+    "Africa/Porto-Novo",
+    "Africa/Sao_Tome",
+    "Africa/Timbuktu",
+    "Africa/Tripoli",
+    "Africa/Tunis",
+    "Africa/Windhoek",
+    "America/Adak",
+    "America/Anchorage",
+    "America/Anguilla",
+    "America/Antigua",
+    "America/Araguaina",
+    "America/Argentina/Buenos_Aires",
+    "America/Argentina/Catamarca",
+    "America/Argentina/ComodRivadavia",
+    "America/Argentina/Cordoba",
+    "America/Argentina/Jujuy",
+    "America/Argentina/La_Rioja",
+    "America/Argentina/Mendoza",
+    "America/Argentina/Rio_Gallegos",
+    "America/Argentina/Salta",
+    "America/Argentina/San_Juan",
+    "America/Argentina/San_Luis",
+    "America/Argentina/Tucuman",
+    "America/Argentina/Ushuaia",
+    "America/Aruba",
+    "America/Asuncion",
+    "America/Atikokan",
+    "America/Atka",
+    "America/Bahia",
+    "America/Bahia_Banderas",
+    "America/Barbados",
+    "America/Belem",
+    "America/Belize",
+    "America/Blanc-Sablon",
+    "America/Boa_Vista",
+    "America/Bogota",
+    "America/Boise",
+    "America/Buenos_Aires",
+    "America/Cambridge_Bay",
+    "America/Campo_Grande",
+    "America/Cancun",
+    "America/Caracas",
+    "America/Catamarca",
+    "America/Cayenne",
+    "America/Cayman",
+    "America/Chicago",
+    "America/Chihuahua",
+    "America/Ciudad_Juarez",
+    "America/Coral_Harbour",
+    "America/Cordoba",
+    "America/Costa_Rica",
+    "America/Coyhaique",
+    "America/Creston",
+    "America/Cuiaba",
+    "America/Curacao",
+    "America/Danmarkshavn",
+    "America/Dawson",
+    "America/Dawson_Creek",
+    "America/Denver",
+    "America/Detroit",
+    "America/Dominica",
+    "America/Edmonton",
+    "America/Eirunepe",
+    "America/El_Salvador",
+    "America/Ensenada",
+    "America/Fort_Nelson",
+    "America/Fort_Wayne",
+    "America/Fortaleza",
+    "America/Glace_Bay",
+    "America/Godthab",
+    "America/Goose_Bay",
+    "America/Grand_Turk",
+    "America/Grenada",
+    "America/Guadeloupe",
+    "America/Guatemala",
+    "America/Guayaquil",
+    "America/Guyana",
+    "America/Halifax",
+    "America/Havana",
+    "America/Hermosillo",
+    "America/Indiana/Indianapolis",
+    "America/Indiana/Knox",
+    "America/Indiana/Marengo",
+    "America/Indiana/Petersburg",
+    "America/Indiana/Tell_City",
+    "America/Indiana/Vevay",
+    "America/Indiana/Vincennes",
+    "America/Indiana/Winamac",
+    "America/Indianapolis",
+    "America/Inuvik",
+    "America/Iqaluit",
+    "America/Jamaica",
+    "America/Jujuy",
+    "America/Juneau",
+    "America/Kentucky/Louisville",
+    "America/Kentucky/Monticello",
+    "America/Knox_IN",
+    "America/Kralendijk",
+    "America/La_Paz",
+    "America/Lima",
+    "America/Los_Angeles",
+    "America/Louisville",
+    "America/Lower_Princes",
+    "America/Maceio",
+    "America/Managua",
+    "America/Manaus",
+    "America/Marigot",
+    "America/Martinique",
+    "America/Matamoros",
+    "America/Mazatlan",
+    "America/Mendoza",
+    "America/Menominee",
+    "America/Merida",
+    "America/Metlakatla",
+    "America/Mexico_City",
+    "America/Miquelon",
+    "America/Moncton",
+    "America/Monterrey",
+    "America/Montevideo",
+    "America/Montreal",
+    "America/Montserrat",
+    "America/Nassau",
+    "America/New_York",
+    "America/Nipigon",
+    "America/Nome",
+    "America/Noronha",
+    "America/North_Dakota/Beulah",
+    "America/North_Dakota/Center",
+    "America/North_Dakota/New_Salem",
+    "America/Nuuk",
+    "America/Ojinaga",
+    "America/Panama",
+    "America/Pangnirtung",
+    "America/Paramaribo",
+    "America/Phoenix",
+    "America/Port-au-Prince",
+    "America/Port_of_Spain",
+    "America/Porto_Acre",
+    "America/Porto_Velho",
+    "America/Puerto_Rico",
+    "America/Punta_Arenas",
+    "America/Rainy_River",
+    "America/Rankin_Inlet",
+    "America/Recife",
+    "America/Regina",
+    "America/Resolute",
+    "America/Rio_Branco",
+    "America/Rosario",
+    "America/Santa_Isabel",
+    "America/Santarem",
+    "America/Santiago",
+    "America/Santo_Domingo",
+    "America/Sao_Paulo",
+    "America/Scoresbysund",
+    "America/Shiprock",
+    "America/Sitka",
+    "America/St_Barthelemy",
+    "America/St_Johns",
+    "America/St_Kitts",
+    "America/St_Lucia",
+    "America/St_Thomas",
+    "America/St_Vincent",
+    "America/Swift_Current",
+    "America/Tegucigalpa",
+    "America/Thule",
+    "America/Thunder_Bay",
+    "America/Tijuana",
+    "America/Toronto",
+    "America/Tortola",
+    "America/Vancouver",
+    "America/Virgin",
+    "America/Whitehorse",
+    "America/Winnipeg",
+    "America/Yakutat",
+    "America/Yellowknife",
+    "Antarctica/Casey",
+    "Antarctica/Davis",
+    "Antarctica/DumontDUrville",
+    "Antarctica/Macquarie",
+    "Antarctica/Mawson",
+    "Antarctica/McMurdo",
+    "Antarctica/Palmer",
+    "Antarctica/Rothera",
+    "Antarctica/South_Pole",
+    "Antarctica/Syowa",
+    "Antarctica/Troll",
+    "Antarctica/Vostok",
+    "Arctic/Longyearbyen",
+    "Asia/Aden",
+    "Asia/Almaty",
+    "Asia/Amman",
+    "Asia/Anadyr",
+    "Asia/Aqtau",
+    "Asia/Aqtobe",
+    "Asia/Ashgabat",
+    "Asia/Ashkhabad",
+    "Asia/Atyrau",
+    "Asia/Baghdad",
+    "Asia/Bahrain",
+    "Asia/Baku",
+    "Asia/Bangkok",
+    "Asia/Barnaul",
+    "Asia/Beirut",
+    "Asia/Bishkek",
+    "Asia/Brunei",
+    "Asia/Calcutta",
+    "Asia/Chita",
+    "Asia/Choibalsan",
+    "Asia/Chongqing",
+    "Asia/Chungking",
+    "Asia/Colombo",
+    "Asia/Dacca",
+    "Asia/Damascus",
+    "Asia/Dhaka",
+    "Asia/Dili",
+    "Asia/Dubai",
+    "Asia/Dushanbe",
+    "Asia/Famagusta",
+    "Asia/Gaza",
+    "Asia/Harbin",
+    "Asia/Hebron",
+    "Asia/Ho_Chi_Minh",
+    "Asia/Hong_Kong",
+    "Asia/Hovd",
+    "Asia/Irkutsk",
+    "Asia/Istanbul",
+    "Asia/Jakarta",
+    "Asia/Jayapura",
+    "Asia/Jerusalem",
+    "Asia/Kabul",
+    "Asia/Kamchatka",
+    "Asia/Karachi",
+    "Asia/Kashgar",
+    "Asia/Kathmandu",
+    "Asia/Katmandu",
+    "Asia/Khandyga",
+    "Asia/Kolkata",
+    "Asia/Krasnoyarsk",
+    "Asia/Kuala_Lumpur",
+    "Asia/Kuching",
+    "Asia/Kuwait",
+    "Asia/Macao",
+    "Asia/Macau",
+    "Asia/Magadan",
+    "Asia/Makassar",
+    "Asia/Manila",
+    "Asia/Muscat",
+    "Asia/Nicosia",
+    "Asia/Novokuznetsk",
+    "Asia/Novosibirsk",
+    "Asia/Omsk",
+    "Asia/Oral",
+    "Asia/Phnom_Penh",
+    "Asia/Pontianak",
+    "Asia/Pyongyang",
+    "Asia/Qatar",
+    "Asia/Qostanay",
+    "Asia/Qyzylorda",
+    "Asia/Rangoon",
+    "Asia/Riyadh",
+    "Asia/Saigon",
+    "Asia/Sakhalin",
+    "Asia/Samarkand",
+    "Asia/Seoul",
+    "Asia/Shanghai",
+    "Asia/Singapore",
+    "Asia/Srednekolymsk",
+    "Asia/Taipei",
+    "Asia/Tashkent",
+    "Asia/Tbilisi",
+    "Asia/Tehran",
+    "Asia/Tel_Aviv",
+    "Asia/Thimbu",
+    "Asia/Thimphu",
+    "Asia/Tokyo",
+    "Asia/Tomsk",
+    "Asia/Ujung_Pandang",
+    "Asia/Ulaanbaatar",
+    "Asia/Ulan_Bator",
+    "Asia/Urumqi",
+    "Asia/Ust-Nera",
+    "Asia/Vientiane",
+    "Asia/Vladivostok",
+    "Asia/Yakutsk",
+    "Asia/Yangon",
+    "Asia/Yekaterinburg",
+    "Asia/Yerevan",
+    "Atlantic/Azores",
+    "Atlantic/Bermuda",
+    "Atlantic/Canary",
+    "Atlantic/Cape_Verde",
+    "Atlantic/Faeroe",
+    "Atlantic/Faroe",
+    "Atlantic/Jan_Mayen",
+    "Atlantic/Madeira",
+    "Atlantic/Reykjavik",
+    "Atlantic/South_Georgia",
+    "Atlantic/St_Helena",
+    "Atlantic/Stanley",
+    "Australia/ACT",
+    "Australia/Adelaide",
+    "Australia/Brisbane",
+    "Australia/Broken_Hill",
+    "Australia/Canberra",
+    "Australia/Currie",
+    "Australia/Darwin",
+    "Australia/Eucla",
+    "Australia/Hobart",
+    "Australia/LHI",
+    "Australia/Lindeman",
+    "Australia/Lord_Howe",
+    "Australia/Melbourne",
+    "Australia/NSW",
+    "Australia/North",
+    "Australia/Perth",
+    "Australia/Queensland",
+    "Australia/South",
+    "Australia/Sydney",
+    "Australia/Tasmania",
+    "Australia/Victoria",
+    "Australia/West",
+    "Australia/Yancowinna",
+    "Brazil/Acre",
+    "Brazil/DeNoronha",
+    "Brazil/East",
+    "Brazil/West",
+    "CET",
+    "CST6CDT",
+    "Canada/Atlantic",
+    "Canada/Central",
+    "Canada/Eastern",
+    "Canada/Mountain",
+    "Canada/Newfoundland",
+    "Canada/Pacific",
+    "Canada/Saskatchewan",
+    "Canada/Yukon",
+    "Chile/Continental",
+    "Chile/EasterIsland",
+    "Cuba",
+    "EET",
+    "EST",
+    "EST5EDT",
+    "Egypt",
+    "Eire",
+    "Etc/GMT",
+    "Etc/GMT+0",
+    "Etc/GMT+1",
+    "Etc/GMT+10",
+    "Etc/GMT+11",
+    "Etc/GMT+12",
+    "Etc/GMT+2",
+    "Etc/GMT+3",
+    "Etc/GMT+4",
+    "Etc/GMT+5",
+    "Etc/GMT+6",
+    "Etc/GMT+7",
+    "Etc/GMT+8",
+    "Etc/GMT+9",
+    "Etc/GMT-0",
+    "Etc/GMT-1",
+    "Etc/GMT-10",
+    "Etc/GMT-11",
+    "Etc/GMT-12",
+    "Etc/GMT-13",
+    "Etc/GMT-14",
+    "Etc/GMT-2",
+    "Etc/GMT-3",
+    "Etc/GMT-4",
+    "Etc/GMT-5",
+    "Etc/GMT-6",
+    "Etc/GMT-7",
+    "Etc/GMT-8",
+    "Etc/GMT-9",
+    "Etc/GMT0",
+    "Etc/Greenwich",
+    "Etc/UCT",
+    "Etc/UTC",
+    "Etc/Universal",
+    "Etc/Zulu",
+    "Europe/Amsterdam",
+    "Europe/Andorra",
+    "Europe/Astrakhan",
+    "Europe/Athens",
+    "Europe/Belfast",
+    "Europe/Belgrade",
+    "Europe/Berlin",
+    "Europe/Bratislava",
+    "Europe/Brussels",
+    "Europe/Bucharest",
+    "Europe/Budapest",
+    "Europe/Busingen",
+    "Europe/Chisinau",
+    "Europe/Copenhagen",
+    "Europe/Dublin",
+    "Europe/Gibraltar",
+    "Europe/Guernsey",
+    "Europe/Helsinki",
+    "Europe/Isle_of_Man",
+    "Europe/Istanbul",
+    "Europe/Jersey",
+    "Europe/Kaliningrad",
+    "Europe/Kiev",
+    "Europe/Kirov",
+    "Europe/Kyiv",
+    "Europe/Lisbon",
+    "Europe/Ljubljana",
+    "Europe/London",
+    "Europe/Luxembourg",
+    "Europe/Madrid",
+    "Europe/Malta",
+    "Europe/Mariehamn",
+    "Europe/Minsk",
+    "Europe/Monaco",
+    "Europe/Moscow",
+    "Europe/Nicosia",
+    "Europe/Oslo",
+    "Europe/Paris",
+    "Europe/Podgorica",
+    "Europe/Prague",
+    "Europe/Riga",
+    "Europe/Rome",
+    "Europe/Samara",
+    "Europe/San_Marino",
+    "Europe/Sarajevo",
+    "Europe/Saratov",
+    "Europe/Simferopol",
+    "Europe/Skopje",
+    "Europe/Sofia",
+    "Europe/Stockholm",
+    "Europe/Tallinn",
+    "Europe/Tirane",
+    "Europe/Tiraspol",
+    "Europe/Ulyanovsk",
+    "Europe/Uzhgorod",
+    "Europe/Vaduz",
+    "Europe/Vatican",
+    "Europe/Vienna",
+    "Europe/Vilnius",
+    "Europe/Volgograd",
+    "Europe/Warsaw",
+    "Europe/Zagreb",
+    "Europe/Zaporozhye",
+    "Europe/Zurich",
+    "Factory",
+    "GB",
+    "GB-Eire",
+    "GMT",
+    "GMT+0",
+    "GMT-0",
+    "GMT0",
+    "Greenwich",
+    "HST",
+    "Hongkong",
+    "Iceland",
+    "Indian/Antananarivo",
+    "Indian/Chagos",
+    "Indian/Christmas",
+    "Indian/Cocos",
+    "Indian/Comoro",
+    "Indian/Kerguelen",
+    "Indian/Mahe",
+    "Indian/Maldives",
+    "Indian/Mauritius",
+    "Indian/Mayotte",
+    "Indian/Reunion",
+    "Iran",
+    "Israel",
+    "Jamaica",
+    "Japan",
+    "Kwajalein",
+    "Libya",
+    "MET",
+    "MST",
+    "MST7MDT",
+    "Mexico/BajaNorte",
+    "Mexico/BajaSur",
+    "Mexico/General",
+    "NZ",
+    "NZ-CHAT",
+    "Navajo",
+    "PRC",
+    "PST8PDT",
+    "Pacific/Apia",
+    "Pacific/Auckland",
+    "Pacific/Bougainville",
+    "Pacific/Chatham",
+    "Pacific/Chuuk",
+    "Pacific/Easter",
+    "Pacific/Efate",
+    "Pacific/Enderbury",
+    "Pacific/Fakaofo",
+    "Pacific/Fiji",
+    "Pacific/Funafuti",
+    "Pacific/Galapagos",
+    "Pacific/Gambier",
+    "Pacific/Guadalcanal",
+    "Pacific/Guam",
+    "Pacific/Honolulu",
+    "Pacific/Johnston",
+    "Pacific/Kanton",
+    "Pacific/Kiritimati",
+    "Pacific/Kosrae",
+    "Pacific/Kwajalein",
+    "Pacific/Majuro",
+    "Pacific/Marquesas",
+    "Pacific/Midway",
+    "Pacific/Nauru",
+    "Pacific/Niue",
+    "Pacific/Norfolk",
+    "Pacific/Noumea",
+    "Pacific/Pago_Pago",
+    "Pacific/Palau",
+    "Pacific/Pitcairn",
+    "Pacific/Pohnpei",
+    "Pacific/Ponape",
+    "Pacific/Port_Moresby",
+    "Pacific/Rarotonga",
+    "Pacific/Saipan",
+    "Pacific/Samoa",
+    "Pacific/Tahiti",
+    "Pacific/Tarawa",
+    "Pacific/Tongatapu",
+    "Pacific/Truk",
+    "Pacific/Wake",
+    "Pacific/Wallis",
+    "Pacific/Yap",
+    "Poland",
+    "Portugal",
+    "ROC",
+    "ROK",
+    "Singapore",
+    "Turkey",
+    "UCT",
+    "US/Alaska",
+    "US/Aleutian",
+    "US/Arizona",
+    "US/Central",
+    "US/East-Indiana",
+    "US/Eastern",
+    "US/Hawaii",
+    "US/Indiana-Starke",
+    "US/Michigan",
+    "US/Mountain",
+    "US/Pacific",
+    "US/Samoa",
+    "UTC",
+    "Universal",
+    "W-SU",
+    "WET",
+    "Zulu",
+    "localtime"
+   ],
+   "searchable": true,
+   "clearable": true
+  },
+  "slack.require_mention": {
+   "type": "boolean",
+   "description": "Slack → Require Mention",
+   "category": "slack"
+  },
+  "slack.free_response_channels": {
+   "type": "string",
+   "description": "Slack → Free Response Channels",
+   "category": "slack"
+  },
+  "slack.allowed_channels": {
+   "type": "string",
+   "description": "Slack → Allowed Channels",
+   "category": "slack"
+  },
+  "slack.require_mention_channels": {
+   "type": "string",
+   "description": "Slack → Require Mention Channels",
+   "category": "slack"
+  },
+  "slack.ignore_other_user_mentions": {
+   "type": "boolean",
+   "description": "Slack → Ignore Other User Mentions",
+   "category": "slack"
+  },
+  "slack.thread_require_mention": {
+   "type": "boolean",
+   "description": "Slack → Thread Require Mention",
+   "category": "slack"
+  },
+  "discord.require_mention": {
+   "type": "boolean",
+   "description": "Discord → Require Mention",
+   "category": "discord"
+  },
+  "discord.free_response_channels": {
+   "type": "string",
+   "description": "Discord → Free Response Channels",
+   "category": "discord"
+  },
+  "discord.allowed_channels": {
+   "type": "string",
+   "description": "Discord → Allowed Channels",
+   "category": "discord"
+  },
+  "discord.auto_thread": {
+   "type": "boolean",
+   "description": "Discord → Auto Thread",
+   "category": "discord"
+  },
+  "discord.thread_require_mention": {
+   "type": "boolean",
+   "description": "Discord → Thread Require Mention",
+   "category": "discord"
+  },
+  "discord.bots_require_inline_mention": {
+   "type": "boolean",
+   "description": "Discord → Bots Require Inline Mention",
+   "category": "discord"
+  },
+  "discord.history_backfill": {
+   "type": "boolean",
+   "description": "Discord → History Backfill",
+   "category": "discord"
+  },
+  "discord.history_backfill_limit": {
+   "type": "number",
+   "description": "Discord → History Backfill Limit",
+   "category": "discord"
+  },
+  "discord.missed_message_backfill.enabled": {
+   "type": "boolean",
+   "description": "Discord → Missed Message Backfill → Enabled",
+   "category": "discord"
+  },
+  "discord.missed_message_backfill.channels": {
+   "type": "string",
+   "description": "Discord → Missed Message Backfill → Channels",
+   "category": "discord"
+  },
+  "discord.missed_message_backfill.window_seconds": {
+   "type": "number",
+   "description": "Discord → Missed Message Backfill → Window Seconds",
+   "category": "discord"
+  },
+  "discord.missed_message_backfill.limit": {
+   "type": "number",
+   "description": "Discord → Missed Message Backfill → Limit",
+   "category": "discord"
+  },
+  "discord.missed_message_backfill.max_dispatches": {
+   "type": "number",
+   "description": "Discord → Missed Message Backfill → Max Dispatches",
+   "category": "discord"
+  },
+  "discord.reactions": {
+   "type": "boolean",
+   "description": "Discord → Reactions",
+   "category": "discord"
+  },
+  "discord.websocket_liveness_interval_seconds": {
+   "type": "number",
+   "description": "Discord → Websocket Liveness Interval Seconds",
+   "category": "discord"
+  },
+  "discord.websocket_liveness_failure_threshold": {
+   "type": "number",
+   "description": "Discord → Websocket Liveness Failure Threshold",
+   "category": "discord"
+  },
+  "discord.websocket_heartbeat_ack_max_age_seconds": {
+   "type": "number",
+   "description": "Discord → Websocket Heartbeat Ack Max Age Seconds",
+   "category": "discord"
+  },
+  "discord.websocket_max_latency_seconds": {
+   "type": "number",
+   "description": "Discord → Websocket Max Latency Seconds",
+   "category": "discord"
+  },
+  "discord.dm_role_auth_guild": {
+   "type": "string",
+   "description": "Discord → Dm Role Auth Guild",
+   "category": "discord"
+  },
+  "discord.server_actions": {
+   "type": "string",
+   "description": "Discord → Server Actions",
+   "category": "discord"
+  },
+  "discord.allow_any_attachment": {
+   "type": "boolean",
+   "description": "Discord → Allow Any Attachment",
+   "category": "discord"
+  },
+  "discord.max_attachment_bytes": {
+   "type": "number",
+   "description": "Discord → Max Attachment Bytes",
+   "category": "discord"
+  },
+  "discord.approval_mentions": {
+   "type": "boolean",
+   "description": "Discord → Approval Mentions",
+   "category": "discord"
+  },
+  "discord.voice_channel_inactivity_timeout_seconds": {
+   "type": "number",
+   "description": "Discord → Voice Channel Inactivity Timeout Seconds",
+   "category": "discord"
+  },
+  "discord.voice_playback_timeout_seconds": {
+   "type": "number",
+   "description": "Discord → Voice Playback Timeout Seconds",
+   "category": "discord"
+  },
+  "discord.voice_fx.enabled": {
+   "type": "boolean",
+   "description": "Discord → Voice Fx → Enabled",
+   "category": "discord"
+  },
+  "discord.voice_fx.ambient_enabled": {
+   "type": "boolean",
+   "description": "Discord → Voice Fx → Ambient Enabled",
+   "category": "discord"
+  },
+  "discord.voice_fx.ambient_path": {
+   "type": "string",
+   "description": "Discord → Voice Fx → Ambient Path",
+   "category": "discord"
+  },
+  "discord.voice_fx.ambient_gain": {
+   "type": "number",
+   "description": "Discord → Voice Fx → Ambient Gain",
+   "category": "discord"
+  },
+  "discord.voice_fx.duck_gain": {
+   "type": "number",
+   "description": "Discord → Voice Fx → Duck Gain",
+   "category": "discord"
+  },
+  "discord.voice_fx.speech_gain": {
+   "type": "number",
+   "description": "Discord → Voice Fx → Speech Gain",
+   "category": "discord"
+  },
+  "discord.voice_fx.ack_enabled": {
+   "type": "boolean",
+   "description": "Discord → Voice Fx → Ack Enabled",
+   "category": "discord"
+  },
+  "discord.voice_fx.ack_phrases": {
+   "type": "list",
+   "description": "Discord → Voice Fx → Ack Phrases",
+   "category": "discord"
+  },
+  "telegram.reactions": {
+   "type": "boolean",
+   "description": "Telegram → Reactions",
+   "category": "discord"
+  },
+  "telegram.allowed_chats": {
+   "type": "string",
+   "description": "Telegram → Allowed Chats",
+   "category": "discord"
+  },
+  "telegram.extra.rich_messages": {
+   "type": "boolean",
+   "description": "Telegram → Extra → Rich Messages",
+   "category": "discord"
+  },
+  "telegram.extra.rich_drafts": {
+   "type": "boolean",
+   "description": "Telegram → Extra → Rich Drafts",
+   "category": "discord"
+  },
+  "mattermost.require_mention": {
+   "type": "boolean",
+   "description": "Mattermost → Require Mention",
+   "category": "mattermost"
+  },
+  "mattermost.free_response_channels": {
+   "type": "string",
+   "description": "Mattermost → Free Response Channels",
+   "category": "mattermost"
+  },
+  "mattermost.allowed_channels": {
+   "type": "string",
+   "description": "Mattermost → Allowed Channels",
+   "category": "mattermost"
+  },
+  "matrix.require_mention": {
+   "type": "boolean",
+   "description": "Matrix → Require Mention",
+   "category": "matrix"
+  },
+  "matrix.free_response_rooms": {
+   "type": "string",
+   "description": "Matrix → Free Response Rooms",
+   "category": "matrix"
+  },
+  "matrix.allowed_rooms": {
+   "type": "string",
+   "description": "Matrix → Allowed Rooms",
+   "category": "matrix"
+  },
+  "approvals.mode": {
+   "type": "select",
+   "description": "Dangerous command approval mode",
+   "category": "security",
+   "options": [
+    "manual",
+    "smart",
+    "off"
+   ]
+  },
+  "approvals.timeout": {
+   "type": "number",
+   "description": "Approvals → Timeout",
+   "category": "security"
+  },
+  "approvals.cron_mode": {
+   "type": "string",
+   "description": "Approvals → Cron Mode",
+   "category": "security"
+  },
+  "approvals.single_query_mode": {
+   "type": "string",
+   "description": "Approvals → Single Query Mode",
+   "category": "security"
+  },
+  "approvals.unattended_mode": {
+   "type": "string",
+   "description": "Approvals → Unattended Mode",
+   "category": "security"
+  },
+  "approvals.smart_policy": {
+   "type": "string",
+   "description": "Approvals → Smart Policy",
+   "category": "security"
+  },
+  "approvals.denial_breaker_threshold": {
+   "type": "number",
+   "description": "Approvals → Denial Breaker Threshold",
+   "category": "security"
+  },
+  "approvals.deny": {
+   "type": "list",
+   "description": "Approvals → Deny",
+   "category": "security"
+  },
+  "approvals.mcp_reload_confirm": {
+   "type": "boolean",
+   "description": "Approvals → Mcp Reload Confirm",
+   "category": "security"
+  },
+  "approvals.destructive_slash_confirm": {
+   "type": "boolean",
+   "description": "Approvals → Destructive Slash Confirm",
+   "category": "security"
+  },
+  "command_allowlist": {
+   "type": "list",
+   "description": "Command Allowlist",
+   "category": "general"
+  },
+  "plugins.hook_callback_timeout": {
+   "type": "number",
+   "description": "Wall-clock cap (seconds) for timeout-bounded in-process Python plugin hook callbacks (hot-path observers + pre_tool_call). Timed-out pre_tool_call fails closed. 0 disables the cap; values above 600 are clamped. Caller-thread hooks such as subagent_stop are never moved onto a timeout worker.",
+   "category": "agent"
+  },
+  "hooks_auto_accept": {
+   "type": "boolean",
+   "description": "Hooks Auto Accept",
+   "category": "general"
+  },
+  "security.allow_private_urls": {
+   "type": "boolean",
+   "description": "Security → Allow Private Urls",
+   "category": "security"
+  },
+  "security.redact_secrets": {
+   "type": "boolean",
+   "description": "Security → Redact Secrets",
+   "category": "security"
+  },
+  "security.allow_data_training_tiers_noninteractive": {
+   "type": "boolean",
+   "description": "Security → Allow Data Training Tiers Noninteractive",
+   "category": "security"
+  },
+  "security.approval.transport": {
+   "type": "string",
+   "description": "Security → Approval → Transport",
+   "category": "security"
+  },
+  "security.approval.transport_fallback": {
+   "type": "string",
+   "description": "Security → Approval → Transport Fallback",
+   "category": "security"
+  },
+  "security.protected_instruction_files": {
+   "type": "boolean",
+   "description": "Security → Protected Instruction Files",
+   "category": "security"
+  },
+  "security.protected_instruction_extra_patterns": {
+   "type": "list",
+   "description": "Security → Protected Instruction Extra Patterns",
+   "category": "security"
+  },
+  "security.tirith_enabled": {
+   "type": "boolean",
+   "description": "Security → Tirith Enabled",
+   "category": "security"
+  },
+  "security.tirith_path": {
+   "type": "string",
+   "description": "Security → Tirith Path",
+   "category": "security"
+  },
+  "security.tirith_timeout": {
+   "type": "number",
+   "description": "Security → Tirith Timeout",
+   "category": "security"
+  },
+  "security.tirith_fail_open": {
+   "type": "boolean",
+   "description": "Security → Tirith Fail Open",
+   "category": "security"
+  },
+  "security.website_blocklist.enabled": {
+   "type": "boolean",
+   "description": "Security → Website Blocklist → Enabled",
+   "category": "security"
+  },
+  "security.website_blocklist.domains": {
+   "type": "list",
+   "description": "Security → Website Blocklist → Domains",
+   "category": "security"
+  },
+  "security.website_blocklist.shared_files": {
+   "type": "list",
+   "description": "Security → Website Blocklist → Shared Files",
+   "category": "security"
+  },
+  "security.acked_advisories": {
+   "type": "list",
+   "description": "Security → Acked Advisories",
+   "category": "security"
+  },
+  "security.allow_lazy_installs": {
+   "type": "boolean",
+   "description": "Security → Allow Lazy Installs",
+   "category": "security"
+  },
+  "cron.allow_agent_scheduling": {
+   "type": "boolean",
+   "description": "Cron → Allow Agent Scheduling",
+   "category": "agent"
+  },
+  "cron.preflight": {
+   "type": "boolean",
+   "description": "Cron → Preflight",
+   "category": "agent"
+  },
+  "cron.model_drift_guard": {
+   "type": "boolean",
+   "description": "Cron → Model Drift Guard",
+   "category": "agent"
+  },
+  "cron.model": {
+   "type": "string",
+   "description": "Cron → Model",
+   "category": "agent"
+  },
+  "cron.model_provider": {
+   "type": "string",
+   "description": "Cron → Model Provider",
+   "category": "agent"
+  },
+  "cron.provider": {
+   "type": "string",
+   "description": "Cron → Provider",
+   "category": "agent"
+  },
+  "cron.chronos.portal_url": {
+   "type": "string",
+   "description": "Cron → Chronos → Portal Url",
+   "category": "agent"
+  },
+  "cron.chronos.callback_url": {
+   "type": "string",
+   "description": "Cron → Chronos → Callback Url",
+   "category": "agent"
+  },
+  "cron.chronos.expected_audience": {
+   "type": "string",
+   "description": "Cron → Chronos → Expected Audience",
+   "category": "agent"
+  },
+  "cron.chronos.nas_jwks_url": {
+   "type": "string",
+   "description": "Cron → Chronos → Nas Jwks Url",
+   "category": "agent"
+  },
+  "cron.wrap_response": {
+   "type": "boolean",
+   "description": "Cron → Wrap Response",
+   "category": "agent"
+  },
+  "cron.mirror_delivery": {
+   "type": "boolean",
+   "description": "Cron → Mirror Delivery",
+   "category": "agent"
+  },
+  "cron.max_parallel_jobs": {
+   "type": "string",
+   "description": "Cron → Max Parallel Jobs",
+   "category": "agent"
+  },
+  "cron.output_retention": {
+   "type": "number",
+   "description": "Cron → Output Retention",
+   "category": "agent"
+  },
+  "cron.script_timeout_seconds": {
+   "type": "number",
+   "description": "Cron → Script Timeout Seconds",
+   "category": "agent"
+  },
+  "cron.session_db_timeout_seconds": {
+   "type": "number",
+   "description": "Cron → Session Db Timeout Seconds",
+   "category": "agent"
+  },
+  "cron.media_send_timeout_seconds": {
+   "type": "number",
+   "description": "Cron → Media Send Timeout Seconds",
+   "category": "agent"
+  },
+  "kanban.auto_subscribe_on_create": {
+   "type": "boolean",
+   "description": "Kanban → Auto Subscribe On Create",
+   "category": "kanban"
+  },
+  "kanban.dispatch_in_gateway": {
+   "type": "boolean",
+   "description": "Kanban → Dispatch In Gateway",
+   "category": "kanban"
+  },
+  "kanban.review_dispatch": {
+   "type": "boolean",
+   "description": "Kanban → Review Dispatch",
+   "category": "kanban"
+  },
+  "kanban.dispatch_interval_seconds": {
+   "type": "number",
+   "description": "Kanban → Dispatch Interval Seconds",
+   "category": "kanban"
+  },
+  "kanban.failure_limit": {
+   "type": "number",
+   "description": "Kanban → Failure Limit",
+   "category": "kanban"
+  },
+  "kanban.worker_log_rotate_bytes": {
+   "type": "number",
+   "description": "Kanban → Worker Log Rotate Bytes",
+   "category": "kanban"
+  },
+  "kanban.worker_log_backup_count": {
+   "type": "number",
+   "description": "Kanban → Worker Log Backup Count",
+   "category": "kanban"
+  },
+  "kanban.orchestrator_profile": {
+   "type": "string",
+   "description": "Kanban → Orchestrator Profile",
+   "category": "kanban"
+  },
+  "kanban.default_assignee": {
+   "type": "string",
+   "description": "Kanban → Default Assignee",
+   "category": "kanban"
+  },
+  "kanban.max_in_progress": {
+   "type": "string",
+   "description": "Kanban → Max In Progress",
+   "category": "kanban"
+  },
+  "kanban.max_in_progress_per_profile": {
+   "type": "string",
+   "description": "Kanban → Max In Progress Per Profile",
+   "category": "kanban"
+  },
+  "kanban.auto_decompose": {
+   "type": "boolean",
+   "description": "Kanban → Auto Decompose",
+   "category": "kanban"
+  },
+  "kanban.auto_decompose_per_tick": {
+   "type": "number",
+   "description": "Kanban → Auto Decompose Per Tick",
+   "category": "kanban"
+  },
+  "kanban.dispatch_stale_timeout_seconds": {
+   "type": "number",
+   "description": "Kanban → Dispatch Stale Timeout Seconds",
+   "category": "kanban"
+  },
+  "kanban.reconcile_orphans": {
+   "type": "boolean",
+   "description": "Kanban → Reconcile Orphans",
+   "category": "kanban"
+  },
+  "kanban.done_sub_retention_days": {
+   "type": "number",
+   "description": "Kanban → Done Sub Retention Days",
+   "category": "kanban"
+  },
+  "bot_mode.envelope_ttl_seconds": {
+   "type": "number",
+   "description": "Bot Mode → Envelope Ttl Seconds",
+   "category": "agent"
+  },
+  "bot_mode.turn_wait_seconds": {
+   "type": "number",
+   "description": "Bot Mode → Turn Wait Seconds",
+   "category": "agent"
+  },
+  "code_execution.mode": {
+   "type": "string",
+   "description": "Code Execution → Mode",
+   "category": "agent"
+  },
+  "code_execution.kernel_idle_timeout": {
+   "type": "number",
+   "description": "Code Execution → Kernel Idle Timeout",
+   "category": "agent"
+  },
+  "code_execution.max_session_kernels": {
+   "type": "number",
+   "description": "Code Execution → Max Session Kernels",
+   "category": "agent"
+  },
+  "tools.tool_search.enabled": {
+   "type": "string",
+   "description": "Tools → Tool Search → Enabled",
+   "category": "tools"
+  },
+  "tools.tool_search.threshold_pct": {
+   "type": "number",
+   "description": "Tools → Tool Search → Threshold Pct",
+   "category": "tools"
+  },
+  "tools.tool_search.search_default_limit": {
+   "type": "number",
+   "description": "Tools → Tool Search → Search Default Limit",
+   "category": "tools"
+  },
+  "tools.tool_search.max_search_limit": {
+   "type": "number",
+   "description": "Tools → Tool Search → Max Search Limit",
+   "category": "tools"
+  },
+  "tools.tool_search.listing": {
+   "type": "string",
+   "description": "Tools → Tool Search → Listing",
+   "category": "tools"
+  },
+  "tools.tool_search.listing_max_tokens": {
+   "type": "number",
+   "description": "Tools → Tool Search → Listing Max Tokens",
+   "category": "tools"
+  },
+  "logging.level": {
+   "type": "select",
+   "description": "Log level for agent.log",
+   "category": "logging",
+   "options": [
+    "DEBUG",
+    "INFO",
+    "WARNING",
+    "ERROR"
+   ]
+  },
+  "logging.max_size_mb": {
+   "type": "number",
+   "description": "Logging → Max Size Mb",
+   "category": "logging"
+  },
+  "logging.backup_count": {
+   "type": "number",
+   "description": "Logging → Backup Count",
+   "category": "logging"
+  },
+  "model_catalog.enabled": {
+   "type": "boolean",
+   "description": "Model Catalog → Enabled",
+   "category": "model_catalog"
+  },
+  "model_catalog.url": {
+   "type": "string",
+   "description": "Model Catalog → Url",
+   "category": "model_catalog"
+  },
+  "model_catalog.ttl_hours": {
+   "type": "number",
+   "description": "Model Catalog → Ttl Hours",
+   "category": "model_catalog"
+  },
+  "models_dev.url": {
+   "type": "string",
+   "description": "Models Dev → Url",
+   "category": "agent"
+  },
+  "network.force_ipv4": {
+   "type": "boolean",
+   "description": "Network → Force Ipv4",
+   "category": "agent"
+  },
+  "monitoring.install_id": {
+   "type": "string",
+   "description": "Monitoring → Install Id",
+   "category": "monitoring"
+  },
+  "monitoring.gateway_health_export.enabled": {
+   "type": "boolean",
+   "description": "Monitoring → Gateway Health Export → Enabled",
+   "category": "monitoring"
+  },
+  "monitoring.gateway_health_export.metrics_enabled": {
+   "type": "boolean",
+   "description": "Monitoring → Gateway Health Export → Metrics Enabled",
+   "category": "monitoring"
+  },
+  "monitoring.gateway_health_export.diagnostic_events_enabled": {
+   "type": "boolean",
+   "description": "Monitoring → Gateway Health Export → Diagnostic Events Enabled",
+   "category": "monitoring"
+  },
+  "monitoring.gateway_health_export.warning_error_events_enabled": {
+   "type": "boolean",
+   "description": "Monitoring → Gateway Health Export → Warning Error Events Enabled",
+   "category": "monitoring"
+  },
+  "monitoring.gateway_health_export.export_interval_seconds": {
+   "type": "number",
+   "description": "Monitoring → Gateway Health Export → Export Interval Seconds",
+   "category": "monitoring"
+  },
+  "monitoring.gateway_health_export.logs_export_interval_seconds": {
+   "type": "number",
+   "description": "Monitoring → Gateway Health Export → Logs Export Interval Seconds",
+   "category": "monitoring"
+  },
+  "monitoring.gateway_health_export.resource_attributes.service.name": {
+   "type": "string",
+   "description": "Monitoring → Gateway Health Export → Resource Attributes → Service → Name",
+   "category": "monitoring"
+  },
+  "monitoring.gateway_health_export.resource_attributes.deployment.environment.name": {
+   "type": "string",
+   "description": "Monitoring → Gateway Health Export → Resource Attributes → Deployment → Environment → Name",
+   "category": "monitoring"
+  },
+  "monitoring.export.otlp.enabled": {
+   "type": "boolean",
+   "description": "Monitoring → Export → Otlp → Enabled",
+   "category": "monitoring"
+  },
+  "monitoring.export.otlp.endpoint": {
+   "type": "string",
+   "description": "Monitoring → Export → Otlp → Endpoint",
+   "category": "monitoring"
+  },
+  "gateway.multiplex_profile_allowlist": {
+   "type": "string",
+   "description": "Gateway → Multiplex Profile Allowlist",
+   "category": "gateway"
+  },
+  "gateway.signal_interrupt_grace_timeout": {
+   "type": "number",
+   "description": "Gateway → Signal Interrupt Grace Timeout",
+   "category": "gateway"
+  },
+  "gateway.delivery_ledger": {
+   "type": "boolean",
+   "description": "Gateway → Delivery Ledger",
+   "category": "gateway"
+  },
+  "gateway.platform_connect_timeout": {
+   "type": "number",
+   "description": "Gateway → Platform Connect Timeout",
+   "category": "gateway"
+  },
+  "gateway.loop_watchdog": {
+   "type": "boolean",
+   "description": "Gateway → Loop Watchdog",
+   "category": "gateway"
+  },
+  "gateway.loop_watchdog_probe_interval_s": {
+   "type": "number",
+   "description": "Gateway → Loop Watchdog Probe Interval S",
+   "category": "gateway"
+  },
+  "gateway.loop_watchdog_probe_timeout_s": {
+   "type": "number",
+   "description": "Gateway → Loop Watchdog Probe Timeout S",
+   "category": "gateway"
+  },
+  "gateway.loop_watchdog_max_strikes": {
+   "type": "number",
+   "description": "Gateway → Loop Watchdog Max Strikes",
+   "category": "gateway"
+  },
+  "gateway.write_sessions_json": {
+   "type": "boolean",
+   "description": "Gateway → Write Sessions Json",
+   "category": "gateway"
+  },
+  "gateway.scale_to_zero.idle_timeout_minutes": {
+   "type": "number",
+   "description": "Gateway → Scale To Zero → Idle Timeout Minutes",
+   "category": "gateway"
+  },
+  "gateway.restart_loop_guard.max_restarts": {
+   "type": "number",
+   "description": "Gateway → Restart Loop Guard → Max Restarts",
+   "category": "gateway"
+  },
+  "gateway.restart_loop_guard.window_seconds": {
+   "type": "number",
+   "description": "Gateway → Restart Loop Guard → Window Seconds",
+   "category": "gateway"
+  },
+  "gateway.restart_loop_guard.max_gap_seconds": {
+   "type": "number",
+   "description": "Gateway → Restart Loop Guard → Max Gap Seconds",
+   "category": "gateway"
+  },
+  "gateway.respawn_storm.max_starts": {
+   "type": "number",
+   "description": "Gateway → Respawn Storm → Max Starts",
+   "category": "gateway"
+  },
+  "gateway.respawn_storm.window_seconds": {
+   "type": "number",
+   "description": "Gateway → Respawn Storm → Window Seconds",
+   "category": "gateway"
+  },
+  "gateway.message_timestamps.enabled": {
+   "type": "boolean",
+   "description": "Gateway → Message Timestamps → Enabled",
+   "category": "gateway"
+  },
+  "gateway.max_inbound_media_bytes": {
+   "type": "number",
+   "description": "Gateway → Max Inbound Media Bytes",
+   "category": "gateway"
+  },
+  "gateway.strict": {
+   "type": "boolean",
+   "description": "Gateway → Strict",
+   "category": "gateway"
+  },
+  "gateway.media_delivery_allow_dirs": {
+   "type": "list",
+   "description": "Gateway → Media Delivery Allow Dirs",
+   "category": "gateway"
+  },
+  "gateway.trust_recent_files": {
+   "type": "boolean",
+   "description": "Gateway → Trust Recent Files",
+   "category": "gateway"
+  },
+  "gateway.trust_recent_files_seconds": {
+   "type": "number",
+   "description": "Gateway → Trust Recent Files Seconds",
+   "category": "gateway"
+  },
+  "gateway.api_server.max_concurrent_runs": {
+   "type": "number",
+   "description": "Gateway → Api Server → Max Concurrent Runs",
+   "category": "gateway"
+  },
+  "streaming.enabled": {
+   "type": "boolean",
+   "description": "Streaming → Enabled",
+   "category": "streaming"
+  },
+  "streaming.transport": {
+   "type": "string",
+   "description": "Streaming → Transport",
+   "category": "streaming"
+  },
+  "streaming.edit_interval": {
+   "type": "number",
+   "description": "Streaming → Edit Interval",
+   "category": "streaming"
+  },
+  "streaming.buffer_threshold": {
+   "type": "number",
+   "description": "Streaming → Buffer Threshold",
+   "category": "streaming"
+  },
+  "streaming.cursor": {
+   "type": "string",
+   "description": "Streaming → Cursor",
+   "category": "streaming"
+  },
+  "streaming.fresh_final_after_seconds": {
+   "type": "number",
+   "description": "Streaming → Fresh Final After Seconds",
+   "category": "streaming"
+  },
+  "sessions.auto_prune": {
+   "type": "boolean",
+   "description": "Sessions → Auto Prune",
+   "category": "sessions"
+  },
+  "sessions.retention_days": {
+   "type": "number",
+   "description": "Sessions → Retention Days",
+   "category": "sessions"
+  },
+  "sessions.auto_archive": {
+   "type": "boolean",
+   "description": "Sessions → Auto Archive",
+   "category": "sessions"
+  },
+  "sessions.auto_archive_days": {
+   "type": "number",
+   "description": "Sessions → Auto Archive Days",
+   "category": "sessions"
+  },
+  "sessions.vacuum_after_prune": {
+   "type": "boolean",
+   "description": "Sessions → Vacuum After Prune",
+   "category": "sessions"
+  },
+  "sessions.min_vacuum_interval_days": {
+   "type": "number",
+   "description": "Sessions → Min Vacuum Interval Days",
+   "category": "sessions"
+  },
+  "sessions.min_interval_hours": {
+   "type": "number",
+   "description": "Sessions → Min Interval Hours",
+   "category": "sessions"
+  },
+  "sessions.write_json_snapshots": {
+   "type": "boolean",
+   "description": "Sessions → Write Json Snapshots",
+   "category": "sessions"
+  },
+  "sessions.fts_optimize_notice": {
+   "type": "string",
+   "description": "Sessions → Fts Optimize Notice",
+   "category": "sessions"
+  },
+  "sessions.cjk_fts": {
+   "type": "boolean",
+   "description": "Sessions → Cjk Fts",
+   "category": "sessions"
+  },
+  "sessions.search_slow_ms": {
+   "type": "number",
+   "description": "Sessions → Search Slow Ms",
+   "category": "sessions"
+  },
+  "sessions.max_resume_messages": {
+   "type": "number",
+   "description": "Sessions → Max Resume Messages",
+   "category": "sessions"
+  },
+  "sessions.max_export_messages": {
+   "type": "number",
+   "description": "Sessions → Max Export Messages",
+   "category": "sessions"
+  },
+  "onboarding.profile_build": {
+   "type": "string",
+   "description": "Onboarding → Profile Build",
+   "category": "agent"
+  },
+  "telemetry.shared_metrics.enabled": {
+   "type": "boolean",
+   "description": "Telemetry → Shared Metrics → Enabled",
+   "category": "security"
+  },
+  "doctor.live_probe_timeout": {
+   "type": "number",
+   "description": "Doctor → Live Probe Timeout",
+   "category": "general"
+  },
+  "updates.pre_update_backup": {
+   "type": "string",
+   "description": "Updates → Pre Update Backup",
+   "category": "general"
+  },
+  "updates.backup_keep": {
+   "type": "number",
+   "description": "Updates → Backup Keep",
+   "category": "general"
+  },
+  "updates.non_interactive_local_changes": {
+   "type": "select",
+   "description": "When the chat app / gateway updates Harvis (no terminal prompt), what to do with uncommitted local source edits. 'stash' keeps them and re-applies them after the update; 'discard' throws them away. Terminal updates always ask, regardless of this setting.",
+   "category": "general",
+   "options": [
+    "stash",
+    "discard"
+   ]
+  },
+  "updates.auto_switch_parked_branch": {
+   "type": "boolean",
+   "description": "Updates → Auto Switch Parked Branch",
+   "category": "general"
+  },
+  "updates.parked_branch_strategy": {
+   "type": "string",
+   "description": "Updates → Parked Branch Strategy",
+   "category": "general"
+  },
+  "updates.refresh_cua_driver": {
+   "type": "boolean",
+   "description": "Refresh an already-installed cua-driver during hermes update. Disable this on non-admin macOS accounts where /Applications is not writable.",
+   "category": "general"
+  },
+  "lsp.enabled": {
+   "type": "boolean",
+   "description": "Lsp → Enabled",
+   "category": "lsp"
+  },
+  "lsp.wait_mode": {
+   "type": "string",
+   "description": "Lsp → Wait Mode",
+   "category": "lsp"
+  },
+  "lsp.wait_timeout": {
+   "type": "number",
+   "description": "Lsp → Wait Timeout",
+   "category": "lsp"
+  },
+  "lsp.install_strategy": {
+   "type": "string",
+   "description": "Lsp → Install Strategy",
+   "category": "lsp"
+  },
+  "lsp.idle_timeout": {
+   "type": "number",
+   "description": "Lsp → Idle Timeout",
+   "category": "lsp"
+  },
+  "x_search.model": {
+   "type": "string",
+   "description": "X Search → Model",
+   "category": "x_search"
+  },
+  "x_search.reasoning_effort": {
+   "type": "string",
+   "description": "X Search → Reasoning Effort",
+   "category": "x_search"
+  },
+  "x_search.timeout_seconds": {
+   "type": "number",
+   "description": "X Search → Timeout Seconds",
+   "category": "x_search"
+  },
+  "x_search.retries": {
+   "type": "number",
+   "description": "X Search → Retries",
+   "category": "x_search"
+  },
+  "secrets.bitwarden.enabled": {
+   "type": "boolean",
+   "description": "Secrets → Bitwarden → Enabled",
+   "category": "secrets"
+  },
+  "secrets.bitwarden.access_token_env": {
+   "type": "string",
+   "description": "Secrets → Bitwarden → Access Token Env",
+   "category": "secrets"
+  },
+  "secrets.bitwarden.project_id": {
+   "type": "string",
+   "description": "Secrets → Bitwarden → Project Id",
+   "category": "secrets"
+  },
+  "secrets.bitwarden.cache_ttl_seconds": {
+   "type": "number",
+   "description": "Secrets → Bitwarden → Cache Ttl Seconds",
+   "category": "secrets"
+  },
+  "secrets.bitwarden.encrypted_cache.enabled": {
+   "type": "boolean",
+   "description": "Secrets → Bitwarden → Encrypted Cache → Enabled",
+   "category": "secrets"
+  },
+  "secrets.bitwarden.encrypted_cache.max_stale_seconds": {
+   "type": "number",
+   "description": "Secrets → Bitwarden → Encrypted Cache → Max Stale Seconds",
+   "category": "secrets"
+  },
+  "secrets.bitwarden.override_existing": {
+   "type": "boolean",
+   "description": "Secrets → Bitwarden → Override Existing",
+   "category": "secrets"
+  },
+  "secrets.bitwarden.auto_install": {
+   "type": "boolean",
+   "description": "Secrets → Bitwarden → Auto Install",
+   "category": "secrets"
+  },
+  "secrets.bitwarden.server_url": {
+   "type": "string",
+   "description": "Secrets → Bitwarden → Server Url",
+   "category": "secrets"
+  },
+  "secrets.onepassword.enabled": {
+   "type": "boolean",
+   "description": "Secrets → Onepassword → Enabled",
+   "category": "secrets"
+  },
+  "secrets.onepassword.account": {
+   "type": "string",
+   "description": "Secrets → Onepassword → Account",
+   "category": "secrets"
+  },
+  "secrets.onepassword.service_account_token_env": {
+   "type": "string",
+   "description": "Secrets → Onepassword → Service Account Token Env",
+   "category": "secrets"
+  },
+  "secrets.onepassword.binary_path": {
+   "type": "string",
+   "description": "Secrets → Onepassword → Binary Path",
+   "category": "secrets"
+  },
+  "secrets.onepassword.cache_ttl_seconds": {
+   "type": "number",
+   "description": "Secrets → Onepassword → Cache Ttl Seconds",
+   "category": "secrets"
+  },
+  "secrets.onepassword.override_existing": {
+   "type": "boolean",
+   "description": "Secrets → Onepassword → Override Existing",
+   "category": "secrets"
+  },
+  "paste_collapse_threshold": {
+   "type": "number",
+   "description": "Paste Collapse Threshold",
+   "category": "general"
+  },
+  "paste_collapse_threshold_fallback": {
+   "type": "number",
+   "description": "Paste Collapse Threshold Fallback",
+   "category": "general"
+  },
+  "paste_collapse_char_threshold": {
+   "type": "number",
+   "description": "Paste Collapse Char Threshold",
+   "category": "general"
+  },
+  "computer_use.cua_telemetry": {
+   "type": "boolean",
+   "description": "Computer Use → Cua Telemetry",
+   "category": "agent"
+  },
+  "computer_use.max_image_dimension": {
+   "type": "number",
+   "description": "Computer Use → Max Image Dimension",
+   "category": "agent"
+  },
+  "computer_use.capture_after_mode": {
+   "type": "string",
+   "description": "Computer Use → Capture After Mode",
+   "category": "agent"
+  },
+  "computer_use.no_overlay": {
+   "type": "string",
+   "description": "Computer Use → No Overlay",
+   "category": "agent"
+  },
+  "computer_use.permission_mode": {
+   "type": "string",
+   "description": "Computer Use → Permission Mode",
+   "category": "agent"
+  },
+  "computer_use.capability_manifest": {
+   "type": "string",
+   "description": "Computer Use → Capability Manifest",
+   "category": "agent"
+  },
+  "computer_use.allow_unsigned_driver": {
+   "type": "boolean",
+   "description": "Computer Use → Allow Unsigned Driver",
+   "category": "agent"
+  },
+  "proxy.enabled": {
+   "type": "boolean",
+   "description": "Docker-only egress credential firewall. Requires `hermes egress setup` and `hermes egress start`; Modal/SSH/Daytona are not wired yet.",
+   "category": "security"
+  },
+  "proxy.tunnel_port": {
+   "type": "number",
+   "description": "Proxy → Tunnel Port",
+   "category": "proxy"
+  },
+  "proxy.auto_install": {
+   "type": "boolean",
+   "description": "Proxy → Auto Install",
+   "category": "proxy"
+  },
+  "proxy.credential_source": {
+   "type": "select",
+   "description": "Where iron-proxy loads real upstream secrets at start time",
+   "category": "security",
+   "options": [
+    "env",
+    "bitwarden"
+   ]
+  },
+  "proxy.enforce_on_docker": {
+   "type": "boolean",
+   "description": "Refuse Docker sandboxes when egress is enabled but not configured/running",
+   "category": "security"
+  },
+  "proxy.allow_env_fallback": {
+   "type": "boolean",
+   "description": "Proxy → Allow Env Fallback",
+   "category": "proxy"
+  },
+  "proxy.upstream_deny_cidrs": {
+   "type": "string",
+   "description": "Proxy → Upstream Deny Cidrs",
+   "category": "proxy"
+  },
+  "proxy.extra_allowed_hosts": {
+   "type": "list",
+   "description": "Proxy → Extra Allowed Hosts",
+   "category": "proxy"
+  },
+  "desktop.repo_scan_enabled": {
+   "type": "boolean",
+   "description": "Desktop → Repo Scan Enabled",
+   "category": "desktop"
+  },
+  "desktop.repo_scan_roots": {
+   "type": "list",
+   "description": "Desktop → Repo Scan Roots",
+   "category": "desktop"
+  },
+  "desktop.repo_scan_exclude_paths": {
+   "type": "list",
+   "description": "Desktop → Repo Scan Exclude Paths",
+   "category": "desktop"
+  },
+  "desktop.electron_flags": {
+   "type": "list",
+   "description": "Desktop → Electron Flags",
+   "category": "desktop"
+  },
+  "desktop.ozone_platform_hint": {
+   "type": "string",
+   "description": "Desktop → Ozone Platform Hint",
+   "category": "desktop"
+  },
+  "desktop.disable_gpu": {
+   "type": "string",
+   "description": "Desktop → Disable Gpu",
+   "category": "desktop"
+  },
+  "desktop.password_store": {
+   "type": "string",
+   "description": "Desktop → Password Store",
+   "category": "desktop"
+  },
+  "desktop.macos_signing_identity": {
+   "type": "string",
+   "description": "Desktop → Macos Signing Identity",
+   "category": "desktop"
+  },
+  "desktop.auto_continue.enabled": {
+   "type": "boolean",
+   "description": "Desktop → Auto Continue → Enabled",
+   "category": "desktop"
+  },
+  "desktop.auto_continue.freshness_minutes": {
+   "type": "number",
+   "description": "Desktop → Auto Continue → Freshness Minutes",
+   "category": "desktop"
+  },
+  "desktop.auto_continue.max_attempts": {
+   "type": "number",
+   "description": "Desktop → Auto Continue → Max Attempts",
+   "category": "desktop"
+  },
+  "vertex.project_id": {
+   "type": "string",
+   "description": "Vertex → Project Id",
+   "category": "vertex"
+  },
+  "vertex.region": {
+   "type": "string",
+   "description": "Vertex → Region",
+   "category": "vertex"
+  }
+ },
+ "category_order": [
+  "general",
+  "agent",
+  "terminal",
+  "display",
+  "delegation",
+  "memory",
+  "compression",
+  "security",
+  "browser",
+  "voice",
+  "tts",
+  "stt",
+  "logging",
+  "discord",
+  "auxiliary"
+ ]
+}

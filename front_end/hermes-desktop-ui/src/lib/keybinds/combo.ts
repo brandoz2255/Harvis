@@ -12,6 +12,8 @@
 // Control+Tab. Off macOS, Control already *is* `mod`, so `canonicalizeCombo`
 // folds `ctrl` → `mod`.
 
+import { isWebReplacement } from './web-defaults'
+
 export const IS_MAC = typeof navigator !== 'undefined' && /mac/i.test(navigator.platform || navigator.userAgent || '')
 
 // event.code → canonical base token. Letters/digits map to their lowercase
@@ -277,7 +279,7 @@ export function actionAllowedInInput(actionId: string, combo: string): boolean {
     return false
   }
 
-  if (/^(?:mod|ctrl)(?:\+|$)/.test(combo)) {
+  if (/^(?:mod|ctrl)(?:\+|$)/.test(combo) || isWebReplacement(actionId, combo)) {
     return true
   }
 

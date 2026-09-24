@@ -2,6 +2,7 @@ import type {
   MessagingPlatformsResponse,
   MessagingPlatformTestResponse,
   MessagingPlatformUpdate,
+  MessagingPlatformUpdateResponse,
   PairingResponse,
   PairingUser,
   WebhookCreatePayload,
@@ -23,8 +24,8 @@ export function updateMessagingPlatform(
   platformId: string,
   body: MessagingPlatformUpdate,
   profile?: null | string
-): Promise<{ ok: boolean; platform: string }> {
-  return hermesApi<{ ok: boolean; platform: string }>({
+): Promise<MessagingPlatformUpdateResponse> {
+  return hermesApi<MessagingPlatformUpdateResponse>({
     ...profileScoped(profile),
     path: `/api/messaging/platforms/${encodeURIComponent(platformId)}`,
     method: 'PUT',
@@ -44,11 +45,9 @@ export function testMessagingPlatform(
 }
 
 // -- Pairing (who may DM the bot) --------------------------------------------
-// Unknown DMers get a one-time code and land in `pending` until an admin
-// approves them. Approval grants on the row's `request_id`, never on the code:
-// the code is the requester's proof that the channel is theirs and is never
-// returned by the API, while an authenticated admin is only ever identifying
-// a row they can already see.
+// Unknown senders land in `pending` until the owner approves them. In Harvis
+// the pairing code the sender is shown IS the row's `request_id`, so the owner
+// can match "my code is 3fa9c1" against the list before approving it.
 
 export function getPairing(profile?: null | string): Promise<PairingResponse> {
   return hermesApi<PairingResponse>({
@@ -68,6 +67,15 @@ export function approvePairing(
     method: 'POST',
     // These endpoints read the profile off the body, not the query string —
     // `profileScoped()` alone would approve into the wrong profile's store.
+    body: { platform, request_id: requestId, ...profileScoped(profile) }
+  })
+}
+
+export function dismissPairing(platform: string, requestId: string, profile?: null | string): Promise<{ ok: boolean }> {
+  return hermesApi<{ ok: boolean }>({
+    ...profileScoped(profile),
+    path: '/api/pairing/dismiss',
+    method: 'POST',
     body: { platform, request_id: requestId, ...profileScoped(profile) }
   })
 }

@@ -30,6 +30,11 @@ describe('model-status-label', () => {
     )
   })
 
+  it('drops the effort for models the catalog marks as non-reasoning', () => {
+    expect(formatModelStatusLabel('gemma4:e2b', { reasoning: false, reasoningEffort: 'medium' })).toBe('Gemma4:E2b')
+    expect(formatModelStatusLabel('gemma4:e2b-fast', { reasoning: false })).toBe('Gemma4:E2b · Fast')
+  })
+
   it('falls back to the profile default effort, then to medium', () => {
     expect(formatModelStatusLabel('openai/gpt-5.5', { reasoningEffort: 'medium' })).toBe('GPT-5.5 · Med')
     expect(formatModelStatusLabel('openai/gpt-5.5')).toBe('GPT-5.5 · Med')

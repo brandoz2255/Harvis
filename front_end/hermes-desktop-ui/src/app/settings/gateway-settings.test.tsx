@@ -42,7 +42,7 @@ describe('GatewaySettings', () => {
     render(<GatewaySettings />)
     expect(await screen.findByText('Local gateway')).toBeTruthy()
     expect(
-      screen.getByText('Start a private Hermes backend on localhost. This is the default and works offline.')
+      screen.getByText('Start a private Harvis backend on localhost. This is the default and works offline.')
     ).toBeTruthy()
 
     // The page manages the machine's gateway connections; it must load the

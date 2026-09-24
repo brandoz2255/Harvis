@@ -11,6 +11,7 @@
 
 import { api, gatewayWsUrl, localStore, notify, openExternal, readClipboard, writeClipboard } from './api'
 import { noopListener, stubs } from './stubs'
+import { installZoom, zoom } from './zoom'
 
 const projectDir = localStore('hermes.web.defaultProjectDir')
 
@@ -21,6 +22,8 @@ export function installDesktopShim(): void {
 
   const shim = {
     ...stubs,
+    // Read by lib/keybinds/web-defaults: this renderer runs in a browser tab.
+    webShell: true,
 
     // ── Real implementations ─────────────────────────────────────────────
     api,
@@ -29,6 +32,7 @@ export function installDesktopShim(): void {
     readClipboard,
     writeClipboard,
     getGatewayWsUrl: async () => ({ ok: true, wsUrl: gatewayWsUrl() }),
+    zoom,
 
     settings: {
       getDefaultProjectDir: async () => {
@@ -41,18 +45,19 @@ export function installDesktopShim(): void {
       setDefaultProjectDir: async (dir: null | string) => {
         projectDir.write(dir)
         return { dir }
-      },
+      }
     },
 
     themes: {
       // The VS Code Marketplace sends no CORS headers, so a browser cannot read
       // it directly. Empty results render as "nothing found" instead of an error.
       fetchMarketplace: async () => ({ themes: [] }),
-      searchMarketplace: async () => [],
-    },
+      searchMarketplace: async () => []
+    }
   }
 
   ;(window as any).hermesDesktop = shim
+  installZoom()
 }
 
 // Install on import. A bare call in main.tsx would NOT work: ES imports are

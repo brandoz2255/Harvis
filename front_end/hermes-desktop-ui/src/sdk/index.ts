@@ -767,7 +767,7 @@ export const host = {
     const bridge = window.hermesDesktop?.connections
 
     if (!bridge) {
-      throw new Error('This Desktop build has no connection registry. Update Hermes Desktop.')
+      throw new Error('This Desktop build has no connection registry. Update Harvis Desktop.')
     }
 
     const registryPayload = await bridge.list()
@@ -784,7 +784,7 @@ export const host = {
     const roster = window.hermesDesktop?.getAgentRoster
 
     if (!roster) {
-      throw new Error('This Desktop build cannot enumerate multi-source agents. Update Hermes Desktop.')
+      throw new Error('This Desktop build cannot enumerate multi-source agents. Update Harvis Desktop.')
     }
 
     return roster()
@@ -1183,7 +1183,7 @@ export const host = {
       const openTab = $newSessionTabAction.get()
 
       if (!openTab) {
-        notify({ kind: 'error', message: 'Update Hermes Desktop to open another Bot chat.' })
+        notify({ kind: 'error', message: 'Update Harvis Desktop to open another Bot chat.' })
 
         return
       }
@@ -1246,7 +1246,7 @@ export const host = {
     const getProfileRoutes = desktop?.getProfileRoutes
 
     if (!getProfileRoutes) {
-      throw new Error('Hermes Desktop connection routing unavailable')
+      throw new Error('Harvis Desktop connection routing unavailable')
     }
 
     let profiles = $profiles.get()
@@ -1375,7 +1375,7 @@ export const host = {
     const gateway = $gateway.get()
 
     if (!gateway) {
-      throw new Error('Hermes gateway unavailable')
+      throw new Error('Harvis gateway unavailable')
     }
 
     return gateway.request<T>(method, params)
@@ -1401,6 +1401,8 @@ export {
   type ComposerAttachmentProvider,
   type ComposerMiddleware
 } from '@/app/chat/composer/contrib'
+/** Put text into the active composer (appended as its own block by default). */
+export { requestComposerInsert } from '@/app/chat/composer/focus'
 
 // -- ui: the design language --------------------------------------------------
 
@@ -1449,7 +1451,18 @@ export {
   PanelRowMenu,
   PanelSectionLabel
 } from '@/app/overlays/panel'
-export { type RouteContribution, ROUTES_AREA, SIDEBAR_NAV_AREA, type SidebarNavContribution } from '@/app/routes'
+export {
+  type RouteContribution,
+  ROUTES_AREA,
+  SIDEBAR_NAV_AREA,
+  SIDEBAR_SECTION_AREA,
+  type SidebarNavContribution
+} from '@/app/routes'
+/** THE page scaffolding core pages use (Messaging, Capabilities): a search +
+ *  centered-tabs header over a list rail beside a scrolling detail. Plugins
+ *  that add a durable page compose these so they read as one app. */
+export { DetailColumn, ListColumn, MasterDetail } from '@/app/master-detail'
+export { PageSearchShell, type PageShellTab } from '@/app/page-search-shell'
 
 /** THE full per-toolset config panel core Settings renders — provider picker,
  *  env vars / API keys, model catalog picker, and post-setup runners. Route-
@@ -1542,6 +1555,8 @@ export { Input } from '@/components/ui/input'
 export { Kbd, KbdGroup } from '@/components/ui/kbd'
 /** The app's canonical loader (animated curves; `lemniscate-bloom` for long
  *  page loads) — the same one every core page uses. */
+/** Full-page loading state (never "Loading…" text). */
+export { PageLoader } from '@/components/page-loader'
 export { Loader, type LoaderType } from '@/components/ui/loader'
 export { LogView } from '@/components/ui/log-view'
 export { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'

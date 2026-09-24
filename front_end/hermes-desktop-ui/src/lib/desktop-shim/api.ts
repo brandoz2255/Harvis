@@ -102,7 +102,7 @@ export async function notify(payload: { title?: string; body?: string }): Promis
     const permission =
       Notification.permission === 'default' ? await Notification.requestPermission() : Notification.permission
     if (permission !== 'granted') return false
-    new Notification(payload?.title ?? 'Hermes', { body: payload?.body })
+    new Notification(payload?.title ?? 'Harvis', { body: payload?.body })
     return true
   } catch {
     return false

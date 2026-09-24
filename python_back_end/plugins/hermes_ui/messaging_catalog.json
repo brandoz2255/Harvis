@@ -1,0 +1,1834 @@
+[
+  {
+    "id": "telegram",
+    "name": "Telegram",
+    "description": "Run Harvis from Telegram DMs, groups, and topics.",
+    "docs_url": "https://core.telegram.org/bots/features#botfather",
+    "env_vars": [
+      {
+        "key": "TELEGRAM_BOT_TOKEN",
+        "required": true,
+        "description": "Complete Telegram bot token created by @BotFather (numeric bot ID followed by a colon and secret)",
+        "prompt": "Telegram bot token",
+        "help": "",
+        "url": "https://t.me/BotFather",
+        "is_password": true,
+        "advanced": false
+      },
+      {
+        "key": "TELEGRAM_ALLOWED_USERS",
+        "required": false,
+        "description": "Optional comma-separated numeric Telegram user IDs allowed immediately; leave blank to approve new users through DM pairing",
+        "prompt": "Allowed Telegram user IDs (comma-separated)",
+        "help": "",
+        "url": "https://t.me/userinfobot",
+        "is_password": false,
+        "advanced": false
+      }
+    ],
+    "required_env": [
+      "TELEGRAM_BOT_TOKEN"
+    ]
+  },
+  {
+    "id": "discord",
+    "name": "Discord",
+    "description": "Connect Harvis to Discord DMs, channels, and threads.",
+    "docs_url": "https://discord.com/developers/applications",
+    "env_vars": [
+      {
+        "key": "DISCORD_BOT_TOKEN",
+        "required": true,
+        "description": "Discord bot token from Developer Portal",
+        "prompt": "Discord bot token",
+        "help": "",
+        "url": "https://discord.com/developers/applications",
+        "is_password": true,
+        "advanced": false
+      },
+      {
+        "key": "DISCORD_ALLOWED_USERS",
+        "required": false,
+        "description": "Comma-separated Discord user IDs allowed to use the bot",
+        "prompt": "Allowed Discord user IDs (comma-separated)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      }
+    ],
+    "required_env": [
+      "DISCORD_BOT_TOKEN"
+    ]
+  },
+  {
+    "id": "slack",
+    "name": "Slack",
+    "description": "Use Harvis from Slack via Socket Mode. Add allowed Slack member IDs so connected bots can respond.",
+    "docs_url": "https://api.slack.com/apps",
+    "env_vars": [
+      {
+        "key": "SLACK_BOT_TOKEN",
+        "required": true,
+        "description": "Slack bot token (xoxb-). Get from OAuth & Permissions after installing your app. Required scopes: chat:write, app_mentions:read, channels:history, groups:history, im:history, im:read, im:write, mpim:history, mpim:read, users:read, files:read, files:write",
+        "prompt": "Slack Bot Token (xoxb-...)",
+        "help": "In your Slack app, add the required bot scopes, install the app to the workspace, then copy OAuth & Permissions > Bot User OAuth Token.",
+        "url": "https://api.slack.com/apps",
+        "is_password": true,
+        "advanced": false
+      },
+      {
+        "key": "SLACK_APP_TOKEN",
+        "required": true,
+        "description": "Slack app-level token (xapp-) for Socket Mode. Get from Basic Information → App-Level Tokens. Also ensure Event Subscriptions include: message.im, message.channels, message.groups, message.mpim, app_mention",
+        "prompt": "Slack App Token (xapp-...)",
+        "help": "In your Slack app, enable Socket Mode, then create Basic Information > App-Level Tokens with the connections:write scope.",
+        "url": "https://api.slack.com/apps",
+        "is_password": true,
+        "advanced": false
+      },
+      {
+        "key": "SLACK_ALLOWED_USERS",
+        "required": false,
+        "description": "Comma-separated Slack member IDs allowed to use Harvis, e.g. U01ABC2DEF3. Without this, Slack may connect but deny messages by default.",
+        "prompt": "Allowed Slack member IDs",
+        "help": "In Slack, open your profile, choose More or the three-dot menu, then Copy member ID. Add multiple IDs comma-separated.",
+        "url": "https://api.slack.com/apps",
+        "is_password": false,
+        "advanced": false
+      }
+    ],
+    "required_env": [
+      "SLACK_BOT_TOKEN",
+      "SLACK_APP_TOKEN"
+    ]
+  },
+  {
+    "id": "mattermost",
+    "name": "Mattermost",
+    "description": "Connect Harvis to Mattermost channels and direct messages.",
+    "docs_url": "https://mattermost.com/deploy/",
+    "env_vars": [
+      {
+        "key": "MATTERMOST_URL",
+        "required": true,
+        "description": "Mattermost server URL (e.g. https://mm.example.com)",
+        "prompt": "Mattermost server URL",
+        "help": "",
+        "url": "https://mattermost.com/deploy/",
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "MATTERMOST_TOKEN",
+        "required": true,
+        "description": "Mattermost bot token or personal access token",
+        "prompt": "Mattermost bot token",
+        "help": "",
+        "url": null,
+        "is_password": true,
+        "advanced": false
+      },
+      {
+        "key": "MATTERMOST_ALLOWED_USERS",
+        "required": false,
+        "description": "Comma-separated Mattermost user IDs allowed to use the bot",
+        "prompt": "Allowed Mattermost user IDs (comma-separated)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      }
+    ],
+    "required_env": [
+      "MATTERMOST_URL",
+      "MATTERMOST_TOKEN"
+    ]
+  },
+  {
+    "id": "matrix",
+    "name": "Matrix",
+    "description": "Use Harvis in Matrix rooms and direct messages.",
+    "docs_url": "https://matrix.org/ecosystem/servers/",
+    "env_vars": [
+      {
+        "key": "MATRIX_HOMESERVER",
+        "required": true,
+        "description": "Matrix homeserver URL (e.g. https://matrix.example.org)",
+        "prompt": "Matrix homeserver URL",
+        "help": "",
+        "url": "https://matrix.org/ecosystem/servers/",
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "MATRIX_ACCESS_TOKEN",
+        "required": true,
+        "description": "Matrix access token (preferred over password login)",
+        "prompt": "Matrix access token",
+        "help": "",
+        "url": null,
+        "is_password": true,
+        "advanced": false
+      },
+      {
+        "key": "MATRIX_USER_ID",
+        "required": true,
+        "description": "Matrix user ID (e.g. @hermes:example.org)",
+        "prompt": "Matrix user ID (@user:server)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "MATRIX_ALLOWED_USERS",
+        "required": false,
+        "description": "Comma-separated Matrix user IDs allowed to use the bot (@user:server format)",
+        "prompt": "Allowed Matrix user IDs (comma-separated)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "MATRIX_DEVICE_ID",
+        "required": false,
+        "description": "Stable Matrix device ID for E2EE persistence across restarts (e.g. HERMES_BOT)",
+        "prompt": "Matrix device ID (stable across restarts)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": true
+      },
+      {
+        "key": "MATRIX_PASSWORD",
+        "required": false,
+        "description": "Matrix account password (alternative to MATRIX_ACCESS_TOKEN)",
+        "prompt": "Matrix password",
+        "help": "",
+        "url": null,
+        "is_password": true,
+        "advanced": false
+      },
+      {
+        "key": "MATRIX_RECOVERY_KEY",
+        "required": false,
+        "description": "Matrix recovery key for cross-signing verification after device key rotation (from Element: Settings → Security → Recovery Key)",
+        "prompt": "Matrix recovery key",
+        "help": "",
+        "url": null,
+        "is_password": true,
+        "advanced": true
+      }
+    ],
+    "required_env": [
+      "MATRIX_HOMESERVER",
+      "MATRIX_ACCESS_TOKEN",
+      "MATRIX_USER_ID"
+    ]
+  },
+  {
+    "id": "whatsapp",
+    "name": "WhatsApp",
+    "description": "Use Harvis through the bundled WhatsApp bridge with QR-based auth.",
+    "docs_url": "https://github.com/tulir/whatsmeow",
+    "env_vars": [
+      {
+        "key": "WHATSAPP_ENABLED",
+        "required": false,
+        "description": "Enable the WhatsApp adapter (requires the Node.js bridge running)",
+        "prompt": "Enable WhatsApp? (true/false)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "WHATSAPP_MODE",
+        "required": false,
+        "description": "WhatsApp bridge mode",
+        "prompt": "WhatsApp mode",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": true
+      },
+      {
+        "key": "WHATSAPP_DM_POLICY",
+        "required": false,
+        "description": "How WhatsApp direct messages are authorized",
+        "prompt": "WhatsApp DM policy",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": true
+      },
+      {
+        "key": "WHATSAPP_ALLOWED_USERS",
+        "required": false,
+        "description": "Comma-separated WhatsApp user IDs allowed to talk to the bot",
+        "prompt": "Allowed users (comma-separated)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      }
+    ],
+    "required_env": []
+  },
+  {
+    "id": "signal",
+    "name": "Signal",
+    "description": "Connect through signal-cli running as a daemon with its HTTP endpoint.",
+    "docs_url": "https://github.com/AsamK/signal-cli",
+    "env_vars": [
+      {
+        "key": "SIGNAL_HTTP_URL",
+        "required": true,
+        "description": "URL of signal-cli daemon --http as the gateway container sees it, e.g. http://signal-cli:8080 for a container on the Harvis network",
+        "prompt": "Signal bridge URL",
+        "help": "",
+        "url": "https://github.com/AsamK/signal-cli",
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "SIGNAL_ACCOUNT",
+        "required": true,
+        "description": "Phone number of the Signal account linked to signal-cli, e.g. +15550001111",
+        "prompt": "Signal account",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "SIGNAL_ALLOWED_USERS",
+        "required": false,
+        "description": "Comma-separated phone numbers or Signal UUIDs allowed to chat with Harvis; others must pair",
+        "prompt": "Allowed Signal users",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      }
+    ],
+    "required_env": [
+      "SIGNAL_HTTP_URL",
+      "SIGNAL_ACCOUNT"
+    ]
+  },
+  {
+    "id": "bluebubbles",
+    "name": "BlueBubbles (iMessage)",
+    "description": "Use Harvis through iMessage via a BlueBubbles server.",
+    "docs_url": "https://bluebubbles.app/",
+    "env_vars": [
+      {
+        "key": "BLUEBUBBLES_SERVER_URL",
+        "required": true,
+        "description": "BlueBubbles server URL for iMessage integration (e.g. http://192.168.1.10:1234)",
+        "prompt": "BlueBubbles server URL",
+        "help": "",
+        "url": "https://bluebubbles.app/",
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "BLUEBUBBLES_PASSWORD",
+        "required": true,
+        "description": "BlueBubbles server password (from BlueBubbles Server → Settings → API)",
+        "prompt": "BlueBubbles server password",
+        "help": "",
+        "url": null,
+        "is_password": true,
+        "advanced": false
+      },
+      {
+        "key": "BLUEBUBBLES_ALLOWED_USERS",
+        "required": false,
+        "description": "Comma-separated iMessage addresses (email or phone) allowed to use the bot",
+        "prompt": "Allowed iMessage addresses (comma-separated)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      }
+    ],
+    "required_env": [
+      "BLUEBUBBLES_SERVER_URL",
+      "BLUEBUBBLES_PASSWORD"
+    ]
+  },
+  {
+    "id": "homeassistant",
+    "name": "Home Assistant",
+    "description": "Control your smart home from Harvis via Home Assistant.",
+    "docs_url": "https://www.home-assistant.io/docs/authentication/",
+    "env_vars": [
+      {
+        "key": "HASS_URL",
+        "required": true,
+        "description": "Home Assistant base URL (default: http://homeassistant.local:8123)",
+        "prompt": "Home Assistant URL",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "HASS_TOKEN",
+        "required": true,
+        "description": "Home Assistant Long-Lived Access Token",
+        "prompt": "Home Assistant Long-Lived Access Token",
+        "help": "",
+        "url": null,
+        "is_password": true,
+        "advanced": false
+      }
+    ],
+    "required_env": [
+      "HASS_URL",
+      "HASS_TOKEN"
+    ]
+  },
+  {
+    "id": "email",
+    "name": "Email",
+    "description": "Talk to Harvis through an IMAP/SMTP mailbox.",
+    "docs_url": "https://hermes-agent.nousresearch.com/docs/user-guide/messaging/",
+    "env_vars": [
+      {
+        "key": "EMAIL_ADDRESS",
+        "required": true,
+        "description": "Email account address",
+        "prompt": "Email address",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "EMAIL_PASSWORD",
+        "required": true,
+        "description": "Email account password / app password",
+        "prompt": "Email password",
+        "help": "",
+        "url": null,
+        "is_password": true,
+        "advanced": false
+      },
+      {
+        "key": "EMAIL_IMAP_HOST",
+        "required": true,
+        "description": "IMAP host for inbound polling (e.g. imap.gmail.com)",
+        "prompt": "IMAP host",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "EMAIL_SMTP_HOST",
+        "required": true,
+        "description": "SMTP host (e.g. smtp.gmail.com)",
+        "prompt": "SMTP host",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "EMAIL_ALLOWED_USERS",
+        "required": false,
+        "description": "Comma-separated email addresses allowed to talk to the bot",
+        "prompt": "Allowed users (comma-separated)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "EMAIL_SMTP_PORT",
+        "required": false,
+        "description": "SMTP port (default 587)",
+        "prompt": "SMTP port",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "EMAIL_IMAP_PORT",
+        "required": false,
+        "description": "IMAP port (default 993, SSL)",
+        "prompt": "IMAP port",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      }
+    ],
+    "required_env": [
+      "EMAIL_ADDRESS",
+      "EMAIL_PASSWORD",
+      "EMAIL_IMAP_HOST",
+      "EMAIL_SMTP_HOST"
+    ]
+  },
+  {
+    "id": "sms",
+    "name": "SMS (Twilio)",
+    "description": "Send and receive text messages via Twilio.",
+    "docs_url": "https://www.twilio.com/console",
+    "env_vars": [
+      {
+        "key": "TWILIO_ACCOUNT_SID",
+        "required": true,
+        "description": "Twilio Account SID",
+        "prompt": "Twilio Account SID",
+        "help": "",
+        "url": "https://www.twilio.com/",
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "TWILIO_AUTH_TOKEN",
+        "required": true,
+        "description": "Twilio Auth Token",
+        "prompt": "Twilio Auth Token",
+        "help": "",
+        "url": null,
+        "is_password": true,
+        "advanced": false
+      },
+      {
+        "key": "TWILIO_PHONE_NUMBER",
+        "required": false,
+        "description": "Twilio phone number (SMS-capable, E.164 format)",
+        "prompt": "Twilio phone number",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      }
+    ],
+    "required_env": [
+      "TWILIO_ACCOUNT_SID",
+      "TWILIO_AUTH_TOKEN"
+    ]
+  },
+  {
+    "id": "dingtalk",
+    "name": "DingTalk",
+    "description": "Connect Harvis to DingTalk groups (钉钉).",
+    "docs_url": "https://open.dingtalk.com/document/orgapp/the-robot-development-process",
+    "env_vars": [
+      {
+        "key": "DINGTALK_CLIENT_ID",
+        "required": true,
+        "description": "DingTalk app key (Client ID)",
+        "prompt": "DingTalk Client ID (app key)",
+        "help": "",
+        "url": "https://open-dev.dingtalk.com",
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "DINGTALK_CLIENT_SECRET",
+        "required": true,
+        "description": "DingTalk app secret (Client Secret)",
+        "prompt": "DingTalk Client Secret",
+        "help": "",
+        "url": "https://open-dev.dingtalk.com",
+        "is_password": true,
+        "advanced": false
+      },
+      {
+        "key": "DINGTALK_ALLOWED_USERS",
+        "required": false,
+        "description": "Comma-separated staff/sender IDs allowed to talk to the bot (* = any)",
+        "prompt": "Allowed users (comma-separated)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "DINGTALK_WEBHOOK_URL",
+        "required": false,
+        "description": "Static robot webhook URL for cross-platform / cron delivery",
+        "prompt": "DingTalk robot webhook URL (optional)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      }
+    ],
+    "required_env": [
+      "DINGTALK_CLIENT_ID",
+      "DINGTALK_CLIENT_SECRET"
+    ]
+  },
+  {
+    "id": "feishu",
+    "name": "Feishu / Lark",
+    "description": "Use Harvis inside Feishu / Lark.",
+    "docs_url": "https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/intro",
+    "env_vars": [
+      {
+        "key": "FEISHU_APP_ID",
+        "required": true,
+        "description": "Feishu/Lark app ID",
+        "prompt": "Feishu App ID",
+        "help": "",
+        "url": "https://open.feishu.cn/",
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "FEISHU_APP_SECRET",
+        "required": true,
+        "description": "Feishu/Lark app secret",
+        "prompt": "Feishu App Secret",
+        "help": "",
+        "url": "https://open.feishu.cn/",
+        "is_password": true,
+        "advanced": false
+      },
+      {
+        "key": "FEISHU_ENCRYPT_KEY",
+        "required": false,
+        "description": "Feishu / Lark encrypt key",
+        "prompt": "Encrypt key",
+        "help": "",
+        "url": null,
+        "is_password": true,
+        "advanced": false
+      },
+      {
+        "key": "FEISHU_VERIFICATION_TOKEN",
+        "required": false,
+        "description": "Feishu / Lark verification token",
+        "prompt": "Verification token",
+        "help": "",
+        "url": null,
+        "is_password": true,
+        "advanced": false
+      },
+      {
+        "key": "FEISHU_ALLOWED_USERS",
+        "required": false,
+        "description": "Comma-separated Feishu user IDs allowed to talk to the bot",
+        "prompt": "Allowed users (comma-separated)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "FEISHU_DOMAIN",
+        "required": false,
+        "description": "Domain: 'feishu' (China) or 'lark' (International)",
+        "prompt": "Domain (feishu/lark)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      }
+    ],
+    "required_env": [
+      "FEISHU_APP_ID",
+      "FEISHU_APP_SECRET"
+    ]
+  },
+  {
+    "id": "google_chat",
+    "name": "Google Chat",
+    "description": "Connect Harvis to Google Chat via Cloud Pub/Sub.",
+    "docs_url": "https://hermes-agent.nousresearch.com/docs/user-guide/messaging/google_chat",
+    "env_vars": [
+      {
+        "key": "GOOGLE_CHAT_SERVICE_ACCOUNT_JSON",
+        "required": true,
+        "description": "Path to Service Account JSON key (or inline JSON). Leave empty to use Application Default Credentials on Cloud Run / GCE. Falls back to GOOGLE_APPLICATION_CREDENTIALS.",
+        "prompt": "Path to SA JSON (or empty for ADC)",
+        "help": "",
+        "url": null,
+        "is_password": true,
+        "advanced": false
+      },
+      {
+        "key": "GOOGLE_CHAT_ALLOWED_USERS",
+        "required": false,
+        "description": "Comma-separated user emails allowed to interact with the bot.",
+        "prompt": "Allowed user emails (comma-separated)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "GOOGLE_CHAT_HTTP_EVENTS_AUDIENCE",
+        "required": false,
+        "description": "Expected audience for Google-signed HTTP event bearer tokens. Defaults to GOOGLE_CHAT_HTTP_EVENTS_URL.",
+        "prompt": "HTTP events token audience",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "GOOGLE_CHAT_HTTP_EVENTS_SERVICE_ACCOUNT_EMAIL",
+        "required": false,
+        "description": "Expected Google service account email for HTTP event bearer tokens.",
+        "prompt": "HTTP events service account email",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "GOOGLE_CHAT_HTTP_EVENTS_URL",
+        "required": false,
+        "description": "Authenticated HTTP endpoint for Chat message events.",
+        "prompt": "HTTP events callback URL",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "GOOGLE_CHAT_PROJECT_ID",
+        "required": false,
+        "description": "GCP project ID for optional Pub/Sub inbound mode. Falls back to GOOGLE_CLOUD_PROJECT.",
+        "prompt": "GCP project ID",
+        "help": "",
+        "url": "https://console.cloud.google.com/",
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "GOOGLE_CHAT_SUBSCRIPTION_NAME",
+        "required": false,
+        "description": "Optional Pub/Sub subscription path for pull-mode inbound events.",
+        "prompt": "Pub/Sub subscription name",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      }
+    ],
+    "required_env": [
+      "GOOGLE_CHAT_SERVICE_ACCOUNT_JSON"
+    ]
+  },
+  {
+    "id": "wecom",
+    "name": "WeCom (group bot)",
+    "description": "Send-only WeCom group bot via webhook.",
+    "docs_url": "https://developer.work.weixin.qq.com/document/path/91770",
+    "env_vars": [
+      {
+        "key": "WECOM_BOT_ID",
+        "required": true,
+        "description": "WeCom Smart Robot bot ID",
+        "prompt": "WeCom bot ID",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "WECOM_SECRET",
+        "required": false,
+        "description": "WeCom Smart Robot secret",
+        "prompt": "WeCom secret",
+        "help": "",
+        "url": null,
+        "is_password": true,
+        "advanced": false
+      }
+    ],
+    "required_env": [
+      "WECOM_BOT_ID"
+    ]
+  },
+  {
+    "id": "wecom_callback",
+    "name": "WeCom (app)",
+    "description": "Two-way WeCom integration via callback app.",
+    "docs_url": "https://developer.work.weixin.qq.com/document/path/90930",
+    "env_vars": [
+      {
+        "key": "WECOM_CALLBACK_CORP_ID",
+        "required": true,
+        "description": "WeCom callback-mode corp ID (self-built apps)",
+        "prompt": "WeCom callback corp ID",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "WECOM_CALLBACK_CORP_SECRET",
+        "required": true,
+        "description": "WeCom callback-mode corp secret",
+        "prompt": "WeCom callback corp secret",
+        "help": "",
+        "url": null,
+        "is_password": true,
+        "advanced": false
+      },
+      {
+        "key": "WECOM_CALLBACK_AGENT_ID",
+        "required": true,
+        "description": "WeCom callback-mode agent ID",
+        "prompt": "WeCom callback agent ID",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "WECOM_CALLBACK_TOKEN",
+        "required": false,
+        "description": "WeCom callback verification token",
+        "prompt": "WeCom callback token",
+        "help": "",
+        "url": null,
+        "is_password": true,
+        "advanced": false
+      },
+      {
+        "key": "WECOM_CALLBACK_ENCODING_AES_KEY",
+        "required": false,
+        "description": "WeCom callback EncodingAESKey for message crypto",
+        "prompt": "WeCom callback EncodingAESKey",
+        "help": "",
+        "url": null,
+        "is_password": true,
+        "advanced": false
+      }
+    ],
+    "required_env": [
+      "WECOM_CALLBACK_CORP_ID",
+      "WECOM_CALLBACK_CORP_SECRET",
+      "WECOM_CALLBACK_AGENT_ID"
+    ]
+  },
+  {
+    "id": "weixin",
+    "name": "Weixin / WeChat (Personal)",
+    "description": "Connect a personal WeChat account through Tencent's iLink Bot API.",
+    "docs_url": "https://hermes-agent.nousresearch.com/docs/user-guide/messaging/weixin/",
+    "env_vars": [
+      {
+        "key": "WEIXIN_ACCOUNT_ID",
+        "required": true,
+        "description": "iLink Bot account ID obtained through QR login in hermes gateway setup",
+        "prompt": "iLink Bot account ID",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "WEIXIN_TOKEN",
+        "required": true,
+        "description": "iLink Bot token obtained through QR login in hermes gateway setup",
+        "prompt": "iLink Bot token",
+        "help": "",
+        "url": null,
+        "is_password": true,
+        "advanced": false
+      },
+      {
+        "key": "WEIXIN_BASE_URL",
+        "required": false,
+        "description": "iLink API base URL saved by QR login (default: https://ilinkai.weixin.qq.com)",
+        "prompt": "iLink API base URL",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      }
+    ],
+    "required_env": [
+      "WEIXIN_ACCOUNT_ID",
+      "WEIXIN_TOKEN"
+    ]
+  },
+  {
+    "id": "qqbot",
+    "name": "QQ Bot",
+    "description": "Connect Harvis to a QQ Bot from the QQ Open Platform.",
+    "docs_url": "https://q.qq.com",
+    "env_vars": [
+      {
+        "key": "QQ_APP_ID",
+        "required": true,
+        "description": "QQ Bot App ID from QQ Open Platform (q.qq.com)",
+        "prompt": "QQ App ID",
+        "help": "",
+        "url": "https://q.qq.com",
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "QQ_CLIENT_SECRET",
+        "required": true,
+        "description": "QQ Bot Client Secret from QQ Open Platform",
+        "prompt": "QQ Client Secret",
+        "help": "",
+        "url": null,
+        "is_password": true,
+        "advanced": false
+      },
+      {
+        "key": "QQ_ALLOWED_USERS",
+        "required": false,
+        "description": "Comma-separated QQ user IDs allowed to use the bot",
+        "prompt": "QQ Allowed Users",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "QQ_GROUP_ALLOWED_USERS",
+        "required": false,
+        "description": "Comma-separated QQ group IDs allowed to interact with the bot",
+        "prompt": "QQ Group Allowed Users",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "QQ_SANDBOX",
+        "required": false,
+        "description": "Enable QQ sandbox mode for development testing (true/false)",
+        "prompt": "QQ Sandbox Mode",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      }
+    ],
+    "required_env": [
+      "QQ_APP_ID",
+      "QQ_CLIENT_SECRET"
+    ]
+  },
+  {
+    "id": "yuanbao",
+    "name": "Yuanbao (元宝)",
+    "description": "Connect Harvis to Tencent Yuanbao.",
+    "docs_url": "",
+    "env_vars": [],
+    "required_env": []
+  },
+  {
+    "id": "api_server",
+    "name": "API server",
+    "description": "Expose Harvis as an OpenAI-compatible HTTP API for tools like Open WebUI.",
+    "docs_url": "https://hermes-agent.nousresearch.com/docs/user-guide/messaging/",
+    "env_vars": [
+      {
+        "key": "API_SERVER_ENABLED",
+        "required": false,
+        "description": "Enable the OpenAI-compatible API server (true/false). Allows frontends like Open WebUI, LobeChat, etc. to connect.",
+        "prompt": "Enable API server (true/false)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": true
+      },
+      {
+        "key": "API_SERVER_KEY",
+        "required": false,
+        "description": "Bearer token for API server authentication. Required whenever the API server is enabled; server refuses to start without it.",
+        "prompt": "API server auth key",
+        "help": "",
+        "url": null,
+        "is_password": true,
+        "advanced": true
+      },
+      {
+        "key": "API_SERVER_PORT",
+        "required": false,
+        "description": "Port for the API server (default: 8642).",
+        "prompt": "API server port",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": true
+      },
+      {
+        "key": "API_SERVER_HOST",
+        "required": false,
+        "description": "Host/bind address for the API server (default: 127.0.0.1). API_SERVER_KEY is still required even on loopback binds.",
+        "prompt": "API server host",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": true
+      },
+      {
+        "key": "API_SERVER_MODEL_NAME",
+        "required": false,
+        "description": "Model name advertised on /v1/models. Defaults to the profile name (or 'hermes-agent' for the default profile). Useful for multi-user setups with OpenWebUI.",
+        "prompt": "API server model name",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": true
+      }
+    ],
+    "required_env": []
+  },
+  {
+    "id": "webhook",
+    "name": "Webhooks",
+    "description": "Receive events from GitHub, GitLab, and other webhook sources.",
+    "docs_url": "https://hermes-agent.nousresearch.com/docs/user-guide/messaging/webhooks/",
+    "env_vars": [
+      {
+        "key": "WEBHOOK_ENABLED",
+        "required": false,
+        "description": "Enable the webhook platform adapter for receiving events from GitHub, GitLab, etc.",
+        "prompt": "Enable webhooks (true/false)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "WEBHOOK_PORT",
+        "required": false,
+        "description": "Port for the webhook HTTP server (default: 8644).",
+        "prompt": "Webhook port",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "WEBHOOK_SECRET",
+        "required": false,
+        "description": "Global HMAC secret for webhook signature validation (overridable per route in config.yaml).",
+        "prompt": "Webhook secret",
+        "help": "",
+        "url": null,
+        "is_password": true,
+        "advanced": false
+      }
+    ],
+    "required_env": []
+  },
+  {
+    "id": "a2a",
+    "name": "A2A",
+    "description": "No extra packages needed (stdlib only)",
+    "docs_url": "",
+    "env_vars": [
+      {
+        "key": "A2A_AGENT_NAME",
+        "required": false,
+        "description": "Name advertised on this agent's Agent Card (default: hostname-derived).",
+        "prompt": "A2A agent name",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "A2A_BEARER_TOKEN",
+        "required": false,
+        "description": "Shared bearer token for inbound A2A calls (identity falls back to caller IP). With no token of any kind => bind to 127.0.0.1 only (no remote access).",
+        "prompt": "A2A shared bearer token (or empty for localhost-only)",
+        "help": "",
+        "url": null,
+        "is_password": true,
+        "advanced": false
+      },
+      {
+        "key": "A2A_HOST",
+        "required": false,
+        "description": "Inbound bind host. Defaults to 127.0.0.1; only widens to 0.0.0.0 when a bearer token is set AND you opt in here.",
+        "prompt": "A2A bind host (default 127.0.0.1)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "A2A_PEER_TOKENS",
+        "required": false,
+        "description": "Per-peer bearer tokens ('alice:tok1,bob:tok2'). Each remote agent gets its own credential; the matched name is the authenticated identity used for rate limiting, trust, and audit.",
+        "prompt": "A2A per-peer tokens (name:token, comma-separated; or empty)",
+        "help": "",
+        "url": null,
+        "is_password": true,
+        "advanced": false
+      },
+      {
+        "key": "A2A_PORT",
+        "required": false,
+        "description": "Inbound A2A server port (default 9900).",
+        "prompt": "A2A port (default 9900)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      }
+    ],
+    "required_env": []
+  },
+  {
+    "id": "buzz",
+    "name": "Buzz",
+    "description": "Requires the buzz CLI binary (https://github.com/block/buzz) on PATH or at BUZZ_CLI_PATH",
+    "docs_url": "",
+    "env_vars": [
+      {
+        "key": "BUZZ_RELAY_URL",
+        "required": true,
+        "description": "Base URL of the Buzz community relay (e.g. https://mycommunity.communities.buzz.xyz)",
+        "prompt": "Buzz relay URL",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "BUZZ_PRIVATE_KEY",
+        "required": true,
+        "description": "Nostr private key for the agent's Buzz identity (nsec or hex) — the only Buzz secret",
+        "prompt": "Nostr private key (nsec or hex)",
+        "help": "",
+        "url": null,
+        "is_password": true,
+        "advanced": false
+      },
+      {
+        "key": "BUZZ_ALLOWED_USERS",
+        "required": false,
+        "description": "Comma-separated npubs or hex pubkeys allowed to talk to the agent",
+        "prompt": "Allowed users (comma-separated)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "BUZZ_AUTH_TAG",
+        "required": false,
+        "description": "Optional NIP-OA owner-attestation auth tag JSON for NIP-42 WebSocket auth",
+        "prompt": "NIP-OA auth tag JSON (or empty)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "BUZZ_CHANNELS",
+        "required": false,
+        "description": "Comma-separated channel UUIDs to watch (default: all joined channels)",
+        "prompt": "Channel UUIDs (comma-separated)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "BUZZ_CLI_PATH",
+        "required": false,
+        "description": "Path to the buzz CLI binary (default: 'buzz' on PATH, then ~/bin/buzz)",
+        "prompt": "buzz CLI path (or empty)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "BUZZ_CREDENTIALS_FILE",
+        "required": false,
+        "description": "JSON credentials file holding the nsec (fallback when BUZZ_PRIVATE_KEY is unset)",
+        "prompt": "Credentials file path (or empty)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "BUZZ_POLL_INTERVAL",
+        "required": false,
+        "description": "Seconds between inbound poll sweeps (default: 4)",
+        "prompt": "Poll interval seconds",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "BUZZ_REPLY_IN_THREAD",
+        "required": false,
+        "description": "Thread replies under the triggering message (true/false, default: true); false posts flat to the channel timeline",
+        "prompt": "Reply in thread? (true/false)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "BUZZ_TRANSPORT",
+        "required": false,
+        "description": "Inbound transport: auto (WebSocket w/ poll fallback, default), websocket, or poll",
+        "prompt": "Transport (auto/websocket/poll)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      }
+    ],
+    "required_env": [
+      "BUZZ_RELAY_URL",
+      "BUZZ_PRIVATE_KEY"
+    ]
+  },
+  {
+    "id": "photon",
+    "name": "iMessage via Photon",
+    "description": "Use Harvis through iMessage via Photon's managed Spectrum platform.",
+    "docs_url": "https://hermes-agent.nousresearch.com/docs/user-guide/messaging/photon",
+    "env_vars": [
+      {
+        "key": "PHOTON_PROJECT_ID",
+        "required": true,
+        "description": "Spectrum project id (the project's spectrumProjectId; set by `hermes photon setup`)",
+        "prompt": "Photon Spectrum project id",
+        "help": "",
+        "url": "https://app.photon.codes/",
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "PHOTON_PROJECT_SECRET",
+        "required": true,
+        "description": "Project secret paired with the Spectrum project id (set by `hermes photon setup`)",
+        "prompt": "Photon project secret",
+        "help": "",
+        "url": "https://app.photon.codes/",
+        "is_password": true,
+        "advanced": false
+      },
+      {
+        "key": "PHOTON_ALLOWED_USERS",
+        "required": false,
+        "description": "Comma-separated E.164 phone numbers allowed to talk to the bot",
+        "prompt": "Allowed users (comma-separated)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "PHOTON_DASHBOARD_HOST",
+        "required": false,
+        "description": "Photon Dashboard API host (default https://app.photon.codes)",
+        "prompt": "Dashboard host",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "PHOTON_MARKDOWN",
+        "required": false,
+        "description": "Send agent replies as markdown — iMessage renders it natively, other Spectrum platforms degrade to plain text (true/false, default true)",
+        "prompt": "Render replies as markdown? (true/false)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "PHOTON_MENTION_PATTERNS",
+        "required": false,
+        "description": "Mention wake-word regexes for group chats (JSON list or comma/newline-separated; defaults to Harvis wake words)",
+        "prompt": "Group mention patterns",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "PHOTON_NODE_BIN",
+        "required": false,
+        "description": "Path to the node binary (default: shutil.which('node'))",
+        "prompt": "Node executable path",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "PHOTON_REACTIONS",
+        "required": false,
+        "description": "Tapback 👀/👍/👎 on messages as processing status and route tapbacks on bot messages to the agent (true/false, default false)",
+        "prompt": "Enable reaction tapbacks? (true/false)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "PHOTON_READ_RECEIPTS",
+        "required": false,
+        "description": "Mark inbound iMessages read after forwarding to Harvis (true/false, default true)",
+        "prompt": "Send read receipts? (true/false)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "PHOTON_SIDECAR_AUTOSTART",
+        "required": false,
+        "description": "Spawn the Node sidecar on connect (true/false, default true)",
+        "prompt": "Auto-start the sidecar?",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "PHOTON_SIDECAR_PORT",
+        "required": false,
+        "description": "Loopback port for the Node sidecar control + inbound channel (default 8789)",
+        "prompt": "Sidecar control port",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "PHOTON_SPECTRUM_HOST",
+        "required": false,
+        "description": "Photon Spectrum API host (default https://spectrum.photon.codes)",
+        "prompt": "Spectrum API host",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "PHOTON_TELEMETRY",
+        "required": false,
+        "description": "Enable Spectrum SDK telemetry in the sidecar (true/false, default false; toggle with `hermes photon telemetry on|off`)",
+        "prompt": "Enable Spectrum telemetry? (true/false)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      }
+    ],
+    "required_env": [
+      "PHOTON_PROJECT_ID",
+      "PHOTON_PROJECT_SECRET"
+    ]
+  },
+  {
+    "id": "irc",
+    "name": "IRC",
+    "description": "Relay messages between an IRC channel (or DMs) and Harvis.",
+    "docs_url": "https://hermes-agent.nousresearch.com/docs/user-guide/messaging/irc",
+    "env_vars": [
+      {
+        "key": "IRC_SERVER",
+        "required": true,
+        "description": "IRC server hostname (e.g. irc.libera.chat)",
+        "prompt": "IRC server",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "IRC_CHANNEL",
+        "required": true,
+        "description": "IRC channel to join (e.g. #hermes)",
+        "prompt": "IRC channel",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "IRC_NICKNAME",
+        "required": true,
+        "description": "Bot nickname on IRC (default: hermes-bot)",
+        "prompt": "IRC nickname",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "IRC_ALLOWED_USERS",
+        "required": false,
+        "description": "Comma-separated IRC nicks allowed to talk to the bot",
+        "prompt": "Allowed nicks (comma-separated)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "IRC_NICKSERV_PASSWORD",
+        "required": false,
+        "description": "NickServ password for nick identification",
+        "prompt": "NickServ password",
+        "help": "",
+        "url": null,
+        "is_password": true,
+        "advanced": true
+      },
+      {
+        "key": "IRC_PORT",
+        "required": false,
+        "description": "IRC server port (default: 6697 with TLS, 6667 without)",
+        "prompt": "IRC port",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "IRC_SERVER_PASSWORD",
+        "required": false,
+        "description": "IRC server password (if required)",
+        "prompt": "IRC server password",
+        "help": "",
+        "url": null,
+        "is_password": true,
+        "advanced": true
+      },
+      {
+        "key": "IRC_USE_TLS",
+        "required": false,
+        "description": "Use TLS for the IRC connection (1/true/yes to enable, default: true on port 6697)",
+        "prompt": "Use TLS? (true/false)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      }
+    ],
+    "required_env": [
+      "IRC_SERVER",
+      "IRC_CHANNEL",
+      "IRC_NICKNAME"
+    ]
+  },
+  {
+    "id": "line",
+    "name": "LINE",
+    "description": "Use Harvis from LINE via the LINE Messaging API webhook.",
+    "docs_url": "https://hermes-agent.nousresearch.com/docs/user-guide/messaging/line",
+    "env_vars": [
+      {
+        "key": "LINE_CHANNEL_ACCESS_TOKEN",
+        "required": true,
+        "description": "LINE channel long-lived access token (LINE Developers Console > Messaging API > Channel access token)",
+        "prompt": "LINE channel access token",
+        "help": "",
+        "url": "https://developers.line.biz/console/",
+        "is_password": true,
+        "advanced": false
+      },
+      {
+        "key": "LINE_CHANNEL_SECRET",
+        "required": true,
+        "description": "LINE channel secret (used for HMAC-SHA256 webhook signature verification)",
+        "prompt": "LINE channel secret",
+        "help": "",
+        "url": "https://developers.line.biz/console/",
+        "is_password": true,
+        "advanced": false
+      },
+      {
+        "key": "LINE_ALLOWED_GROUPS",
+        "required": false,
+        "description": "Comma-separated LINE group IDs the bot will respond in (C-prefixed)",
+        "prompt": "Allowed group IDs (comma-separated)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "LINE_ALLOWED_ROOMS",
+        "required": false,
+        "description": "Comma-separated LINE room IDs the bot will respond in (R-prefixed)",
+        "prompt": "Allowed room IDs (comma-separated)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "LINE_ALLOWED_USERS",
+        "required": false,
+        "description": "Comma-separated LINE user IDs allowed to DM the bot (U-prefixed)",
+        "prompt": "Allowed user IDs (comma-separated)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "LINE_HOST",
+        "required": false,
+        "description": "Webhook bind host (default: unset → dual-stack, all interfaces IPv4+IPv6)",
+        "prompt": "Webhook host",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "LINE_PORT",
+        "required": false,
+        "description": "Webhook listen port (default: 8646)",
+        "prompt": "Webhook port",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "LINE_PUBLIC_URL",
+        "required": false,
+        "description": "Public HTTPS base URL for serving images/audio/video to LINE (e.g. https://my-tunnel.example.com). Required for media sending when the bind address is not directly reachable.",
+        "prompt": "Public HTTPS base URL",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "LINE_SLOW_RESPONSE_THRESHOLD",
+        "required": false,
+        "description": "Seconds before the slow-LLM postback button fires (default: 45; set 0 to disable and always Push-fallback)",
+        "prompt": "Slow response threshold (seconds)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      }
+    ],
+    "required_env": [
+      "LINE_CHANNEL_ACCESS_TOKEN",
+      "LINE_CHANNEL_SECRET"
+    ]
+  },
+  {
+    "id": "msgraph_webhook",
+    "name": "Microsoft Graph Webhook",
+    "description": "Receive Microsoft Graph change notifications (Teams meetings, Outlook, …).",
+    "docs_url": "https://hermes-agent.nousresearch.com/docs/user-guide/messaging/msgraph-webhook",
+    "env_vars": [],
+    "required_env": []
+  },
+  {
+    "id": "teams",
+    "name": "Microsoft Teams",
+    "description": "Connect Harvis to Microsoft Teams chats via the Bot Framework.",
+    "docs_url": "https://hermes-agent.nousresearch.com/docs/user-guide/messaging/teams",
+    "env_vars": [
+      {
+        "key": "TEAMS_CLIENT_ID",
+        "required": true,
+        "description": "Azure AD application (Bot Framework) client ID",
+        "prompt": "Teams / Azure AD client ID",
+        "help": "",
+        "url": "https://portal.azure.com/",
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "TEAMS_CLIENT_SECRET",
+        "required": true,
+        "description": "Azure AD application client secret",
+        "prompt": "Teams / Azure AD client secret",
+        "help": "",
+        "url": "https://portal.azure.com/",
+        "is_password": true,
+        "advanced": false
+      },
+      {
+        "key": "TEAMS_TENANT_ID",
+        "required": true,
+        "description": "Azure AD tenant ID hosting the bot application",
+        "prompt": "Teams / Azure AD tenant ID",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "TEAMS_ALLOWED_USERS",
+        "required": false,
+        "description": "Comma-separated Teams user IDs / UPNs allowed to talk to the bot",
+        "prompt": "Allowed users (comma-separated)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "TEAMS_HOST",
+        "required": false,
+        "description": "Webhook bind host (default: unset → dual-stack, all interfaces IPv4+IPv6)",
+        "prompt": "Webhook host",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "TEAMS_PORT",
+        "required": false,
+        "description": "Webhook listen port (Bot Framework default: 3978)",
+        "prompt": "Webhook port",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      }
+    ],
+    "required_env": [
+      "TEAMS_CLIENT_ID",
+      "TEAMS_CLIENT_SECRET",
+      "TEAMS_TENANT_ID"
+    ]
+  },
+  {
+    "id": "ntfy",
+    "name": "ntfy",
+    "description": "Chat with Harvis over ntfy push topics (ntfy.sh or self-hosted).",
+    "docs_url": "https://hermes-agent.nousresearch.com/docs/user-guide/messaging/ntfy",
+    "env_vars": [
+      {
+        "key": "NTFY_TOPIC",
+        "required": true,
+        "description": "Topic name to subscribe to (e.g. hermes-in)",
+        "prompt": "ntfy subscribe topic",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "NTFY_ALLOWED_USERS",
+        "required": false,
+        "description": "Comma-separated topic names allowed (allowlist)",
+        "prompt": "Allowed topic names (comma-separated)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "NTFY_MARKDOWN",
+        "required": false,
+        "description": "Send replies with X-Markdown: true header (true/false, default: false)",
+        "prompt": "Enable markdown formatting? (true/false)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "NTFY_PUBLISH_TOPIC",
+        "required": false,
+        "description": "Topic to publish replies to (defaults to NTFY_TOPIC)",
+        "prompt": "ntfy publish topic (or empty)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "NTFY_SERVER_URL",
+        "required": false,
+        "description": "ntfy server URL (default: https://ntfy.sh)",
+        "prompt": "ntfy server URL",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "NTFY_TOKEN",
+        "required": false,
+        "description": "Bearer token or 'user:pass' for Basic auth (optional)",
+        "prompt": "ntfy auth token (or empty)",
+        "help": "",
+        "url": null,
+        "is_password": true,
+        "advanced": false
+      }
+    ],
+    "required_env": [
+      "NTFY_TOPIC"
+    ]
+  },
+  {
+    "id": "raft",
+    "name": "Raft",
+    "description": "Join a Raft workspace as an external agent.",
+    "docs_url": "https://hermes-agent.nousresearch.com/docs/user-guide/messaging/raft",
+    "env_vars": [
+      {
+        "key": "RAFT_PROFILE",
+        "required": true,
+        "description": "Raft agent profile slug — auto-enables the adapter when set",
+        "prompt": "Raft agent profile",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      }
+    ],
+    "required_env": [
+      "RAFT_PROFILE"
+    ]
+  },
+  {
+    "id": "relay",
+    "name": "Relay (experimental)",
+    "description": "Generic relay adapter fronted by the Harvis Relay connector.",
+    "docs_url": "",
+    "env_vars": [],
+    "required_env": []
+  },
+  {
+    "id": "simplex",
+    "name": "SimpleX Chat",
+    "description": "Talk to Harvis over SimpleX Chat via a local simplex-chat daemon.",
+    "docs_url": "https://hermes-agent.nousresearch.com/docs/user-guide/messaging/simplex",
+    "env_vars": [
+      {
+        "key": "SIMPLEX_WS_URL",
+        "required": true,
+        "description": "WebSocket URL of the simplex-chat daemon (e.g. ws://127.0.0.1:5225)",
+        "prompt": "SimpleX daemon WebSocket URL",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "SIMPLEX_ALLOWED_USERS",
+        "required": false,
+        "description": "Comma-separated SimpleX contact IDs allowed to talk to the bot",
+        "prompt": "Allowed contact IDs (comma-separated)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "SIMPLEX_AUTO_ACCEPT",
+        "required": false,
+        "description": "Auto-accept incoming contact requests (default: true)",
+        "prompt": "Auto-accept contact requests? (true/false)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "SIMPLEX_GROUP_ALLOWED",
+        "required": false,
+        "description": "Comma-separated SimpleX group IDs the bot should participate in, or '*' to allow any group. Omit to ignore group messages entirely (safer default — a bot in a group otherwise processes every member's traffic).",
+        "prompt": "Allowed group IDs (comma-separated, or '*' for any)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      }
+    ],
+    "required_env": [
+      "SIMPLEX_WS_URL"
+    ]
+  },
+  {
+    "id": "whatsapp_cloud",
+    "name": "WhatsApp Cloud API",
+    "description": "Use Harvis via Meta's hosted WhatsApp Cloud API (no local bridge).",
+    "docs_url": "https://hermes-agent.nousresearch.com/docs/user-guide/messaging/whatsapp-cloud",
+    "env_vars": [
+      {
+        "key": "WHATSAPP_ACCESS_TOKEN",
+        "required": true,
+        "description": "Permanent (System User) access token from Meta for Developers with whatsapp_business_messaging",
+        "prompt": "WhatsApp access token",
+        "help": "",
+        "url": "https://developers.facebook.com/apps/",
+        "is_password": true,
+        "advanced": false
+      },
+      {
+        "key": "WHATSAPP_PHONE_NUMBER_ID",
+        "required": true,
+        "description": "The numeric Phone number ID shown under WhatsApp > API setup (not the phone number itself)",
+        "prompt": "Phone number id",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      },
+      {
+        "key": "WHATSAPP_VERIFY_TOKEN",
+        "required": true,
+        "description": "Any string you choose; enter the same value when registering the webhook in Meta",
+        "prompt": "Webhook verify token",
+        "help": "",
+        "url": null,
+        "is_password": true,
+        "advanced": false
+      },
+      {
+        "key": "WHATSAPP_APP_SECRET",
+        "required": false,
+        "description": "The app's App Secret (Settings > Basic); lets Harvis verify that webhook calls really come from Meta",
+        "prompt": "App secret",
+        "help": "",
+        "url": null,
+        "is_password": true,
+        "advanced": false
+      },
+      {
+        "key": "WHATSAPP_ALLOWED_USERS",
+        "required": false,
+        "description": "Phone numbers in international format allowed immediately; others go through pairing",
+        "prompt": "Allowed phone numbers (comma-separated)",
+        "help": "",
+        "url": null,
+        "is_password": false,
+        "advanced": false
+      }
+    ],
+    "required_env": [
+      "WHATSAPP_ACCESS_TOKEN",
+      "WHATSAPP_PHONE_NUMBER_ID",
+      "WHATSAPP_VERIFY_TOKEN"
+    ]
+  }
+]

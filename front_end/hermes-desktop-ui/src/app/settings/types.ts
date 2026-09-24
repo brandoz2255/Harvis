@@ -9,6 +9,7 @@ export type SettingsView =
   | 'billing'
   | 'connections'
   | 'gateway'
+  | 'harvis-memory'
   | 'keybinds'
   | 'keys'
   | 'notifications'

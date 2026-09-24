@@ -1,7 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import { atom } from 'nanostores'
-import { createRef } from 'react'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -50,22 +49,19 @@ afterEach(() => {
 async function renderConfigSettings() {
   const { ConfigSettings } = await import('./config-settings')
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  const importInputRef = createRef<HTMLInputElement>()
 
   render(
     <MemoryRouter>
       <QueryClientProvider client={client}>
-        <ConfigSettings activeSectionId="safety" importInputRef={importInputRef} />
+        <ConfigSettings activeSectionId="voice" />
       </QueryClientProvider>
     </MemoryRouter>
   )
-
-  return { importInputRef }
 }
 
 describe('ConfigSettings autosave', () => {
   it('sends a later revert instead of diffing it away against the stale page-load baseline', async () => {
-    getHermesConfigRecord.mockResolvedValue({ checkpoints: { enabled: false }, other: 'untouched' })
+    getHermesConfigRecord.mockResolvedValue({ voice: { auto_tts: false }, other: 'untouched' })
 
     vi.useFakeTimers({ shouldAdvanceTime: true })
 
@@ -74,12 +70,12 @@ describe('ConfigSettings autosave', () => {
 
       const toggle = await screen.findByRole('switch')
 
-      // Edit: flip checkpoints.enabled on, let the debounced autosave fire.
+      // Edit: flip voice.auto_tts on, let the debounced autosave fire.
       toggle.click()
       await vi.advanceTimersByTimeAsync(700)
 
       await waitFor(() => expect(saveHermesConfig).toHaveBeenCalledTimes(1))
-      expect(saveHermesConfig.mock.calls[0][0]).toEqual({ checkpoints: { enabled: true } })
+      expect(saveHermesConfig.mock.calls[0][0]).toEqual({ voice: { auto_tts: true } })
 
       // Revert: flip it back to its original value and let autosave fire again.
       toggle.click()
@@ -90,7 +86,7 @@ describe('ConfigSettings autosave', () => {
       // never-advanced page-load baseline would produce an empty patch here
       // (the field is back to its original value) and leave disk stuck at
       // `enabled: true` from the first save.
-      expect(saveHermesConfig.mock.calls[1][0]).toEqual({ checkpoints: { enabled: false } })
+      expect(saveHermesConfig.mock.calls[1][0]).toEqual({ voice: { auto_tts: false } })
     } finally {
       vi.useRealTimers()
     }

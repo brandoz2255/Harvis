@@ -29,6 +29,7 @@ from .models import (
     PodcastStyle, PodcastStatus, PodcastRequest, Podcast, PodcastListResponse,
     YouTubeSourceRequest
 )
+from . import podcast_audio
 from .manager import NotebookManager, NotebookNotFoundError, SourceNotFoundError, NoteNotFoundError
 
 logger = logging.getLogger(__name__)
@@ -1453,6 +1454,18 @@ async def delete_standalone_podcast(
     return {"success": True, "message": "Podcast deleted"}
 
 
+async def _default_ollama_model(ollama_url: str) -> str:
+    """The first installed chat model; the old hardcoded "mistral" usually isn't pulled."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            names = [m.get("name", "") for m in (await client.get(f"{ollama_url}/api/tags")).json().get("models", [])]
+    except Exception:
+        names = []
+    chat = [n for n in names if n and not any(k in n for k in ("embed", "minilm", "bge", "rerank"))]
+    return chat[0] if chat else "mistral"
+
+
 async def _generate_podcast_with_ollama(
     content: str, podcast_request, log
 ) -> dict:
@@ -1461,7 +1474,7 @@ async def _generate_podcast_with_ollama(
     from datetime import datetime, timezone
 
     ollama_url = os.environ.get("OLLAMA_URL", "http://ollama:11434")
-    model = "mistral"
+    model = getattr(podcast_request, "model", None) or os.environ.get("NOTEBOOK_PODCAST_MODEL") or await _default_ollama_model(ollama_url)
     
     speaker_names = []
     if podcast_request.custom_speakers:
@@ -1626,43 +1639,51 @@ async def generate_standalone_podcast_stream(
 
                     yield f"event: progress\ndata: {json.dumps({'step': 'audio', 'message': f'Synthesizing {len(script_segments)} segments...'})}\n\n"
 
-                    import time as _time_mod
-                    _tts_start = _time_mod.time()
-
-                    async with httpx.AsyncClient(timeout=600.0) as client:
-                        resp = await client.post(
-                            f"{tts_url}/generate/podcast",
-                            json={
-                                "script": script_segments,
-                                "voice_mapping": voice_mapping,
-                                "output_format": "wav",
-                                "normalize_audio": True,
-                                "add_silence_between_speakers": 0.3,
-                            },
-                        )
-
-                    _tts_elapsed = _time_mod.time() - _tts_start
-
-
-                    if resp.status_code == 200:
-                        tts_data = resp.json()
-                        if tts_data.get("success"):
-                            # Audio URL is relative to tts-service, proxy via our endpoint
-                            tts_audio_url = tts_data.get("audio_url", "")
-                            tts_filename = tts_audio_url.split("/")[-1] if tts_audio_url else ""
-                            duration_secs = tts_data.get("duration", 0)
-
-                            result["audio_path"] = f"/api/notebooks/podcasts/tts-audio/{tts_filename}"
-                            result["audio_url"] = result["audio_path"]
-                            result["duration_seconds"] = duration_secs
-                            result["status"] = "completed"
-                            logger.info(f"Podcast audio generated via tts-service: {tts_filename} ({duration_secs:.1f}s)")
-                        else:
-                            logger.warning(f"TTS returned success=false: {tts_data}")
-                            result["status"] = "script_only"
+                    if not os.environ.get("TTS_URL"):
+                        # Default install: no tts-service, speak through the voice sidecar.
+                        audio_name, duration_secs = await podcast_audio.synthesize(script_segments)
+                        result["audio_path"] = f"/api/notebooks/podcasts/tts-audio/{audio_name}"
+                        result["audio_url"] = result["audio_path"]
+                        result["duration_seconds"] = duration_secs
+                        result["status"] = "completed"
                     else:
-                        logger.warning(f"TTS returned {resp.status_code}: {resp.text[:200]}")
-                        result["status"] = "script_only"
+                        import time as _time_mod
+                        _tts_start = _time_mod.time()
+
+                        async with httpx.AsyncClient(timeout=600.0) as client:
+                            resp = await client.post(
+                                f"{tts_url}/generate/podcast",
+                                json={
+                                    "script": script_segments,
+                                    "voice_mapping": voice_mapping,
+                                    "output_format": "wav",
+                                    "normalize_audio": True,
+                                    "add_silence_between_speakers": 0.3,
+                                },
+                            )
+
+                        _tts_elapsed = _time_mod.time() - _tts_start
+
+
+                        if resp.status_code == 200:
+                            tts_data = resp.json()
+                            if tts_data.get("success"):
+                                # Audio URL is relative to tts-service, proxy via our endpoint
+                                tts_audio_url = tts_data.get("audio_url", "")
+                                tts_filename = tts_audio_url.split("/")[-1] if tts_audio_url else ""
+                                duration_secs = tts_data.get("duration", 0)
+
+                                result["audio_path"] = f"/api/notebooks/podcasts/tts-audio/{tts_filename}"
+                                result["audio_url"] = result["audio_path"]
+                                result["duration_seconds"] = duration_secs
+                                result["status"] = "completed"
+                                logger.info(f"Podcast audio generated via tts-service: {tts_filename} ({duration_secs:.1f}s)")
+                            else:
+                                logger.warning(f"TTS returned success=false: {tts_data}")
+                                result["status"] = "script_only"
+                        else:
+                            logger.warning(f"TTS returned {resp.status_code}: {resp.text[:200]}")
+                            result["status"] = "script_only"
 
                 except Exception as tts_err:
                     logger.warning(f"Audio generation failed: {tts_err}")
@@ -1727,6 +1748,10 @@ async def proxy_tts_audio(filename: str):
     """Proxy audio files from tts-service container"""
     import httpx
     safe_filename = os.path.basename(filename)
+    local = podcast_audio.local_file(safe_filename)
+    if local is not None:
+        from fastapi.responses import FileResponse
+        return FileResponse(local, media_type="audio/wav", filename=safe_filename, content_disposition_type="inline")
     tts_url = os.environ.get("TTS_URL", "http://tts-service:8001")
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -1790,27 +1815,32 @@ async def generate_standalone_podcast_audio_from_script(
             speaker_names = {seg["speaker"] for seg in cleaned_transcript}
             voice_mapping = {name: "__default__" for name in speaker_names}
 
-            async with httpx.AsyncClient(timeout=600.0) as client:
-                resp = await client.post(f"{tts_url}/generate/podcast", json={
-                    "script": script_segments,
-                    "voice_mapping": voice_mapping,
-                    "output_format": "wav",
-                    "normalize_audio": True,
-                    "add_silence_between_speakers": 0.3,
-                })
-
-            if resp.status_code == 200:
-                tts_data = resp.json()
-                if tts_data.get("success"):
-                    tts_audio_url = tts_data.get("audio_url", "")
-                    tts_filename = tts_audio_url.split("/")[-1] if tts_audio_url else ""
-                    audio_path = f"/api/notebooks/podcasts/tts-audio/{tts_filename}"
-                    audio_url = audio_path
-                    duration_seconds = tts_data.get("duration", 0)
-                else:
-                    error_msg = "TTS generation returned success=false"
+            if not os.environ.get("TTS_URL"):
+                audio_name, duration_seconds = await podcast_audio.synthesize(script_segments)
+                audio_path = f"/api/notebooks/podcasts/tts-audio/{audio_name}"
+                audio_url = audio_path
             else:
-                error_msg = f"TTS returned {resp.status_code}"
+                async with httpx.AsyncClient(timeout=600.0) as client:
+                    resp = await client.post(f"{tts_url}/generate/podcast", json={
+                        "script": script_segments,
+                        "voice_mapping": voice_mapping,
+                        "output_format": "wav",
+                        "normalize_audio": True,
+                        "add_silence_between_speakers": 0.3,
+                    })
+
+                if resp.status_code == 200:
+                    tts_data = resp.json()
+                    if tts_data.get("success"):
+                        tts_audio_url = tts_data.get("audio_url", "")
+                        tts_filename = tts_audio_url.split("/")[-1] if tts_audio_url else ""
+                        audio_path = f"/api/notebooks/podcasts/tts-audio/{tts_filename}"
+                        audio_url = audio_path
+                        duration_seconds = tts_data.get("duration", 0)
+                    else:
+                        error_msg = "TTS generation returned success=false"
+                else:
+                    error_msg = f"TTS returned {resp.status_code}"
 
         except Exception as tts_err:
             error_msg = f"TTS unavailable: {tts_err}"

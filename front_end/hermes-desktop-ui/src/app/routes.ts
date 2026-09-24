@@ -119,6 +119,13 @@ export interface SidebarNavContribution {
   path: string
 }
 
+// ── Contributed sidebar sections — the `sidebar.section` registry area ───────
+// A RENDER contribution mounts a whole section in the sidebar's scrolling
+// column, above the session groups (a bot roster next to Sessions). Hidden
+// while a search query filters the sessions, like every other section.
+
+export const SIDEBAR_SECTION_AREA = 'sidebar.section'
+
 // Views that render as a full-screen modal card (OverlayView) over the shell.
 // While one is open the app's titlebar control clusters must hide so they don't
 // bleed over the overlay (they sit at a higher z-index than the overlay card).

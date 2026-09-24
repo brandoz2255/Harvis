@@ -46,6 +46,28 @@
 
 	let ldapUsername = '';
 
+	// This app is built with adapter-static and `fallback: index.html`, so its
+	// client router owns the whole origin: goto() on a path with no route here
+	// renders THIS app's 404 instead of leaving it. /hermes/ is a separate
+	// bundle served by nginx, and it is where the front door sends people — so
+	// a redirect that points outside the SvelteKit route table has to be a real
+	// browser navigation, not a client-side one.
+	const EXTERNAL_PREFIXES = ['/hermes', '/onb'];
+
+	const goAfterAuth = (path: string) => {
+		// `/` is the front door, and nginx decides what the front door is — today
+		// a 302 to /hermes/. goto('/') would be answered by this router instead
+		// and land the user in OpenWebUI, so the one place that rule lives has to
+		// be asked, not second-guessed.
+		const external =
+			path === '/' || EXTERNAL_PREFIXES.some((p) => path === p || path.startsWith(`${p}/`));
+		if (external) {
+			window.location.href = path;
+			return;
+		}
+		goto(path);
+	};
+
 	const setSessionUser = async (sessionUser, redirectPath: string | null = null) => {
 		if (sessionUser) {
 			console.log(sessionUser);
@@ -67,8 +89,8 @@
 				redirectPath = $page.url.searchParams.get('redirect') || '/';
 			}
 
-			goto(redirectPath);
 			localStorage.removeItem('redirectPath');
+			goAfterAuth(redirectPath);
 		}
 	};
 
@@ -183,7 +205,7 @@
 	onMount(async () => {
 		const redirectPath = $page.url.searchParams.get('redirect');
 		if ($user !== undefined) {
-			goto(redirectPath || '/');
+			goAfterAuth(redirectPath || '/');
 		} else {
 			if (redirectPath) {
 				localStorage.setItem('redirectPath', redirectPath);
@@ -228,22 +250,26 @@
 	}}
 />
 
-<div class="w-full h-screen max-h-[100dvh] text-white relative" id="auth-page">
-	<div class="w-full h-full absolute top-0 left-0 bg-white dark:bg-black"></div>
+<div class="hx-auth" id="auth-page">
 
 	<div class="w-full absolute top-0 left-0 right-0 h-8 drag-region" />
 
 	{#if loaded}
-		<div
-			class="fixed bg-transparent min-h-screen w-full flex justify-center font-primary z-50 text-black dark:text-white"
-			id="auth-container"
-		>
-			<div class="w-full px-10 min-h-screen flex flex-col text-center">
+		<div class="hx-shell" id="auth-container">
+			<aside class="hx-brand">
+				<div class="hx-brand-mark">
+					<img crossorigin="anonymous" src="{WEBUI_BASE_URL}/static/favicon.png" class="hx-logo" alt="" />
+					<span>{$WEBUI_NAME}</span>
+				</div>
+				<p class="hx-wordmark" aria-hidden="true">{$WEBUI_NAME}</p>
+				<p class="hx-tagline">
+					{$i18n.t('Agents, models and memory that run on your own machine.')}
+				</p>
+			</aside>
+			<div class="hx-main">
 				{#if ($config?.features.auth_trusted_header ?? false) || $config?.features.auth === false}
-					<div class=" my-auto pb-10 w-full sm:max-w-md">
-						<div
-							class="flex items-center justify-center gap-3 text-xl sm:text-2xl text-center font-medium dark:text-gray-200"
-						>
+					<div class="hx-form">
+						<div class="hx-title hx-row">
 							<div>
 								{$i18n.t('Signing in to {{WEBUI_NAME}}', { WEBUI_NAME: $WEBUI_NAME })}
 							</div>
@@ -254,15 +280,15 @@
 						</div>
 					</div>
 				{:else}
-					<div class="my-auto flex flex-col justify-center items-center">
-						<div class=" sm:max-w-md my-auto pb-10 w-full dark:text-gray-100">
+					<div class="hx-center">
+						<div class="hx-form">
 							{#if $config?.metadata?.auth_logo_position === 'center'}
-								<div class="flex justify-center mb-6">
+								<div class="hx-center-logo">
 									<img
 										id="logo"
 										crossorigin="anonymous"
 										src="{WEBUI_BASE_URL}/static/favicon.png"
-										class="size-24 rounded-full"
+										class="hx-center-logo-img"
 										alt="{$WEBUI_NAME} logo"
 									/>
 								</div>
@@ -275,7 +301,7 @@
 								}}
 							>
 								<div class="mb-1">
-									<div class=" text-2xl font-medium">
+									<h1 class="hx-title">
 										{#if $config?.onboarding ?? false}
 											{$i18n.t(`Get started with {{WEBUI_NAME}}`, { WEBUI_NAME: $WEBUI_NAME })}
 										{:else if mode === 'ldap'}
@@ -285,30 +311,30 @@
 										{:else}
 											{$i18n.t(`Sign up to {{WEBUI_NAME}}`, { WEBUI_NAME: $WEBUI_NAME })}
 										{/if}
-									</div>
+									</h1>
 
 									{#if $config?.onboarding ?? false}
-										<div class="mt-1 text-xs font-medium text-gray-600 dark:text-gray-500">
+										<p class="hx-sub">
 											ⓘ {$WEBUI_NAME}
 											{$i18n.t(
 												'does not make any external connections, and your data stays securely on your locally hosted server.'
 											)}
-										</div>
+										</p>
 									{/if}
 								</div>
 
 								{#if $config?.features.enable_login_form || $config?.features.enable_ldap || form}
-									<div class="flex flex-col mt-4">
+									<div class="hx-fields">
 										{#if mode === 'signup'}
 											<div class="mb-2">
-												<label for="name" class="text-sm font-medium text-left mb-1 block"
+												<label for="name" class="hx-label"
 													>{$i18n.t('Name')}</label
 												>
 												<input
 													bind:value={name}
 													type="text"
 													id="name"
-													class="my-0.5 w-full text-sm outline-hidden bg-transparent placeholder:text-gray-300 dark:placeholder:text-gray-600"
+													class="hx-input"
 													autocomplete="name"
 													placeholder={$i18n.t('Enter Your Full Name')}
 													required
@@ -318,13 +344,13 @@
 
 										{#if mode === 'ldap'}
 											<div class="mb-2">
-												<label for="username" class="text-sm font-medium text-left mb-1 block"
+												<label for="username" class="hx-label"
 													>{$i18n.t('Username')}</label
 												>
 												<input
 													bind:value={ldapUsername}
 													type="text"
-													class="my-0.5 w-full text-sm outline-hidden bg-transparent placeholder:text-gray-300 dark:placeholder:text-gray-600"
+													class="hx-input"
 													autocomplete="username"
 													name="username"
 													id="username"
@@ -334,14 +360,14 @@
 											</div>
 										{:else}
 											<div class="mb-2">
-												<label for="email" class="text-sm font-medium text-left mb-1 block"
+												<label for="email" class="hx-label"
 													>{$i18n.t('Email')}</label
 												>
 												<input
 													bind:value={email}
 													type="email"
 													id="email"
-													class="my-0.5 w-full text-sm outline-hidden bg-transparent placeholder:text-gray-300 dark:placeholder:text-gray-600"
+													class="hx-input"
 													autocomplete="email"
 													name="email"
 													placeholder={$i18n.t('Enter Your Email')}
@@ -351,14 +377,14 @@
 										{/if}
 
 										<div>
-											<label for="password" class="text-sm font-medium text-left mb-1 block"
+											<label for="password" class="hx-label"
 												>{$i18n.t('Password')}</label
 											>
 											<SensitiveInput
 												bind:value={password}
 												type="password"
 												id="password"
-												class="my-0.5 w-full text-sm outline-hidden bg-transparent placeholder:text-gray-300 dark:placeholder:text-gray-600"
+												outerClassName="hx-input hx-input-row" inputClassName="hx-input-inner" showButtonClassName="hx-reveal"
 												placeholder={$i18n.t('Enter Your Password')}
 												autocomplete={mode === 'signup' ? 'new-password' : 'current-password'}
 												name="password"
@@ -370,21 +396,21 @@
 
 										{#if mode === 'signup' && setupCodeRequired}
 											<div class="mb-2">
-												<label for="setup-code" class="text-sm font-medium text-left mb-1 block"
+												<label for="setup-code" class="hx-label"
 													>{$i18n.t('Setup Code')}</label
 												>
 												<SensitiveInput
 													bind:value={setupCode}
 													type="password"
 													id="setup-code"
-													class="my-0.5 w-full text-sm outline-hidden bg-transparent placeholder:text-gray-300 dark:placeholder:text-gray-600"
+													outerClassName="hx-input hx-input-row" inputClassName="hx-input-inner" showButtonClassName="hx-reveal"
 													placeholder={$i18n.t('From .env (HARVIS_SETUP_CODE)')}
 													autocomplete="one-time-code"
 													name="setup-code"
 													required
 													aria-required="true"
 												/>
-												<div class="mt-1 text-xs text-gray-600 dark:text-gray-500">
+												<div class="hx-hint">
 													{$i18n.t(
 														'This instance sets HARVIS_SETUP_CODE in .env; the first admin needs it.'
 													)}
@@ -396,14 +422,14 @@
 											<div class="mt-2">
 												<label
 													for="confirm-password"
-													class="text-sm font-medium text-left mb-1 block"
+													class="hx-label"
 													>{$i18n.t('Confirm Password')}</label
 												>
 												<SensitiveInput
 													bind:value={confirmPassword}
 													type="password"
 													id="confirm-password"
-													class="my-0.5 w-full text-sm outline-hidden bg-transparent"
+													outerClassName="hx-input hx-input-row" inputClassName="hx-input-inner" showButtonClassName="hx-reveal"
 													placeholder={$i18n.t('Confirm Your Password')}
 													autocomplete="new-password"
 													name="confirm-password"
@@ -413,18 +439,18 @@
 										{/if}
 									</div>
 								{/if}
-								<div class="mt-5">
+								<div class="hx-actions">
 									{#if $config?.features.enable_login_form || $config?.features.enable_ldap || form}
 										{#if mode === 'ldap'}
 											<button
-												class="bg-gray-700/5 hover:bg-gray-700/10 dark:bg-gray-100/5 dark:hover:bg-gray-100/10 dark:text-gray-300 dark:hover:text-white transition w-full rounded-lg font-medium text-sm py-2.5"
+												class="hx-primary"
 												type="submit"
 											>
 												{$i18n.t('Authenticate')}
 											</button>
 										{:else}
 											<button
-												class="bg-gray-700/5 hover:bg-gray-700/10 dark:bg-gray-100/5 dark:hover:bg-gray-100/10 dark:text-gray-300 dark:hover:text-white transition w-full rounded-lg font-medium text-sm py-2.5"
+												class="hx-primary"
 												type="submit"
 											>
 												{mode === 'signin'
@@ -435,13 +461,13 @@
 											</button>
 
 											{#if $config?.features.enable_signup && !($config?.onboarding ?? false)}
-												<div class=" mt-4 text-sm text-center">
+												<div class="hx-switch">
 													{mode === 'signin'
 														? $i18n.t("Don't have an account?")
 														: $i18n.t('Already have an account?')}
 
 													<button
-														class=" font-medium underline"
+														class="hx-link"
 														type="button"
 														on:click={() => {
 															if (mode === 'signin') {
@@ -461,21 +487,21 @@
 							</form>
 
 							{#if Object.keys($config?.oauth?.providers ?? {}).length > 0}
-								<div class="inline-flex items-center justify-center w-full">
-									<hr class="w-32 h-px my-4 border-0 dark:bg-gray-100/10 bg-gray-700/10" />
+								<div class="hx-divider">
+									<hr class="hx-rule" />
 									{#if $config?.features.enable_login_form || $config?.features.enable_ldap || form}
 										<span
-											class="px-3 text-sm font-medium text-gray-900 dark:text-white bg-transparent"
+											class="hx-or"
 											>{$i18n.t('or')}</span
 										>
 									{/if}
 
-									<hr class="w-32 h-px my-4 border-0 dark:bg-gray-100/10 bg-gray-700/10" />
+									<hr class="hx-rule" />
 								</div>
-								<div class="flex flex-col space-y-2">
+								<div class="hx-oauth">
 									{#if $config?.oauth?.providers?.google}
 										<button
-											class="flex justify-center items-center bg-gray-700/5 hover:bg-gray-700/10 dark:bg-gray-100/5 dark:hover:bg-gray-100/10 dark:text-gray-300 dark:hover:text-white transition w-full rounded-lg font-medium text-sm py-2.5"
+											class="hx-secondary"
 											on:click={() => {
 												window.location.href = `${WEBUI_BASE_URL}/oauth/google/login`;
 											}}
@@ -505,7 +531,7 @@
 									{/if}
 									{#if $config?.oauth?.providers?.microsoft}
 										<button
-											class="flex justify-center items-center bg-gray-700/5 hover:bg-gray-700/10 dark:bg-gray-100/5 dark:hover:bg-gray-100/10 dark:text-gray-300 dark:hover:text-white transition w-full rounded-lg font-medium text-sm py-2.5"
+											class="hx-secondary"
 											on:click={() => {
 												window.location.href = `${WEBUI_BASE_URL}/oauth/microsoft/login`;
 											}}
@@ -536,7 +562,7 @@
 									{/if}
 									{#if $config?.oauth?.providers?.github}
 										<button
-											class="flex justify-center items-center bg-gray-700/5 hover:bg-gray-700/10 dark:bg-gray-100/5 dark:hover:bg-gray-100/10 dark:text-gray-300 dark:hover:text-white transition w-full rounded-lg font-medium text-sm py-2.5"
+											class="hx-secondary"
 											on:click={() => {
 												window.location.href = `${WEBUI_BASE_URL}/oauth/github/login`;
 											}}
@@ -557,7 +583,7 @@
 									{/if}
 									{#if $config?.oauth?.providers?.oidc}
 										<button
-											class="flex justify-center items-center bg-gray-700/5 hover:bg-gray-700/10 dark:bg-gray-100/5 dark:hover:bg-gray-100/10 dark:text-gray-300 dark:hover:text-white transition w-full rounded-lg font-medium text-sm py-2.5"
+											class="hx-secondary"
 											on:click={() => {
 												window.location.href = `${WEBUI_BASE_URL}/oauth/oidc/login`;
 											}}
@@ -587,7 +613,7 @@
 									{/if}
 									{#if $config?.oauth?.providers?.feishu}
 										<button
-											class="flex justify-center items-center bg-gray-700/5 hover:bg-gray-700/10 dark:bg-gray-100/5 dark:hover:bg-gray-100/10 dark:text-gray-300 dark:hover:text-white transition w-full rounded-lg font-medium text-sm py-2.5"
+											class="hx-secondary"
 											on:click={() => {
 												window.location.href = `${WEBUI_BASE_URL}/oauth/feishu/login`;
 											}}
@@ -601,7 +627,7 @@
 							{#if $config?.features.enable_ldap && $config?.features.enable_login_form}
 								<div class="mt-2">
 									<button
-										class="flex justify-center items-center text-xs w-full text-center underline"
+										class="hx-link hx-ldap"
 										type="button"
 										on:click={() => {
 											if (mode === 'ldap')
@@ -620,7 +646,7 @@
 						</div>
 						{#if $config?.metadata?.login_footer}
 							<div class="max-w-3xl mx-auto">
-								<div class="mt-2 text-[0.7rem] text-gray-500 dark:text-gray-400 marked">
+								<div class="hx-footer marked">
 									{@html DOMPurify.sanitize(marked($config?.metadata?.login_footer))}
 								</div>
 							</div>
@@ -630,20 +656,333 @@
 			</div>
 		</div>
 
-		{#if !$config?.metadata?.auth_logo_position}
-			<div class="fixed m-10 z-50">
-				<div class="flex space-x-2">
-					<div class=" self-center">
-						<img
-							id="logo"
-							crossorigin="anonymous"
-							src="{WEBUI_BASE_URL}/static/favicon.png"
-							class=" w-6 rounded-full"
-							alt=""
-						/>
-					</div>
-				</div>
-			</div>
-		{/if}
 	{/if}
 </div>
+
+<style>
+	/* Hermes "Harvis" skin (hermes-desktop-ui/src/themes/presets.ts, `nous`):
+	   GitHub chrome, Harvis blue accent, Collapse display lettering. Kept local
+	   so the sign-in page reads as the app it opens into, not as OWUI. */
+	@font-face {
+		font-family: 'Collapse';
+		font-weight: 700;
+		font-display: swap;
+		src: url('/assets/fonts/Collapse-Bold.woff2') format('woff2');
+	}
+
+	.hx-auth {
+		--hx-bg: #ffffff;
+		--hx-panel: #f6f8fa;
+		--hx-stroke: #d0d7de;
+		--hx-text: #1f2328;
+		--hx-muted: #656d76;
+		--hx-accent: #0053fd;
+		--hx-accent-fg: #ffffff;
+		--hx-soft: #eef1f4;
+		--hx-soft-hover: #e4e8ec;
+		--hx-danger: #cf222e;
+
+		position: relative;
+		min-height: 100dvh;
+		background: var(--hx-bg);
+		color: var(--hx-text);
+		font-family:
+			'Segoe UI', -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif;
+		font-size: 0.9375rem;
+	}
+
+	:global(html.dark) .hx-auth {
+		--hx-bg: #0d1117;
+		--hx-panel: #010409;
+		--hx-stroke: #30363d;
+		--hx-text: #e6edf3;
+		--hx-muted: #7d8590;
+		--hx-accent: #4a84fe;
+		--hx-accent-fg: #0b0f16;
+		--hx-soft: #161b22;
+		--hx-soft-hover: #1f2630;
+		--hx-danger: #f85149;
+	}
+
+	.hx-shell {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr);
+		min-height: 100dvh;
+	}
+
+	.hx-brand {
+		display: none;
+	}
+
+	@media (min-width: 900px) {
+		.hx-shell {
+			grid-template-columns: minmax(20rem, 0.9fr) minmax(0, 1.1fr);
+		}
+
+		.hx-brand {
+			display: flex;
+			flex-direction: column;
+			justify-content: space-between;
+			gap: 2rem;
+			padding: 2.5rem 3rem;
+			background: var(--hx-panel);
+			border-right: 1px solid var(--hx-stroke);
+			overflow: hidden;
+		}
+
+		.hx-center-logo {
+			display: none;
+		}
+	}
+
+	.hx-brand-mark {
+		display: flex;
+		align-items: center;
+		gap: 0.625rem;
+		font-weight: 600;
+		font-size: 0.9375rem;
+	}
+
+	.hx-logo {
+		width: 1.75rem;
+		height: 1.75rem;
+		border-radius: 999px;
+	}
+
+	.hx-wordmark {
+		font-family: 'Collapse', system-ui, sans-serif;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		line-height: 0.9;
+		color: var(--hx-accent);
+		margin: 0;
+		font-size: clamp(4rem, 9vw, 8.5rem);
+		overflow-wrap: anywhere;
+	}
+
+	.hx-center-logo {
+		margin-bottom: 1.25rem;
+	}
+
+	.hx-center-logo-img {
+		width: 3.5rem;
+		height: 3.5rem;
+	}
+
+	.hx-tagline {
+		max-width: 26rem;
+		font-size: 1.0625rem;
+		line-height: 1.5;
+		color: var(--hx-muted);
+		text-wrap: balance;
+	}
+
+	.hx-main {
+		display: flex;
+		flex-direction: column;
+		min-height: 100dvh;
+		padding: 2.5rem 1.25rem;
+	}
+
+	.hx-center {
+		display: flex;
+		flex: 1;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.hx-form {
+		width: 100%;
+		max-width: 24rem;
+		margin: auto;
+		text-align: left;
+	}
+
+	.hx-title {
+		font-size: 1.625rem;
+		font-weight: 600;
+		line-height: 1.25;
+		letter-spacing: -0.01em;
+		text-wrap: balance;
+	}
+
+	.hx-row {
+		display: flex;
+		align-items: center;
+		gap: 0.75rem;
+	}
+
+	.hx-sub,
+	.hx-hint {
+		margin-top: 0.375rem;
+		font-size: 0.8125rem;
+		line-height: 1.45;
+		color: var(--hx-muted);
+	}
+
+	.hx-fields {
+		display: flex;
+		flex-direction: column;
+		gap: 0.875rem;
+		margin-top: 1.75rem;
+	}
+
+	.hx-fields > div {
+		margin: 0;
+	}
+
+	.hx-label {
+		display: block;
+		margin-bottom: 0.375rem;
+		font-size: 0.8125rem;
+		font-weight: 500;
+		color: var(--hx-muted);
+	}
+
+	.hx-auth :global(.hx-input) {
+		display: flex;
+		align-items: center;
+		width: 100%;
+		height: 2.625rem;
+		padding: 0 0.75rem;
+		border-radius: 6px;
+		background: var(--hx-bg);
+		box-shadow: inset 0 0 0 1px var(--hx-stroke);
+		color: var(--hx-text);
+		font-size: 0.9375rem;
+		outline: none;
+		transition: box-shadow 120ms ease;
+	}
+
+	.hx-auth :global(.hx-input:focus),
+	.hx-auth :global(.hx-input-row:focus-within) {
+		box-shadow:
+			inset 0 0 0 1px var(--hx-accent),
+			0 0 0 3px color-mix(in srgb, var(--hx-accent) 22%, transparent);
+	}
+
+	.hx-auth :global(.hx-input::placeholder),
+	.hx-auth :global(.hx-input-inner::placeholder) {
+		color: color-mix(in srgb, var(--hx-muted) 70%, transparent);
+	}
+
+	.hx-auth :global(.hx-input-inner) {
+		flex: 1;
+		min-width: 0;
+		height: 100%;
+		background: transparent;
+		color: inherit;
+		font-size: inherit;
+		outline: none;
+	}
+
+	.hx-auth :global(.hx-reveal) {
+		padding-left: 0.5rem;
+		color: var(--hx-muted);
+		background: transparent;
+	}
+
+	.hx-actions {
+		margin-top: 1.5rem;
+	}
+
+	.hx-primary,
+	.hx-secondary {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 100%;
+		height: 2.625rem;
+		border-radius: 6px;
+		font-size: 0.9375rem;
+		font-weight: 600;
+		transition:
+			background 120ms ease,
+			filter 120ms ease;
+	}
+
+	.hx-primary {
+		background: var(--hx-accent);
+		color: var(--hx-accent-fg);
+	}
+
+	.hx-primary:hover {
+		filter: brightness(1.08);
+	}
+
+	.hx-secondary {
+		background: var(--hx-soft);
+		color: var(--hx-text);
+		font-weight: 500;
+	}
+
+	.hx-secondary:hover {
+		background: var(--hx-soft-hover);
+	}
+
+	.hx-primary:focus-visible,
+	.hx-secondary:focus-visible,
+	.hx-link:focus-visible {
+		outline: 2px solid var(--hx-accent);
+		outline-offset: 2px;
+	}
+
+	.hx-switch {
+		margin-top: 1.25rem;
+		font-size: 0.875rem;
+		color: var(--hx-muted);
+		text-align: center;
+	}
+
+	.hx-link {
+		color: var(--hx-accent);
+		font-weight: 500;
+	}
+
+	.hx-link:hover {
+		text-decoration: underline;
+		text-underline-offset: 3px;
+	}
+
+	.hx-ldap {
+		display: block;
+		width: 100%;
+		margin-top: 0.75rem;
+		font-size: 0.8125rem;
+		text-align: center;
+	}
+
+	.hx-divider {
+		display: flex;
+		align-items: center;
+		gap: 0.75rem;
+		margin: 1.5rem 0 1rem;
+	}
+
+	.hx-rule {
+		flex: 1;
+		height: 1px;
+		border: 0;
+		background: var(--hx-stroke);
+	}
+
+	.hx-or {
+		font-size: 0.8125rem;
+		color: var(--hx-muted);
+	}
+
+	.hx-oauth {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+	}
+
+	.hx-footer {
+		margin-top: 1rem;
+		font-size: 0.75rem;
+		color: var(--hx-muted);
+		text-align: center;
+	}
+</style>

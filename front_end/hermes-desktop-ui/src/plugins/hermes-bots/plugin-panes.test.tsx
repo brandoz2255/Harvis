@@ -19,6 +19,9 @@
 import type * as HermesSdk from '@hermes/plugin-sdk'
 import type { PluginContext } from '@hermes/plugin-sdk'
 import { atom } from 'nanostores'
+
+import { $profiles } from '@/store/profile'
+import type { ProfileInfo } from '@/types/hermes'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type * as DataModule from './data'
@@ -152,6 +155,8 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 0))
 
 beforeEach(() => {
   vi.clearAllMocks()
+  // Every dock test assumes a bot exists; the gate test overrides this.
+  $profiles.set([DEFAULT_PROFILE, BOT_PROFILE])
   mocks.botChatOwnsWorkspace.mockReturnValue(false)
   mocks.sessionOwnsWorkspace.mockReturnValue(false)
 })
@@ -160,9 +165,42 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
+const DEFAULT_PROFILE = { is_default: true, name: 'Harvis' } as unknown as ProfileInfo
+const BOT_PROFILE = { is_default: false, name: 'scout' } as unknown as ProfileInfo
+
+describe('the Bots pane gate', () => {
+  // Harvis: no bots yet means no BOTS tab at all, so the sidebar stays a plain
+  // Sessions column instead of a SESSIONS | BOTS strip with one placeholder row.
+  it('registers the pane only while a non-default profile exists', () => {
+    paneStores()
+    $profiles.set([DEFAULT_PROFILE])
+
+    const harness = recordingContext()
+
+    plugin.register(harness.ctx)
+
+    expect(harness.find('pane')).toBeUndefined()
+
+    $profiles.set([DEFAULT_PROFILE, BOT_PROFILE])
+    expect(harness.find('pane')).toBeDefined()
+
+    $profiles.set([DEFAULT_PROFILE])
+    expect(harness.find('pane')).toBeUndefined()
+
+    $profiles.set([DEFAULT_PROFILE, BOT_PROFILE])
+    expect(harness.find('pane')).toBeDefined()
+
+    harness.dispose()
+    $profiles.set([DEFAULT_PROFILE])
+    // Disposed plugins stop listening; nothing to unregister here.
+    expect(harness.find('pane')).toBeDefined()
+  })
+})
+
 describe('the Bots pane dock', () => {
   it('center-stacks into the sessions zone as a standing invariant', () => {
     paneStores()
+    $profiles.set([DEFAULT_PROFILE, BOT_PROFILE])
 
     const harness = recordingContext()
 

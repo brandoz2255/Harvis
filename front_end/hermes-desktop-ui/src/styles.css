@@ -64,7 +64,42 @@
   font-style: normal;
   font-weight: 700;
   font-display: swap;
-  src: url('../../../node_modules/@nous-research/ui/dist/fonts/Collapse-Bold.woff2') format('woff2');
+  src: url('./fonts/Collapse-Bold.woff2') format('woff2');
+}
+
+/* Harvis display faces (vendored from @nous-research/ui, MIT; Inter is OFL).
+   Inter Bold is the original Harvis wordmark face (OWUI's .harvis-wordmark);
+   the rest only appear in the empty-chat wordmark's face cycle. */
+@font-face {
+  font-family: 'Harvis Inter';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('./fonts/Inter-Bold.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Mondwest';
+  font-weight: 400;
+  font-display: swap;
+  src: url('./fonts/Mondwest-Regular.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Neuebit';
+  font-weight: 700;
+  font-display: swap;
+  src: url('./fonts/Neuebit-Bold.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Rules Expanded';
+  font-weight: 700;
+  font-display: swap;
+  src: url('./fonts/RulesExpanded-Bold.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Rules Compressed';
+  font-weight: 500;
+  font-display: swap;
+  src: url('./fonts/RulesCompressed-Medium.woff2') format('woff2');
 }
 
 /* JetBrains Mono — bundled terminal font (Apache-2.0) so bold/italic share the
@@ -1634,6 +1669,104 @@ body.guest-pointer-lock :is(webview, iframe) {
   letter-spacing: 0.08em;
 }
 
+/* The Harvis name as the original product wordmark set it: Inter Bold,
+   uppercase, wide tracking. Used where the name is a label (titlebar). */
+.harvis-name {
+  font-family: 'Harvis Inter', 'Inter', var(--font-sans);
+  font-weight: 700;
+  letter-spacing: 0.26em;
+  text-transform: uppercase;
+}
+
+/* The empty chat's HARVIS: one layer per face stacked in a single grid cell,
+   cross-fading in turn. Each layer is visible for 1/N of the cycle. */
+.harvis-cycle {
+  --harvis-cycle-step: 6s;
+  display: grid;
+  justify-items: center;
+  align-items: center;
+  font-size: clamp(3rem, 10vw, 6.75rem);
+  line-height: 1;
+  filter: drop-shadow(0 0 22px rgb(91 141 239 / 0.35));
+}
+
+.harvis-cycle > span {
+  grid-area: 1 / 1;
+  white-space: nowrap;
+  text-transform: uppercase;
+  background-image: linear-gradient(180deg, #7fb0ff 0%, #5b8def 55%, #2f5fd8 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  opacity: 0;
+  animation: harvis-face calc(var(--harvis-cycle-step) * var(--harvis-cycle-count)) linear infinite both;
+  animation-delay: calc(var(--harvis-cycle-step) * var(--harvis-cycle-index));
+}
+
+/* Six faces: each holds for 1/6 of the cycle (16.667%) and fades out over
+   the next 4%, while the following face fades in over its own first 4%. */
+@keyframes harvis-face {
+  0% {
+    opacity: 0;
+    filter: blur(8px);
+    transform: scale(0.97);
+  }
+  4% {
+    opacity: 1;
+    filter: blur(0);
+    transform: scale(1);
+  }
+  16.667% {
+    opacity: 1;
+    filter: blur(0);
+    transform: scale(1);
+  }
+  20.667% {
+    opacity: 0;
+    filter: blur(8px);
+    transform: scale(1.02);
+  }
+  100% {
+    opacity: 0;
+    filter: blur(8px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .harvis-cycle > span {
+    animation: none;
+  }
+  .harvis-cycle > span:first-child {
+    opacity: 1;
+  }
+}
+
+/* The voice panel's Harvis face (harvis-voice-orb.tsx). It paints its own
+   night-blue ground, so the brand blue reads the same in either theme.
+   --orb-level (0..1) is written every frame from the mic or Harvis's voice. */
+.harvis-orb {
+  --orb-level: 0;
+  background: radial-gradient(circle at 50% 38%, #22386e 0%, #12203f 60%, #0d152a 100%);
+  border: 1.5px solid rgb(59 118 224 / 0.55);
+  box-shadow:
+    0 0 calc(18px + var(--orb-level) * 46px) rgb(91 141 239 / calc(0.25 + var(--orb-level) * 0.5)),
+    inset 0 0 18px rgb(111 160 255 / 0.18);
+  transform: scale(calc(1 + var(--orb-level) * 0.28));
+  transition: opacity 200ms ease-out;
+}
+
+.harvis-orb-mouth {
+  transform-box: fill-box;
+  transform-origin: center top;
+  transform: scaleY(calc(1 + var(--orb-level) * 1.8));
+}
+
+.harvis-orb-arc {
+  background: conic-gradient(from 0deg, transparent 0 70%, rgb(91 141 239 / 0.9) 100%);
+  -webkit-mask: radial-gradient(closest-side, transparent calc(100% - 3px), #000 calc(100% - 2px));
+  mask: radial-gradient(closest-side, transparent calc(100% - 3px), #000 calc(100% - 2px));
+}
+
 .fit-text > [aria-hidden] {
   visibility: hidden;
 }
@@ -2954,7 +3087,8 @@ button[data-slot='aui_msg-reactions'] svg {
    Widgets on the shared shell (components/chat/widget-shell.ts →
    `--ui-widget-surface-background`) and any chat-surface card are matched on
    their class, so new ones inherit this without touching the list. */
-[data-hud-shell] [data-slot='composer-bounds']
+[data-hud-shell]
+  [data-slot='composer-bounds']
   :is(
     [data-slot='clarify-inline'],
     [data-slot='tool-block'],
@@ -3514,4 +3648,23 @@ html:has([data-hud-shell]) [data-slot='popover-content'] {
 
 [data-hud-shell] [data-slot='composer-bounds'] *::-webkit-scrollbar {
   display: none;
+}
+
+/* Harvis: a model's thinking reads as a grey aside, set off from the answer
+   by a hairline rule and kept grey all the way down (bold, code, links
+   inside a thought stay muted too), so the reply below is the only thing in
+   the reading colour. */
+[data-slot='aui_thinking-body'] {
+  margin-top: 0.375rem;
+  padding-left: 0.75rem;
+  border-left: 2px solid color-mix(in srgb, var(--ui-base) 16%, transparent);
+}
+
+[data-slot='aui_reasoning-text'],
+[data-slot='aui_reasoning-text'] :is(p, li, code, pre, strong, em, a, h1, h2, h3, h4, blockquote, span) {
+  color: var(--ui-text-tertiary) !important;
+}
+
+[data-slot='aui_reasoning-text'] :is(code, pre) {
+  background: color-mix(in srgb, var(--ui-base) 6%, transparent);
 }

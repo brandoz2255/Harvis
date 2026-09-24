@@ -47,7 +47,7 @@ describe('thinking indicator is tail-only', () => {
   it('shows the loading indicator on a running placeholder at the tail', async () => {
     const { container } = render(<Harness messages={[userMessage('u1', 'question'), assistant('a1', '', true)]} />)
 
-    expect(await screen.findByRole('status', { name: 'Hermes is loading a response' })).toBeTruthy()
+    expect(await screen.findByRole('status', { name: 'Harvis is loading a response' })).toBeTruthy()
     expect(container.querySelector('[data-slot="aui_response-loading"]')).toBeTruthy()
   })
 

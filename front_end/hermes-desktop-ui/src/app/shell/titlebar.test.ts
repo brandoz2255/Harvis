@@ -40,8 +40,8 @@ describe('titlebarControlsPosition', () => {
     expect(titlebarControlsPosition(null).left).toBe(TITLEBAR_EDGE_INSET)
   })
 
-  it('uses the macOS fallback while the initial window state is unknown', () => {
-    expect(titlebarControlsPosition(undefined).left).toBe(TITLEBAR_FALLBACK_WINDOW_BUTTON_X + TITLEBAR_CONTROL_OFFSET_X)
+  it('pins to the edge while the window state is unknown (Harvis runs in a browser tab)', () => {
+    expect(titlebarControlsPosition(undefined).left).toBe(TITLEBAR_EDGE_INSET)
   })
 })
 

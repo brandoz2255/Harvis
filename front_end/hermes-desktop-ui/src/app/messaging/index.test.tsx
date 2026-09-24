@@ -10,11 +10,16 @@ const updateMessagingPlatform = vi.fn()
 const getPairing = vi.fn()
 const approvePairing = vi.fn()
 const revokePairing = vi.fn()
+const dismissPairing = vi.fn()
+const testMessagingPlatform = vi.fn()
 const openExternalLink = vi.fn()
 
 vi.mock('@/hermes', () => ({
   approvePairing: (platformId: string, requestId: string, profile?: null | string) =>
     approvePairing(platformId, requestId, profile),
+  dismissPairing: (platformId: string, requestId: string, profile?: null | string) =>
+    dismissPairing(platformId, requestId, profile),
+  testMessagingPlatform: (platformId: string, profile?: null | string) => testMessagingPlatform(platformId, profile),
   getMessagingPlatforms: (profile?: null | string) => getMessagingPlatforms(profile),
   getPairing: (profile?: null | string) => getPairing(profile),
   getProfiles: vi.fn(async () => ({ profiles: [] })),
@@ -40,8 +45,10 @@ vi.mock('@/lib/external-link', () => ({
   openExternalLink: (href: string) => openExternalLink(href)
 }))
 
+const notify = vi.fn()
+
 vi.mock('@/store/notifications', () => ({
-  notify: vi.fn(),
+  notify: (input: unknown) => notify(input),
   notifyError: vi.fn()
 }))
 
@@ -230,5 +237,106 @@ describe('MessagingView pairing', () => {
       $platformsChangeTick.set($platformsChangeTick.get() + 1)
     })
     expect(getPairing).not.toHaveBeenCalled()
+  })
+})
+
+describe('MessagingView Harvis setup flow', () => {
+  const telegram = (patch: Partial<MessagingPlatformInfo> = {}) =>
+    platform({
+      configured: true,
+      enabled: true,
+      id: 'telegram',
+      name: 'Telegram',
+      state: 'connected',
+      supported: true,
+      ...patch
+    })
+
+  it('lists platforms Harvis can run before the ones it cannot', async () => {
+    getMessagingPlatforms.mockResolvedValue({
+      platforms: [platform({ id: 'teams', name: 'Microsoft Teams', supported: false }), telegram()]
+    })
+
+    await renderMessaging()
+
+    const rows = await screen.findAllByRole('button', { name: /Telegram|Microsoft Teams/ })
+    expect(rows[0].textContent).toContain('Telegram')
+  })
+
+  it('sends a test message and shows the gateway answer, success or not', async () => {
+    getMessagingPlatforms.mockResolvedValue({ platforms: [telegram({ can_test: true, display: '@harvis_bot' })] })
+    testMessagingPlatform.mockResolvedValue({ ok: false, message: 'send failed: press Start on the bot once' })
+
+    await renderMessaging()
+
+    expect(await screen.findByText('as @harvis_bot')).toBeTruthy()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Send test message/ }))
+    })
+
+    await waitFor(() => expect(testMessagingPlatform).toHaveBeenCalledWith('telegram', undefined))
+    expect((await screen.findByTestId('messaging-test-result')).textContent).toContain('press Start')
+  })
+
+  it('keeps the test button off until the platform can deliver one', async () => {
+    getMessagingPlatforms.mockResolvedValue({ platforms: [telegram({ can_test: false, state: 'connecting' })] })
+
+    await renderMessaging()
+
+    const button = await screen.findByRole('button', { name: /Send test message/ })
+    expect((button as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('says why the gateway is unavailable instead of pretending to connect', async () => {
+    getMessagingPlatforms.mockResolvedValue({
+      gateway_error: 'The messaging gateway is not running. Start it with: docker compose up',
+      gateway_reachable: false,
+      platforms: [telegram({ state: 'gateway_stopped' })]
+    })
+
+    await renderMessaging()
+
+    expect((await screen.findByRole('alert')).textContent).toContain('not running')
+  })
+
+  it('shows the pairing code on a pending row and can dismiss it', async () => {
+    getMessagingPlatforms.mockResolvedValue({ platforms: [telegram()] })
+    getPairing.mockResolvedValue({
+      approved: [],
+      pending: [{ age_minutes: 1, platform: 'telegram', request_id: '3fa9c1', user_id: '555', user_name: 'Ann' }]
+    })
+    dismissPairing.mockResolvedValue({ ok: true })
+
+    await renderMessaging()
+
+    expect(await screen.findByText(/code 3fa9c1/)).toBeTruthy()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }))
+    })
+
+    await waitFor(() => expect(dismissPairing).toHaveBeenCalledWith('telegram', '3fa9c1', undefined))
+  })
+
+  it('reports the backend save message and warns when the gateway did not apply it', async () => {
+    getMessagingPlatforms.mockResolvedValue({ platforms: [telegram({ enabled: false, state: 'disabled' })] })
+    updateMessagingPlatform.mockResolvedValue({
+      gateway_applied: false,
+      message: 'Saved. The messaging gateway is not running.',
+      ok: true,
+      platform: 'telegram'
+    })
+
+    await renderMessaging()
+
+    await act(async () => {
+      fireEvent.click(await screen.findByRole('switch', { name: 'Enable Telegram' }))
+    })
+
+    await waitFor(() =>
+      expect(notify).toHaveBeenCalledWith(
+        expect.objectContaining({ kind: 'warning', message: 'Saved. The messaging gateway is not running.' })
+      )
+    )
+    expect(updateMessagingPlatform).toHaveBeenCalledWith('telegram', { enabled: true }, undefined)
   })
 })

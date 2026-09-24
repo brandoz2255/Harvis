@@ -1,5 +1,6 @@
 import { useStore } from '@nanostores/react'
-import { useCallback, useEffect, useMemo, useRef } from 'react'
+import type { ChangeEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router'
 
 import { codiconIcon } from '@/components/ui/codicon'
@@ -10,20 +11,17 @@ import { useI18n } from '@/i18n'
 import { triggerHaptic } from '@/lib/haptics'
 import {
   Archive,
-  BarChart3,
   Bell,
+  Brain,
+  Cpu,
   Download,
   Globe,
   Info,
   Keyboard,
-  KeyRound,
-  Package,
   RefreshCw,
   Search,
-  Settings2,
-  Upload,
-  Wrench,
-  Zap
+  Terminal,
+  Upload
 } from '@/lib/icons'
 import { isEditableTarget } from '@/lib/keybinds/combo'
 import { typeToFocusChar } from '@/lib/keybinds/composer-focus-keys'
@@ -31,8 +29,9 @@ import { cn } from '@/lib/utils'
 import { $commandPaletteOpen, openCommandPalettePage } from '@/store/command-palette'
 import { confirm } from '@/store/confirm'
 import { bindingsFor } from '@/store/keybinds'
-import { notifyError } from '@/store/notifications'
+import { notify, notifyError } from '@/store/notifications'
 
+import { invalidateHermesConfig } from '../hooks/use-config-record'
 import { useRouteEnumParam } from '../hooks/use-route-enum-param'
 import { OverlayIconButton } from '../overlays/overlay-chrome'
 import { OverlayMain, OverlayNav, type OverlayNavGroup, OverlaySplitLayout } from '../overlays/overlay-split-layout'
@@ -41,30 +40,30 @@ import { SKILLS_ROUTE } from '../routes'
 
 import { AboutSettings } from './about-settings'
 import { AppearanceSettings } from './appearance-settings'
-import { BillingSettings } from './billing'
 import { ConfigSettings } from './config-settings'
-import { SECTIONS } from './constants'
+import { HARVIS_SECTIONS } from './constants'
 import { GatewaySettings } from './gateway-settings'
+import { CodingEnginesSettings, HarvisProvidersSettings } from './harvis-providers-settings'
 import { KeybindSettings } from './keybind-settings'
-import { KEYS_VIEWS, KeysSettings, type KeysView } from './keys-settings'
+import { MemoryLearningSettings } from './memory-learning-settings'
+import { MODEL_VIEW_LABELS, MODEL_VIEWS, type ModelView } from './model-views'
 import { NotificationsSettings } from './notifications-settings'
-import { PluginsSettings } from './plugins-settings'
 import { PROVIDER_VIEWS, ProvidersSettings, type ProviderView } from './providers-settings'
 import { SessionsSettings } from './sessions-settings'
 import type { SettingsPageProps, SettingsView as SettingsViewId } from './types'
 
 const SETTINGS_VIEWS: readonly SettingsViewId[] = [
-  ...SECTIONS.map(s => `config:${s.id}` as SettingsViewId),
+  // Harvis: no Nous billing, API-keys page (env vars are the server's, read-only)
+  // or desktop plugins, so those tabs are not routable either.
+  ...HARVIS_SECTIONS.map(s => `config:${s.id}` as SettingsViewId),
   'providers',
+  'harvis-memory',
   'gateway',
   // Legacy alias: the Connections page merged into Gateways. Kept in the enum
   // so saved `?tab=connections` deep links still resolve (redirected below).
   'connections',
   'keybinds',
-  'keys',
   'notifications',
-  'billing',
-  'plugins',
   'sessions',
   'about'
 ]
@@ -99,8 +98,10 @@ export function SettingsView({ onClose, onConfigSaved, onMainModelChanged }: Set
   }, [activeView, setActiveView])
   // Providers subnav (Accounts vs API keys) lives in its own param so each
   // sub-view is deep-linkable and survives a refresh.
-  const [providerView, setProviderView] = useRouteEnumParam<ProviderView>('pview', PROVIDER_VIEWS, 'accounts')
-  const [keysView] = useRouteEnumParam<KeysView>('kview', KEYS_VIEWS, 'tools')
+  const [providerView, setProviderView] = useRouteEnumParam<ProviderView>('pview', PROVIDER_VIEWS, 'harvis')
+  // Model settings are nested (main / fallback / mixture of agents / auxiliary);
+  // each sub-page is deep-linkable the same way the provider views are.
+  const [modelView] = useRouteEnumParam<ModelView>('mview', MODEL_VIEWS, 'main')
 
   // Jump to a section + its sub-view in one navigate. Two sequential setters
   // would each read the same stale `search` and the second would clobber the
@@ -123,13 +124,60 @@ export function SettingsView({ onClose, onConfigSaved, onMainModelChanged }: Set
   )
 
   const openProviderView = useCallback(
-    (view: ProviderView) => openSubView('providers', 'pview', view, 'accounts'),
+    (view: ProviderView) => openSubView('providers', 'pview', view, 'harvis'),
     [openSubView]
   )
 
-  const openKeysView = useCallback((view: KeysView) => openSubView('keys', 'kview', view, 'tools'), [openSubView])
+  const openModelView = useCallback(
+    (view: ModelView) => openSubView('config:model' as SettingsViewId, 'mview', view, 'main'),
+    [openSubView]
+  )
 
   const importInputRef = useRef<HTMLInputElement | null>(null)
+  // Bumped after an import or reset so the open config page re-seeds its draft
+  // from the saved record instead of autosaving its stale copy back over it.
+  const [configEpoch, setConfigEpoch] = useState(0)
+
+  const afterConfigReplaced = async () => {
+    await invalidateHermesConfig()
+    setConfigEpoch(epoch => epoch + 1)
+    onConfigSaved?.()
+  }
+
+  const importConfig = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+
+    if (!file) {
+      return
+    }
+
+    void file
+      .text()
+      .then(async text => {
+        const parsed: unknown = JSON.parse(text)
+        // Accept both an exported record and a `{config: {...}}` wrapper.
+        const record =
+          parsed && typeof parsed === 'object' && !Array.isArray(parsed) && 'config' in parsed
+            ? (parsed as { config: unknown }).config
+            : parsed
+
+        if (!record || typeof record !== 'object' || Array.isArray(record)) {
+          throw new Error(t.settings.config.invalidJson)
+        }
+
+        const result = await saveHermesConfig(record as Parameters<typeof saveHermesConfig>[0])
+
+        if (!result.ok) {
+          throw new Error(t.settings.config.autosaveFailed)
+        }
+
+        await afterConfigReplaced()
+        triggerHaptic('success')
+        notify({ kind: 'success', title: t.settings.config.imported, message: file.name })
+      })
+      .catch(err => notifyError(err, t.settings.config.invalidJson))
+  }
 
   const exportConfig = async () => {
     try {
@@ -160,8 +208,8 @@ export function SettingsView({ onClose, onConfigSaved, onMainModelChanged }: Set
 
     try {
       await saveHermesConfig(await getHermesConfigDefaults())
+      await afterConfigReplaced()
       triggerHaptic('success')
-      onConfigSaved?.()
     } catch (err) {
       notifyError(err, t.settings.resetFailed)
     }
@@ -169,8 +217,26 @@ export function SettingsView({ onClose, onConfigSaved, onMainModelChanged }: Set
 
   const navGroups: OverlayNavGroup[] = useMemo(
     () => [
-      ...SECTIONS.map(s => {
+      // Harvis: no Nous billing, remote-gateway registry, API-keys page or desktop plugins.
+      ...HARVIS_SECTIONS.map(s => {
         const view = `config:${s.id}` as SettingsViewId
+
+        if (s.id === 'model') {
+          return {
+            active: activeView === view,
+            children: MODEL_VIEWS.map(mv => ({
+              active: activeView === view && modelView === mv,
+              icon: s.icon,
+              id: `mview:${mv}`,
+              label: MODEL_VIEW_LABELS[mv],
+              onSelect: () => openModelView(mv)
+            })),
+            icon: s.icon,
+            id: view,
+            label: t.settings.sections[s.id] ?? s.label,
+            onSelect: () => openModelView('main')
+          }
+        }
 
         return {
           active: activeView === view,
@@ -188,28 +254,21 @@ export function SettingsView({ onClose, onConfigSaved, onMainModelChanged }: Set
         onSelect: () => setActiveView('notifications')
       },
       {
-        active: activeView === 'billing',
-        icon: BarChart3,
-        id: 'billing',
-        label: t.settings.nav.billing,
-        onSelect: () => setActiveView('billing')
-      },
-      {
         active: activeView === 'providers',
         children: [
           {
-            active: activeView === 'providers' && providerView === 'accounts',
-            icon: codiconIcon('account'),
-            id: 'pview:accounts',
-            label: t.settings.nav.providerAccounts,
-            onSelect: () => openProviderView('accounts')
+            active: activeView === 'providers' && providerView === 'harvis',
+            icon: Cpu,
+            id: 'pview:harvis',
+            label: 'Models',
+            onSelect: () => openProviderView('harvis')
           },
           {
-            active: activeView === 'providers' && providerView === 'keys',
-            icon: KeyRound,
-            id: 'pview:keys',
-            label: t.settings.nav.providerApiKeys,
-            onSelect: () => openProviderView('keys')
+            active: activeView === 'providers' && providerView === 'engines',
+            icon: Terminal,
+            id: 'pview:engines',
+            label: 'Coding engines',
+            onSelect: () => openProviderView('engines')
           },
           {
             active: activeView === 'providers' && providerView === 'custom-endpoints',
@@ -219,18 +278,17 @@ export function SettingsView({ onClose, onConfigSaved, onMainModelChanged }: Set
             onSelect: () => openProviderView('custom-endpoints')
           }
         ],
-        gapBefore: true,
-        icon: Zap,
+        icon: Globe,
         id: 'providers',
         label: t.settings.nav.providers,
-        onSelect: () => setActiveView('providers')
+        onSelect: () => openProviderView('harvis')
       },
       {
-        active: activeView === 'gateway',
-        icon: Globe,
-        id: 'gateway',
-        label: t.settings.nav.gateway,
-        onSelect: () => setActiveView('gateway')
+        active: activeView === 'harvis-memory',
+        icon: Brain,
+        id: 'harvis-memory',
+        label: 'Memory & skills',
+        onSelect: () => setActiveView('harvis-memory')
       },
       {
         active: activeView === 'keybinds',
@@ -238,36 +296,6 @@ export function SettingsView({ onClose, onConfigSaved, onMainModelChanged }: Set
         id: 'keybinds',
         label: t.settings.nav.keybinds,
         onSelect: () => setActiveView('keybinds')
-      },
-      {
-        active: activeView === 'keys',
-        children: [
-          {
-            active: activeView === 'keys' && keysView === 'tools',
-            icon: Wrench,
-            id: 'kview:tools',
-            label: t.settings.nav.keysTools,
-            onSelect: () => openKeysView('tools')
-          },
-          {
-            active: activeView === 'keys' && keysView === 'settings',
-            icon: Settings2,
-            id: 'kview:settings',
-            label: t.settings.nav.keysSettings,
-            onSelect: () => openKeysView('settings')
-          }
-        ],
-        icon: KeyRound,
-        id: 'keys',
-        label: t.settings.nav.apiKeys,
-        onSelect: () => setActiveView('keys')
-      },
-      {
-        active: activeView === 'plugins',
-        icon: Package,
-        id: 'plugins',
-        label: t.settings.nav.plugins,
-        onSelect: () => setActiveView('plugins')
       },
       {
         active: activeView === 'sessions',
@@ -285,7 +313,7 @@ export function SettingsView({ onClose, onConfigSaved, onMainModelChanged }: Set
         onSelect: () => setActiveView('about')
       }
     ],
-    [activeView, keysView, providerView, t, setActiveView, openProviderView, openKeysView]
+    [activeView, modelView, providerView, t, setActiveView, openProviderView, openModelView]
   )
 
   // Type-to-search: printable keystrokes on the Settings surface (outside any
@@ -384,10 +412,17 @@ export function SettingsView({ onClose, onConfigSaved, onMainModelChanged }: Set
     ) : activeView.startsWith('config:') ? (
       <ConfigSettings
         activeSectionId={activeView.slice('config:'.length)}
-        importInputRef={importInputRef}
+        key={configEpoch}
+        modelView={modelView}
         onConfigSaved={onConfigSaved}
         onMainModelChanged={onMainModelChanged}
       />
+    ) : activeView === 'providers' && providerView === 'harvis' ? (
+      <HarvisProvidersSettings />
+    ) : activeView === 'providers' && providerView === 'engines' ? (
+      <CodingEnginesSettings />
+    ) : activeView === 'harvis-memory' ? (
+      <MemoryLearningSettings onClose={onClose} />
     ) : activeView === 'providers' ? (
       <ProvidersSettings
         onClose={onClose}
@@ -396,14 +431,8 @@ export function SettingsView({ onClose, onConfigSaved, onMainModelChanged }: Set
         onViewChange={setProviderView}
         view={providerView}
       />
-    ) : activeView === 'keys' ? (
-      <KeysSettings view={keysView} />
     ) : activeView === 'notifications' ? (
       <NotificationsSettings />
-    ) : activeView === 'billing' ? (
-      <BillingSettings />
-    ) : activeView === 'plugins' ? (
-      <PluginsSettings />
     ) : (
       <SessionsSettings />
     )
@@ -414,6 +443,13 @@ export function SettingsView({ onClose, onConfigSaved, onMainModelChanged }: Set
         <OverlayNav footer={navFooter} groups={navGroups} />
 
         <OverlayMain className="px-0 pb-0">{activeSettingsContent}</OverlayMain>
+        <input
+          accept=".json,application/json"
+          className="hidden"
+          onChange={importConfig}
+          ref={importInputRef}
+          type="file"
+        />
       </OverlaySplitLayout>
     </OverlayView>
   )

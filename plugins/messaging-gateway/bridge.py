@@ -3,6 +3,8 @@
 The gateway sidecar uses this client to:
   * post inbound messages to /api/messaging/inbound
   * poll workspace run status via /api/messaging/runs/{id}/status
+  * pull the per-user platform settings from /api/messaging/gateway/config
+  * file pairing requests for unknown senders via /api/messaging/gateway/pairing-request
 
 Authentication is a shared secret in the X-Gateway-Token header (matches the
 existing OPENCLAW_GATEWAY_TOKEN pattern in tools/discord_proxy.py).
@@ -23,6 +25,7 @@ from messaging_types import (
     InboundResponse,
     RunStatus,
 )
+from platforms.base import AdapterSpec
 
 logger = logging.getLogger(__name__)
 
@@ -152,3 +155,74 @@ class HarvisBridge:
             status="timeout",
             error_message=f"polled {self._cfg.poll_timeout_s}s without terminal status",
         )
+
+    # ------------------------------------------------------------------
+    # Settings sync + pairing (Harvis Messaging page)
+    # ------------------------------------------------------------------
+
+    async def fetch_config(self) -> Optional[list[AdapterSpec]]:
+        """Adapters the backend wants running, with decrypted credentials.
+
+        Returns None when the backend is unreachable or refuses the token, so
+        the supervisor keeps the last known set instead of stopping everything
+        on a transient error. Secrets are never logged.
+        """
+        client = self._require_client()
+        try:
+            r = await client.get("/api/messaging/gateway/config")
+        except httpx.HTTPError as e:
+            logger.warning("fetch_config network error: %s", e.__class__.__name__)
+            return None
+        if r.status_code != 200:
+            logger.warning("fetch_config non-200 %s", r.status_code)
+            return None
+        try:
+            data = r.json()
+        except ValueError:
+            logger.warning("fetch_config: backend returned non-JSON")
+            return None
+        specs: list[AdapterSpec] = []
+        for row in data.get("adapters") or []:
+            if not isinstance(row, dict) or not row.get("platform"):
+                continue
+            owner = row.get("user_id")
+            env = row.get("env") if isinstance(row.get("env"), dict) else {}
+            specs.append(AdapterSpec(
+                platform=str(row["platform"]),
+                owner_user_id=int(owner) if owner is not None else None,
+                env={str(k): str(v) for k, v in env.items() if v is not None},
+                source="settings",
+                updated_at=row.get("updated_at"),
+            ))
+        return specs
+
+    async def request_pairing(
+        self,
+        *,
+        owner_user_id: int,
+        platform: str,
+        sender_id: str,
+        sender_name: Optional[str],
+        chat_id: str,
+    ) -> Optional[dict]:
+        """Queue a pairing request in the owner's Messaging page. Best-effort."""
+        client = self._require_client()
+        payload = {
+            "owner_user_id": owner_user_id,
+            "platform": platform,
+            "sender_id": sender_id,
+            "sender_name": sender_name,
+            "chat_id": chat_id,
+        }
+        try:
+            r = await client.post("/api/messaging/gateway/pairing-request", json=payload)
+        except httpx.HTTPError as e:
+            logger.warning("request_pairing network error: %s", e.__class__.__name__)
+            return None
+        if r.status_code != 200:
+            logger.warning("request_pairing non-200 %s: %s", r.status_code, r.text[:200])
+            return None
+        try:
+            return r.json()
+        except ValueError:
+            return None

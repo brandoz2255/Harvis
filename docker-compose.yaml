@@ -379,6 +379,7 @@ services:
       DISCORD_WORKSPACE_HISTORY_TURNS: "${DISCORD_WORKSPACE_HISTORY_TURNS:-0}"
       # Messaging gateway sidecar — service-to-service shared secret
       MESSAGING_GATEWAY_TOKEN: "${MESSAGING_GATEWAY_TOKEN:-}"
+      HARVIS_PUBLIC_URL: "${HARVIS_PUBLIC_URL:-}"
       # Shared projects volume path inside backend container
       OPENCLAW_PROJECTS_DIR: "/data/openclaw-projects"
       # Real local repos bind-mounted READ-ONLY for orchestrated clone-local "attached" runs
@@ -824,12 +825,10 @@ services:
     networks:
       - ollama-n8n-network
 
-  # Same idea as owui-builder, for the vendored Hermes desktop UI. Behind the
-  # `hermes-ui` profile on purpose: a default `docker compose up -d` must not
-  # start paying for a second frontend build, and /hermes simply 404s when the
-  # dist dir is empty. To populate it:
-  #
-  #     docker compose --profile hermes-ui up hermes-ui-builder
+  # Same idea as owui-builder, for the vendored Hermes desktop UI. Hermes is
+  # Harvis's primary application shell, so its static build is part of the
+  # normal install. This is a one-shot build step; it neither starts a model
+  # service nor downloads model weights.
   #
   # Context is ./front_end (not the UI dir) because the build also needs
   # ./front_end/hermes-shared — see front_end/hermes-desktop-ui/Dockerfile.
@@ -838,22 +837,40 @@ services:
       context: ./front_end
       dockerfile: hermes-desktop-ui/Dockerfile
       target: artifact
+      args:
+        # Must match nginx's `location /hermes-api/`, which proxies to the
+        # backend facade. Baked into the bundle at build time — changing it
+        # changes the stamp below, so the new bytes actually get published.
+        VITE_HERMES_API_BASE: "${HARVIS_HERMES_UI_API_BASE:-/hermes-api}"
+        # Lower this on a machine with little RAM; the build is the only place
+        # Harvis asks for a big Node heap.
+        HERMES_UI_NODE_HEAP_MB: "${HARVIS_HERMES_UI_NODE_HEAP_MB:-8192}"
     image: harvis-hermes-ui-builder:local
     pull_policy: build
     container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-hermes-ui-builder
-    profiles: ["hermes-ui"]
     restart: "no"
     volumes:
       - ./front_end/hermes-desktop-ui/dist:/out
+    # Publish only when the host copy differs from the image's, compared by the
+    # stamp the Dockerfile writes. The old guard skipped whenever index.html
+    # existed, which meant a corrected build could never reach a machine that had
+    # built once — dist/ is gitignored, so only fresh clones ever got new bytes.
+    # This step never exits non-zero: nginx gates on it, and a publish failure
+    # should cost /hermes a 404, not take the whole proxy (and OWUI with it) down.
     command:
       - sh
       - -c
       - >
-        if [ -f /out/index.html ]; then
-          echo 'hermes UI build already present in ./front_end/hermes-desktop-ui/dist — skipping (clear it to force a rebuild)';
+        if [ -f /out/.harvis-build-id ] && cmp -s /app/dist/.harvis-build-id /out/.harvis-build-id; then
+          echo 'hermes UI build in ./front_end/hermes-desktop-ui/dist is current — skipping';
         else
-          echo 'Populating ./front_end/hermes-desktop-ui/dist from the Docker build...';
-          cp -a /app/dist/. /out/ && echo 'hermes UI build ready';
+          echo 'Publishing the hermes UI build to ./front_end/hermes-desktop-ui/dist...';
+          rm -rf /out/assets /out/.harvis-build-id;
+          if cp -a /app/dist/. /out/; then
+            echo 'hermes UI build ready';
+          else
+            echo 'WARNING: could not publish the hermes UI build - /hermes will 404 until this is fixed' >&2;
+          fi;
         fi
     networks:
       - ollama-n8n-network
@@ -903,6 +920,8 @@ services:
       # long-form so nginx waits for the one-shot owui-builder to finish
       # populating the static bundle before it starts serving.
       owui-builder:
+        condition: service_completed_successfully
+      hermes-ui-builder:
         condition: service_completed_successfully
       backend:
         condition: service_started

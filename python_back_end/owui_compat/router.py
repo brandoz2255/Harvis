@@ -335,6 +335,14 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
         img = await maybe_handle_image_generation(request, owui_body, user)
         if img is not None:
             return img
+        # An explicit deep-research ask ("deep research X", "/research X") starts
+        # a research run and answers with the ResearchRunCard marker. Ahead of the
+        # workspace detector, which would hand the same words to a quick web lookup.
+        from .research_bridge import maybe_handle_research
+
+        research = await maybe_handle_research(request, owui_body, user)
+        if research is not None:
+            return research
         # Auto-detect workspace tasks → launch a run + return a WorkspaceRunCard
         # marker (the OWUI card attaches to /api/workspace/stream/{id}). Falls
         # through to a normal chat completion when it's not a workspace task.

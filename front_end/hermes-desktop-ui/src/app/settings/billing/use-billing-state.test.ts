@@ -63,7 +63,7 @@ describe('deriveBillingView', () => {
     expect(view.summary).toContainEqual({ label: 'Balance', value: '$996.47' })
     expect(view.summary).toContainEqual({ label: 'Plan', value: 'Ultra · $200/mo' })
     expect(view.topupRow?.description).toBe(
-      "Remote spending is off for this account — a billing admin can turn it on from the portal's Hermes Agent page."
+      "Remote spending is off for this account — a billing admin can turn it on from the portal's Harvis Agent page."
     )
     expect(view.topupRow?.chips).toBeUndefined()
     expect(view.refillRow).toMatchObject({
@@ -163,7 +163,7 @@ describe('deriveBillingView', () => {
     expect(view.status).toBe('logged_out')
     expect(view.summary.map(item => item.value)).toEqual(['—', '—', '—'])
     expect(view.notice).toMatchObject({
-      title: 'Connect your Nous account'
+      title: 'Connect your Harvis account'
     })
     expect(view.paymentRow).toBeUndefined()
     expect(view.topupRow).toBeUndefined()

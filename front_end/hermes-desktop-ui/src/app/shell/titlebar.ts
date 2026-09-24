@@ -97,8 +97,10 @@ export function titlebarControlsPosition(
   // No left-side native controls to dodge:
   //   - Windows/Linux: native min/max/close render on the right via titleBarOverlay.
   //   - macOS fullscreen: traffic lights are hidden.
-  // In both cases, pin the cluster to the edge with a small inset.
-  if (windowButtonPosition === null || isFullscreen) {
+  //   - Harvis: the UI runs in a browser tab, so there is no window bridge
+  //     (position undefined) and nothing on the left to dodge.
+  // In all cases, pin the cluster to the edge with a small inset.
+  if (windowButtonPosition == null || isFullscreen) {
     return { left: TITLEBAR_EDGE_INSET, top }
   }
 

@@ -1063,7 +1063,7 @@ export function McpTab({ gateway, profile }: { gateway: HermesGateway | null; pr
           <div className="flex min-h-0 flex-1 flex-col p-2">
             <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain [scrollbar-gutter:stable]">
               {/* ONE coherent column: the configured fleet on top, the
-                  Nous-approved catalog below it. Installed entries live in the
+                  Harvis-approved catalog below it. Installed entries live in the
                   fleet list (with live status), so the catalog section only
                   offers what's NOT installed yet — no duplicate rows, no tab
                   flipping to find the install button. */}

@@ -185,7 +185,7 @@ export function AdvancedProfileConfig({ bot, state, setState }: AdvancedProfileC
   if (unsupported) {
     return (
       <div className="px-2 py-3 text-center text-xs text-(--ui-text-tertiary)">
-        Full configuration needs a newer gateway (restart it after updating Hermes).
+        Full configuration needs a newer gateway (restart it after updating Harvis).
       </div>
     )
   }

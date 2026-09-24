@@ -84,6 +84,7 @@ import type { ChatBarProps } from './types'
 import { isRedoShortcut, isUndoShortcut } from './undo-history'
 import { UrlDialog } from './url-dialog'
 import { chipTypedUrlOnSpace, linkifyUrls } from './url-refs'
+import { HarvisVoiceOrb } from './harvis-voice-orb'
 import { VoiceActivity, VoicePlaybackActivity } from './voice-activity'
 
 export function ChatBar({
@@ -1346,6 +1347,15 @@ export function ChatBar({
                   <ContribSlot area={COMPOSER_AREAS.top} />
                   <VoiceActivity state={voiceActivityState} />
                   <VoicePlaybackActivity />
+                  {voiceConversationActive && (
+                    <HarvisVoiceOrb
+                      level={conversation.level}
+                      muted={conversation.muted}
+                      onEnd={endConversation}
+                      onToggleMute={conversation.toggleMute}
+                      status={conversation.status}
+                    />
+                  )}
                   {queueEdit && editingQueuedPrompt && (
                     <div className="flex items-center justify-between gap-2 rounded-lg border border-[color-mix(in_srgb,var(--dt-composer-ring)_32%,transparent)] bg-accent/18 px-2 py-1">
                       <div className="min-w-0 text-[0.7rem] text-muted-foreground/88">

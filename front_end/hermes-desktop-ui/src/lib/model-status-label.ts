@@ -100,7 +100,7 @@ export function displayModelName(model: string): string {
  *  no explicit effort so the label never advertises a default the agent won't use. */
 export function formatModelStatusLabel(
   model: string,
-  options?: { defaultEffort?: string; fastMode?: boolean; reasoningEffort?: string }
+  options?: { defaultEffort?: string; fastMode?: boolean; reasoning?: boolean; reasoningEffort?: string }
 ): string {
   const name = displayModelName(model)
 
@@ -117,8 +117,11 @@ export function formatModelStatusLabel(
   }
 
   // Always surface the effort so the current reasoning level is visible at a
-  // glance, not just when non-default.
-  parts.push(reasoningEffortLabel(options?.reasoningEffort || options?.defaultEffort || DEFAULT_REASONING_EFFORT))
+  // glance, not just when non-default — unless the catalog says the model
+  // takes no effort level at all (every model behind the Harvis facade).
+  if (options?.reasoning !== false) {
+    parts.push(reasoningEffortLabel(options?.reasoningEffort || options?.defaultEffort || DEFAULT_REASONING_EFFORT))
+  }
 
-  return `${name} · ${parts.join(' ')}`
+  return parts.length ? `${name} · ${parts.join(' ')}` : name
 }

@@ -14,8 +14,13 @@
 #   - DISCORD_ALLOWED_CHANNEL_IDS allowlist (DMs always pass)
 #   - DISCORD_MENTION_ONLY for non-DM channels
 #   - <@id> / <@!id> mention-prefix stripping
-#   - DISCORD_DEFAULT_USER_ID fallback when no platform link exists
+#   - DISCORD_DEFAULT_USER_ID fallback when no platform link exists (env
+#     fallback path only; settings-driven adapters use DISCORD_ALLOWED_USERS
+#     plus pairing, like every other platform)
 #   - 2000-char message splitting on send
+#
+# Settings arrive through AdapterSpec.env (catalog keys), whether they came
+# from the Harvis Messaging page or the container environment.
 
 from __future__ import annotations
 
@@ -24,9 +29,8 @@ import logging
 import re
 from typing import Optional
 
-from config import GatewayConfig
 from messaging_types import InboundMessage, MessageType, Platform, SessionSource
-from platforms.base import BasePlatformAdapter
+from platforms.base import AdapterSpec, BasePlatformAdapter, split_text
 
 logger = logging.getLogger(__name__)
 
@@ -42,36 +46,28 @@ _DISCORD_MAX_LEN = 2000
 
 
 def _split_for_discord(text: str, max_len: int = _DISCORD_MAX_LEN) -> list[str]:
-    """Split text into <=max_len chunks, preferring newline + word boundaries.
+    return split_text(text, max_len)
 
-    Mirrors the behavior of legacy _send_long_message in
-    discord_workspace_bot.py without depending on Discord's helpers.
-    """
-    if not text:
-        return []
-    if len(text) <= max_len:
-        return [text]
 
-    out: list[str] = []
-    remaining = text
-    while remaining:
-        if len(remaining) <= max_len:
-            out.append(remaining)
-            break
-        cut = remaining.rfind("\n", 0, max_len)
-        if cut <= 0:
-            cut = remaining.rfind(" ", 0, max_len)
-        if cut <= 0:
-            cut = max_len
-        out.append(remaining[:cut].rstrip())
-        remaining = remaining[cut:].lstrip()
-    return out
+def _csv_int_set(raw: str) -> frozenset[int]:
+    out: set[int] = set()
+    for part in (raw or "").split(","):
+        part = part.strip()
+        if part.isdigit():
+            out.add(int(part))
+    return frozenset(out)
 
 
 class DiscordAdapter(BasePlatformAdapter):
-    def __init__(self, cfg: GatewayConfig):
-        super().__init__(Platform.DISCORD)
-        self._cfg = cfg
+    allowed_users_key = "DISCORD_ALLOWED_USERS"
+
+    def __init__(self, spec: AdapterSpec):
+        super().__init__(Platform.DISCORD, spec)
+        self._token = spec.get("DISCORD_BOT_TOKEN")
+        self._mention_only = spec.flag("DISCORD_MENTION_ONLY", default=True)
+        self._allowed_channel_ids = _csv_int_set(spec.get("DISCORD_ALLOWED_CHANNEL_IDS"))
+        raw_default = spec.get("DISCORD_DEFAULT_USER_ID", "0")
+        self._legacy_default_user = int(raw_default) if raw_default.isdigit() and int(raw_default) > 0 else None
         self._client: Optional["discord.Client"] = None  # type: ignore[name-defined]
         self._client_task: Optional[asyncio.Task] = None
         self._mention_re: Optional[re.Pattern[str]] = None
@@ -82,10 +78,10 @@ class DiscordAdapter(BasePlatformAdapter):
 
     async def start(self) -> None:
         if not DISCORD_AVAILABLE:
-            logger.error("[discord] discord.py not installed; cannot start adapter")
+            self._mark_error("discord.py not installed; cannot start adapter")
             return
-        if not self._cfg.discord_token:
-            logger.error("[discord] DISCORD_BOT_TOKEN not set")
+        if not self._token:
+            self._mark_error("DISCORD_BOT_TOKEN not set")
             return
 
         intents = discord.Intents.default()
@@ -98,8 +94,8 @@ class DiscordAdapter(BasePlatformAdapter):
 
         @client.event
         async def on_ready():  # noqa: ARG001
-            self._mark_connected()
             user = client.user
+            self._mark_connected(f"@{user.name}" if user is not None else None)
             if user is not None:
                 self._mention_re = re.compile(rf"<@!?{user.id}>")
                 logger.info("[discord] connected as %s (id=%s)", user.name, user.id)
@@ -109,12 +105,16 @@ class DiscordAdapter(BasePlatformAdapter):
             await self._handle_message(message)
 
         try:
-            await client.start(self._cfg.discord_token)
+            await client.start(self._token)
         except asyncio.CancelledError:
             logger.info("[discord] client cancelled")
             raise
-        except Exception:
-            logger.exception("[discord] client crashed")
+        except discord.LoginFailure as e:
+            self._mark_error(f"Discord rejected the bot token: {e}")
+        except discord.PrivilegedIntentsRequired:
+            self._mark_error("Enable the MESSAGE CONTENT intent for this bot in the Discord Developer Portal.")
+        except Exception as e:
+            self._mark_error(f"client crashed: {e.__class__.__name__}: {e}")
         finally:
             self._mark_disconnected()
 
@@ -152,7 +152,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 channel = await self._client.fetch_channel(channel_id)
             except Exception:
                 logger.exception("[discord] fetch_channel %s failed", channel_id)
-                return
+                raise
 
         chunks = _split_for_discord(text)
         if not chunks:
@@ -180,7 +180,7 @@ class DiscordAdapter(BasePlatformAdapter):
                     await channel.send(chunk)
             except Exception:
                 logger.exception("[discord] channel.send failed for chat=%s", channel_id)
-                return
+                raise
             first = False
 
     # ------------------------------------------------------------------
@@ -196,13 +196,13 @@ class DiscordAdapter(BasePlatformAdapter):
         is_dm = isinstance(channel, discord.DMChannel) or getattr(channel, "type", None) == discord.ChannelType.private
 
         # Allowed-channel allowlist (DMs always pass).
-        if self._cfg.discord_allowed_channel_ids and not is_dm:
+        if self._allowed_channel_ids and not is_dm:
             chan_id = getattr(channel, "id", None)
-            if chan_id is None or int(chan_id) not in self._cfg.discord_allowed_channel_ids:
+            if chan_id is None or int(chan_id) not in self._allowed_channel_ids:
                 return
 
         # Mention-only mode for non-DM channels (matches legacy).
-        if self._cfg.discord_mention_only and not is_dm:
+        if self._mention_only and not is_dm:
             if self._client is None or self._client.user is None:
                 return
             if self._client.user not in getattr(message, "mentions", []):
@@ -236,6 +236,13 @@ class DiscordAdapter(BasePlatformAdapter):
             message_id=str(message.id),
             message_type=MessageType.TEXT,
             text=text,
-            fallback_user_id=self._cfg.discord_default_user_id or None,
         )
         await self._emit(msg)
+
+    def fallback_user_for(self, sender_id: str) -> Optional[int]:
+        # Legacy env install: DISCORD_DEFAULT_USER_ID answered everyone in the
+        # allowed channels. Keep that only for env-sourced adapters; settings
+        # from the Messaging page use the allowlist + pairing like the rest.
+        if self.spec.source == "env" and self._legacy_default_user is not None:
+            return self._legacy_default_user
+        return super().fallback_user_for(sender_id)
