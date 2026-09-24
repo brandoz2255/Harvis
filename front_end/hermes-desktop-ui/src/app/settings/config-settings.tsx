@@ -1,6 +1,5 @@
 import { useStore } from '@nanostores/react'
 import { useQuery } from '@tanstack/react-query'
-import type { ChangeEvent } from 'react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router'
 
@@ -21,7 +20,7 @@ import {
 } from '@/store/data-url-read-max'
 import { $disableF12, setDisableF12 } from '@/store/disable-f12'
 import { $keepAwake, setKeepAwake } from '@/store/keep-awake'
-import { notify, notifyError } from '@/store/notifications'
+import { notifyError } from '@/store/notifications'
 import { normalizeProfileKey } from '@/store/profile'
 import { repoDiscoveryPolicyFromConfig, repoDiscoveryPolicySignature, scanAndRecordRepos } from '@/store/projects'
 import { $settingsRequestProfile } from '@/store/settings-scope'
@@ -32,6 +31,7 @@ import { useOnProfileSwitch } from '../hooks/use-on-profile-switch'
 import { PanelEmpty } from '../overlays/panel'
 
 import { ConfigField } from './config-field'
+import { HARVIS_SECTION_KEYS } from './constants'
 import {
   clearsEnabledToolsets,
   diffConfig,
@@ -45,15 +45,16 @@ import {
 import { MemoryConnect } from './memory/connect'
 import { ProviderConfigPanel } from './memory/provider-config-panel'
 import { ModelSettings, ModelSettingsSkeleton } from './model-settings'
+import { MODEL_VIEW_FIELDS, type ModelView } from './model-views'
 import { EmptyState, ListRow, SettingsContent, SettingsSkeleton, ToggleRow } from './primitives'
 import { SettingsProfileScope } from './profile-scope'
 import { QuickEntrySettings } from './quick-entry-settings'
 
 export function ConfigSettings({
   activeSectionId,
+  modelView = 'main',
   onConfigSaved,
-  onMainModelChanged,
-  importInputRef
+  onMainModelChanged
 }: ConfigSettingsProps) {
   // Shared "Applies to" scope (null → the app's active profile). Remount the
   // inner page per scope so every draft/seed/autosave ref resets wholesale
@@ -64,8 +65,8 @@ export function ConfigSettings({
   return (
     <ConfigSettingsInner
       activeSectionId={activeSectionId}
-      importInputRef={importInputRef}
       key={scopeProfile ?? '__active__'}
+      modelView={modelView}
       onConfigSaved={onConfigSaved}
       onMainModelChanged={onMainModelChanged}
       scopeProfile={scopeProfile}
@@ -75,16 +76,17 @@ export function ConfigSettings({
 
 interface ConfigSettingsProps {
   activeSectionId: string
+  /** Which nested Model page is open (only read when activeSectionId is 'model'). */
+  modelView?: ModelView
   onConfigSaved?: () => void
   onMainModelChanged?: (provider: string, model: string) => void
-  importInputRef: React.RefObject<HTMLInputElement | null>
 }
 
 function ConfigSettingsInner({
   activeSectionId,
+  modelView = 'main',
   onConfigSaved,
   onMainModelChanged,
-  importInputRef,
   scopeProfile
 }: ConfigSettingsProps & { scopeProfile: string | undefined }) {
   const { t } = useI18n()
@@ -272,7 +274,10 @@ function ConfigSettingsInner({
     return sectionFieldEntries(schema, config)
   }, [schema, config])
 
-  const fields = sectionFields.get(activeSectionId) ?? []
+  // Harvis shows only the fields it honours (HARVIS_SECTION_KEYS); the rest of
+  // the upstream section stays defined for search/voice helpers but is not editable.
+  const shownKeys = HARVIS_SECTION_KEYS[activeSectionId] ?? []
+  const fields = (sectionFields.get(activeSectionId) ?? []).filter(([key]) => shownKeys.includes(key))
 
   // Deep-link target from the command palette (?field=<key>): scroll the row
   // into view and flash it, then drop the param so it doesn't re-fire.
@@ -314,28 +319,6 @@ function ConfigSettingsInner({
     return () => window.clearTimeout(timeout)
   }, [config, schema, setSearchParams, targetField])
 
-  function handleImport(e: ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0]
-
-    if (!file) {
-      return
-    }
-
-    const reader = new FileReader()
-
-    reader.onload = () => {
-      try {
-        updateConfig(JSON.parse(String(reader.result)))
-        notify({ kind: 'success', title: c.imported, message: t.common.saving })
-      } catch (err) {
-        notifyError(err, c.invalidJson)
-      }
-    }
-
-    reader.readAsText(file)
-    e.target.value = ''
-  }
-
   if (!config || !schema) {
     // A failed config/schema fetch must surface a retry, not spin forever.
     if ((configLoadFailed && !config) || (schemaFailed && !schema)) {
@@ -376,7 +359,12 @@ function ConfigSettingsInner({
     return <SettingsSkeleton sections={[{ rows: 6 }]} />
   }
 
-  const visibleFields = activeSectionId === 'voice' ? fields.filter(([key]) => voiceFieldVisible(key, config)) : fields
+  const visibleFields =
+    activeSectionId === 'voice'
+      ? fields.filter(([key]) => voiceFieldVisible(key, config))
+      : activeSectionId === 'model'
+        ? fields.filter(([key]) => MODEL_VIEW_FIELDS[modelView].includes(key))
+        : fields
 
   return (
     <SettingsContent>
@@ -385,7 +373,7 @@ function ConfigSettingsInner({
       <SettingsProfileScope className="mb-5" />
       {activeSectionId === 'model' && (
         <div className="mb-6">
-          <ModelSettings onMainModelChanged={onMainModelChanged} scopeProfile={scopeProfile} />
+          <ModelSettings onMainModelChanged={onMainModelChanged} scopeProfile={scopeProfile} section={modelView} />
         </div>
       )}
       {/* Device-local desktop prefs (not config.yaml) — they live here since
@@ -411,8 +399,8 @@ function ConfigSettingsInner({
       {/* Device-local attach/preview byte cap (main-process IPC guard). Chat is
           where image-attachment behavior already lives, so this sits above the
           schema fields for that section. */}
-      {activeSectionId === 'chat' ? <AttachmentSizeSetting /> : null}
-      {visibleFields.length === 0 && activeSectionId !== 'chat' ? (
+      {activeSectionId === 'chat' && window.hermesDesktop?.dataUrlReadMax ? <AttachmentSizeSetting /> : null}
+      {visibleFields.length === 0 && activeSectionId !== 'chat' && activeSectionId !== 'model' ? (
         <EmptyState description={c.emptyDesc} title={c.emptyTitle} />
       ) : visibleFields.length === 0 ? null : (
         <div className="grid gap-1">
@@ -446,13 +434,6 @@ function ConfigSettingsInner({
           ))}
         </div>
       )}
-      <input
-        accept=".json,application/json"
-        className="hidden"
-        onChange={handleImport}
-        ref={importInputRef}
-        type="file"
-      />
     </SettingsContent>
   )
 }

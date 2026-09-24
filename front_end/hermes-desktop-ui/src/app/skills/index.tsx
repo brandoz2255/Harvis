@@ -63,6 +63,9 @@ import { ToolsetConfigPanel } from '../settings/toolset-config-panel'
 import type { SetStatusbarItemGroup } from '../shell/statusbar-controls'
 
 import { EmbeddedHubPicker } from './embedded-hub-picker'
+
+// Harvis skills live in owui_skills; the Nous Skills Hub is not its catalog.
+const SHOW_SKILLS_HUB = false
 import { McpTab } from './mcp-tab'
 import { $skillsSortDesc, $toolsetsSortDesc } from './store'
 
@@ -721,7 +724,7 @@ export function SkillsView({
 
     return (profilesData?.profiles ?? []).map(p => ({
       key: p.name,
-      label: p.is_default ? 'Hermes (default)' : p.name,
+      label: p.is_default ? 'Harvis (default)' : p.name,
       value: p.name
     }))
   }, [multiConnection, profilesData, rosterData])
@@ -926,7 +929,7 @@ export function SkillsView({
               on purpose — the picker fetches nothing; scope rides the
               `profile` prop into each install call, and remounting on scope
               change would reload the whole site for no data benefit. */}
-          {hubMounted && (
+          {hubMounted && SHOW_SKILLS_HUB && (
             <EmbeddedHubPicker hidden={mode !== 'skills'} installedNames={installedSkillNames} profile={scopeProfile} />
           )}
         </div>

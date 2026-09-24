@@ -173,8 +173,8 @@ export const githubTheme: DesktopTheme = {
  */
 export const nousTheme: DesktopTheme = {
   name: 'nous',
-  label: 'Nous',
-  description: 'GitHub chrome, Nous blue accent',
+  label: 'Harvis',
+  description: 'GitHub chrome, Harvis blue accent',
   colors: {
     background: '#ffffff',
     foreground: '#1f2328',
@@ -600,7 +600,7 @@ const nousAltTintTransparent = (pct: number) => `color-mix(in srgb, ${NOUS_ALT_B
  */
 export const nousAltTheme: DesktopTheme = {
   name: 'nous-alt',
-  label: 'Nous Alt',
+  label: 'Harvis Alt',
   description: 'Glass neutrals, cream on mission-blue',
   colors: {
     background: '#F8FAFF',

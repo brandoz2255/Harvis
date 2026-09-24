@@ -1,27 +1,29 @@
-"""Stub adapter — exposes a tiny HTTP endpoint that injects synthetic messages.
+"""Stub adapter — an HTTP endpoint that injects synthetic messages.
 
 Used for E2E smoke tests of the inbound → backend → workspace → poll → reply
 flow without needing real platform credentials. Never enable in production.
 
-Activated by STUB_ENABLED=true; binds to STUB_PORT (default 18800).
+Activated by STUB_ENABLED=true; mounts POST /inject on the gateway's control
+port (the app is handed over in ``CONTROL_APP`` by gateway.py at boot).
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import uuid
 from typing import Optional
 
-import uvicorn
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
-from config import GatewayConfig
 from messaging_types import InboundMessage, MessageType, Platform, SessionSource
-from platforms.base import BasePlatformAdapter
+from platforms.base import AdapterSpec, BasePlatformAdapter
 
 logger = logging.getLogger(__name__)
+
+CONTROL_APP: Optional[FastAPI] = None
 
 
 class _InjectPayload(BaseModel):
@@ -33,26 +35,33 @@ class _InjectPayload(BaseModel):
 
 
 class StubAdapter(BasePlatformAdapter):
-    def __init__(self, cfg: GatewayConfig):
-        super().__init__(Platform.STUB)
-        self._cfg = cfg
-        self._server: Optional[uvicorn.Server] = None
+    def __init__(self, spec: AdapterSpec):
+        super().__init__(Platform.STUB, spec)
         # Holds the most recent reply produced by the runner so the inject
         # caller can pick it up synchronously. Stub-only convenience.
         self._last_reply: dict[str, str] = {}
+        self._mounted = False
 
     async def start(self) -> None:
-        app = FastAPI(title="harvis-messaging-gateway-stub", openapi_url=None)
+        app = CONTROL_APP
+        if app is None:
+            self._mark_error("stub adapter has no control app to mount on")
+            return
+        if not self._mounted:
+            self._mount(app)
+            self._mounted = True
+        self._mark_connected("stub")
+        logger.info("[stub] /inject mounted on the control port")
+        await self._stop_event.wait()
 
+    def _mount(self, app: FastAPI) -> None:
         @app.post("/inject")
-        async def inject(
-            payload: _InjectPayload,
-            x_stub_token: str = Header(default=""),
-        ):
+        async def inject(payload: _InjectPayload, x_stub_token: str = Header(default="")):
             expected = os.getenv("STUB_TOKEN", "")
             if expected and x_stub_token != expected:
                 raise HTTPException(status_code=401, detail="invalid stub token")
-
+            if not self._connected:
+                raise HTTPException(status_code=503, detail="stub adapter is stopped")
             message_id = f"stub-{uuid.uuid4().hex[:12]}"
             msg = InboundMessage(
                 source=SessionSource(
@@ -70,28 +79,9 @@ class StubAdapter(BasePlatformAdapter):
             await self._emit(msg)
             return {"ok": True, "message_id": message_id, "reply": self._last_reply.pop(message_id, None)}
 
-        @app.get("/health")
-        async def health():
-            return {"ok": True, "platform": self.platform.value, "connected": self.is_connected}
-
-        config = uvicorn.Config(
-            app,
-            host="0.0.0.0",
-            port=self._cfg.stub_port,
-            log_level="info",
-            access_log=False,
-        )
-        self._server = uvicorn.Server(config)
-        self._connected = True
-        logger.info("[stub] HTTP inject endpoint listening on :%d", self._cfg.stub_port)
-        # Run until cancelled. uvicorn.serve() returns when self._server.should_exit
-        # is set, which happens via stop().
-        await self._server.serve()
-
     async def stop(self) -> None:
-        if self._server is not None:
-            self._server.should_exit = True
-        self._connected = False
+        self._stop_event.set()
+        self._mark_disconnected()
 
     async def send_text(
         self,
@@ -104,3 +94,4 @@ class StubAdapter(BasePlatformAdapter):
         if reply_to_message_id:
             self._last_reply[reply_to_message_id] = text
         logger.info("[stub] reply for %s: %s", reply_to_message_id, text[:200])
+        await asyncio.sleep(0)

@@ -19,6 +19,9 @@ class Platform(str, Enum):
     TELEGRAM = "telegram"
     EMAIL = "email"
     SMS = "sms"
+    MATRIX = "matrix"
+    WHATSAPP_CLOUD = "whatsapp_cloud"
+    SIGNAL = "signal"
     STUB = "stub"
 
 
@@ -95,3 +98,7 @@ class RunStatus:
 # Run statuses we treat as terminal when polling. Mirrors the values written
 # by python_back_end/workspace/workspace_router.py.
 TERMINAL_RUN_STATUSES = frozenset({"completed", "failed", "error", "cancelled"})
+
+# Error string the backend dispatcher returns when no Harvis user is linked to
+# the sender (plugins/messaging/dispatcher.py, status rejected_no_user).
+NO_USER_ERROR = "no harvis user mapped to this sender"

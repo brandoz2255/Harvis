@@ -33,7 +33,7 @@ DEFAULT_USER_SETTINGS: dict = {"ui": {}, "version": 0}
 
 # Subtrees written by dedicated server endpoints; the full-blob settings-sync
 # must not drop them when the OWUI client posts a body without them.
-_SERVER_MANAGED_KEYS = ("harvis", "integrations")
+_SERVER_MANAGED_KEYS = ("harvis", "integrations", "hermes_ui")
 
 # ── settings.harvis subtree ────────────────────────────────────────────────
 HARVIS_TASK_KEYS = ("chat", "build", "research", "notebook", "orchestrated")

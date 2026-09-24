@@ -40,8 +40,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 // judging an accent. The hue spread across the blues is the whole reason this
 // control exists: they look far apart and are 6° apart.
 const SWATCHES: ReadonlyArray<{ hex: string; name: string }> = [
-  { hex: '#0053FD', name: 'Nous blue · 263° (light seed)' },
-  { hex: '#4a84fe', name: 'Nous blue · 263° (dark seed)' },
+  { hex: '#0053FD', name: 'Harvis blue · 263° (light seed)' },
+  { hex: '#4a84fe', name: 'Harvis blue · 263° (dark seed)' },
   { hex: '#1540B1', name: 'Psyche blue · 264°' },
   { hex: '#0969da', name: 'GitHub blue · 257°' },
   { hex: '#196d31', name: 'GitHub green · 148°' },

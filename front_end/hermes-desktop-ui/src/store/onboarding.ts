@@ -192,7 +192,7 @@ function shouldPreserveConfiguredOnFallback(runtime: RuntimeReadinessResult, sta
 }
 
 function notifyReady(provider: string) {
-  notify({ kind: 'success', title: 'Hermes is ready', message: `${provider} connected.` })
+  notify({ kind: 'success', title: 'Harvis is ready', message: `${provider} connected.` })
 }
 
 // Human-friendly labels for tools auto-routed through the Nous Tool Gateway,
@@ -220,7 +220,7 @@ function notifyGatewayTools(tools: string[] | undefined) {
   notify({
     durationMs: 8000,
     kind: 'info',
-    message: `${list} now run through your Nous subscription — no separate API keys needed.`,
+    message: `${list} now run through your Harvis subscription — no separate API keys needed.`,
     title: 'Tool Gateway enabled'
   })
 }
@@ -331,7 +331,7 @@ async function completeWithModelConfirm(
 
       notifyGatewayTools(res.gateway_tools)
     } catch (error) {
-      onFail(error instanceof Error ? error.message : 'Hermes could not save the selected model.')
+      onFail(error instanceof Error ? error.message : 'Harvis could not save the selected model.')
 
       return
     }
@@ -367,8 +367,8 @@ function providerResolutionFailure(reason: null | string) {
   const detail = reason?.trim()
 
   return detail
-    ? `Connected, but Hermes still cannot resolve a usable provider. ${detail}`
-    : 'Connected, but Hermes still cannot resolve a usable provider.'
+    ? `Connected, but Harvis still cannot resolve a usable provider. ${detail}`
+    : 'Connected, but Harvis still cannot resolve a usable provider.'
 }
 
 async function refreshProviders() {
@@ -567,7 +567,7 @@ export async function refreshOnboarding(ctx: OnboardingContext) {
       kind: 'error',
       title: 'Runtime not ready',
       message:
-        'Hermes Desktop could not verify the running backend on startup. Some features may be unavailable until the gateway is reachable.'
+        'Harvis Desktop could not verify the running backend on startup. Some features may be unavailable until the gateway is reachable.'
     })
 
     return false
@@ -769,7 +769,7 @@ export async function recheckExternalSignin(ctx: OnboardingContext) {
       provider,
       message:
         reason?.trim() ||
-        `Hermes still cannot reach ${provider.name}. Run \`${provider.cli_command}\` in a terminal first.`
+        `Harvis still cannot reach ${provider.name}. Run \`${provider.cli_command}\` in a terminal first.`
     })
   )
 }
@@ -884,7 +884,7 @@ export async function saveOnboardingLocalEndpoint(baseUrl: string, apiKey: strin
     if (!runtime.ready) {
       const detail = (runtime.reason ?? '').trim()
 
-      return { ok: false, message: detail || `Saved, but Hermes still cannot reach ${url}.` }
+      return { ok: false, message: detail || `Saved, but Harvis still cannot reach ${url}.` }
     }
 
     notifyReady('Local / custom endpoint')

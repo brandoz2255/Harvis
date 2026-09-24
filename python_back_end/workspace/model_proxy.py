@@ -1155,6 +1155,9 @@ async def execute_chat_completion(request: Request, body: dict):
             "temperature", "top_p", "stop", "max_tokens",
             "presence_penalty", "frequency_penalty", "seed",
             "response_format", "options",
+            # Ollama's own thinking level (low/medium/high/none). Only callers that
+            # checked the model thinks send it; Ollama 400s it on any other model.
+            "reasoning_effort",
         }
         if "max_completion_tokens" in body and "max_tokens" not in body:
             body["max_tokens"] = body["max_completion_tokens"]

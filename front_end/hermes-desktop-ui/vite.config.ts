@@ -101,9 +101,35 @@ const emojibaseAssets = () => ({
   }
 })
 
+// @assistant-ui/core 0.2.23 ships ThreadListRuntimeImpl.subscribe() wired to
+// the raw core instead of its LazyMemoizeSubject, so the subject never connects
+// and getState() hands React a fresh object on every call — useSyncExternalStore
+// then throws "Maximum update depth exceeded … getSnapshot should be cached" the
+// moment a reply renders. Upstream fixed it by subscribing through the binding;
+// this applies that one-line fix at bundle time so the vendored tree stays as
+// shipped and a fresh Docker build gets it too.
+const assistantUiSubscribeFix = () => ({
+  name: 'harvis:assistant-ui-subscribe-fix',
+  transform(code: string, id: string) {
+    if (!/@assistant-ui[\/]core[\/]dist[\/]runtime[\/]api[\/]thread-list-runtime\.js$/.test(id)) return null
+    const bind = '\t\tthis._getState = stateBinding.getState.bind(stateBinding);\n'
+    const sub = '\tsubscribe(callback) {\n\t\treturn this._core.subscribe(callback);\n\t}\n'
+    if (!code.includes(bind) || !code.includes(sub)) {
+      this.warn('assistant-ui subscribe fix: anchors not found, leaving module untouched')
+      return null
+    }
+    return {
+      code: code
+        .replace(bind, bind + '\t\tthis._stateBinding = stateBinding;\n')
+        .replace(sub, '\tsubscribe(callback) {\n\t\treturn this._stateBinding.subscribe(callback);\n\t}\n'),
+      map: null
+    }
+  }
+})
+
 export default defineConfig(({ command }) => ({
   base: '/hermes/',
-  plugins: [react(), babel({ presets: [compilerPreset()] }), tailwindcss(), emojibaseAssets()],
+  plugins: [react(), babel({ presets: [compilerPreset()] }), tailwindcss(), emojibaseAssets(), assistantUiSubscribeFix()],
   css: {
     // Pin an explicit (empty) PostCSS config. Tailwind is handled entirely by
     // `@tailwindcss/vite`, so the renderer needs no PostCSS plugins — and

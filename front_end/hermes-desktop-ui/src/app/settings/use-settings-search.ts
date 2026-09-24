@@ -14,6 +14,8 @@ import { TRANSLUCENCY_SUPPORTED } from '@/store/translucency'
 import { useHermesConfigRecord } from '../hooks/use-config-record'
 import { useOnProfileSwitch } from '../hooks/use-on-profile-switch'
 
+import { HARVIS_SECTIONS } from './constants'
+
 import {
   APPEARANCE_SETTING_IDS,
   buildConfigSearchEntries,
@@ -100,11 +102,16 @@ export function useSettingsSearchCatalog(enabled: boolean) {
   const configEntries =
     configQuery.isFetching || schemaQuery.isFetching || configQuery.isError || schemaQuery.isError
       ? []
-      : buildConfigSearchEntries(schemaQuery.data?.fields, configQuery.data, {
-          fieldDescriptions: t.settings.fieldDescriptions,
-          fieldLabels: t.settings.fieldLabels,
-          sections: t.settings.sections
-        })
+      : buildConfigSearchEntries(
+          schemaQuery.data?.fields,
+          configQuery.data,
+          {
+            fieldDescriptions: t.settings.fieldDescriptions,
+            fieldLabels: t.settings.fieldLabels,
+            sections: t.settings.sections
+          },
+          HARVIS_SECTIONS
+        )
 
   const appearanceContext = t.settings.sections.appearance
   const appearance = t.settings.appearance
@@ -198,10 +205,12 @@ export function useSettingsSearchCatalog(enabled: boolean) {
     { settings: Settings2, tools: Wrench }
   )
 
+  // Harvis hides the API-keys and Plugins pages, so their rows would deep-link
+  // to nothing; only config fields Harvis honours are searchable.
   return {
     appearanceEntries,
     configEntries,
-    credentialEntries,
-    pluginEntries
+    credentialEntries: credentialEntries.filter(() => false),
+    pluginEntries: pluginEntries.filter(() => false)
   }
 }

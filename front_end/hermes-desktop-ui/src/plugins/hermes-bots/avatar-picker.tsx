@@ -278,7 +278,7 @@ export function AvatarPicker({ shape, color, image, onShape, onColor, onImage, g
         ) : (
           <div className="px-2 py-3 text-center text-xs leading-5 text-(--ui-text-tertiary)">
             {imagen === false
-              ? 'No image model available. If you just enabled one (or updated Hermes), restart the gateway: Ctrl+K → "Restart gateway".'
+              ? 'No image model available. If you just enabled one (or updated Harvis), restart the gateway: Ctrl+K → "Restart gateway".'
               : 'Checking image backend…'}
           </div>
         )

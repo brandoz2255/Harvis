@@ -219,8 +219,12 @@ export interface MessagingHomeChannel {
 }
 
 export interface MessagingPlatformInfo {
+  /** True when the gateway can deliver a test message right now. */
+  can_test?: boolean
   configured: boolean
   description: string
+  /** The bot's own name on the platform once connected, e.g. "@harvis_bot". */
+  display?: null | string
   docs_url: string
   enabled: boolean
   env_vars: MessagingEnvVarInfo[]
@@ -230,12 +234,33 @@ export interface MessagingPlatformInfo {
   home_channel?: MessagingHomeChannel | null
   id: string
   name: string
+  /** Served by the backend's in-process bot rather than the gateway. */
+  runs_on_harvis?: boolean
+  /** Where to get the credentials, in the backend's words. */
+  setup_hint?: null | string
   state?: null | string
+  /** False for catalog platforms Harvis has no adapter for yet. */
+  supported?: boolean
   updated_at?: null | string
+  webhook_note?: null | string
+  /** Public URL to register with the provider, for webhook-driven platforms. */
+  webhook_url?: null | string
 }
 
 export interface MessagingPlatformsResponse {
+  gateway_error?: null | string
+  gateway_reachable?: boolean
+  gateway_start_command?: string
   platforms: MessagingPlatformInfo[]
+  public_url?: null | string
+}
+
+export interface MessagingPlatformUpdateResponse {
+  gateway_applied?: boolean
+  message?: string
+  ok: boolean
+  platform: string
+  supported?: boolean
 }
 
 /** A pending pairing request, or an already-approved user, for one platform. */

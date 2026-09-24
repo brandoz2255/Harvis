@@ -322,14 +322,14 @@ describe('ModelSettings', () => {
   it('renders the auxiliary task rows', async () => {
     await renderModelSettings()
 
-    expect(await screen.findByText('Vision')).toBeTruthy()
+    expect(await screen.findByText('Memory and skill learning')).toBeTruthy()
     expect(screen.getAllByText('auto · use main model').length).toBeGreaterThan(0)
   })
 
   it('assigns an auxiliary task to the main model via setModelAssignment', async () => {
     await renderModelSettings()
 
-    // One "Set to main" button per task slot; the first is Vision.
+    // One "Set to main" button per task slot; Harvis offers only the learning (curator) slot.
     const setToMainButtons = await screen.findAllByRole('button', { name: 'Set to main' })
     fireEvent.click(setToMainButtons[0])
 
@@ -338,7 +338,7 @@ describe('ModelSettings', () => {
         model: 'hermes-4',
         provider: 'nous',
         scope: 'auxiliary',
-        task: 'vision'
+        task: 'curator'
       })
     )
   })
@@ -372,7 +372,7 @@ describe('ModelSettings', () => {
         model: 'qwen3:latest',
         provider: 'local-ollama',
         scope: 'auxiliary',
-        task: 'vision',
+        task: 'curator',
         base_url: 'http://localhost:11434/v1'
       })
     )

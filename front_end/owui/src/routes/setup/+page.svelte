@@ -358,6 +358,18 @@
 		}
 	};
 
+	// Where a finished setup lands. `/` is the front door, and nginx — not this
+	// router — decides what the front door is (today: a 302 to /hermes/). A
+	// goto('/') would be handled entirely inside this SPA and quietly drop the
+	// new admin into OpenWebUI, which is how a fresh signup ended up in the
+	// wrong application. A real navigation asks nginx, so there is one answer to
+	// "where does Harvis start" instead of two that can drift.
+	const openApp = () => {
+		const saved = localStorage.getItem('redirectPath');
+		localStorage.removeItem('redirectPath');
+		window.location.href = saved || '/';
+	};
+
 	const claimAdmin = async () => {
 		if (!name.trim() || !email.trim() || !password) {
 			toast.error($i18n.t('Name, email, and password are required.'));
@@ -570,7 +582,7 @@
 					<button
 						class="mt-4 text-sm font-medium underline"
 						type="button"
-						on:click={() => goto('/')}
+						on:click={openApp}
 					>
 						{$i18n.t('Go to chat')}
 					</button>
@@ -1093,7 +1105,7 @@
 					<button
 						type="button"
 						class="w-full rounded-lg bg-gray-900 text-white dark:bg-white dark:text-black py-2.5 text-sm font-medium"
-						on:click={() => goto('/')}
+						on:click={openApp}
 					>
 						{$i18n.t('Open Harvis')}
 					</button>

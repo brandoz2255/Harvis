@@ -25,19 +25,42 @@ from pydantic import BaseModel
 logger = logging.getLogger(__name__)
 
 # Bundled filesystem skills that seed into owui_skills with a server-side
-# 'supported' verdict (never forgeable via CRUD). Paths are relative to the
-# repo skills/Harvis tree (also synced into openclaw/skills by the pipeline).
-_BUNDLED_SKILL_SPECS = (
-    {
-        "name": "harvis-build",
-        "relpath": "harvis-build/SKILL.md",
+# 'supported' verdict (never forgeable via CRUD). The source of truth is the
+# repo skills/Harvis tree (also synced into openclaw/skills by the pipeline):
+# one directory per skill, each holding a SKILL.md. It used to be a hand-written
+# tuple naming a single skill, so eighteen shipped capabilities were invisible
+# in both UIs; a directory listing cannot drift from what is actually on disk.
+_BUNDLED_FALLBACKS = {
+    "harvis-build": {
         "emoji": "🛠️",
         "description": (
             "Default Harvis Build / Vibe Code coding skill — str_replace discipline, "
             "screenshot_preview loop, lane rules."
         ),
     },
-)
+}
+
+
+def bundled_skill_specs() -> list[dict]:
+    """Every skills/Harvis/<name>/SKILL.md, sorted by name. Never raises."""
+    root = _skills_harvis_root()
+    specs: list[dict] = []
+    try:
+        entries = sorted(p for p in root.iterdir() if p.is_dir())
+    except OSError:
+        logger.warning("bundled skills root unreadable: %s", root)
+        return []
+    for entry in entries:
+        if not (entry / "SKILL.md").is_file():
+            continue
+        fallback = _BUNDLED_FALLBACKS.get(entry.name, {})
+        specs.append({
+            "name": entry.name,
+            "relpath": f"{entry.name}/SKILL.md",
+            "emoji": fallback.get("emoji"),
+            "description": fallback.get("description", ""),
+        })
+    return specs
 
 
 def _skills_harvis_root() -> Path:
@@ -94,7 +117,7 @@ def _parse_skill_md(raw: str) -> tuple[str, str, str]:
 
 def load_bundled_skill_body(name: str = "harvis-build") -> str | None:
     """Load markdown body (no frontmatter) for a bundled skill, or None."""
-    spec = next((s for s in _BUNDLED_SKILL_SPECS if s["name"] == name), None)
+    spec = next((s for s in bundled_skill_specs() if s["name"] == name), None)
     if not spec:
         return None
     path = _skills_harvis_root() / spec["relpath"]
@@ -116,7 +139,7 @@ async def seed_bundled_skills_if_missing(pool, user_id: int) -> list[str]:
         return []
     inserted: list[str] = []
     root = _skills_harvis_root()
-    for spec in _BUNDLED_SKILL_SPECS:
+    for spec in bundled_skill_specs():
         path = root / spec["relpath"]
         try:
             raw = path.read_text(encoding="utf-8")

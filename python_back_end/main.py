@@ -686,6 +686,7 @@ async def lifespan(app: FastAPI):
                     "016_inference_nodes.sql",
                     "017_user_profile_fields.sql",
                     "018_agent_teammates.sql",
+                    "019_hermes_bots.sql",
                 ):
                     _mig_path = os.path.join(_mig_dir, _mig_name)
                     try:
@@ -710,7 +711,7 @@ async def lifespan(app: FastAPI):
                             _mig_name,
                             _mig_err,
                         )
-                logger.info("✅ Idempotent migrations 010-018 ensured")
+                logger.info("✅ Idempotent migrations 010-019 ensured")
 
                 # vibecoding_sessions. The /api/vibecode/sessions* routes are
                 # mounted on every boot and every one of them queries this table,
@@ -1854,6 +1855,9 @@ app.include_router(discord_proxy_router)
 # Include messaging plugin (Phase 1A: gateway-sidecar routes + per-user platform links + audit)
 from plugins.messaging.routes import router as messaging_router
 app.include_router(messaging_router)
+# Gateway-facing settings export, pairing requests and provider webhooks (hermes_ui Messaging page).
+from plugins.hermes_ui.messaging_gateway import router as messaging_gateway_router
+app.include_router(messaging_gateway_router)
 
 # Phase-storage CRUD routes — JWT-auth via get_current_user_optimized.
 # Per-user SOUL.md (Phase 7), memory provider (Phase 4), cron jobs (Phase 6).
@@ -1867,6 +1871,11 @@ app.include_router(memory_router)
 app.include_router(cron_router)
 app.include_router(inference_nodes_router)
 app.include_router(agents_router)
+
+# Hermes desktop-UI facade: REST + JSON-RPC WebSocket under /hermes-api/ so the
+# vendored UI at /hermes/ can boot and chat through Harvis (no Hermes gateway here).
+from plugins.hermes_ui.router import router as hermes_ui_router
+app.include_router(hermes_ui_router)
 
 # SSH remote-access SCAFFOLD (Phase 7) — flagged OFF: HARVIS_SSH_ENABLED absent/0 (the
 # default) → every endpoint 403s; connect/test is additionally a hard 501 stub (no SSH I/O).

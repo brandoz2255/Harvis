@@ -68,7 +68,7 @@ function VoiceLevelBars({ level, active }: { active: boolean; level: number }) {
   )
 }
 
-function getElementAnalyser(audioElement: HTMLAudioElement): ElementAnalyser | null {
+export function getElementAnalyser(audioElement: HTMLAudioElement): ElementAnalyser | null {
   let entry = elementAnalysers.get(audioElement)
 
   if (!entry) {

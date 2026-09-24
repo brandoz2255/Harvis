@@ -1,5 +1,6 @@
 import { useStore } from '@nanostores/react'
-import { useEffect, useState } from 'react'
+import { QueryClientContext } from '@tanstack/react-query'
+import { useCallback, useContext, useEffect, useState, useSyncExternalStore } from 'react'
 
 import { useSessionView } from '@/app/chat/session-view'
 import { useTourMarker } from '@/app/chat/tour-marker'
@@ -14,6 +15,7 @@ import { ChevronDown } from '@/lib/icons'
 import { formatModelStatusLabel } from '@/lib/model-status-label'
 import { cn } from '@/lib/utils'
 import { $currentModelSource, $defaultReasoningEffort, setModelPickerOpen } from '@/store/session'
+import type { ModelOptionsResponse } from '@/types/hermes'
 
 import { onComposerModelMenuRequest } from './focus'
 import { useComposerScope } from './scope'
@@ -26,6 +28,34 @@ const PILL = cn(
   'h-(--composer-control-size) min-w-0 max-w-40 shrink gap-1 rounded-md px-2 text-xs font-normal',
   'text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground'
 )
+
+/** Whether any cached model catalog says this model takes a reasoning level:
+ *  `undefined` until a catalog lists it. Live, so the pill repaints when the
+ *  catalog lands after the session's model does. */
+function useModelTakesEffort(provider: string, model: string): boolean | undefined {
+  // Read the context directly so the pill still renders outside a provider.
+  const cache = useContext(QueryClientContext)?.getQueryCache()
+
+  const subscribe = useCallback((listener: () => void) => cache?.subscribe(listener) ?? (() => {}), [cache])
+
+  return useSyncExternalStore(subscribe, () => {
+    for (const query of cache?.findAll({ queryKey: ['model-options'] }) ?? []) {
+      // The session can name a different provider than the catalog files the
+      // model under (Harvis reports `harvis`, the catalog groups by `ollama`),
+      // so fall back to any row that lists the model.
+      const rows = (query.state.data as ModelOptionsResponse | undefined)?.providers ?? []
+      const row =
+        rows.find(p => p.slug === provider && p.capabilities?.[model]) ?? rows.find(p => p.capabilities?.[model])
+      const caps = row?.capabilities?.[model]
+
+      if (caps) {
+        return caps.reasoning
+      }
+    }
+
+    return undefined
+  })
+}
 
 /**
  * Composer model selector — the relocated status-bar pill. Reuses the live
@@ -59,6 +89,7 @@ export function ModelPill({
   const modelSource = useStore($currentModelSource)
   const defaultEffort = useStore($defaultReasoningEffort)
   const runtimeId = useStore(view.$runtimeId)
+  const reasoning = useModelTakesEffort(currentProvider, currentModel)
   const [open, setOpen] = useState(false)
   const scope = useComposerScope()
   const hasLiveMenu = Boolean(model.modelMenuContent)
@@ -101,7 +132,7 @@ export function ModelPill({
     <>
       {currentModel.trim() ? (
         <span className="truncate">
-          {formatModelStatusLabel(currentModel, { defaultEffort, fastMode, reasoningEffort })}
+          {formatModelStatusLabel(currentModel, { defaultEffort, fastMode, reasoning, reasoningEffort })}
         </span>
       ) : (
         <GlyphSpinner className="opacity-50" spinner="braille" />

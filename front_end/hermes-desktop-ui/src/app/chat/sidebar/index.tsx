@@ -22,6 +22,7 @@ import {
   SidebarMenuItem
 } from '@/components/ui/sidebar'
 import { Tip, TipKeybindLabel } from '@/components/ui/tooltip'
+import { Slot as ContribSlot } from '@/contrib/react/slot'
 import { useContributions } from '@/contrib/react/use-contributions'
 import { searchSessions, type SessionInfo, type SessionSearchResult } from '@/hermes'
 import { useI18n } from '@/i18n'
@@ -139,6 +140,7 @@ import {
   CRON_ROUTE,
   MESSAGING_ROUTE,
   SIDEBAR_NAV_AREA,
+  SIDEBAR_SECTION_AREA,
   type SidebarNavContribution,
   SKILLS_ROUTE
 } from '../../routes'
@@ -1599,6 +1601,7 @@ export function ChatSidebar({
             data-sessions-mode={sessionsMode}
             data-sessions-project={inProject ? (enteredProjectId ?? undefined) : undefined}
           >
+            {!trimmedQuery && <ContribSlot area={SIDEBAR_SECTION_AREA} />}
             {trimmedQuery && (
               <SidebarSessionsSection
                 activeSessionId={activeSidebarSessionId}

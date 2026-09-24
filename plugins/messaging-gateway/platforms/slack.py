@@ -19,9 +19,8 @@ import asyncio
 import logging
 from typing import Optional
 
-from config import GatewayConfig
 from messaging_types import InboundMessage, MessageType, Platform, SessionSource
-from platforms.base import BasePlatformAdapter
+from platforms.base import AdapterSpec, BasePlatformAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -49,9 +48,12 @@ class SlackAdapter(BasePlatformAdapter):
       * SLACK_SIGNING_SECRET is NOT used by Socket Mode (HTTP events mode only).
     """
 
-    def __init__(self, cfg: GatewayConfig):
-        super().__init__(Platform.SLACK)
-        self._cfg = cfg
+    allowed_users_key = "SLACK_ALLOWED_USERS"
+
+    def __init__(self, spec: AdapterSpec):
+        super().__init__(Platform.SLACK, spec)
+        self._bot_token = spec.get("SLACK_BOT_TOKEN")
+        self._app_token = spec.get("SLACK_APP_TOKEN")
         self._app: Optional[AsyncApp] = None  # type: ignore[valid-type]
         self._handler: Optional[AsyncSocketModeHandler] = None  # type: ignore[valid-type]
         self._bot_user_id: Optional[str] = None
@@ -64,14 +66,14 @@ class SlackAdapter(BasePlatformAdapter):
 
     async def start(self) -> None:
         if not SLACK_AVAILABLE:
-            logger.error("[slack] slack-bolt not installed; cannot start adapter")
+            self._mark_error("slack-bolt not installed; cannot start adapter")
             return
 
-        if not self._cfg.slack_bot_token or not self._cfg.slack_app_token:
-            logger.error("[slack] SLACK_BOT_TOKEN and SLACK_APP_TOKEN must both be set")
+        if not self._bot_token or not self._app_token:
+            self._mark_error("SLACK_BOT_TOKEN and SLACK_APP_TOKEN must both be set")
             return
 
-        self._app = AsyncApp(token=self._cfg.slack_bot_token)
+        self._app = AsyncApp(token=self._bot_token)
 
         # Identify the bot so we can filter our own messages.
         try:
@@ -81,8 +83,8 @@ class SlackAdapter(BasePlatformAdapter):
                 "[slack] authenticated as @%s in team %s (bot_user_id=%s)",
                 auth.get("user", "?"), auth.get("team", "?"), self._bot_user_id,
             )
-        except Exception:
-            logger.exception("[slack] auth_test failed")
+        except Exception as e:
+            self._mark_error(f"Slack rejected the bot token (auth.test): {e}")
             return
 
         # Register handlers.
@@ -110,8 +112,8 @@ class SlackAdapter(BasePlatformAdapter):
         async def _on_file_change(event, say):  # noqa: ARG001
             return None
 
-        self._handler = AsyncSocketModeHandler(self._app, self._cfg.slack_app_token)
-        self._mark_connected()
+        self._handler = AsyncSocketModeHandler(self._app, self._app_token)
+        self._mark_connected(f"@{auth.get('user', '?')} in {auth.get('team', '?')}")
         logger.info("[slack] connecting via Socket Mode")
 
         try:
@@ -119,9 +121,8 @@ class SlackAdapter(BasePlatformAdapter):
         except asyncio.CancelledError:
             logger.info("[slack] handler cancelled")
             raise
-        except Exception:
-            logger.exception("[slack] socket-mode handler crashed")
-            self._mark_disconnected()
+        except Exception as e:
+            self._mark_error(f"socket-mode handler crashed: {e.__class__.__name__}: {e}")
 
     async def stop(self) -> None:
         self._stopping.set()
@@ -162,6 +163,7 @@ class SlackAdapter(BasePlatformAdapter):
             )
         except Exception:
             logger.exception("[slack] chat_postMessage failed for chat=%s", target.chat_id)
+            raise
 
     # ------------------------------------------------------------------
     # Inbound

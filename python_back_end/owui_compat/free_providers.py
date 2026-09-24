@@ -23,6 +23,7 @@ a stale guess.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -73,6 +74,17 @@ class FreeProvider:
     # free-tier key answers 402 to. When True, discovery keeps only zero-priced models.
     # Flip to False for a user who has funded the account and wants the paid catalogue.
     free_only: bool = False
+    # Does this endpoint work WITHOUT a key? True only for a server the user runs
+    # themselves (OmniRoute defaults to no auth). ``verify_provider_key`` then treats a
+    # readable ``/models`` as proof of reachability instead of proof of a credential, and
+    # the UI lets the user connect with the key field empty. The engine-auth table still
+    # needs a non-empty credential, so the UI sends ``NO_KEY`` as a stand-in; the chat
+    # proxy sends it as a Bearer token, which a keyless server ignores.
+    key_optional: bool = False
+
+
+# The stand-in credential stored for a key-optional provider connected without a key.
+NO_KEY = "no-key"
 
 
 # Ordered by how useful the free tier actually is for coding/chat work.
@@ -139,6 +151,33 @@ FREE_PROVIDERS: tuple[FreeProvider, ...] = (
         base_url="https://api.mistral.ai/v1",
         console_url="https://console.mistral.ai/api-keys/",
         free_note="Free 'Experiment' tier: large monthly token allowance. Requires phone verification.",
+    ),
+    FreeProvider(
+        id="ollama-cloud",
+        name="Ollama Cloud",
+        engine="ollama-cloud",
+        base_url="https://ollama.com/v1",
+        console_url="https://ollama.com/settings/keys",
+        free_note="Hosted models from ollama.com (ollama.com/v1, API key from your Ollama account). "
+                  "Free to try with usage limits; paid plans raise them. Not your local Ollama.",
+        # Probed 2026-09-23: GET /v1/models answers 200 with no key and with a bad key (20
+        # models), so the list check proves nothing — the chat probe is the real proof.
+        models_endpoint_public=True,
+    ),
+    FreeProvider(
+        id="omniroute",
+        name="OmniRoute",
+        engine="omniroute",
+        base_url=os.getenv("OMNIROUTE_BASE_URL", "http://omniroute-trial:20129/v1").rstrip("/"),
+        console_url=os.getenv("OMNIROUTE_DASHBOARD_URL", "http://localhost:20128"),
+        free_note="Self-hosted router you run yourself (docker-compose.omniroute-trial.yml, or your own "
+                  "install). Put its address below; it needs no key unless you enabled one in its "
+                  "dashboard. Harvis lists the models its /v1/models reports.",
+        # Probed 2026-09-23 against the trial container: GET /v1/models answers 200 with no key
+        # (115 models); the chat lane answered 429 with and without a key, so key enforcement
+        # on chat is unconfirmed. Reachability is the check we can actually make.
+        models_endpoint_public=True,
+        key_optional=True,
     ),
 )
 
@@ -407,13 +446,16 @@ async def verify_provider_key(provider_id: str, api_key: str) -> tuple[bool, str
 
     try:
         headers = {"Authorization": f"Bearer {api_key}", **prov.extra_headers}
+        if prov.key_optional and api_key == NO_KEY:
+            headers.pop("Authorization")
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.get(f"{prov.base_url}/models", headers=headers)
 
         if r.status_code != 200:
             return False, _reject(r.status_code) or f"{prov.name} returned HTTP {r.status_code}."
 
-        if not prov.models_endpoint_public:
+        if not prov.models_endpoint_public or prov.key_optional:
+            # A keyless server can only be proved reachable; there is no credential to prove.
             invalidate_model_cache(provider_id)
             return True, ""
 

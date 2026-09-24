@@ -61,7 +61,7 @@ export const resolveRefusal = (refusal: BillingRefusal): BillingRefusalPresentat
       return {
         action: portalAction(refusal.portalUrl),
         message:
-          "Remote spending is off for this account — a billing admin can turn it on from the portal's Hermes Agent page.",
+          "Remote spending is off for this account — a billing admin can turn it on from the portal's Harvis Agent page.",
         title: 'Remote spending is off'
       }
 

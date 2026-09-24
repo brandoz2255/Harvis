@@ -297,7 +297,7 @@ describe('SkillsView toolset management', { timeout: 60_000 }, () => {
     )
   })
 
-  it('mounts the hub iframe lazily and keeps it (hidden) across tab switches', async () => {
+  it('never mounts the Nous hub iframe (Harvis serves skills from owui_skills)', async () => {
     // On a non-Skills tab the docs-site iframe must not exist at all — an
     // eagerly mounted hub is exactly the Capabilities lag bug.
     await renderSkills() // ?tab=toolsets
@@ -318,19 +318,13 @@ describe('SkillsView toolset management', { timeout: 60_000 }, () => {
       )
     })
 
-    const iframe = document.querySelector('iframe')
-    expect(iframe).toBeTruthy()
-    expect(iframe!.closest('section')!.classList.contains('hidden')).toBe(false)
-
-    // Switch to Tools → the iframe STAYS mounted (no docs-site reload on the
-    // next visit) but its section is fully hidden, so nothing from the hub
-    // can paint over the toolsets UI.
+    // Harvis keeps the Skills tab, but SHOW_SKILLS_HUB is off: the docs-site
+    // picker must not appear on the Skills tab or after a tab switch.
+    expect(document.querySelector('iframe')).toBeNull()
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: /Tools/ }))
     })
-    const kept = document.querySelector('iframe')
-    expect(kept).toBeTruthy()
-    expect(kept!.closest('section')!.classList.contains('hidden')).toBe(true)
+    expect(document.querySelector('iframe')).toBeNull()
   })
 
   it('shows a vision explainer that deep-links to Settings → Models', async () => {

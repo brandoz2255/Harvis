@@ -1,0 +1,16 @@
+# The Hermes browser build only COPYs these two trees.  Keeping the context
+# allowlisted avoids shipping local node_modules, generated bundles, and the
+# other frontend experiments to Docker on every Hermes UI build.
+*
+!hermes-desktop-ui/
+!hermes-desktop-ui/**
+!hermes-shared/
+!hermes-shared/**
+
+# The allowlisted app still has local development output beneath it.  The
+# Dockerfile installs its own dependencies and creates its own dist bundle.
+hermes-desktop-ui/node_modules/
+hermes-desktop-ui/dist/
+hermes-desktop-ui/release/
+hermes-desktop-ui/.vite/
+hermes-desktop-ui/.eslintcache

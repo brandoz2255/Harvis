@@ -6,10 +6,10 @@ import { CodeEditor } from '@/components/chat/code-editor'
 import { PageLoader } from '@/components/page-loader'
 import { Button } from '@/components/ui/button'
 import { ProfileGlyph } from '@/components/ui/profile-glyph'
-import { getProfileSoul, type ProfileInfo, updateProfileSoul } from '@/hermes'
+import { exportProfileArchive, getProfileSoul, importProfileArchive, type ProfileInfo, updateProfileSoul } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { displayPath } from '@/lib/display-path'
-import { AlertTriangle, Save } from '@/lib/icons'
+import { AlertTriangle, Download, Save, Upload } from '@/lib/icons'
 import { resolveProfileColor } from '@/lib/profile-color'
 import { normalize } from '@/lib/text'
 import { notify, notifyError } from '@/store/notifications'
@@ -102,6 +102,64 @@ export function ProfilesView({ onClose }: ProfilesViewProps) {
     [refresh]
   )
 
+  // Harvis profiles travel as one JSON document (soul + model + description),
+  // downloaded and re-uploaded through the browser: no native save dialogs here.
+  const importInputRef = useRef<HTMLInputElement | null>(null)
+
+  const exportProfile = useCallback(async (profile: ProfileInfo) => {
+    try {
+      const { archive } = await exportProfileArchive(profile.name)
+      const blob = new Blob([JSON.stringify(archive, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = `${profile.name}.harvis-profile.json`
+      link.click()
+      URL.revokeObjectURL(url)
+      notify({ kind: 'success', message: `${profileLabel(profile)} was downloaded.`, title: 'Profile exported' })
+    } catch (err) {
+      notifyError(err, 'Could not export the profile')
+    }
+  }, [])
+
+  const importProfile = useCallback(
+    async (file: File) => {
+      try {
+        const document = JSON.parse(await file.text()) as unknown
+
+        if (!document || typeof document !== 'object') {
+          throw new Error('That file is not a Harvis profile export.')
+        }
+
+        const result = await importProfileArchive(document as never)
+        notify({ kind: 'success', message: `Imported as ${result.name}.`, title: 'Profile imported' })
+        await selectAndRefresh(result.name)
+      } catch (err) {
+        notifyError(err, 'Could not import the profile')
+      }
+    },
+    [selectAndRefresh]
+  )
+
+  const importInput = (
+    <input
+      accept="application/json,.json"
+      aria-label="Import profile file"
+      className="hidden"
+      data-testid="profile-import-input"
+      onChange={event => {
+        const file = event.target.files?.[0]
+        event.target.value = ''
+
+        if (file) {
+          void importProfile(file)
+        }
+      }}
+      ref={importInputRef}
+      type="file"
+    />
+  )
+
   return (
     <Panel closeLabel={p.close} onClose={onClose}>
       {!profiles ? (
@@ -119,7 +177,16 @@ export function ProfilesView({ onClose }: ProfilesViewProps) {
         />
       ) : (
         <>
-          <PanelHeader subtitle={p.count(profiles.length)} title={p.title} />
+          <PanelHeader
+            actions={
+              <Button onClick={() => importInputRef.current?.click()} size="sm" variant="ghost">
+                <Upload className="size-3.5" /> Import
+              </Button>
+            }
+            subtitle={p.count(profiles.length)}
+            title={p.title}
+          />
+          {importInput}
           <PanelBody>
             <PanelList
               onSearchChange={setQuery}
@@ -135,9 +202,13 @@ export function ProfilesView({ onClose }: ProfilesViewProps) {
                     profile.is_default
                       ? // Renaming the default profile sets a presentation-only
                         // display name (the canonical id stays "default").
-                        [{ icon: 'edit', label: p.renameMenu, onSelect: () => setPendingRename(profile) }]
+                        [
+                          { icon: 'edit', label: p.renameMenu, onSelect: () => setPendingRename(profile) },
+                          { icon: 'cloud-download', label: 'Export', onSelect: () => void exportProfile(profile) }
+                        ]
                       : [
                           { icon: 'edit', label: p.renameMenu, onSelect: () => setPendingRename(profile) },
+                          { icon: 'cloud-download', label: 'Export', onSelect: () => void exportProfile(profile) },
                           {
                             icon: 'trash',
                             label: t.common.delete,

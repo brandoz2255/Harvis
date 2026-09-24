@@ -49,6 +49,9 @@ import { cn } from '@/lib/utils'
 import { playSpeechText, stopVoicePlayback } from '@/lib/voice-playback'
 import { notifyError } from '@/store/notifications'
 import { requestSendDiagnostics } from '@/store/send-diagnostics'
+
+// Harvis: the diagnostics bundle uploads logs to Nous-internal storage; never offered.
+const SEND_DIAGNOSTICS_UPLOAD = false
 import { $connection, $currentModel } from '@/store/session'
 import { $voicePlayback } from '@/store/voice-playback'
 
@@ -564,10 +567,12 @@ const ErrorRecoveryActions: FC = () => {
           {remoteConnection ? copy.errorOpenDesktopLogs : copy.errorOpenLogs}
         </button>
       )}
-      <button className="aui-error-action" onClick={() => requestSendDiagnostics(diagnosticsText())} type="button">
-        <Upload className="size-3" />
-        {copy.errorSendDiagnostics}
-      </button>
+      {SEND_DIAGNOSTICS_UPLOAD && (
+        <button className="aui-error-action" onClick={() => requestSendDiagnostics(diagnosticsText())} type="button">
+          <Upload className="size-3" />
+          {copy.errorSendDiagnostics}
+        </button>
+      )}
       <CopyButton
         appearance="inline"
         className="aui-error-action"

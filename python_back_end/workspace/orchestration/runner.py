@@ -843,10 +843,12 @@ class SubAgentRunner:
             except Exception:
                 logger.exception("mcp: tool discovery failed; continuing without it")
                 mcp_specs = []
-        if mcp_specs and computer is not None:
-            # A teammate run re-sends every tool schema on every step, so the
-            # whole connector catalogue (156 tools / ~200 KB here) starved the
-            # model of time before its first tool call. Budget it, goal-first.
+        if mcp_specs:
+            # Every run re-sends every tool schema on every step, so the whole
+            # connector catalogue (156 tools / ~200 KB here) starved local
+            # models of time before their first tool call — a 240 s read
+            # timeout on gemma4:e4b and qwen3:4b alike. Budget it, goal-first,
+            # for plain workspace runs as well as teammate runs.
             from plugins.agents.tool_budget import trim as _trim_mcp
 
             mcp_specs, _dropped_mcp = _trim_mcp(mcp_specs, task)
