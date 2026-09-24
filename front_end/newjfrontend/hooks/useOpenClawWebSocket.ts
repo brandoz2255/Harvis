@@ -17,7 +17,12 @@ export function useOpenClawWebSocket(taskId: string | null) {
   const connect = useCallback(() => {
     if (!taskId || ws.current?.readyState === WebSocket.OPEN) return
 
-    const wsUrl = `ws://localhost:8000/ws/openclaw/tasks/${taskId}`
+    // Same-origin URL through the nginx proxy (/ws/openclaw/ -> backend).
+    // Browsers cannot set headers on WebSocket, so the JWT goes in ?token=.
+    const token = typeof window !== 'undefined' ? (localStorage.getItem('token') || '') : ''
+    const proto = typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const host = typeof window !== 'undefined' ? window.location.host : ''
+    const wsUrl = `${proto}//${host}/ws/openclaw/tasks/${taskId}?token=${encodeURIComponent(token)}`
     ws.current = new WebSocket(wsUrl)
 
     ws.current.onopen = () => {

@@ -125,11 +125,14 @@ python_back_end/whisper_models/
 **/*.ckpt
 
 # openclaw directory (image is pre-built, not tracked)
-openclaw/
+# Anchored to the repo-root vendored tree only — an unanchored "openclaw/"
+# also matches app dirs named openclaw (e.g. front_end/.../app/api/openclaw/,
+# components/openclaw/) and would silently drop tracked frontend code.
+/openclaw/
 # ...but track our local config and skills placeholder
-!openclaw/config/
-!openclaw/config/openclaw.json
-!openclaw/config/exec-approvals.json
+!/openclaw/config/
+!/openclaw/config/openclaw.json
+!/openclaw/config/exec-approvals.json
 !openclaw/skills/
 !openclaw/skills/.gitkeep
 

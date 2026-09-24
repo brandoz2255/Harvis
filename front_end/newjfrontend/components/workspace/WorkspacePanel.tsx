@@ -1552,18 +1552,13 @@ export function WorkspacePanel({ onContinueInChat }: { onContinueInChat?: (summa
   const handleCancel = async () => {
     if (!workspaceId) return
     const store = useOpenClawStore.getState()
-    let _cancelStatus: number | null = null
-    let _cancelBody: string = ''
     try {
       const token = localStorage.getItem('token')
       const headers: Record<string, string> = {}
       if (token) headers['Authorization'] = `Bearer ${token}`
-      const res = await fetch(`/api/workspace/cancel/${workspaceId}`, { method: 'POST', headers })
-      _cancelStatus = res.status
-      try { _cancelBody = (await res.clone().text()).slice(0, 300) } catch { /* ignore */ }
+      await fetch(`/api/workspace/cancel/${workspaceId}`, { method: 'POST', headers })
     } catch (err) {
       console.error('Workspace cancel failed:', err)
-      _cancelBody = String(err).slice(0, 300)
       // Even if the backend call failed, still reset the UI so the user can
       // launch another task instead of being stuck on a zombie running panel.
     }
@@ -1589,24 +1584,6 @@ export function WorkspacePanel({ onContinueInChat }: { onContinueInChat?: (summa
     store.setWorkspaceId(null)
     store.setWorkspaceSessionId(null)
     store.setSuggestion(null)
-
-    // #region agent log
-    try {
-      fetch('http://127.0.0.1:7532/ingest/9269ee65-762c-4e4d-9bef-0cd2be96389e', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'd007eb' },
-        body: JSON.stringify({
-          sessionId: 'd007eb',
-          location: 'WorkspacePanel.tsx:handleCancel',
-          message: 'workspace_cancel_clicked',
-          data: { workspaceId, cancelStatus: _cancelStatus, cancelBody: _cancelBody },
-          runId: 'run_cancel_button',
-          hypothesisId: 'H_cancel',
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {})
-    } catch { /* ignore */ }
-    // #endregion
   }
 
 
