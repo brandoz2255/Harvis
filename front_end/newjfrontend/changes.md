@@ -1,3 +1,62 @@
+## 2026-09-24: OpenClaw UI wired to real backend endpoints (Hermes UI ↔ endpoint audit)
+
+### Problem
+An endpoint-contract scan of the workspace/OpenClaw ("Hermes") UI found the UI
+was mostly wired, but the entire OpenClaw task/instance surface it calls had no
+backend and several frontend calls were broken:
+- `/api/openclaw/tasks` (+ `/{id}`, `/{id}/cancel|approve|context`) and
+  `/api/openclaw/instances` returned 404 — the backend route never existed.
+- `/ws/openclaw/tasks/{id}` WebSocket did not exist.
+- `useOpenClawWebSocket.ts` hardcoded `ws://localhost:8000` (unreachable in
+  Docker/K8s) with no auth token.
+- `useOpenClawAPI.ts` and `TaskStarter.tsx` sent no `Authorization` header.
+- The Next.js OpenClaw proxy read its subpath from `?path=` while callers used
+  real path segments, so it could not resolve `/api/openclaw/tasks` standalone.
+- Leftover `localhost:7532` debug-telemetry beacons in three files.
+- `/api/tts/*` 404'd — `api/tts_routes.py` was imported but never mounted.
+
+### Root cause
+The OpenClaw UI (hooks + components) was built against a designed backend API
+that was never implemented, and dev-only debug beacons were left in the tree.
+
+### Solution
+Backend (python_back_end):
+- New `workspace/openclaw_tasks_router.py` — a thin translation layer over the
+  existing workspace engine: `createTask` launches a real workspace run and the
+  `/ws/openclaw/tasks/{id}` WebSocket bridges the per-workspace live broadcaster
+  into the `{type:'event', event:{job_id,type,payload,timestamp}}` envelope the
+  store parses. JWT auth via `?token=` / cookie + per-user ownership checks.
+- `main.py` registers it and mounts the previously-unmounted `tts_router`.
+- `nginx.conf` gains a `/ws/openclaw/` upgrade location.
+
+Frontend (newjfrontend):
+- `useOpenClawWebSocket.ts` → same-origin `wss?`+`/ws/openclaw/tasks/{id}?token=`.
+- `useOpenClawAPI.ts` + `TaskStarter.tsx` → `Authorization: Bearer` on all calls.
+- Replaced `app/api/openclaw/route.ts` (`?path=`) with catch-all
+  `app/api/openclaw/[...path]/route.ts` forwarding real segments to the backend.
+- Removed all 5 `localhost:7532` debug beacons (WorkspacePanel,
+  ModelSelectorDropdown, openclawStore).
+- `.gitignore`: anchored `openclaw/` → `/openclaw/` so app dirs named `openclaw`
+  are not silently ignored (the new catch-all route was being dropped).
+
+### Files modified
+- python_back_end/workspace/openclaw_tasks_router.py (new)
+- python_back_end/main.py, nginx.conf
+- front_end/newjfrontend/hooks/useOpenClawAPI.ts, useOpenClawWebSocket.ts
+- front_end/newjfrontend/components/openclaw/TaskStarter.tsx
+- front_end/newjfrontend/components/workspace/{WorkspacePanel,ModelSelectorDropdown}.tsx
+- front_end/newjfrontend/stores/openclawStore.ts
+- front_end/newjfrontend/app/api/openclaw/[...path]/route.ts (new; old route.ts removed)
+- .gitignore
+
+### Result / status
+Endpoints now exist and are wired end-to-end (auth + ownership enforced).
+Not built (deferred to goal #4 "Harvis's own computer" / browser-runner): task
+per-step screenshots, VM `instances` (currently logical records), and the
+`needs_approval` interactive gate. `useAgentStream.ts` still connects the browser
+directly to the OpenClaw gateway on :18789 (violates the no-host-exposure rule) —
+left as an open item pending a backend gateway-events proxy decision.
+
 ## 2026-04-24: Agent ran tools but produced empty answers / wrong answers in workspaces
 
 ### Problem

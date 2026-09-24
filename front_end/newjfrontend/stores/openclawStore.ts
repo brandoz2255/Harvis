@@ -386,26 +386,6 @@ export const useOpenClawStore = create<OpenClawState>()(
       const token = localStorage.getItem('token')
       if (!token || !workspaceId) return
 
-      // #region agent log
-      try {
-        fetch('http://127.0.0.1:7532/ingest/9269ee65-762c-4e4d-9bef-0cd2be96389e', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'd007eb' },
-          body: JSON.stringify({
-            sessionId: 'd007eb',
-            location: 'openclawStore.ts:attachToWorkspaceStream:start',
-            message: 'attach_workspace_stream_start',
-            data: { workspaceId },
-            runId: 'run_workspace_follow_click',
-            hypothesisId: 'H_active_orphan',
-            timestamp: Date.now(),
-          }),
-        }).catch(() => {})
-      } catch {
-        /* ignore */
-      }
-      // #endregion
-
       set((state) => {
         state.sseAbortController?.abort()
         state.logEvents = []
@@ -434,49 +414,10 @@ export const useOpenClawStore = create<OpenClawState>()(
           signal: controller.signal,
         })
       } catch {
-        // #region agent log
-        try {
-          fetch('http://127.0.0.1:7532/ingest/9269ee65-762c-4e4d-9bef-0cd2be96389e', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'd007eb' },
-            body: JSON.stringify({
-              sessionId: 'd007eb',
-              location: 'openclawStore.ts:attachToWorkspaceStream:fetch',
-              message: 'attach_workspace_stream_fetch_failed',
-              data: { workspaceId },
-              runId: 'run_workspace_follow_click',
-              hypothesisId: 'H_active_orphan',
-              timestamp: Date.now(),
-            }),
-          }).catch(() => {})
-        } catch {
-          /* ignore */
-        }
-        // #endregion
         get().addLogEvent({ type: 'error', message: 'SSE connection failed.' })
         set({ workspaceId: null, isWorkspaceActive: false })
         return
       }
-
-      // #region agent log
-      try {
-        fetch('http://127.0.0.1:7532/ingest/9269ee65-762c-4e4d-9bef-0cd2be96389e', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': 'd007eb' },
-          body: JSON.stringify({
-            sessionId: 'd007eb',
-            location: 'openclawStore.ts:attachToWorkspaceStream:response',
-            message: 'attach_workspace_stream_response',
-            data: { workspaceId, status: streamRes.status, ok: streamRes.ok, hasBody: Boolean(streamRes.body) },
-            runId: 'run_workspace_follow_click',
-            hypothesisId: 'H_active_orphan',
-            timestamp: Date.now(),
-          }),
-        }).catch(() => {})
-      } catch {
-        /* ignore */
-      }
-      // #endregion
 
       // Handle 404 or other error responses - clear stale workspace state
       if (!streamRes.ok) {

@@ -22,11 +22,19 @@ interface CreateInstanceRequest {
   vm_config?: Record<string, any>
 }
 
+// Read the JWT the same way the rest of the app does (see lib/api.ts getAuthHeaders)
+const authToken = () =>
+  typeof window !== 'undefined' ? localStorage.getItem('token') || '' : ''
+
 export function useOpenClawAPI() {
   const createTask = useCallback(async (request: CreateTaskRequest) => {
+    const token = authToken()
     const response = await fetch('/api/openclaw/tasks', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
       body: JSON.stringify(request),
     })
 
@@ -38,9 +46,13 @@ export function useOpenClawAPI() {
   }, [])
 
   const cancelTask = useCallback(async (taskId: string, reason?: string) => {
+    const token = authToken()
     const response = await fetch(`/api/openclaw/tasks/${taskId}/cancel`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
       body: JSON.stringify({ reason }),
     })
 
@@ -53,9 +65,13 @@ export function useOpenClawAPI() {
 
   const submitApproval = useCallback(
     async (taskId: string, requestId: string, approved: boolean, reason?: string) => {
+      const token = authToken()
       const response = await fetch(`/api/openclaw/tasks/${taskId}/approve`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
         body: JSON.stringify({
           request_id: requestId,
           approved,
@@ -74,9 +90,13 @@ export function useOpenClawAPI() {
 
   const submitContext = useCallback(
     async (taskId: string, requestId: string, response: string, attachments?: any[]) => {
+      const token = authToken()
       const res = await fetch(`/api/openclaw/tasks/${taskId}/context`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
         body: JSON.stringify({
           request_id: requestId,
           response,
@@ -94,7 +114,10 @@ export function useOpenClawAPI() {
   )
 
   const fetchTasks = useCallback(async () => {
-    const response = await fetch('/api/openclaw/tasks')
+    const token = authToken()
+    const response = await fetch('/api/openclaw/tasks', {
+      headers: { Authorization: `Bearer ${token}` },
+    })
 
     if (!response.ok) {
       throw new Error('Failed to fetch tasks')
@@ -104,7 +127,10 @@ export function useOpenClawAPI() {
   }, [])
 
   const fetchTask = useCallback(async (taskId: string) => {
-    const response = await fetch(`/api/openclaw/tasks/${taskId}`)
+    const token = authToken()
+    const response = await fetch(`/api/openclaw/tasks/${taskId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
 
     if (!response.ok) {
       throw new Error('Failed to fetch task')
@@ -114,9 +140,13 @@ export function useOpenClawAPI() {
   }, [])
 
   const createInstance = useCallback(async (request: CreateInstanceRequest) => {
+    const token = authToken()
     const response = await fetch('/api/openclaw/instances', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
       body: JSON.stringify(request),
     })
 
@@ -128,7 +158,10 @@ export function useOpenClawAPI() {
   }, [])
 
   const fetchInstances = useCallback(async () => {
-    const response = await fetch('/api/openclaw/instances')
+    const token = authToken()
+    const response = await fetch('/api/openclaw/instances', {
+      headers: { Authorization: `Bearer ${token}` },
+    })
 
     if (!response.ok) {
       throw new Error('Failed to fetch instances')

@@ -47,11 +47,14 @@ export function TaskStarter() {
     setIsStarting(true)
 
     try {
+      const token = typeof window !== 'undefined' ? localStorage.getItem('token') || '' : ''
+
       // Call API to start task
       const response = await fetch('/api/openclaw/tasks', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
           task_prompt: taskDescription,
