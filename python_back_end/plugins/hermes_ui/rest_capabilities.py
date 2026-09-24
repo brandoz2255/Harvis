@@ -82,7 +82,9 @@ async def skill_content(request: Request, user=Depends(get_current_user_optimize
     return {"content": row["content"], "name": row["name"], "path": f"owui_skills/{row['name']}"}
 
 
-@router.post("/skills/toggle")
+# The desktop Capabilities screen sends PUT (src/api/skills.ts setSkillEnabled);
+# accept POST too so any older/OWUI caller keeps working.
+@router.api_route("/skills/toggle", methods=["POST", "PUT"])
 async def skill_toggle(request: Request, user=Depends(get_current_user_optimized)):
     body = await request.json()
     name, enabled = str(body.get("name") or ""), bool(body.get("enabled"))
@@ -231,6 +233,67 @@ async def mcp_servers(request: Request, user=Depends(get_current_user_optimized)
             "url": r["url"], "enabled": bool(r["enabled"]), "tools": None,
         })
     return {"servers": servers}
+
+
+@router.put("/mcp/servers")
+async def mcp_servers_replace(request: Request, user=Depends(get_current_user_optimized)):
+    """Replace the whole `mcp_servers` map — the desktop mcp.json editor's save.
+
+    The Hermes desktop UI's saveMcpServers() sends PUT {"servers": {name: cfg}}
+    and expects a full REPLACE (not a deep-merge): servers absent from the map
+    are removed, and each server's transport/url/command/args/enabled is
+    overwritten. Credentials are still sealed through _upsert_server/merge_env,
+    so a save that omits a token (the editor never sees stored secrets) keeps the
+    stored one instead of wiping it.
+    """
+    body = await request.json()
+    servers = body.get("servers")
+    if not isinstance(servers, dict):
+        raise HTTPException(400, 'Expected {"servers": {name: config}}')
+
+    # Validate every entry up front so a bad one can't leave a half-replaced map.
+    cleaned: list[tuple[str, dict]] = []
+    for raw_name, cfg in servers.items():
+        name = str(raw_name or "").strip()
+        if not name or not isinstance(cfg, dict):
+            continue
+        transport = str(cfg.get("transport") or "stdio").strip().lower()
+        if transport not in ("stdio", "sse", "streamable-http"):
+            raise HTTPException(400, f"Unsupported transport for {name}: {transport}")
+        cleaned.append((name, {**cfg, "transport": transport}))
+    keep = {name for name, _ in cleaned}
+
+    # Upsert first, delete second: no single transaction spans _upsert_server's
+    # own connection, so if an upsert raised mid-loop a delete-first order could
+    # drop servers without re-adding them. This way a partial failure keeps the
+    # prior rows intact.
+    for name, cfg in cleaned:
+        # _upsert_server seals creds + guards remote URLs but does not touch the
+        # enabled column, so apply enabled after (default True — an omitted flag
+        # re-enables, matching the editor's replace semantics).
+        await _upsert_server(
+            request, user, name=name, transport=cfg["transport"],
+            url=str(cfg.get("url") or "").strip() or None,
+            command=str(cfg.get("command") or "").strip() or None,
+            args=list(cfg.get("args") or []),
+            auth_method=str(cfg.get("auth_method") or "none"),
+            env={}, credentials={str(k): str(v) for k, v in (cfg.get("env") or {}).items()})
+        async with _pool(request).acquire() as conn:
+            await conn.execute(
+                "UPDATE mcp_servers SET enabled=$3, updated_at=NOW() "
+                "WHERE user_id=$1 AND server_name=$2",
+                _uid(user), name, bool(cfg.get("enabled", True)))
+
+    async with _pool(request).acquire() as conn:
+        existing = await conn.fetch(
+            "SELECT server_name FROM mcp_servers WHERE user_id=$1", _uid(user))
+        for r in existing:
+            if r["server_name"] not in keep:
+                await conn.execute(
+                    "DELETE FROM mcp_servers WHERE user_id=$1 AND server_name=$2",
+                    _uid(user), r["server_name"])
+
+    return {"ok": True}
 
 
 @router.put("/mcp/servers/{name}/enabled")
