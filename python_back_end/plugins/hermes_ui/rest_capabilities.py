@@ -82,19 +82,6 @@ async def skill_content(request: Request, user=Depends(get_current_user_optimize
     return {"content": row["content"], "name": row["name"], "path": f"owui_skills/{row['name']}"}
 
 
-# The desktop Capabilities screen sends PUT (src/api/skills.ts setSkillEnabled);
-# accept POST too so any older/OWUI caller keeps working.
-@router.api_route("/skills/toggle", methods=["POST", "PUT"])
-async def skill_toggle(request: Request, user=Depends(get_current_user_optimized)):
-    body = await request.json()
-    name, enabled = str(body.get("name") or ""), bool(body.get("enabled"))
-    async with _pool(request).acquire() as conn:
-        tag = await conn.execute(
-            "UPDATE owui_skills SET enabled=$3, updated_at=NOW() WHERE user_id=$1 AND name=$2",
-            _uid(user), name, enabled)
-    return {"ok": tag.endswith("1"), "name": name, "enabled": enabled}
-
-
 @router.get("/skills/hub/sources")
 async def skills_hub_sources(user=Depends(get_current_user_optimized)):
     return {"sources": [], "index_available": False, "featured": [], "installed": {}}
