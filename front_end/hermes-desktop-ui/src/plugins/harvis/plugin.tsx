@@ -26,8 +26,10 @@ import { BotsPage } from './bots-page'
 import { BrowserPage } from './browser'
 import { BrowserDock } from './browser-dock'
 import { RecentRunsButton } from './chat-mode'
+import { watchLearnedSkills } from './learned-skill'
 import { NotebooksPage } from './notebooks'
 import { ResearchPage } from './research'
+import { SandboxButton } from './sandbox-button'
 import { RunDock } from './run-dock'
 
 const plugin: HermesPlugin = {
@@ -36,10 +38,14 @@ const plugin: HermesPlugin = {
   description: 'Harvis workspace runs inside the chat, plus the Deep Research, Notebooks and Browser pages.',
   defaultEnabled: true,
   register(ctx) {
+    // "Harvis learned a skill ▸ Enable" toasts for skills Harvis drafts after a hard job.
+    ctx.onDispose(watchLearnedSkills())
     ctx.registerMany([
       // No mode pill: Harvis picks chat vs workspace run per message (or follows
       // what the message asks for). Only reopening a recent run stays here.
       { id: 'recent-runs', area: COMPOSER_AREAS.actions, order: 10, render: () => <RecentRunsButton /> },
+      // This chat's sandbox: size, the apps it's serving (Open → right panel), GPU, Delete.
+      { id: 'sandbox', area: COMPOSER_AREAS.actions, order: 11, render: () => <SandboxButton /> },
       // Deep Research from the chat's "+" menu, so it isn't only on its own page.
       // The anchored phrase is research_bridge's explicit trigger: the backend
       // takes everything after "on" as the topic and runs the research inline
