@@ -168,10 +168,11 @@ afterEach(() => {
 const DEFAULT_PROFILE = { is_default: true, name: 'Harvis' } as unknown as ProfileInfo
 const BOT_PROFILE = { is_default: false, name: 'scout' } as unknown as ProfileInfo
 
-describe('the Bots pane gate', () => {
-  // Harvis: no bots yet means no BOTS tab at all, so the sidebar stays a plain
-  // Sessions column instead of a SESSIONS | BOTS strip with one placeholder row.
-  it('registers the pane only while a non-default profile exists', () => {
+describe('the Bots pane', () => {
+  // Harvis: SESSIONS | BOTS is always a tab strip — the Bots tab is the one bot
+  // surface and holds the "+" that makes the first bot, so it must exist even
+  // before any bot does, and must not come and go as the roster changes.
+  it('is registered with no bots yet and stays registered as the roster changes', () => {
     paneStores()
     $profiles.set([DEFAULT_PROFILE])
 
@@ -179,21 +180,15 @@ describe('the Bots pane gate', () => {
 
     plugin.register(harness.ctx)
 
-    expect(harness.find('pane')).toBeUndefined()
+    expect(harness.find('pane')).toBeDefined()
 
     $profiles.set([DEFAULT_PROFILE, BOT_PROFILE])
     expect(harness.find('pane')).toBeDefined()
 
     $profiles.set([DEFAULT_PROFILE])
-    expect(harness.find('pane')).toBeUndefined()
-
-    $profiles.set([DEFAULT_PROFILE, BOT_PROFILE])
     expect(harness.find('pane')).toBeDefined()
 
     harness.dispose()
-    $profiles.set([DEFAULT_PROFILE])
-    // Disposed plugins stop listening; nothing to unregister here.
-    expect(harness.find('pane')).toBeDefined()
   })
 })
 

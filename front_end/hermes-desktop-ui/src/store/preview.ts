@@ -131,11 +131,15 @@ export const $previewTabs = persistentAtom<PreviewTab[]>(TABS_STORAGE_KEY, [], {
   decode: decodePreviewTabs,
   // Inline bytes are not restorable. Strip them from images, and skip remote
   // HTML and artifact tabs that cannot render without their in-memory payload.
+  // Harvis: Browser (url) tabs are not restored either. The browser opens when
+  // something needs it (preview.open, a link) and should not greet you on the
+  // next launch as a permanent tab you never asked to keep.
   encode: tabs =>
     JSON.stringify(
       tabs.filter(
         tab =>
           tab.target.kind !== 'artifact' &&
+          tab.target.kind !== 'url' &&
           !tab.target.transient &&
           !(tab.target.previewKind === 'html' && tab.target.dataUrl)
       ),

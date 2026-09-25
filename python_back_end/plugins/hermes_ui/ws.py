@@ -17,7 +17,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from auth_optimized import decode_token_fast
 
-from . import bots, chat, learn, providers, runs, sessions, store, turn_models
+from . import bots, chat, learn, profiles, providers, runs, sessions, store, turn_models
 from .models import DEFAULT_EFFORT, is_hidden_model, ollama_effort, thinking_models
 from .rest import build_model_options
 from .ws_settings import SettingsMethods
@@ -206,7 +206,14 @@ class Connection(SettingsMethods):
 
     async def m_session_create(self, rid, params):
         bot = await bots.get_bot(self.pool, self.user_id, str(params.get("bot_id") or ""))
+        if bot is None and params.get("profile"):
+            # Bot Mode names its bot by profile, not bot_id; without this every
+            # roster bot (and every group member) spoke as plain Harvis.
+            bot = await profiles.resolve_session_bot(self.pool, self.user_id, params.get("profile"))
         s = await sessions.create(self.pool, self.user_id, model=str(params.get("model") or ""), bot=bot)
+        title = str(params.get("title") or "").strip()
+        if title:
+            s.title = title  # written into the row when the first message creates it
         info = sessions.runtime_info(s)
         asyncio.get_running_loop().call_soon(
             lambda: asyncio.ensure_future(self.emit("session.info", s.id, info)))
@@ -226,6 +233,23 @@ class Connection(SettingsMethods):
             "messages_omitted": False, "info": info, "inflight": None,
             "running": s.running, "hydrating": False,
         })
+
+    async def m_session_title(self, rid, params):
+        """Rename a session. Bot Mode titles its canonical chat "Bot Chat" right
+        after session.create and finds it again BY that title, so an unanswered
+        rename minted a fresh Bot Chat on every open."""
+        title = str(params.get("title") or "").strip()[:200]
+        if not title:
+            return _err(rid, ERR_PARAMS, "title required")
+        s, _, err = await self._open(rid, params)
+        if err:
+            return err
+        s.title = title
+        if not s.persisted:
+            # No row until the first message; append() writes s.title into it.
+            return _ok(rid, {"title": title, "pending": True, "session_key": s.id})
+        await store.set_flags(self.pool, self.user_id, s.id, title=title)
+        return _ok(rid, {"title": title, "pending": False, "session_key": s.id})
 
     async def m_session_activate(self, rid, params):
         s, _, err = await self._open(rid, params)
@@ -284,8 +308,11 @@ class Connection(SettingsMethods):
             # Sessions saved while Gemini / cloud tags were offered fall back to the default.
             model = "" if is_hidden_model(s.model) else s.model
             endpoint = await providers.resolve_active_endpoint(self.pool, self.user_id)
-            mode = str((await store.get_section(self.pool, self.user_id)).get("chat_mode") or "auto")
             query = next((m["content"] for m in reversed(msgs) if m["role"] == "user"), "")
+            # No mode pill: Harvis decides (auto) unless this message asks for a
+            # mode outright ("use a team", "just answer"). A chat_mode saved by
+            # the old pill is ignored so nobody is stuck in a mode they can't see.
+            mode = chat.requested_mode(query) or "auto"
             recall = await learn.recall_message(self.pool, self.user_id, query)
             turn = [recall, *msgs] if recall else msgs
             # A bot chat: its instructions and knowledge lead every turn, and
