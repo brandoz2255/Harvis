@@ -17,7 +17,7 @@ interface Health {
   reason?: string
 }
 
-interface Session {
+export interface Session {
   sessionId: string
   agentId: null | string
   vncPath: string
@@ -27,7 +27,11 @@ interface Session {
 }
 
 const BASE = '/api/agents/computer'
-const sessionsKey = ['harvis', 'computer', 'sessions'] as const
+export const sessionsKey = ['harvis', 'computer', 'sessions'] as const
+
+/** Live browser sessions. Shared by the page and the dock (same query key, so
+ *  one poll serves both and they never disagree about what is open). */
+export const fetchSessions = () => harvisApi<{ items: Session[] }>(`${BASE}/sessions`).then(r => r.items ?? [])
 
 /** `path` is encoded because it carries its own `?token=`. */
 const vncUrl = (vncPath: string) =>
@@ -69,7 +73,16 @@ function withScheme(raw: string) {
     : `https://duckduckgo.com/?q=${encodeURIComponent(url)}`
 }
 
-function Screen({ session, onClosed }: { session: Session; onClosed: () => void }) {
+export function Screen({
+  session,
+  onClosed,
+  compact = false
+}: {
+  session: Session
+  onClosed: () => void
+  /** The dock's smaller frame; the page gives the screen the full height. */
+  compact?: boolean
+}) {
   const queryClient = useQueryClient()
   const [address, setAddress] = useState('')
   const [error, setError] = useState('')
@@ -158,7 +171,8 @@ function Screen({ session, onClosed }: { session: Session; onClosed: () => void 
       {error && <p className="text-xs text-destructive">{error}</p>}
       <div
         className={cn(
-          'relative min-h-[28rem] flex-1 overflow-hidden rounded-lg border bg-black',
+          'relative flex-1 overflow-hidden rounded-lg border bg-black',
+          compact ? 'h-64 min-h-64' : 'min-h-[28rem]',
           taken && 'ring-2 ring-amber-500/60'
         )}
       >
@@ -187,7 +201,7 @@ export function BrowserPage() {
   })
 
   const sessions = useQuery({
-    queryFn: () => harvisApi<{ items: Session[] }>(`${BASE}/sessions`).then(r => r.items ?? []),
+    queryFn: fetchSessions,
     queryKey: sessionsKey,
     refetchInterval: 5000
   })

@@ -120,6 +120,11 @@ async def append(pool, s: Live, role: str, content: str, reasoning: str = "") ->
         blob, s.persisted = store.new_chat_blob(s.model), False
         if s.bot_id:
             blob["bot_id"] = s.bot_id
+        if s.title:
+            # A title set before the row existed (session.create title=, or
+            # session.title while pending) — _title_for honors it over the
+            # first-message derivation. Bot Mode relies on "Bot Chat" sticking.
+            blob["title"] = s.title
     parent = (blob.get("history") or {}).get("currentId")
     store.append_to_blob(blob, store.make_message(role, content, parent, s.model, reasoning))
     if s.persisted:

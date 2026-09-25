@@ -53,6 +53,35 @@ def research_marker(text: str) -> str | None:
 
 CHAT_MODES = ("auto", "chat", "agent", "orchestrate")
 
+# There is no mode pill: every turn is "auto" (answer in chat, start a run when
+# the task needs one) unless the message itself tells Harvis how to handle it.
+# Only deliberate instructions count, never topic words, so "tell me about
+# multi-agent systems" stays a normal auto turn. Order matters: a refusal
+# ("don't use agents") must win over the agent phrasing inside it.
+_MODE_REQUESTS = (
+    ("chat", re.compile(
+        r"\b(?:just|only)\s+(?:answer|reply|chat|respond)\b"
+        r"|\b(?:don'?t|do\s+not|no\s+need\s+to)\s+(?:run|use|start|launch)\s+(?:any\s+|a\s+|an\s+|the\s+)?"
+        r"(?:tools?|agents?|workspace|runs?)\b"
+        r"|\bwithout\s+(?:any\s+)?(?:tools|agents|a\s+workspace)\b", re.I)),
+    ("orchestrate", re.compile(
+        r"\b(?:use|spin\s+up|assemble|put\s+together|get)\s+(?:a\s+|the\s+)?team\b"
+        r"|\bteam\s+of\s+agents\b"
+        r"|\b(?:use|with)\s+(?:multiple|several|many)\s+agents\b", re.I)),
+    ("agent", re.compile(
+        r"\b(?:use|run|launch|start|spin\s+up)\s+(?:an?\s+|the\s+)?(?:agent|workspace)\b"
+        r"|\b(?:run|do)\s+(?:it|this|that)\s+(?:as|with|in)\s+(?:an?\s+|the\s+)?(?:agent|workspace)\b"
+        r"|\buse\s+(?:your\s+)?tools\b", re.I)),
+)
+
+
+def requested_mode(text: str) -> str | None:
+    """The mode the user explicitly asked for in this message, if any."""
+    for mode, pattern in _MODE_REQUESTS:
+        if pattern.search(text or ""):
+            return mode
+    return None
+
 
 async def stream_turn(token: str, messages: list[dict], model: str = "",
                       endpoint: dict[str, str] | None = None,

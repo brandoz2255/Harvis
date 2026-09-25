@@ -207,7 +207,7 @@ describe('preview store', () => {
     expect($previewTabs.get()).toHaveLength(1)
   })
 
-  it('persists file and url tabs but never artifacts, whose content is memory-only', () => {
+  it('persists file tabs but never browser tabs (opened on demand) or artifacts (memory-only)', () => {
     openPreview(fileTarget('/work/demo.html'), 'file-browser')
     openPreview(urlTarget('http://localhost:5174'), 'tool-result')
     openPreview(artifactTarget('session-1:dashboard'))
@@ -215,8 +215,12 @@ describe('preview store', () => {
     const stored = window.localStorage.getItem('hermes.desktop.previewTabs.v2') ?? ''
 
     expect(stored).toContain('/work/demo.html')
-    expect(stored).toContain('localhost:5174')
+    // Harvis: the browser pops up when something needs it and is not restored
+    // on relaunch — so it never reads as a permanent tab.
+    expect(stored).not.toContain('localhost:5174')
     expect(stored).not.toContain('dashboard')
+    // The live (in-memory) tab list still has the browser for this session.
+    expect($previewTabs.get().some(tab => tab.target.kind === 'url')).toBe(true)
   })
 
   it('strips inline image bytes rather than pushing megabytes into storage', () => {

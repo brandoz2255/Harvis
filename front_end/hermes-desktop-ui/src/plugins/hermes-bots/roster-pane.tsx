@@ -639,7 +639,15 @@ export function BotsPane() {
               </DropdownMenuItem>
               <DropdownMenuItem disabled={activeSourceRoster.length < 2} onSelect={() => setGroupCreateOpen(true)}>
                 <Codicon className="mr-1.5" name="organization" />
-                {b.group.newTitle}
+                {/* A disabled item with no reason reads as broken; say what unlocks it. */}
+                {activeSourceRoster.length < 2 ? (
+                  <span className="flex flex-col">
+                    {b.group.newTitle}
+                    <span className="text-xs text-(--ui-text-tertiary)">{b.group.newNeedsBots}</span>
+                  </span>
+                ) : (
+                  b.group.newTitle
+                )}
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>

@@ -11,9 +11,11 @@ ProfileSoul). RPC shapes: src/plugins/hermes-bots/{profile-config,data}.ts.
 """
 from __future__ import annotations
 
+import json
+import logging
 import re
 import time
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
@@ -23,6 +25,7 @@ from plugins.soul import loader as soul_loader
 from . import settings_store, store
 
 router = APIRouter(prefix="/hermes-api/api/profiles", tags=["hermes-ui"])
+logger = logging.getLogger(__name__)
 
 DEFAULT = "default"
 PROFILES_KEY = "profiles"
@@ -91,6 +94,7 @@ async def set_soul(pool, uid: int, name: str, content: Any) -> None:
     records, rec = await _require(pool, uid, name)
     rec["soul"] = text
     await _save(pool, uid, records)
+    await _sync_bot(pool, uid, name, rec)
 
 
 async def _model_of(pool, uid: int, name: str, rec: dict) -> tuple[str | None, str | None]:
@@ -99,12 +103,184 @@ async def _model_of(pool, uid: int, name: str, rec: dict) -> tuple[str | None, s
     return rec.get("model") or None, rec.get("provider") or None
 
 
+# ── profile ↔ Harvis bot bridge ─────────────────────────────────────────────
+# Bot Mode's roster is profiles, but a chat's agent identity (system prompt,
+# model) and its per-bot history are keyed on a Harvis bot (bots.py,
+# ``owui_subagents`` + ``chat.bot_id``). Every non-default profile is therefore
+# backed by one bot, linked by ``rec["bot_id"]`` so the profile name and the
+# bot handle never have to agree. Bots made on the old /bots page are adopted
+# into the roster on the next list, so there is one set of bots, not two.
+
+CANONICAL_TITLE = "Bot Chat"  # hermes-bots canonical-chat.ts CANONICAL_CHAT_TITLE
+PREVIEW_CHARS = 160
+
+
+def _bot_fields(name: str, rec: dict, base: Optional[dict] = None) -> dict:
+    """The bot body for create/update. update_bot REPLACES the row, so the bot's
+    own extras (avatar, notebooks, starters, tools) are carried through from ``base``."""
+    from . import bots
+    base = base or {}
+    return {
+        "title": (rec.get("display_name") or base.get("name") or name)[: bots.MAX_NAME],
+        "description": str(rec.get("description") or "")[: bots.MAX_DESCRIPTION],
+        # SOUL.md may be far longer than a bot's instructions allow; the profile
+        # keeps the full text, the bot gets the prefix it can hold.
+        "instructions": str(rec.get("soul") or "")[: bots.MAX_INSTRUCTIONS],
+        "model": str(rec.get("model") or "")[: bots.MAX_MODEL],
+        "avatar": base.get("avatar") or None,
+        "notebook_ids": base.get("notebook_ids") or [],
+        "starter_prompts": base.get("starter_prompts") or [],
+        "tools": base.get("tools") or None,
+    }
+
+
+async def ensure_bot(pool, uid: int, name: str) -> Optional[dict]:
+    """The Harvis bot behind a non-default profile, creating it on first need."""
+    from . import bots
+    if name == DEFAULT:
+        return None
+    records, rec = await _require(pool, uid, name)
+    bot = await bots.get_bot(pool, uid, str(rec.get("bot_id") or ""))
+    if bot:
+        return bot
+    try:
+        bot = await bots.create_bot(pool, uid, _bot_fields(name, rec))
+    except bots.BotError as exc:
+        raise ProfileError(f"could not create a bot for {name}: {exc}") from exc
+    rec["bot_id"] = bot["id"]
+    await _save(pool, uid, records)
+    return bot
+
+
+async def resolve_session_bot(pool, uid: int, profile: Any) -> Optional[dict]:
+    """The bot a ``session.create`` for ``profile`` should speak as (None = plain Harvis)."""
+    raw = str(profile or "").strip()
+    if not raw:
+        return None
+    try:
+        name = normalize_name(raw)
+        return await ensure_bot(pool, uid, name)
+    except Exception as exc:  # noqa: BLE001 — a chat must still open as plain Harvis
+        logger.warning("profile %r has no bot identity (%s); using plain Harvis", raw, exc)
+        return None
+
+
+async def _sync_bot(pool, uid: int, name: str, rec: dict) -> None:
+    """Mirror the profile's identity onto its bot. Best effort: a bot-side
+    validation failure must not undo a profile edit the user just made."""
+    from . import bots
+    if name == DEFAULT or not rec.get("bot_id"):
+        return
+    try:
+        base = await bots.get_bot(pool, uid, str(rec["bot_id"]))
+        if base:
+            await bots.update_bot(pool, uid, base["id"], _bot_fields(name, rec, base))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("could not sync bot for profile %s: %s", name, exc)
+
+
+def _unique_name(base: str, records: dict[str, dict]) -> str:
+    try:
+        stem = normalize_name(base)
+    except ProfileError:
+        stem = "bot"
+    name, n = stem, 1
+    while name == DEFAULT or name in records:
+        n += 1
+        name = f"{stem[:58]}-{n}"
+    return name
+
+
+async def _adopt_bots(pool, uid: int, records: dict[str, dict]) -> bool:
+    """Give every Harvis bot that no profile links to a profile record. Returns
+    True when records changed (the caller saves once)."""
+    from . import bots
+    try:
+        all_bots = await bots.list_bots(pool, uid)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("could not list bots to adopt: %s", exc)
+        return False
+    linked = {str(r.get("bot_id")) for r in records.values() if r.get("bot_id")}
+    changed = False
+    for bot in all_bots:
+        if bot["id"] in linked:
+            continue
+        name = _unique_name(bot.get("handle") or bot.get("name") or "bot", records)
+        records[name] = {
+            "created_at": time.time(),
+            "display_name": bot.get("name") or name,
+            "description": bot.get("description") or "",
+            "soul": bot.get("instructions") or "",
+            "model": bot.get("model") or None,
+            "bot_id": bot["id"],
+        }
+        changed = True
+    return changed
+
+
+def _content_text(raw: Any) -> str:
+    """A message's content as plain text (asyncpg hands JSONB back as a string;
+    content is a string or a list of {type, text} parts)."""
+    value = raw
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            pass
+    if isinstance(value, list):
+        value = " ".join(str(p.get("text") or "") for p in value if isinstance(p, dict))
+    return " ".join(str(value or "").split())[:PREVIEW_CHARS]
+
+
+_PREVIEW_SQL = """
+WITH picked AS (
+    SELECT DISTINCT ON (chat->>'bot_id', title = $3)
+           id, chat->>'bot_id' AS bot_id, title, updated_at
+    FROM owui_chats
+    WHERE user_id = $1 AND chat->>'bot_id' = ANY($2::text[])
+    ORDER BY chat->>'bot_id', title = $3, updated_at DESC
+)
+SELECT p.bot_id, p.id, p.title, p.updated_at,
+       (SELECT m->'content' FROM jsonb_array_elements(
+            CASE WHEN jsonb_typeof(c.chat->'messages') = 'array'
+                 THEN c.chat->'messages' ELSE '[]'::jsonb END) WITH ORDINALITY AS t(m, i)
+        ORDER BY i DESC LIMIT 1) AS last_content
+FROM picked p JOIN owui_chats c ON c.id = p.id
+"""
+
+
+async def _chat_previews(pool, uid: int, bot_ids: list[str]) -> dict[str, dict]:
+    """Per bot: its canonical Bot Chat and its newest other chat, each with the
+    LAST message said (any role) as the preview. One query for the whole roster."""
+    if not bot_ids:
+        return {}
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(_PREVIEW_SQL, uid, bot_ids, CANONICAL_TITLE)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("bot previews unavailable: %s", exc)
+        return {}
+    out: dict[str, dict] = {}
+    for r in rows:
+        sid = str(r["id"])
+        entry = {"last_active": r["updated_at"].timestamp() if r["updated_at"] else None,
+                 "preview": _content_text(r["last_content"])}
+        slot = out.setdefault(r["bot_id"], {})
+        if (r["title"] or "") == CANONICAL_TITLE:
+            slot["canonical_session"] = {**entry, "id": sid, "resolved_id": sid,
+                                         "title": CANONICAL_TITLE, "root_title": CANONICAL_TITLE}
+        else:
+            slot["last_session"] = entry
+    return out
+
+
 # ── roster ───────────────────────────────────────────────────────────────────
 
-async def _row(pool, uid: int, name: str, rec: dict) -> dict:
+async def _row(pool, uid: int, name: str, rec: dict, preview: Optional[dict] = None) -> dict:
     """One row that satisfies both ProfileInfo (REST) and RosterRow (Bot Mode)."""
     model, provider = await _model_of(pool, uid, name, rec)
     ui_meta = rec.get("ui_meta") if isinstance(rec.get("ui_meta"), dict) else {}
+    preview = preview or {}
     return {
         "name": name,
         "display_name": rec.get("display_name") or ("Harvis" if name == DEFAULT else name),
@@ -119,17 +295,23 @@ async def _row(pool, uid: int, name: str, rec: dict) -> dict:
         "has_avatar": bool((rec.get("assets") or {}).get("avatar")),
         "ui_meta": ui_meta,
         "ui_meta_revisions": {k: int(rec.get("ui_meta_rev") or 0) for k in ui_meta},
-        "last_session": None,
-        "canonical_session": None,
+        "last_session": preview.get("last_session"),
+        "canonical_session": preview.get("canonical_session"),
         "created_at": rec.get("created_at"),
     }
 
 
 async def list_profiles(pool, uid: int) -> list[dict]:
     records = await _records(pool, uid)
+    if await _adopt_bots(pool, uid, records):
+        await _save(pool, uid, records)
+    names = sorted(k for k in records if k != DEFAULT)
+    previews = await _chat_previews(
+        pool, uid, [str(records[n]["bot_id"]) for n in names if records[n].get("bot_id")])
     rows = [await _row(pool, uid, DEFAULT, records.get(DEFAULT) or {})]
-    for name in sorted(k for k in records if k != DEFAULT):
-        rows.append(await _row(pool, uid, name, records[name]))
+    for name in names:
+        rec = records[name]
+        rows.append(await _row(pool, uid, name, rec, previews.get(str(rec.get("bot_id") or ""))))
     return rows
 
 
@@ -222,7 +404,14 @@ async def create(pool, uid: int, payload: dict) -> dict:
         rec["model"], rec["provider"] = str(payload["model"]), str(payload["provider"])
     records[name] = rec
     await _save(pool, uid, records)
-    return await _row(pool, uid, name, rec)
+    # Back the new profile with a bot now, so its first chat already speaks as it.
+    # Best effort: the profile exists either way, and ensure_bot runs again on
+    # its first session.create if this attempt failed.
+    try:
+        await ensure_bot(pool, uid, name)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("profile %s created without a bot yet: %s", name, exc)
+    return await _row(pool, uid, name, (await _records(pool, uid)).get(name, rec))
 
 
 async def configure(pool, uid: int, name: str, payload: dict) -> dict:
@@ -254,6 +443,8 @@ async def configure(pool, uid: int, name: str, payload: dict) -> dict:
             rec[key] = [str(v) for v in payload[key]]
             applied[key] = True
     await _save(pool, uid, records)
+    if applied.keys() & {"model", "description", "display_name"}:
+        await _sync_bot(pool, uid, name, rec)
     return {"ok": True, "applied": applied}
 
 
@@ -273,9 +464,17 @@ async def rename(pool, uid: int, name: str, new_name: Any) -> str:
 async def delete(pool, uid: int, name: str) -> None:
     if name == DEFAULT:
         raise ProfileError("The default profile cannot be deleted")
-    records, _ = await _require(pool, uid, name)
+    from . import bots
+    records, rec = await _require(pool, uid, name)
+    bot_id = str(rec.get("bot_id") or "")
     del records[name]
     await _save(pool, uid, records)
+    # The bot IS this profile's identity; leaving it would re-adopt it next list.
+    if bot_id:
+        try:
+            await bots.delete_bot(pool, uid, bot_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("profile %s deleted but its bot %s was not: %s", name, bot_id, exc)
 
 
 async def set_asset(pool, uid: int, name: str, asset: Any, data: Any) -> None:
