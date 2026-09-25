@@ -1,5 +1,15 @@
 # Recent Changes and Fixes Documentation
 
+## Date: 2026-09-24 — Bot room chat: missing sessions are 4007, so bots can start talking
+
+**Problem:** in a Bots room, every member's first turn showed "hit an error" and nobody replied.
+
+**Root cause:** the room looks up each bot's session by the title `Group: <roomId>` before any row exists. The desktop UI treats JSON-RPC 4007 as "never existed" and then calls `session.create`. The facade answered that lookup with 4001 ("runtime reaped"), which the room refuses to mint over, so each bot threw instead of opening a chat.
+
+**Solution:** `ERR_SESSION_NOT_FOUND` in `python_back_end/plugins/hermes_ui/ws.py` is 4007. 4001 stays the composer's code for a reaped `process.list` poll, which this facade does not use for session lookup.
+
+**Files modified:** `python_back_end/plugins/hermes_ui/ws.py`
+
 ## Date: 2026-09-25 — Notebooks come back as NotebookLM-style cards and a research workspace
 
 Ask: *"notebooks needs to be more like notebooklm or gemini notebook or more standard to how we have our
