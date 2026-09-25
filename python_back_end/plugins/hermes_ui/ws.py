@@ -33,7 +33,13 @@ ERR_INVALID = -32600
 ERR_METHOD = -32601
 ERR_PARAMS = -32602
 ERR_INTERNAL = -32603
-ERR_SESSION_NOT_FOUND = 4001
+# 4007, not 4001. The desktop Bot Mode treats 4007 as "this id was never a
+# session" and then session.create's one. 4001 means "the runtime was reaped"
+# and it refuses to mint, so every bot in a room reported "hit an error" on
+# the first message (the room resumes by the title "Group: …" before any row
+# exists). Composer polling uses 4001 only for process.list, which this
+# facade answers without a session lookup.
+ERR_SESSION_NOT_FOUND = 4007
 ERR_SESSION_BUSY = 4002
 
 
