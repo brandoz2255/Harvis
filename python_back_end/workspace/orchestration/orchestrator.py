@@ -94,6 +94,11 @@ async def run_orchestrated(
     repo_config: dict | None = None,
     launch_mode: str = "user",   # "auto" (auto-detected launch) → heavy tools withheld from the offered schema
     single_agent: bool = False,  # Agent-pill turn: ONE agent on the task as written, no planner
+    # A Hermes chat's sandbox ({workspace_path, session_id}, plugins/hermes_ui/sandbox.py):
+    # every agent works in that folder and its exec/run_tests go to the chat's hardened
+    # runner container (the one the right sidebar's terminal shows) instead of a scratch
+    # dir and the backend process. The folder is the user's, so nothing is diffed or wiped.
+    sandbox: dict | None = None,
 ) -> AsyncGenerator[OpenClawEvent, None]:
     # Lazy import (avoid circular import at module load). Import the FUNCTIONS
     # from the submodule path — `from .. import workspace_router` would resolve to
@@ -222,6 +227,7 @@ async def run_orchestrated(
                     skill_blocks=child.get("skill_blocks"),
                     pool=pool,
                     user_id=user_id,
+                    session_id=(sandbox or {}).get("session_id") or None,
                 ):
                     await queue.put(ev)
             except Exception as exc:
@@ -247,7 +253,8 @@ async def run_orchestrated(
     tasks: list[asyncio.Task] = []
     for p in plan:
         child_run_id = uuid.uuid4().hex[:8]
-        wsinfo = await iso.create_workspace_for_agent(child_run_id, role=p["role"])
+        wsinfo = ({"workspace_path": sandbox["workspace_path"], "branch_name": "sandbox"} if sandbox
+                  else await iso.create_workspace_for_agent(child_run_id, role=p["role"]))
         await _db_create_run(
             pool,
             child_run_id,
@@ -271,7 +278,8 @@ async def run_orchestrated(
             # Two tasks on purpose: `task` is what the run row and the Plan panel show
             # (the brief, unchanged), `prompt_task` is what the model reads.
             "task": p["task"],
-            "prompt_task": conversation_prefix(p["task"], chat_history),
+            "prompt_task": ((sandbox or {}).get("note", "") + "\n\n" if (sandbox or {}).get("note") else "")
+                           + conversation_prefix(p["task"], chat_history),
             "start": time.monotonic(),
             "ok": True,
             "tool_calls": 0,
@@ -339,9 +347,14 @@ async def run_orchestrated(
     all_files: list[str] = []
     for c in children:
         ws_path = c["wsinfo"]["workspace_path"]
-        diff = await iso.collect_diff(ws_path)
-        files = await iso.collect_changed_files(ws_path)
-        contents = await iso.collect_file_contents(ws_path)  # before cleanup wipes the dir
+        if sandbox:
+            # The chat's own folder (maybe a multi-GB app install): no snapshot to diff
+            # against and nothing to clean up — the sidebar's Files pane shows the result.
+            diff, files, contents = "(changes are in this chat's sandbox — see Files)", [], {}
+        else:
+            diff = await iso.collect_diff(ws_path)
+            files = await iso.collect_changed_files(ws_path)
+            contents = await iso.collect_file_contents(ws_path)  # before cleanup wipes the dir
         all_files += files
         await _db_save_artifact(
             pool, parent_workspace_id, "diff",
@@ -364,7 +377,8 @@ async def run_orchestrated(
             child_summary, None, c["tool_calls"], 0, c["start"],
             prompt_tokens=c["prompt_tokens"], completion_tokens=c["completion_tokens"],
         )
-        await iso.cleanup(ws_path)
+        if not sandbox:
+            await iso.cleanup(ws_path)
 
     await _db_save_artifact(
         pool, parent_workspace_id, "changed_files", content="\n".join(all_files),

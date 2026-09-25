@@ -314,7 +314,7 @@ async def test_run_turn_binds_the_bot_every_turn(monkeypatch):
     assert calls["turn"][0]["content"].startswith("You are Paper Bot.")
     assert "[1] p.pdf — N" in calls["turn"][0]["content"]
     assert calls["mode"] == "chat"
-    assert calls["extra"] == {"harvis_research": False}
+    assert calls["extra"] == {"harvis_research": False, "harvis_sandbox_session": "s1"}
     assert calls["origin"] == "http://o"
     assert calls["assistant"] == "42"
     assert "message.complete" in emitted and live.running is False
@@ -366,4 +366,4 @@ async def test_run_turn_without_a_bot_is_unchanged(monkeypatch):
 
     msgs = [{"role": "user", "content": "hi"}]
     await Connection._run_turn(Conn(), sessions.Live(id="s2", user_id=1, model="m"), msgs)
-    assert calls == {"turn": msgs, "mode": "auto", "extra": {}}
+    assert calls == {"turn": msgs, "mode": "auto", "extra": {"harvis_sandbox_session": "s2"}}

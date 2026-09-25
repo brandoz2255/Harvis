@@ -17,7 +17,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from auth_optimized import decode_token_fast
 
-from . import bots, chat, learn, profiles, providers, runs, sessions, store, turn_models
+from . import bots, chat, learn, profiles, providers, runs, sandbox, sessions, skill_select, store, turn_models
 from .models import DEFAULT_EFFORT, is_hidden_model, ollama_effort, thinking_models
 from .rest import build_model_options
 from .ws_settings import SettingsMethods
@@ -56,6 +56,15 @@ def _token_from(ws: WebSocket) -> Optional[str]:
     if auth.lower().startswith("bearer "):
         return auth[7:].strip()
     return None
+
+
+def _turn_extra(s: sessions.Live, bot: Optional[dict]) -> dict:
+    """Harvis-only body flags: the bot's switches, plus this chat's session id so a
+    workspace run works in the chat's sandbox (owui_compat.workspace_bridge._chat_sandbox)."""
+    extra = bots.turn_extra(bot)
+    if sandbox.enabled():
+        extra = {**extra, "harvis_sandbox_session": s.id}
+    return extra
 
 
 class Connection(SettingsMethods):
@@ -315,6 +324,9 @@ class Connection(SettingsMethods):
             mode = chat.requested_mode(query) or "auto"
             recall = await learn.recall_message(self.pool, self.user_id, query)
             turn = [recall, *msgs] if recall else msgs
+            # Trusted skills whose name or description match this message (or that it names).
+            skill = await skill_select.skill_message(self.pool, self.user_id, query)
+            turn = [skill, *turn] if skill else turn
             # A bot chat: its instructions and knowledge lead every turn, and
             # its tool switches narrow what the turn may start.
             bot = await bots.get_bot(self.pool, self.user_id, s.bot_id) if s.bot_id else None
@@ -326,7 +338,7 @@ class Connection(SettingsMethods):
                       if model and not endpoint and model in await thinking_models() else "")
             # Fallback models, mixture of agents and the personality note (Settings ▸ Model / Chat).
             async for kind, delta in turn_models.stream(self.pool, self.user_id, self.token, turn, model, endpoint,
-                                                        mode, effort, self.origin, extra=bots.turn_extra(bot),
+                                                        mode, effort, self.origin, extra=_turn_extra(s, bot),
                                                         bot=bot is not None):
                 if kind != "run":
                     await self._relay(s, kind, delta, parts, thoughts)
@@ -359,7 +371,8 @@ class Connection(SettingsMethods):
             except Exception:  # noqa: BLE001
                 log.exception("hermes_ui: could not persist assistant turn for %s", s.id)
         if status is None and text.strip():
-            learn.after_turn(self.pool, self.user_id, s.id, msgs, text, ran_workspace)
+            learn.after_turn(self.pool, self.user_id, s.id, msgs, text, ran_workspace,
+                             on_skill=lambda drafted, sid=s.id: self.emit("harvis.skill.drafted", sid, drafted))
         s.running = False
         done = {"text": text}
         if status == "error":

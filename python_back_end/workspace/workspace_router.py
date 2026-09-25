@@ -1404,6 +1404,7 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
             repo_config={"repo_path": _repo_path} if _repo_path else None,
             # Offer-time tool policy: auto-detected launches get heavy tools withheld.
             launch_mode=ws.get("launch_mode", "user"),
+            sandbox=ws.get("sandbox"),
         )
 
     elif agent_id.startswith("agent:"):
@@ -1469,6 +1470,7 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
             isolation_mode="attached" if _repo_path else "scratch",
             repo_config={"repo_path": _repo_path} if _repo_path else None,
             launch_mode=ws.get("launch_mode", "user"),
+            sandbox=ws.get("sandbox"),
         )
 
     elif agent_id == "vibecode-turn":
@@ -2651,6 +2653,7 @@ async def _start_workspace(
     vibecode_reviewer_ids: Optional[list[str]] = None,
     launch_mode: str = "user",
     attachments: Optional[list[dict]] = None,
+    sandbox: Optional[dict] = None,
 ) -> OpenClawClient:
     """
     Register a workspace in memory, create its queue, and start the background task.
@@ -2717,6 +2720,9 @@ async def _start_workspace(
         # Fail-CLOSED for unrecognized non-empty values (a bad/typo signal → restricted);
         # absent callers still get the param default "user" (legacy-compatible).
         "launch_mode": launch_mode if launch_mode in ("user", "auto") else "auto",
+        # A Hermes chat's sandbox ({workspace_path, session_id}): agent-native and
+        # orchestrated runs work there, exec in its hardened runner (orchestrator.py).
+        "sandbox": sandbox or None,
         # The user's raw attachment refs. _prepend_attachments already described
         # them in the brief; this keeps the refs themselves so image attachments
         # can be sent to the model as real multimodal parts rather than a filename.
