@@ -1,5 +1,101 @@
 # Recent Changes and Fixes Documentation
 
+## Date: 2026-09-25 — Notebooks come back as NotebookLM-style cards and a research workspace
+
+Ask: *"notebooks needs to be more like notebooklm or gemini notebook or more standard to how we have our
+opennotebook stuff ... more squares once selected it puts the user in a space that has the tools for
+research."* Branch `feat/hermes-ui`, `front_end/hermes-desktop-ui/src/plugins/harvis/`.
+
+**Problem:** the Hermes Notebooks page was a list-and-detail split. It had a thin row list on the left and
+one notebook squeezed into the right pane behind four tabs. It didn't look or work like open-notebook (`/onb`)
+or NotebookLM: no card home, and nothing you step *into* where sources, chat and tools sit together.
+
+**Root cause:** the notebook features themselves were already there: sources with live ingest, cited chat,
+notes, Studio transformations and audio overview, and auto-name, all over `/api/notebooks/*`. Only the layout was
+wrong. The page used the generic MasterDetail shell every other Hermes page uses.
+
+**Solution (native re-layout, no iframe and no open-notebook container):**
+- `notebooks.tsx`: the home is now a responsive card grid (1 → 4 columns). Each card shows the emoji, the title,
+  the description clamped to four lines, source/note count badges and a relative time. A ⋯ menu offers
+  Open/Delete, and Delete uses the shared ConfirmDialog. The first tile is a dashed **New notebook** square.
+  Like NotebookLM, it creates the notebook straight away ("Untitled notebook") and opens it. Search still
+  filters the cards (title and description) and still lists full-text hits from inside sources and notes.
+- Opening a card routes to `#/notebooks?nb=<id>` (the same `useSearchParams` pattern as `/research?id=`), so a
+  notebook is linkable and browser Back works. The workspace header has a ← button back to the grid.
+- `notebook-detail.tsx` is now the workspace. With ≥1024px of width it shows three columns: **Library** (Sources,
+  then Notes) | **Chat** | **Studio**. Each column scrolls on its own. Narrower than that, it falls back to the old
+  Sources/Chat/Notes/Studio tabs. Width is measured with a ResizeObserver on one stable root, and a `layout` prop can force it.
+- A notebook still titled "Untitled notebook" auto-names itself (title and emoji) the first time one of its sources is
+  ready. This happens once per open and never overwrites a name you set.
+
+**Files modified:** `src/plugins/harvis/notebooks.tsx`, `notebook-detail.tsx`, `notebook-detail.test.tsx`
+(+3 cases: columns layout, auto-name when untitled, named notebooks left alone). New: `notebooks.test.tsx` (4 cases:
+cards, open → workspace → Back, `?nb=` deep link, New creates and opens).
+
+**Verification:** `npx vitest run src/plugins/harvis/` → 9 files / 50 tests pass. `npx tsc -p . --noEmit` is clean
+apart from the known pre-existing fixture/hermes-shared errors. Not yet checked visually in a browser (no stack running here).
+
+**Next (not done):** a richer Studio rail like open-notebook's (Quiz / Flashcards / Study guide / Briefing / FAQ /
+Timeline, plus a "Generated" log and suggested questions). The backend for it already exists at the `onb_compat`
+facade (`/onb-api/notebooks/{id}/generate`, `/artifacts`, `/suggest-questions`); port it from
+`front_end/open-notebook/src/components/notebook/NotebookStudioRail.tsx`.
+
+## Date: 2026-09-25 — One Bots surface that actually works, a browser that pops up, no mode pill
+
+Asks: *"the bots tab should be placed next to sessions at the top / pressing on the bots tab should
+tell me what was the last thing said in that session / in the + for new chat bots i should be able to
+add different bots into a group ... and @ the bot i need"*, *"the browser function [shouldn't] have to
+be a tab it just needs to pop up when its necessary ... like grok"*, *"get rid of the auto function
+next to the model name ... have the ai automatically do it or ... when the user specifies"*,
+*"deep research needs a button in the main chat as a plus where the attach files are"*.
+Branch `feat/hermes-ui` (hermes-desktop-ui + the `hermes_ui` facade).
+
+**Root cause for the bots asks — Bot Mode bots were never real agents on Harvis.** Bot Mode's roster
+is *profiles*, and it sends `profile: <name>` on `session.create` (bot chat and every group turn). The
+facade read only `bot_id` (Harvis bots, `owui_subagents`) and dropped `profile`, so every Bot Mode bot
+answered as plain Harvis and a "group of bots" was one agent replying several times. `profiles.list`
+also hard-coded `last_session`/`canonical_session = None`, so the preview line the UI already draws
+was always blank, and `session.title` did not exist, so the canonical "Bot Chat" never kept its title.
+
+- **Profile ↔ bot bridge** (`profiles.py`): every non-default profile is backed by one Harvis bot,
+  linked by `rec["bot_id"]`. Create makes the bot, soul/model/name/description edits mirror onto it
+  (instructions truncated to the bot's 12k cap; the full SOUL.md stays on the profile), delete removes
+  it. Bots made on the old /bots page are **adopted** into the roster on the next list. All bot-side
+  calls are best-effort: a failure logs and never breaks profile CRUD or a chat opening.
+- **Last message** (`profiles.list`): one query per roster fills `last_session` / `canonical_session`
+  with the **last thing said** (any role) in the bot's newest chat and its Bot Chat.
+- **Sessions** (`ws.py`, `sessions.py`): `session.create` honours `profile` and `title`; new
+  `session.title` (pending title is written into the row on the first message).
+- **SESSIONS | BOTS tab** (`hermes-bots/plugin.tsx`): the Bots pane was registered only once a
+  non-default profile existed, so most users never saw it. Now always registered in the sessions strip.
+- **One Bots surface** (`harvis/plugin.tsx`): removed the old Bots nav row and sidebar section; the
+  /bots page stays routable for old links.
+- **Groups**: "+" already offers *New group chat* and @-mention routing already exists; it was
+  greyed out because the roster had < 2 bots. The disabled item now says why (4 locales).
+
+**Browser** (`harvis/browser-dock.tsx`, `harvis/browser.tsx`, `store/preview.ts`): no Browser nav tab.
+While a browser session is live (agent's first) it docks above the composer with the live screen,
+collapse / hide / "open full view" (/browser). Right-rail browser tabs are no longer restored on relaunch.
+
+**No mode pill** (`harvis/chat-mode.tsx`, `chat.py`, `ws.py`): every turn is Auto unless the message
+explicitly asks — `requested_mode()` honours "use a team", "run this as an agent", "just answer / don't
+run anything" (refusals win; topic words like "multi-agent systems" don't trigger). A stale saved
+`chat_mode` is ignored. Reopening recent runs moved to a history icon that only shows when runs exist.
+
+**Deep research in "+"** (`harvis/plugin.tsx`): a *Deep research* attach-menu entry inserts
+"Deep research on " — research_bridge's anchored trigger, which takes the rest as the topic.
+
+**Verification.** Frontend: `tsc` clean apart from 3 pre-existing environment errors (a fixture path
+outside the repo, `hermes-shared` tests without `vitest`); vitest — store 113 files / 1359 tests,
+harvis + composer 56 / 435, hermes-bots panes + i18n pass. Backend: `test_hermes_ui_*` = 113 passed,
+9 failed — the **same 9 fail on the untouched code** (cron schedule parsing ×8, one settings catalog
+test). Bridge helpers and the mode detector have scratch unit tests (all pass). Not verified here:
+live UI against a running gateway. Known gap: `eslint` cannot run — `eslint.config.mjs` imports a
+monorepo-root `eslint.config.shared.mjs` that is not in this repo.
+
+**Earlier the same day** (`dffc711`, pushed): facade now accepts PUT `/skills/toggle`, bulk PUT
+`/mcp/servers`, and the `approval.received` RPC — three UI calls that were 404 / -32601.
+
 ## Date: 2026-08-01 — Attachments reach every Build lane; the Build preview finally exists
 
 Asks: *"can you just make it so the engine models like anthropic and kimi can do the task too it has

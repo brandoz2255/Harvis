@@ -140,4 +140,47 @@ describe('NotebookDetail', () => {
 
     expect(await screen.findByText('Could not open this notebook')).toBeTruthy()
   })
+
+  it('lays sources, notes, chat and studio out side by side when there is room', async () => {
+    mockRoutes([])
+    const { container } = renderWithQuery(<NotebookDetail layout="columns" notebookId={NB} onDeleted={() => undefined} />)
+
+    await screen.findByText(/Mars Rover Exploration Texts/)
+    expect(container.querySelector('[data-layout="columns"]')).toBeTruthy()
+    expect(screen.queryByRole('radiogroup')).toBeNull()
+    expect(await screen.findByText(/No sources yet/)).toBeTruthy()
+    expect(screen.getByText('Studio')).toBeTruthy()
+    expect(screen.getByText(/^Notes/)).toBeTruthy()
+  })
+
+  it('names an untitled notebook once its first source is ready', async () => {
+    harvisApi.mockImplementation(
+      routeApi({
+        [`GET /api/notebooks/${NB}/sources`]: () => [
+          { id: 's1', type: 'url', title: 'Mars page', status: 'ready', error_message: null, chunk_count: 4, original_filename: null }
+        ],
+        [`GET /api/notebooks/${NB}/stats`]: () => stats,
+        [`GET /api/notebooks/${NB}/notes`]: () => ({ notes: [] }),
+        [`GET /api/notebooks/${NB}/chat/history`]: () => ({ messages: [] }),
+        [`POST /api/notebooks/${NB}/autoname`]: () => ({ title: 'Mars', emoji: '🚀' }),
+        [`GET /api/notebooks/${NB}`]: () => ({ ...notebook, title: 'Untitled notebook' }),
+        'GET /api/workspace/providers': () => ({ providers: [] })
+      })
+    )
+    renderWithQuery(<NotebookDetail notebookId={NB} onDeleted={() => undefined} />)
+
+    await waitFor(() =>
+      expect(harvisApi).toHaveBeenCalledWith(`/api/notebooks/${NB}/autoname`, expect.objectContaining({ method: 'POST' }))
+    )
+  })
+
+  it('leaves a named notebook alone', async () => {
+    mockRoutes([
+      { id: 's1', type: 'url', title: 'Mars page', status: 'ready', error_message: null, chunk_count: 4, original_filename: null }
+    ])
+    renderWithQuery(<NotebookDetail notebookId={NB} onDeleted={() => undefined} />)
+
+    await screen.findByPlaceholderText('Ask something about these sources')
+    expect(harvisApi.mock.calls.some(c => String(c[0]).endsWith('/autoname'))).toBe(false)
+  })
 })
