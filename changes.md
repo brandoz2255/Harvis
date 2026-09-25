@@ -1,5 +1,124 @@
 # Recent Changes and Fixes Documentation
 
+## Date: 2026-09-25 — Harvis writes its own skills; the right sidebar shows each chat's sandbox
+
+Asks: *"tools and skills are made to be created so the ai can make skills to remember how to do a difficult
+job"* and *"when pressing the right button at the top right corner ... it shows terminal and files inside of
+this container that harvis comes with"*. Decisions: a new skill is saved as a draft and you enable it with one
+click; one sandbox per chat session; the sandbox gets internet on an isolated network. Branch `feat/hermes-ui`.
+
+### Skills Harvis writes itself
+**Problem:** Harvis already drafted skills after a workspace run or when asked to "save this as a skill"
+(`learn.draft_skill`), but a draft could never take effect. It was saved OFF. Switching it on didn't give it the
+human `audit.verdict='supported'` that the fail-closed gate (`owui_compat/skills.gated_skill_blocks`) requires.
+Hermes chats never sent `skill_ids`, so no skill ever reached a Hermes chat. The skill editor's Save also
+404'd, because `/api/learning/node` didn't exist.
+
+**Solution:**
+- `plugins/hermes_ui/rest_skills.py` (new; the toggle moved here from `rest_capabilities.py`, which was over the
+  500-line limit): switching a skill **on** records the approval
+  (`audit = {verdict: supported, approved_by, via, approved_at}`), and a `drafts` skill becomes `learned`.
+  Switching it off leaves the audit alone. `GET/PUT/DELETE /learning/node` handles read/save/delete for the editor.
+- `plugins/hermes_ui/skill_select.py` (new): each chat turn carries at most 2 trusted skills. A skill qualifies if the
+  message names it (`/name`, `$name`, or a multi-word slug written out) or if it shares enough words with the
+  message. Name words count double and the threshold is 3, so one shared word is never enough and nothing is
+  global. That avoids the "pirate skill in every chat" leak OWUI had. The skill bodies still pass the same
+  fail-closed gate. Wired in `ws.py _run_turn`.
+- `learn.after_turn(..., on_skill=)`: when a draft lands, the WS sends `harvis.skill.drafted {name, description}`.
+  `plugins/harvis/learned-skill.ts` turns that into a sticky toast, **"Harvis learned a skill ▸ Enable"**.
+
+### Right sidebar = this chat's sandbox
+**Problem:** the files tree and the xterm terminal existed in the UI but did nothing in the browser. `/api/fs/*`
+404'd, the shim terminal was a stub, and sessions reported `cwd: null`, so the pane just said "no project open".
+
+**Solution:**
+- `plugins/hermes_ui/sandbox.py` (new): each chat's folder lives at `<HARVIS_SANDBOX_ROOT>/u<uid>/<session>`
+  (default `/data/artifacts/sandboxes`). It's created on first look. The UI addresses it as
+  `/sandbox/<session>/workspace`. Every path is resolved inside the **caller's own `u<uid>` folder**, and `..`,
+  symlinks that escape, and anything that isn't a sandbox path are refused. The file API covers list,
+  read-text, read-data-url (8 MB cap), write-text (2 MB cap, parent must exist) and git-root.
+  `HARVIS_SANDBOX_ENABLED=false` turns it all off.
+- `plugins/hermes_ui/rest_sandbox.py` (new): `/api/fs/*` routes and a `/api/terminal/ws` terminal WebSocket.
+  The terminal runs a login shell in the chat's container, which is the existing hardened Build Space runner
+  (`terminal_container.ensure_isolated`): all capabilities dropped, no-new-privileges, uid 1001, mem/CPU/pid
+  limits, the chat folder as its only mount, and the `repo-sandbox` network (internet yes; pgsql/ollama/OpenClaw
+  no; falls back to no network if that network is missing). The container only starts when a terminal opens,
+  and the existing idle sweep stops it again.
+- `sessions.py`: `cwd` is now the sandbox path, which lights up the files pane.
+- `src/lib/desktop-shim/terminal.ts` (new): the browser `hermesDesktop.terminal` is now a WebSocket per tab,
+  in place of the stub. The desktop app's own xterm panes are unchanged.
+
+**Verification:** backend `tests/test_hermes_ui_skills.py` (9) and `test_hermes_ui_sandbox.py` (18) pass, including
+path-escape, symlink and cross-user cases and a socketpair-driven terminal protocol test. All `test_hermes_ui_*`:
+140 passed, and the 9 failures (cron parse ×7, job_view_paused, settings catalog) were already failing before
+these changes. Frontend: the new learned-skill and shim terminal tests pass. Full vitest has 9 UI files / 23 tests
+failing, identical on clean HEAD; the electron-project failures are because this environment has no Electron.
+tsc is clean. **Not yet run against a real Docker daemon**, since there is none in this environment.
+
+**Known gaps / next:** see the next section for joining agent runs to the sandbox. MCP checks and the free
+skills/MCP catalog are still open. On k8s the terminal needs the backend to reach a Docker daemon (the helm
+chart's hostPath docker.sock). Without it the terminal says so.
+
+### "Set up this repo / install Pinokio": Harvis installs into the chat's sandbox
+Ask: *"no app catalog, it should be more like mcp getting added manually … they would just give the ai
+instructions and it can put the repo inside of the container."* Decisions: agent plus a port proxy; the GPU is
+opt-in per chat; disk shows usage with one-click delete and no hard cap.
+
+**Found on the way (security):** a Hermes/OWUI chat that escalated to an `agent-native`/`orchestrated` run
+called `runner.run` with no `session_id`. Its `exec`/`run_tests` therefore ran **inside the backend process**
+(`tools.py` `create_subprocess_shell`), and that process holds docker.sock, which is effectively host root.
+Only Build Space turns used the hardened runner.
+
+**Solution:**
+- Hermes sends `harvis_sandbox_session` with each turn (`ws._turn_extra`).
+  `owui_compat/workspace_bridge._chat_sandbox` resolves it inside the user's own folder, and
+  `run_orchestrated(sandbox=…)` (threaded through `_start_workspace`) then does three things:
+  - Every agent works in the chat's folder, and its commands run in the chat's hardened container, the same one
+    the sidebar terminal shows.
+  - The scratch diff and cleanup are skipped, because it's the user's folder.
+  - A short sandbox briefing (`sandbox.agent_note`) goes ahead of the task. It covers where to put things, no
+    sudo, starting servers with `nohup … &` on 0.0.0.0, the app link prefix, base-path flags, and GPU state.
+  OWUI chats are unchanged.
+- A direct instruction ("install ComfyUI", "can you set up <repo>", "clone …") counts as asking for an agent run
+  (`chat.requested_mode`). Only explicit runs get `exec`: auto-detected launches still have it withheld. Questions
+  like "how do I install python?" don't match.
+- **Serving apps:** `rest_sandbox_apps.py` proxies `/hermes-api/sandbox-app/<cap>/<port>/…` (HTTP and WebSocket)
+  to the runner on the `repo-sandbox` network, and nothing is published on the host. The app is untrusted, so:
+  - Every response carries `Content-Security-Policy: sandbox …` without `allow-same-origin`. The page runs on an
+    opaque origin and can't use the SameSite=Lax `access_token` cookie or Harvis storage.
+  - Cookie/Authorization are stripped going out; Set-Cookie and X-Frame-Options are stripped coming back.
+  - `<cap>` is signed with a per-sandbox secret, so links die when the sandbox is deleted.
+  - Ports below 1024 and port 22 are refused.
+  - Cost: apps that insist on their own localStorage/cookies may misbehave.
+- **GPU:** a `.harvis/gpu` marker in the chat's folder makes `terminal_container._spawn_isolated` add an NVIDIA
+  `device_requests`, and a mismatched existing container is recreated. `POST /api/sandbox/gpu` refuses when the
+  daemon has no `nvidia` runtime (`HARVIS_SANDBOX_GPU=off` forces that). New `drop_isolated()` removes the runner.
+- **Disk / delete:** `GET /api/sandbox/info` returns size, over-warn (`HARVIS_SANDBOX_WARN_GB`, default 20),
+  GPU, and the apps listening. Listening apps are read from `/proc/net/tcp` via exec, without starting the
+  container. `DELETE /api/sandbox` removes the container and the folder.
+- Runner container names now use a hash of the session id (`sandbox.runner_key`). Before, the manager's
+  40-character cut could make two long session ids share a container.
+- UI: `plugins/harvis/sandbox-button.tsx` is a new composer button with a popover showing size (amber when over
+  the warning), apps with **Open** (in the right panel's browser), a GPU switch and Delete sandbox. When a new app
+  starts serving, a toast pops with "Open".
+
+**Verification:** `tests/test_hermes_ui_sandbox.py` (40), covering:
+- bridge and orchestrator threading (no scratch dir, no cleanup, runner `session_id`, briefing first)
+- the install-instruction detector
+- link signing, forgery, and rotation on delete
+- the GPU marker and disk usage
+- `/proc/net/tcp` parsing
+- the proxy stripping credentials and setting the CSP
+
+All hermes_ui plus orchestration tests: 170 passed, and the 9 failures were already failing before these
+changes. Frontend: `sandbox-button.test.tsx` (4) passes; `src/plugins/harvis` + shim: 12 files / 60 tests;
+tsc clean. **Not run against a real Docker daemon or GPU** in this environment.
+
+**Files:** `plugins/hermes_ui/{sandbox,rest_sandbox,rest_sandbox_apps,chat,ws,router}.py`,
+`owui_compat/workspace_bridge.py`, `workspace/workspace_router.py`,
+`workspace/orchestration/orchestrator.py`, `workspace/terminal_container.py`;
+`front_end/hermes-desktop-ui/src/plugins/harvis/{sandbox-button.tsx,format.ts,plugin.tsx}`; tests as above.
+
 ## Date: 2026-09-25 — Notebooks come back as NotebookLM-style cards and a research workspace
 
 Ask: *"notebooks needs to be more like notebooklm or gemini notebook or more standard to how we have our

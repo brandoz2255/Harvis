@@ -43,3 +43,20 @@ export function formatDuration(ms: number): string {
 export function formatTokens(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(n >= 10_000 ? 0 : 1)}k` : `${n}`
 }
+
+export function formatBytes(n: number): string {
+  if (n < 1024) {
+    return `${n} B`
+  }
+
+  const units = ['KB', 'MB', 'GB', 'TB']
+  let value = n / 1024
+  let i = 0
+
+  while (value >= 1024 && i < units.length - 1) {
+    value /= 1024
+    i += 1
+  }
+
+  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[i]}`
+}
