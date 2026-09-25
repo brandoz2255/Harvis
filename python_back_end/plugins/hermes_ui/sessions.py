@@ -11,7 +11,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Optional
 
-from . import store
+from . import sandbox, store
 from .models import is_hidden_model
 
 DESKTOP_CONTRACT = 6  # tui_gateway.server.DESKTOP_BACKEND_CONTRACT the vendored UI requires
@@ -163,7 +163,7 @@ def to_session_info(r: dict) -> dict:
         "input_tokens": 0,
         "output_tokens": 0,
         "model": r["model"] or None,
-        "cwd": None,
+        "cwd": sandbox.virtual_cwd(r["id"]),
         "git_branch": None,
         "git_repo_root": None,
         "archived": bool(r.get("archived")),
@@ -190,7 +190,7 @@ def runtime_info(s: Live, running: Optional[bool] = None) -> dict:
         "model": s.model or "harvis-default",
         "provider": "harvis",
         "running": s.running if running is None else running,
-        "cwd": None,
+        "cwd": sandbox.virtual_cwd(s.id),
         "branch": None,
         "title": s.title if s.title != "New Chat" else "",
         "personality": "",
