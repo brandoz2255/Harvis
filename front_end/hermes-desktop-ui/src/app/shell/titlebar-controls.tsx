@@ -23,6 +23,7 @@ import {
   toggleSidebarOpen
 } from '@/store/layout'
 import { $unreadSessionCount } from '@/store/session-dot-state'
+import { $harvisMicOn, $voiceCallLive, toggleHarvisMic } from '@/store/voice-call'
 
 import { appViewForPath, isOverlayView } from '../routes'
 
@@ -137,6 +138,8 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
   const fileBrowserOpen = useStore($fileBrowserOpen)
   const panesFlipped = useStore($panesFlipped)
   const sidebarOpen = useStore($sidebarOpen)
+  const assistantLive = useStore($voiceCallLive)
+  const harvisOn = useStore($harvisMicOn)
   const unreadCount = useStore($unreadSessionCount)
   const unreadBadge = unreadCount > 0 ? unreadCount : undefined
   const unreadHint = unreadBadge ? ` · ${t.titlebar.unreadSessions(unreadBadge)}` : ''
@@ -203,6 +206,20 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
 
   // Static system tools — always pinned to the screen's right edge.
   const systemTools: TitlebarTool[] = [
+    {
+      // Harvis the assistant: its own voice call that moves around the app.
+      // The composer's mic stays the plain talk-to-this-chat call.
+      // An on/off toggle for the bottom mic pill: on shows it on every page
+      // until pressed again; off hides it and ends any call.
+      active: harvisOn,
+      icon: <TitlebarIcon name={assistantLive ? 'mic-filled' : harvisOn ? 'mic' : 'sparkle'} />,
+      id: 'harvis-assistant',
+      label: harvisOn ? t.titlebar.harvisAssistantEnd : t.titlebar.harvisAssistant,
+      onSelect: () => {
+        triggerHaptic(harvisOn ? 'close' : 'open')
+        toggleHarvisMic()
+      }
+    },
     {
       className: 'group/tool',
       // Hover + held ⌘/Ctrl morphs the glyph into its reset form (see

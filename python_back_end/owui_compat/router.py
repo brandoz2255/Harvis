@@ -303,6 +303,12 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
     @router.post("/api/chat/completions")
     async def owui_chat_completions(request: Request, user=Depends(get_current_user)):
         owui_body = await request.json()
+        # The voice assistant's turns: straight to the model, no detector below
+        # may start a run (plugins/hermes_ui/rest_voice.py).
+        if owui_body.get("harvis_plain") is True:
+            from .chat_completion import run_plain_completion
+
+            return await run_plain_completion(request, owui_body, user_id=user.id)
         # A teammate first: the model id alone decides it (`agent:<uuid>`), so
         # this is one string check and it can never claim a turn meant for
         # anything else. It has to precede the detectors below, which read the

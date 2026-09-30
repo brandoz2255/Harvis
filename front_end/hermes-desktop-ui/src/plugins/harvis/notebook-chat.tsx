@@ -16,7 +16,7 @@ import {
   useQuery,
   useQueryClient
 } from '@hermes/plugin-sdk'
-import { useState } from 'react'
+import { type ReactNode, useState } from 'react'
 
 import { harvisApi } from './api'
 import {
@@ -63,7 +63,16 @@ function SaveAnswer({ message, notebookId, question }: { message: ChatMessage; n
   )
 }
 
-export function NotebookChat({ notebookId, ready }: { notebookId: string; ready: boolean }) {
+export function NotebookChat({
+  intro,
+  notebookId,
+  ready
+}: {
+  /** Pinned above the messages; `ask` sends a question, `empty` is true before the first one. */
+  intro?: (ask: (question: string) => void, empty: boolean) => ReactNode
+  notebookId: string
+  ready: boolean
+}) {
   const queryClient = useQueryClient()
   const { available, choose, chosen, loading } = useChosenModel()
   const [draft, setDraft] = useState('')
@@ -77,8 +86,13 @@ export function NotebookChat({ notebookId, ready }: { notebookId: string; ready:
     queryKey: historyKey
   })
 
-  const ask = async () => {
-    const message = draft.trim()
+  const ask = async (question?: string) => {
+    const message = (question ?? draft).trim()
+
+    if (!message || !chosen || pending) {
+      return
+    }
+
     setPending(message)
     setDraft('')
     setError('')
@@ -102,6 +116,7 @@ export function NotebookChat({ notebookId, ready }: { notebookId: string; ready:
 
   return (
     <section className="space-y-3">
+      {intro?.(question => void ask(question), messages.length === 0 && !pending)}
       <div className="flex items-center gap-2">
         <h3 className="flex-1 text-sm font-medium">Ask your sources</h3>
         <Select onValueChange={choose} value={chosen ?? ''}>
@@ -179,9 +194,7 @@ export function NotebookChat({ notebookId, ready }: { notebookId: string; ready:
         onSubmit={event => {
           event.preventDefault()
 
-          if (draft.trim() && chosen && !pending) {
-            void ask()
-          }
+          void ask()
         }}
       >
         <Input

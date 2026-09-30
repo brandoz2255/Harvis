@@ -40,18 +40,23 @@ except ImportError:
 # dead `ollama` hostname. host.docker.internal resolves from inside the
 # container via extra_hosts (["host.docker.internal:host-gateway"]).
 _LLM_DEFAULT_BASE_URL = "http://host.docker.internal:11434"
+# Read before the normalisation below overwrites it. Compose passes the .env
+# value through as-is (empty when unset), and install.sh writes it only when it
+# found a server — so non-empty means someone chose a provider, even when the
+# choice happens to equal the default URL.
+_LLM_BASE_URL_SET = bool((os.getenv("HARVIS_LLM_BASE_URL") or "").strip())
 HARVIS_LLM_BASE_URL = (
     os.getenv("HARVIS_LLM_BASE_URL") or os.getenv("OLLAMA_URL") or _LLM_DEFAULT_BASE_URL
 ).rstrip("/")
 os.environ["HARVIS_LLM_BASE_URL"] = HARVIS_LLM_BASE_URL
 os.environ["OLLAMA_URL"] = HARVIS_LLM_BASE_URL
-# "Explicitly configured" cannot be read off env presence: compose always sets
-# OLLAMA_URL, defaulting it to _LLM_DEFAULT_BASE_URL when .env names no provider.
-# So the honest split is: pointing anywhere OTHER than the default guess means
-# the operator configured a provider; the default guess itself means "nothing
+# "Explicitly configured" cannot be read off OLLAMA_URL: compose always sets it,
+# defaulting to _LLM_DEFAULT_BASE_URL when .env names no provider. A provider is
+# configured when HARVIS_LLM_BASE_URL was set, or when the URL points anywhere
+# other than the default guess (a legacy OLLAMA_URL). Otherwise it is "nothing
 # configured, probing the conventional host port". /api/ollama-models and
 # /api/health/services use this to tell "provider down" from "no provider".
-LLM_PROVIDER_EXPLICITLY_CONFIGURED = HARVIS_LLM_BASE_URL != _LLM_DEFAULT_BASE_URL
+LLM_PROVIDER_EXPLICITLY_CONFIGURED = _LLM_BASE_URL_SET or HARVIS_LLM_BASE_URL != _LLM_DEFAULT_BASE_URL
 
 from datetime import date, datetime, timedelta
 from jose import JWTError, jwt
@@ -400,6 +405,9 @@ from setup_flow import (  # noqa: E402
     create_setup_router,
     service_expected,
 )
+# Same detector setup_flow uses, so the health page and the setup wizard cannot
+# describe a missing service two different ways on the same install.
+from plugins.hosting import create_hosting_router, profile_not_enabled_reason  # noqa: E402
 # Router include is deferred until after ``app = FastAPI(...)`` below.
 
 
@@ -1913,6 +1921,10 @@ app.include_router(
 )
 logger.info("Setup flow router registered at /api/setup/*")
 
+# Hosting mode (compose vs k8s) for the settings page — same auth gate as
+# /api/capabilities/notebooks above, hence the same factory shape.
+app.include_router(create_hosting_router(get_current_user=get_current_user))
+
 # ─── Device & models -----------------------------------------------------------
 device = 0 if torch.cuda.is_available() else -1
 logger.info("Using device: %s", "cuda" if device == 0 else "cpu")
@@ -2790,7 +2802,7 @@ async def health_services():
             if not service_expected(name):
                 results[name] = {
                     "status": "not_installed",
-                    "reason": f"compose profile '{_SERVICE_PROFILE[name]}' is not enabled",
+                    "reason": profile_not_enabled_reason(_SERVICE_PROFILE[name]),
                 }
             else:
                 results[name] = {"status": "down", "error": str(exc)[:200]}
@@ -2833,8 +2845,8 @@ async def health_services():
                 results["model_provider"] = {
                     "status": "not_configured", "url": _ollama_base,
                     "reason": (
-                        "no model provider configured — set HARVIS_LLM_BASE_URL "
-                        "or start a server on the host's port 11434"
+                        f"no model provider configured and nothing answers at {_ollama_base} — "
+                        "start a model server and re-run ./install.sh, or set HARVIS_LLM_BASE_URL"
                     ),
                 }
 

@@ -20,6 +20,16 @@ const notebook = {
   updated_at: '2026-09-01T00:00:00Z'
 }
 
+const readySource = {
+  id: 's1',
+  type: 'url',
+  title: 'Mars page',
+  status: 'ready',
+  error_message: null,
+  chunk_count: 4,
+  original_filename: null
+}
+
 const stats = {
   source_count: 1,
   chunk_count: 12,
@@ -37,7 +47,13 @@ function mockRoutes(sources: unknown[]) {
       [`GET /api/notebooks/${NB}/notes`]: () => ({ notes: [] }),
       [`GET /api/notebooks/${NB}/chat/history`]: () => ({ messages: [] }),
       [`GET /api/notebooks/${NB}`]: () => notebook,
-      [`POST /api/notebooks/${NB}/autoname`]: () => ({ title: 'Mars Rover Exploration Texts', emoji: '🚀' }),
+      [`POST /onb-api/notebooks/${NB}/autoname`]: () => ({
+        title: 'Mars Rover Exploration Texts',
+        emoji: '🚀',
+        description: ''
+      }),
+      [`POST /onb-api/notebooks/${NB}/suggest-questions`]: () => ({ questions: ['What did Perseverance find?'] }),
+      [`GET /onb-api/notebooks/${NB}/artifacts`]: () => [],
       [`PATCH /api/notebooks/${NB}`]: () => notebook,
       'GET /api/workspace/providers': () => ({ providers: [] })
     })
@@ -46,20 +62,27 @@ function mockRoutes(sources: unknown[]) {
 
 beforeEach(() => {
   harvisApi.mockReset()
+  window.localStorage.clear()
 })
 
 afterEach(cleanup)
 
 describe('NotebookDetail', () => {
-  it('shows the emoji, title, description and stats line', async () => {
-    mockRoutes([])
-    renderWithQuery(<NotebookDetail notebookId={NB} onDeleted={() => undefined} />)
+  it('pins the emoji, title, source count and synopsis to the top of the chat', async () => {
+    mockRoutes([readySource])
+    renderWithQuery(<NotebookDetail layout="columns" notebookId={NB} onDeleted={() => undefined} />)
 
-    expect((await screen.findByRole('heading', { level: 2, name: /Mars Rover/ })).textContent).toContain(
-      '🪐 Mars Rover Exploration Texts'
-    )
+    expect(await screen.findByRole('heading', { level: 2, name: 'Mars Rover Exploration Texts' })).toBeTruthy()
+    expect(screen.getByText('🪐')).toBeTruthy()
     expect(screen.getByText('Everything about Perseverance')).toBeTruthy()
-    expect(await screen.findByText('1 source · 12 passages · 2 notes · 3 messages')).toBeTruthy()
+    expect(screen.getByText(/^1 source/)).toBeTruthy()
+  })
+
+  it('offers suggested questions before the first message', async () => {
+    mockRoutes([readySource])
+    renderWithQuery(<NotebookDetail layout="columns" notebookId={NB} onDeleted={() => undefined} />)
+
+    expect(await screen.findByRole('button', { name: 'What did Perseverance find?' })).toBeTruthy()
   })
 
   it('opens on Sources when nothing is ready yet, and on Chat once a source is', async () => {
@@ -68,35 +91,20 @@ describe('NotebookDetail', () => {
     expect(await first.findByText(/No sources yet/)).toBeTruthy()
     first.unmount()
 
-    mockRoutes([
-      {
-        id: 's1',
-        type: 'url',
-        title: 'Mars page',
-        status: 'ready',
-        error_message: null,
-        chunk_count: 4,
-        original_filename: null
-      }
-    ])
+    mockRoutes([readySource])
     renderWithQuery(<NotebookDetail notebookId={NB} onDeleted={() => undefined} />)
     expect(await screen.findByPlaceholderText('Ask something about these sources')).toBeTruthy()
   })
 
-  it('auto-names through POST /autoname and refreshes the header', async () => {
-    mockRoutes([
-      {
-        id: 's1',
-        type: 'url',
-        title: 'Mars page',
-        status: 'ready',
-        error_message: null,
-        chunk_count: 4,
-        original_filename: null
-      }
-    ])
-    renderWithQuery(<NotebookDetail notebookId={NB} onDeleted={() => undefined} />)
-    await screen.findByText(/Mars Rover Exploration Texts/)
+  it('auto-names from the sources through the /onb-api facade', async () => {
+    mockRoutes([readySource])
+    // A hand-set title from an earlier auto-name keeps the effect quiet, so only the click names it.
+    window.localStorage.setItem(
+      `onb:autoname:${NB}`,
+      JSON.stringify({ count: 1, title: 'Mars Rover Exploration Texts' })
+    )
+    renderWithQuery(<NotebookDetail layout="columns" notebookId={NB} onDeleted={() => undefined} />)
+    await screen.findByRole('heading', { level: 2, name: 'Mars Rover Exploration Texts' })
 
     const button = screen.getByRole('button', { name: /auto-name/i })
     await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false))
@@ -104,7 +112,7 @@ describe('NotebookDetail', () => {
 
     await waitFor(() =>
       expect(harvisApi).toHaveBeenCalledWith(
-        `/api/notebooks/${NB}/autoname`,
+        `/onb-api/notebooks/${NB}/autoname`,
         expect.objectContaining({ method: 'POST' })
       )
     )
@@ -114,8 +122,8 @@ describe('NotebookDetail', () => {
 
   it('renames and describes through PATCH', async () => {
     mockRoutes([])
-    renderWithQuery(<NotebookDetail notebookId={NB} onDeleted={() => undefined} />)
-    await screen.findByText(/Mars Rover Exploration Texts/)
+    renderWithQuery(<NotebookDetail layout="columns" notebookId={NB} onDeleted={() => undefined} />)
+    await screen.findByRole('heading', { level: 2, name: 'Mars Rover Exploration Texts' })
 
     const edit = screen.getByRole('button', { name: /edit/i })
     await waitFor(() => expect((edit as HTMLButtonElement).disabled).toBe(false))
@@ -141,44 +149,47 @@ describe('NotebookDetail', () => {
     expect(await screen.findByText('Could not open this notebook')).toBeTruthy()
   })
 
-  it('lays sources, notes, chat and studio out side by side when there is room', async () => {
+  it('lays the library, chat and studio rail out side by side when there is room', async () => {
     mockRoutes([])
-    const { container } = renderWithQuery(<NotebookDetail layout="columns" notebookId={NB} onDeleted={() => undefined} />)
+    const { container } = renderWithQuery(
+      <NotebookDetail layout="columns" notebookId={NB} onDeleted={() => undefined} />
+    )
 
-    await screen.findByText(/Mars Rover Exploration Texts/)
+    await screen.findByRole('heading', { level: 2, name: 'Mars Rover Exploration Texts' })
     expect(container.querySelector('[data-layout="columns"]')).toBeTruthy()
-    expect(screen.queryByRole('radiogroup')).toBeNull()
     expect(await screen.findByText(/No sources yet/)).toBeTruthy()
     expect(screen.getByText('Studio')).toBeTruthy()
+    expect(screen.getByRole('button', { name: /Quiz/ })).toBeTruthy()
     expect(screen.getByText(/^Notes/)).toBeTruthy()
   })
 
   it('names an untitled notebook once its first source is ready', async () => {
     harvisApi.mockImplementation(
       routeApi({
-        [`GET /api/notebooks/${NB}/sources`]: () => [
-          { id: 's1', type: 'url', title: 'Mars page', status: 'ready', error_message: null, chunk_count: 4, original_filename: null }
-        ],
+        [`GET /api/notebooks/${NB}/sources`]: () => [readySource],
         [`GET /api/notebooks/${NB}/stats`]: () => stats,
         [`GET /api/notebooks/${NB}/notes`]: () => ({ notes: [] }),
         [`GET /api/notebooks/${NB}/chat/history`]: () => ({ messages: [] }),
-        [`POST /api/notebooks/${NB}/autoname`]: () => ({ title: 'Mars', emoji: '🚀' }),
+        [`POST /onb-api/notebooks/${NB}/autoname`]: () => ({ title: 'Mars', emoji: '🚀', description: 'About Mars.' }),
+        [`POST /onb-api/notebooks/${NB}/suggest-questions`]: () => ({ questions: [] }),
+        [`GET /onb-api/notebooks/${NB}/artifacts`]: () => [],
         [`GET /api/notebooks/${NB}`]: () => ({ ...notebook, title: 'Untitled notebook' }),
         'GET /api/workspace/providers': () => ({ providers: [] })
       })
     )
-    renderWithQuery(<NotebookDetail notebookId={NB} onDeleted={() => undefined} />)
+    renderWithQuery(<NotebookDetail layout="columns" notebookId={NB} onDeleted={() => undefined} />)
 
     await waitFor(() =>
-      expect(harvisApi).toHaveBeenCalledWith(`/api/notebooks/${NB}/autoname`, expect.objectContaining({ method: 'POST' }))
+      expect(harvisApi).toHaveBeenCalledWith(
+        `/onb-api/notebooks/${NB}/autoname`,
+        expect.objectContaining({ method: 'POST' })
+      )
     )
   })
 
   it('leaves a named notebook alone', async () => {
-    mockRoutes([
-      { id: 's1', type: 'url', title: 'Mars page', status: 'ready', error_message: null, chunk_count: 4, original_filename: null }
-    ])
-    renderWithQuery(<NotebookDetail notebookId={NB} onDeleted={() => undefined} />)
+    mockRoutes([readySource])
+    renderWithQuery(<NotebookDetail layout="columns" notebookId={NB} onDeleted={() => undefined} />)
 
     await screen.findByPlaceholderText('Ask something about these sources')
     expect(harvisApi.mock.calls.some(c => String(c[0]).endsWith('/autoname'))).toBe(false)

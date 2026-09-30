@@ -63,7 +63,12 @@ note " unrelated images before the install, the footprint below is inflated.)"
 
 say "Check 1 — the measured one-command claim"
 
-REPO_KB=$(du -sk --exclude=.git . 2>/dev/null | cut -f1)
+# Whole tree minus .git, rather than `du --exclude`: macOS and busybox du have
+# no --exclude, and an empty REPO_KB crashed the footprint check below.
+REPO_KB=$(du -sk . 2>/dev/null | cut -f1)
+GIT_KB=0
+[ -d .git ] && GIT_KB=$(du -sk .git 2>/dev/null | cut -f1)
+REPO_KB=$(( ${REPO_KB:-0} - ${GIT_KB:-0} ))
 
 python3 - "$BUDGET_GB" "$REPO_KB" <<'PY'
 import json, subprocess, sys
@@ -121,7 +126,7 @@ say "Check 2a — the default set is actually up"
 # with the FreeToken inference-node work and `preview-runner` with the
 # multi-file build preview. Both are unprofiled in docker-compose.yaml, so a
 # fresh `./install.sh` starts them. Update this list when that file changes.
-EXPECTED="artifact-init backend browser-runner harvis-mcp llmfit nginx owui-builder pgsql preview-runner voice-onnx"
+EXPECTED="artifact-init backend browser-runner harvis-mcp hermes-ui-builder llmfit nginx owui-builder pgsql preview-runner voice-onnx"
 # -f pins this to the file we SHIP. Without it Compose silently merges
 # docker-compose.override.yml, which is gitignored and personal — on a
 # developer box that makes this check measure their machine, not the deploy.

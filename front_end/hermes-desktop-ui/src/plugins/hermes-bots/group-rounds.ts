@@ -186,13 +186,21 @@ interface GroupChatTurnPromptInput {
   deltaLines: string[]
   groupName: string
   members: GroupMember[]
+  /** The delta holds a user message: the member answers it instead of passing. */
+  userSpoke?: boolean
   viewer: GroupMember
 }
 
 /** The full per-turn payload for one member: participation rules + the room
  *  delta. Rules travel in the turn payload (not SOUL) so every existing bot
  *  can join a group chat without a profile migration. */
-export function buildGroupChatTurnPrompt({ groupName, members, viewer, deltaLines }: GroupChatTurnPromptInput) {
+export function buildGroupChatTurnPrompt({
+  groupName,
+  members,
+  viewer,
+  deltaLines,
+  userSpoke = false
+}: GroupChatTurnPromptInput) {
   const viewerKey = groupMemberKey(viewer)
   const peers = members.filter(m => groupMemberKey(m) !== viewerKey)
 
@@ -212,7 +220,11 @@ export function buildGroupChatTurnPrompt({ groupName, members, viewer, deltaLine
     '',
     'Rules for this room:',
     '- Reply with ONE conversational message ONLY if you have something new worth adding: build on what was just said, claim or hand off work, answer a question aimed at you, or report a real result. Keep chatter short (1-3 sentences) — but when you are delivering a result, an answer the user asked for, or substantive work, give it at full quality and length; never thin out real content to fit the room.',
-    '- If you have nothing new to add, reply with exactly "(pass)". Passing is good — it lets the conversation settle.',
+    // Small models read "passing is good" as the safe answer and passed on the
+    // user's own "hi", so a turn that carries a user message never offers it.
+    userSpoke
+      ? '- The user just spoke to the room. Answer them yourself, in your own voice: a greeting gets a short greeting back, a question gets your answer. Do not reply "(pass)" this turn, even if a teammate already answered.'
+      : '- If you have nothing new to add, reply with exactly "(pass)". Passing is good — it lets the conversation settle.',
     '- Mention a teammate as @name to pull them in; mention @user only for a judgment call or a result the user needs. Do not repeat points already made.',
     '- Never reveal content from your private 1:1 chats. Your reply text goes to the room verbatim — no preamble, no meta-commentary.'
   ].join('\n')
@@ -620,7 +632,8 @@ export async function runGroupChatRounds(group: string, members: GroupMember[], 
           viewer: member,
           deltaLines: delta
             .slice(-GROUP_CHAT_HISTORY_LIMIT)
-            .map((e: GroupMessage) => formatGroupChatLine(e, member.name))
+            .map((e: GroupMessage) => formatGroupChatLine(e, member.name)),
+          userSpoke: delta.some((e: GroupMessage) => e.from.kind === 'user')
         })
 
         // Images riding this delta (user attachments — member entries don't

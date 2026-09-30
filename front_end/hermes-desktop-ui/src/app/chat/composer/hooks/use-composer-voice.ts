@@ -10,6 +10,7 @@ import { $voiceConversationStartRequest, takeVoiceConversationStart } from '@/st
 import { resetBrowseState } from '@/store/composer-input-history'
 import { $gateway } from '@/store/gateway'
 import { notify, notifyError } from '@/store/notifications'
+import { $voiceCallLive, setVoiceCallLive } from '@/store/voice-call'
 import { $autoSpeakReplies, $voiceStopPhrase, setAutoSpeakReplies } from '@/store/voice-prefs'
 import { resumeWakeAfterVoice } from '@/store/wake-word'
 
@@ -264,6 +265,16 @@ export function useComposerVoice({
   }, [t, voiceConversationActive])
 
   useEffect(() => resumeWakeIfPaused, [resumeWakeIfPaused])
+
+  // One microphone, one call: this chat call and the titlebar's Harvis call
+  // (store/voice-call.ts) each end the other when they start.
+  useEffect(() => {
+    if (voiceConversationActive) {
+      setVoiceCallLive(false)
+    }
+  }, [voiceConversationActive])
+
+  useEffect(() => $voiceCallLive.listen(live => live && setVoiceConversationActive(false)), [])
 
   // Explicit start/end for the on-screen conversation controls (the hotkey uses
   // the gated toggle above).

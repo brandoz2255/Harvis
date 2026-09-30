@@ -93,6 +93,8 @@ import { CommandPalette } from '../command-palette'
 import { triggerAndRefreshCronJobs } from '../cron/cron-actions'
 import { useGatewayBoot } from '../gateway/hooks/use-gateway-boot'
 import { useGatewayRequest } from '../gateway/hooks/use-gateway-request'
+import { HarvisChatter } from '../harvis-chatter/harvis-chatter'
+import { HarvisVoiceCall } from '../harvis-chatter/voice-call'
 import { useKeybinds } from '../hooks/use-keybinds'
 import { useHudHandoff } from '../hud/handoff'
 import { ModelPickerOverlay } from '../model-picker-overlay'
@@ -1251,6 +1253,15 @@ export function ContribWiring({ children }: { children: ReactNode }) {
       {/* Petdex floating mascot — renders nothing unless installed + enabled.
           Never in the HUD: that window is the chat bar and nothing else. */}
       {!isHudWindow() && !isBrowserWindow() && <FloatingPet />}
+
+      {/* The Harvis pill at the bottom of every non-chat page: move around by
+          saying where to go, or ask Harvis without leaving the page. */}
+      {!isHudWindow() && !isBrowserWindow() && <HarvisChatter transcribeAudio={transcribeVoiceAudio} />}
+
+      {/* The voice call with Harvis: its own conversation on every page, a
+          card on the chat and a bubble everywhere else. It never posts into
+          the open chat; text meant for the chat lands in the chat box unsent. */}
+      {!isHudWindow() && !isBrowserWindow() && <HarvisVoiceCall transcribeAudio={transcribeVoiceAudio} />}
 
       {/* In-app tips. Renders nothing until the app is quiet and has something
           to point at, and nothing at all once they're off or all retired. The

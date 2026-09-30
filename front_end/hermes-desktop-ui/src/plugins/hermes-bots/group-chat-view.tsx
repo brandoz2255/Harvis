@@ -1287,6 +1287,21 @@ export function GroupChatWorkspace({ group, members, onBack, visible = true }: G
               value={draft}
             />
             {attachButton(null)}
+            {/* Harvis: Stop sits beside Send while the room runs, not only in the Activity row. */}
+            {room.running ? (
+              <Tip label={b.group.stopHint}>
+                <Button
+                  aria-label={b.group.stop}
+                  onClick={() => void stopRoomRun()}
+                  size="sm"
+                  type="button"
+                  variant="destructive"
+                >
+                  <Codicon name="debug-stop" />
+                  {b.group.stop}
+                </Button>
+              </Tip>
+            ) : null}
             <Button disabled={!draft.trim() && !imagesFor(null).length} size="sm" type="submit">
               {b.group.newThread}
             </Button>

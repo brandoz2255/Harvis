@@ -392,6 +392,9 @@ describe('desktop slash command curation', () => {
     expect(resolveDesktopCommand('/new')?.surface).toEqual({ kind: 'action', action: 'new' })
     expect(resolveDesktopCommand('/reset')?.surface).toEqual({ kind: 'action', action: 'new' })
     expect(resolveDesktopCommand('/resume')?.surface).toEqual({ kind: 'picker', picker: 'session' })
+    // /research is a chat turn the backend turns into a deep-research run, never slash.exec.
+    expect(resolveDesktopCommand('/research')?.surface).toEqual({ kind: 'action', action: 'research' })
+    expect(resolveDesktopCommand('/deep-research')?.surface).toEqual({ kind: 'action', action: 'research' })
     expect(resolveDesktopCommand('/usage')?.surface).toEqual({ kind: 'exec' })
     expect(resolveDesktopCommand('/clear')?.surface).toEqual({ kind: 'unavailable', reason: 'terminal' })
     // Skill / quick commands aren't in the registry.

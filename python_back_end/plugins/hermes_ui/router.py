@@ -10,7 +10,11 @@ from .rest import router as rest_router
 from .rest_capabilities import router as capabilities_router
 from .rest_harvis import router as harvis_router
 from .rest_providers import router as providers_router
+from .rest_sandbox import router as sandbox_router
+from .rest_sandbox_apps import router as sandbox_apps_router
 from .rest_settings import router as settings_router
+from .rest_skills import router as skills_router
+from .rest_voice import router as voice_router
 from .ws import router as ws_router
 
 router = APIRouter()
@@ -20,9 +24,13 @@ router.include_router(profiles_router)
 router.include_router(messaging_router)
 router.include_router(cron_router)
 router.include_router(audio_router)
+router.include_router(skills_router)
+router.include_router(sandbox_router)
+router.include_router(sandbox_apps_router)
 router.include_router(capabilities_router)
 router.include_router(harvis_router)
 router.include_router(providers_router)
 router.include_router(bots_router)
+router.include_router(voice_router)
 router.include_router(rest_router)
 router.include_router(ws_router)

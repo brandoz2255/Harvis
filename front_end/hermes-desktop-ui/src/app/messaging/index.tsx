@@ -249,32 +249,23 @@ export function MessagingView({ setStatusbarItemGroup: _setStatusbarItemGroup, .
     }
   }
 
-  async function handleToggle(platform: MessagingPlatformInfo, enabled: boolean) {
-    setSaving(`enabled:${platform.id}`)
-
-    try {
-      const result = await updateMessagingPlatform(platform.id, { enabled }, scopeProfile)
-      setPlatforms(current => current?.map(row => (row.id === platform.id ? { ...row, enabled } : row)) ?? current)
-      notifySaved(enabled ? m.platformEnabled(platform.name) : m.platformDisabled(platform.name), result)
-      await refreshPlatforms(true)
-    } catch (err) {
-      notifyError(err, m.failedUpdate(platform.name))
-    } finally {
-      setSaving(null)
-    }
-  }
-
   async function handleSave(platform: MessagingPlatformInfo) {
     const env = trimEdits(edits[platform.id] || {})
+    const hasEdits = Object.keys(env).length > 0
 
-    if (Object.keys(env).length === 0) {
+    // No on/off switch: saving a platform's setup is what turns it on.
+    if (!hasEdits && platform.enabled) {
       return
     }
 
     setSaving(`env:${platform.id}`)
 
     try {
-      const result = await updateMessagingPlatform(platform.id, { env }, scopeProfile)
+      const result = await updateMessagingPlatform(
+        platform.id,
+        hasEdits ? { enabled: true, env } : { enabled: true },
+        scopeProfile
+      )
       setEdits(current => ({ ...current, [platform.id]: {} }))
       await refreshPlatforms()
       notifySaved(m.setupSaved(platform.name), result)
@@ -405,7 +396,6 @@ export function MessagingView({ setStatusbarItemGroup: _setStatusbarItemGroup, .
                       hasEdits={Object.keys(trimEdits(edits[selected.id] || {})).length > 0}
                       onSave={() => void handleSave(selected)}
                       onTest={() => void handleTest(selected)}
-                      onToggle={enabled => void handleToggle(selected, enabled)}
                       platform={selected}
                       saving={saving}
                     />

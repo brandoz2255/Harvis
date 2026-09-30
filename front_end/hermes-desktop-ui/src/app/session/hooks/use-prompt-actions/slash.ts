@@ -830,6 +830,25 @@ export function useSlashCommand(deps: SlashCommandDeps) {
 
           appendSessionTextMessage(sid, 'system', recordInput ? slashStatusText(command, message) : message)
         },
+        // /research <topic> is a chat turn, not a gateway command: the backend
+        // starts deep research when a message reads "deep research …" and
+        // answers with the live research card. Sent through slash.exec it
+        // printed "(no output)" and nothing ran.
+        research: async ({ arg, sessionHint }) => {
+          const topic = arg.trim()
+
+          if (!topic) {
+            notify({
+              kind: 'info',
+              message: 'Add a topic after /research, e.g. /research solid-state batteries',
+              durationMs: 4000
+            })
+
+            return
+          }
+
+          await submitPromptText(`Deep research: ${topic}`, { sessionId: sessionHint })
+        },
         // /title <name> renames via the gateway's session.title RPC — the same
         // path the TUI uses, NOT REST renameSession (which 404s on runtime ids)
         // nor the slash worker (whose DB write can silently fail). Bare /title

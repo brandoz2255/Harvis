@@ -574,6 +574,23 @@ class WorkspaceTerminalManager:
                 self._terminals.pop(key, None)
             return await self._spawn_isolated(key, session_id, workspace_path)
 
+    async def drop_isolated(self, session_id: str) -> bool:
+        """Stop and remove a session's hardened runner (its folder is untouched).
+        The next ensure_isolated() starts a fresh one — how a GPU switch or a
+        sandbox delete takes effect. True when a container was removed."""
+        key = f"vc:{self._safe_id(session_id)}"
+        name = f"harvis-vc-run-{self._safe_id(session_id)[:40]}"
+        async with self._lock:
+            self._terminals.pop(key, None)
+            if self._client is None:
+                return False
+            try:
+                c = await asyncio.to_thread(self._client.containers.get, name)
+            except NotFound:
+                return False
+            await asyncio.to_thread(c.remove, force=True)
+            return True
+
     async def _spawn_isolated(self, key: str, session_id: str, workspace_path: str) -> _TerminalState:
         if self._client is None:
             raise RuntimeError("docker client unavailable")
@@ -581,9 +598,13 @@ class WorkspaceTerminalManager:
             raise RuntimeError(f"session workspace {workspace_path!r} does not exist")
         host_src = await self.host_path_of(workspace_path)
         name = f"harvis-vc-run-{self._safe_id(session_id)[:40]}"
+        # A Hermes chat sandbox can opt into the GPU (plugins/hermes_ui/sandbox.set_gpu
+        # leaves a `.harvis/gpu` marker in its folder). Everything else stays CPU-only.
+        want_gpu = os.path.exists(os.path.join(workspace_path, ".harvis", "gpu"))
 
         # Reuse a surviving container (backend restart) — but ONLY if its
-        # /workspace bind still points at the same host path; else recreate.
+        # /workspace bind still points at the same host path and its GPU access
+        # still matches what the folder asks for; else recreate.
         try:
             existing = await asyncio.to_thread(self._client.containers.get, name)
             mounts = (existing.attrs or {}).get("Mounts") or []
@@ -591,7 +612,8 @@ class WorkspaceTerminalManager:
                 m.get("Destination") == "/workspace" and m.get("Source") == host_src
                 for m in mounts
             )
-            if same:
+            has_gpu = bool(((existing.attrs or {}).get("HostConfig") or {}).get("DeviceRequests"))
+            if same and has_gpu == want_gpu:
                 if existing.status != "running":
                     await asyncio.to_thread(existing.start)
                 state = _TerminalState(
@@ -642,12 +664,14 @@ class WorkspaceTerminalManager:
             # host trees, no artifact volume.
             volumes={host_src: {"bind": "/workspace", "mode": "rw"}},
             auto_remove=False,
+            **({"device_requests": [docker.types.DeviceRequest(count=-1, capabilities=[["gpu"]])]}
+               if want_gpu else {}),
         )
         state = _TerminalState(workspace_id=key, container_name=name, created_at=time.time())
         self._terminals[key] = state
         logger.info(
-            "[vc-runner:%s] spawned hardened runner %s (image=%s net=%s mem=%s pids=%d src=%s)",
-            session_id, name, _RUNNER_IMAGE, network, _RUNNER_MEM, _RUNNER_PIDS, host_src,
+            "[vc-runner:%s] spawned hardened runner %s (image=%s net=%s mem=%s pids=%d gpu=%s src=%s)",
+            session_id, name, _RUNNER_IMAGE, network, _RUNNER_MEM, _RUNNER_PIDS, want_gpu, host_src,
         )
         return state
 

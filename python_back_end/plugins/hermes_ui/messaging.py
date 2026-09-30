@@ -28,6 +28,7 @@ from auth_optimized import get_current_user_optimized
 
 from . import messaging_gateway, providers, settings_store
 from .messaging_gateway import GATEWAY_START_COMMAND, SUPPORTED_PLATFORMS
+from .messaging_steps import setup_steps
 from .messaging_pairing import (  # noqa: F401 — re-exported for callers and tests
     PAIRING_KEY, WEBHOOKS_KEY, pairing, pairing_approve, pairing_dismiss, pairing_revoke, webhooks,
     webhooks_create, webhooks_delete, webhooks_enable, webhooks_set_enabled,
@@ -155,7 +156,7 @@ def platform_payload(entry: dict[str, Any], saved: dict, app: Any = None, gw: di
     supported = pid in SUPPORTED_PLATFORMS
     enabled = bool(saved.get("enabled"))
     adapter = messaging_gateway.adapter_for(gw, pid, owner) if supported else None
-    display, can_test, runs_here = None, False, False
+    display, can_test, runs_here, legacy = None, False, False, False
     if not supported:
         state, error = "unsupported", _not_run_message(entry["name"])
     elif adapter is not None:
@@ -164,7 +165,7 @@ def platform_payload(entry: dict[str, Any], saved: dict, app: Any = None, gw: di
         enabled = enabled or adapter.get("source") == "env"
     elif pid == "discord" and _legacy_discord_active(app):
         enabled, state, error = _discord_state(app)
-        runs_here = True
+        runs_here = legacy = True
         if state == "startup_failed":
             error = error or "The bot token is set but the bot did not start; check the backend log."
     elif not enabled:
@@ -188,6 +189,8 @@ def platform_payload(entry: dict[str, Any], saved: dict, app: Any = None, gw: di
         "error_code": state if state in ("startup_failed", "gateway_stopped", "unsupported", "error") else None,
         "error_message": error, "updated_at": saved.get("updated_at"),
         "display": display, "can_test": can_test, "setup_hint": SETUP_HINTS.get(pid),
+        "setup_steps": setup_steps(pid, supported=supported, legacy_discord=legacy, gateway_up=gw is not None,
+                                   owner=owner),
         "webhook_url": webhook, "webhook_note": webhook_note,
     }
 

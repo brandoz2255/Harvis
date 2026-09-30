@@ -1,29 +1,20 @@
 /**
- * One notebook as a research workspace, NotebookLM / open-notebook style: a
- * header (name and description, editable or auto-named from its sources, plus a
- * stats line) over three columns — Library (sources, then notes) | Chat |
- * Studio. When the page is too narrow for three columns the same panels fall
- * back to four tabs: Sources, Chat, Notes and Studio.
+ * One notebook as a research workspace, laid out like open-notebook: a Library
+ * (Sources / Notes) on the left, the chat in the middle with the notebook's
+ * overview pinned to its top, and the Studio rail on the right. When the page
+ * is too narrow for three columns the same panels fall back to four tabs:
+ * Sources, Notes, Chat and Studio.
  */
 
-import {
-  Button,
-  Codicon,
-  EmptyState,
-  Input,
-  SegmentedControl,
-  Textarea,
-  useQuery,
-  useQueryClient
-} from '@hermes/plugin-sdk'
+import { Button, Codicon, EmptyState, SegmentedControl, useQuery } from '@hermes/plugin-sdk'
 import { type ReactNode, useEffect, useRef, useState } from 'react'
 
 import { harvisApi } from './api'
 import { NotebookChat } from './notebook-chat'
 import { NotebookNotes } from './notebook-notes'
+import { NotebookOverview } from './notebook-overview'
 import {
   errorText,
-  listKey,
   type NotebookInfo,
   notebookKey,
   type NotebookStats,
@@ -32,13 +23,12 @@ import {
   statsKey
 } from './notebook-shared'
 import { NotebookSources, useSourceWatchers } from './notebook-sources'
-import { NotebookStudio } from './notebook-studio'
+import { NotebookStudioRail } from './notebook-studio-rail'
+
+export { UNTITLED } from './notebook-overview'
 
 type Tab = 'chat' | 'notes' | 'sources' | 'studio'
 type Layout = 'columns' | 'tabs'
-
-/** The title the notebooks grid gives a new notebook; auto-named once it has a ready source. */
-export const UNTITLED = 'Untitled notebook'
 
 /** Three columns need roughly this much width before chat gets cramped. */
 const COLUMNS_MIN_WIDTH = 1024
@@ -67,84 +57,12 @@ function useLayout(forced: Layout | undefined) {
   return [ref, forced ?? layout] as const
 }
 
-function Panel({ children, className, title }: { children: ReactNode; className?: string; title: string }) {
+function Card({ children, className = '' }: { children: ReactNode; className?: string }) {
   return (
-    <section className={className}>
-      <h3 className="mb-2 text-[0.65rem] font-medium tracking-wide text-(--ui-text-tertiary) uppercase">{title}</h3>
+    <div className={`flex min-h-0 flex-col overflow-hidden rounded-xl border bg-(--ui-bg-secondary) ${className}`}>
       {children}
-    </section>
+    </div>
   )
-}
-
-function EditDetails({ notebook, onDone }: { notebook: NotebookInfo; onDone: () => void }) {
-  const [title, setTitle] = useState(notebook.title)
-  const [description, setDescription] = useState(notebook.description ?? '')
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
-
-  return (
-    <form
-      className="space-y-1.5"
-      onSubmit={async event => {
-        event.preventDefault()
-        setBusy(true)
-        setError('')
-
-        try {
-          await harvisApi(`/api/notebooks/${notebook.id}`, {
-            method: 'PATCH',
-            body: JSON.stringify({ title: title.trim(), description: description.trim() || null })
-          })
-          onDone()
-        } catch (err) {
-          setError(errorText(err))
-        } finally {
-          setBusy(false)
-        }
-      }}
-    >
-      <Input aria-label="Title" onChange={e => setTitle(e.target.value)} value={title} />
-      <Textarea
-        aria-label="Description"
-        className="min-h-16 text-sm"
-        onChange={e => setDescription(e.target.value)}
-        placeholder="What this notebook is for (optional)"
-        value={description}
-      />
-      {error && <p className="text-xs text-destructive">{error}</p>}
-      <div className="flex justify-end gap-1.5">
-        <Button onClick={onDone} size="sm" type="button" variant="ghost">
-          Cancel
-        </Button>
-        <Button disabled={!title.trim() || busy} size="sm" type="submit">
-          Save
-        </Button>
-      </div>
-    </form>
-  )
-}
-
-function StatsLine({ stats }: { stats: NotebookStats | undefined }) {
-  if (!stats) {
-    return null
-  }
-
-  const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
-  const parts = [
-    plural(stats.source_count, 'source'),
-    plural(stats.chunk_count, 'passage'),
-    plural(stats.note_count, 'note')
-  ]
-
-  if (stats.message_count > 0) {
-    parts.push(plural(stats.message_count, 'message'))
-  }
-
-  if (stats.processing_sources > 0) {
-    parts.push(`${stats.processing_sources} still being read`)
-  }
-
-  return <p className="text-xs text-(--ui-text-tertiary)">{parts.join(' · ')}</p>
 }
 
 export function NotebookDetail({
@@ -156,16 +74,13 @@ export function NotebookDetail({
   /** Force a layout instead of measuring the available width. */
   layout?: Layout
   notebookId: string
-  /** Shown as a Back button in the header when set (the notebooks grid). */
+  /** Shown as a Back button in the overview when set (the notebooks grid). */
   onBack?: () => void
   onDeleted: () => void
 }) {
-  const queryClient = useQueryClient()
   const [rootRef, layout] = useLayout(forcedLayout)
-  const [editing, setEditing] = useState(false)
-  const [naming, setNaming] = useState(false)
-  const [error, setError] = useState('')
   const [tab, setTab] = useState<null | Tab>(null)
+  const [library, setLibrary] = useState<'notes' | 'sources'>('sources')
 
   const notebook = useQuery({
     queryFn: () => harvisApi<NotebookInfo>(`/api/notebooks/${notebookId}`),
@@ -190,40 +105,6 @@ export function NotebookDetail({
 
   useSourceWatchers(notebookId, sources.data ?? [])
 
-  const refreshHeader = () => {
-    void queryClient.invalidateQueries({ queryKey: notebookKey(notebookId) })
-    void queryClient.invalidateQueries({ queryKey: listKey })
-  }
-
-  const autoname = async () => {
-    setNaming(true)
-    setError('')
-
-    try {
-      await harvisApi(`/api/notebooks/${notebookId}/autoname`, { method: 'POST' })
-      refreshHeader()
-    } catch (err) {
-      setError(errorText(err))
-    } finally {
-      setNaming(false)
-    }
-  }
-
-  // A notebook made from the grid starts as "Untitled notebook"; name it from
-  // its sources the first time one is ready (once per open, never over a real name).
-  const triedAutoname = useRef(false)
-  const untitled = notebook.data?.title === UNTITLED
-  const anyReady = (sources.data ?? []).some(s => s.status === 'ready')
-
-  useEffect(() => {
-    if (untitled && anyReady && !triedAutoname.current) {
-      triedAutoname.current = true
-      void autoname()
-    }
-    // autoname is recreated every render; the ref keeps this to one call.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [untitled, anyReady])
-
   if (notebook.error) {
     return <EmptyState description={errorText(notebook.error)} title="Could not open this notebook" />
   }
@@ -232,66 +113,8 @@ export function NotebookDetail({
   const ready = list.some(s => s.status === 'ready')
   const current: Tab = tab ?? (ready ? 'chat' : 'sources')
   const nb = notebook.data
+  const noteCount = stats.data?.note_count ?? nb?.note_count ?? 0
   const count = (n: number) => (n > 0 ? ` (${n})` : '')
-
-  const header = (
-    <div className="space-y-1">
-      {editing && nb ? (
-        <EditDetails
-          notebook={nb}
-          onDone={() => {
-            setEditing(false)
-            refreshHeader()
-          }}
-        />
-      ) : (
-        <div className="flex items-start gap-2">
-          {onBack && (
-            <Button aria-label="All notebooks" onClick={onBack} size="sm" title="All notebooks" variant="ghost">
-              <Codicon name="arrow-left" size="0.8rem" />
-            </Button>
-          )}
-          <div className="min-w-0 flex-1">
-            <h2 className="truncate text-lg font-semibold">
-              {nb?.emoji ? `${nb.emoji} ` : ''}
-              {nb?.title ?? (notebook.isLoading ? 'Loading…' : 'Notebook')}
-            </h2>
-            {nb?.description && <p className="text-sm text-(--ui-text-tertiary)">{nb.description}</p>}
-            <StatsLine stats={stats.data} />
-          </div>
-          <Button disabled={!nb} onClick={() => setEditing(true)} size="sm" variant="ghost">
-            <Codicon name="edit" size="0.8rem" /> Edit
-          </Button>
-          <Button
-            disabled={naming || list.length === 0}
-            onClick={() => void autoname()}
-            size="sm"
-            title="Let Harvis name this notebook from its sources"
-            variant="ghost"
-          >
-            <Codicon name="sparkle" size="0.8rem" /> {naming ? 'Naming…' : 'Auto-name'}
-          </Button>
-          <Button
-            onClick={async () => {
-              if (window.confirm('Delete this notebook and all its sources?')) {
-                try {
-                  await harvisApi(`/api/notebooks/${notebookId}`, { method: 'DELETE' })
-                  onDeleted()
-                } catch (err) {
-                  setError(errorText(err))
-                }
-              }
-            }}
-            size="sm"
-            variant="ghost"
-          >
-            <Codicon name="trash" size="0.8rem" /> Delete
-          </Button>
-        </div>
-      )}
-      {error && <p className="text-xs text-destructive">{error}</p>}
-    </div>
-  )
 
   const status = sources.isLoading ? (
     <p className="text-xs text-(--ui-text-tertiary)">Loading…</p>
@@ -299,54 +122,89 @@ export function NotebookDetail({
     <p className="text-xs text-destructive">{errorText(sources.error)}</p>
   ) : null
 
-  const panel = (which: Tab) =>
-    which === 'sources' ? (
-      <NotebookSources notebookId={notebookId} sources={list} />
-    ) : which === 'chat' ? (
-      <NotebookChat notebookId={notebookId} ready={ready} />
-    ) : which === 'notes' ? (
-      <NotebookNotes notebookId={notebookId} />
-    ) : (
-      <NotebookStudio notebookId={notebookId} sources={list} title={nb?.title ?? 'Notebook'} />
-    )
+  const chat = (
+    <NotebookChat
+      intro={(ask, empty) => (
+        <NotebookOverview ask={ask} empty={empty} notebook={nb} onBack={onBack} onDeleted={onDeleted} sources={list} />
+      )}
+      notebookId={notebookId}
+      ready={ready}
+    />
+  )
 
-  const column = 'min-h-0 overflow-y-auto px-4 py-3'
+  const studio = <NotebookStudioRail notebookId={notebookId} sources={list} title={nb?.title ?? 'Notebook'} />
 
   // One stable root so the width observer keeps watching across layout flips.
   return (
     <div className="flex h-full min-h-0 flex-col" data-layout={layout} ref={rootRef}>
       {layout === 'columns' ? (
-        <>
-          <div className="shrink-0 border-b px-4 pb-3">{header}</div>
-          {status ? (
-            <div className="p-4">{status}</div>
-          ) : (
-            <div className="grid min-h-0 flex-1 grid-cols-[minmax(16rem,22rem)_minmax(0,1fr)_minmax(16rem,24rem)]">
-              <div className={`${column} space-y-6 border-r`}>
-                <Panel title={`Sources${count(list.length)}`}>{panel('sources')}</Panel>
-                <Panel title={`Notes${count(stats.data?.note_count ?? nb?.note_count ?? 0)}`}>{panel('notes')}</Panel>
+        status ? (
+          <div className="p-6">{status}</div>
+        ) : (
+          <div className="grid min-h-0 flex-1 grid-cols-[minmax(18rem,24rem)_minmax(0,1fr)_minmax(16rem,20rem)] gap-6 p-6">
+            <Card>
+              <div className="shrink-0 p-3 pb-0">
+                <SegmentedControl
+                  onChange={setLibrary}
+                  options={[
+                    { id: 'sources', label: `Sources${count(list.length)}` },
+                    { id: 'notes', label: `Notes${count(noteCount)}` }
+                  ]}
+                  value={library}
+                />
               </div>
-              <div className={column}>{panel('chat')}</div>
-              <div className={`${column} border-l`}>
-                <Panel title="Studio">{panel('studio')}</Panel>
+              <div className="min-h-0 flex-1 overflow-y-auto p-3">
+                {library === 'sources' ? (
+                  <NotebookSources notebookId={notebookId} sources={list} />
+                ) : (
+                  <NotebookNotes notebookId={notebookId} />
+                )}
               </div>
+            </Card>
+            <Card>
+              <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">{chat}</div>
+            </Card>
+            <div className="flex min-h-0 flex-col border-l pl-6">
+              <h3 className="mb-2 flex shrink-0 items-center gap-1.5 text-sm font-semibold">Studio</h3>
+              <div className="min-h-0 flex-1 overflow-y-auto">{studio}</div>
+            </div>
+          </div>
+        )
+      ) : (
+        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
+          {/* The Chat tab carries the full overview; the other tabs keep a way back and the name. */}
+          {(current !== 'chat' || status) && (
+            <div className="flex items-center gap-1.5">
+              {onBack && (
+                <Button aria-label="All notebooks" onClick={onBack} size="xs" title="All notebooks" variant="ghost">
+                  <Codicon name="arrow-left" size="0.8rem" />
+                </Button>
+              )}
+              <h2 className="min-w-0 flex-1 truncate text-sm font-semibold">
+                {nb ? `${nb.emoji || '📓'} ${nb.title}` : 'Loading…'}
+              </h2>
             </div>
           )}
-        </>
-      ) : (
-        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 pb-4">
-          {header}
           <SegmentedControl
             onChange={setTab}
             options={[
               { id: 'sources', label: `Sources${count(list.length)}` },
+              { id: 'notes', label: `Notes${count(noteCount)}` },
               { id: 'chat', label: 'Chat' },
-              { id: 'notes', label: `Notes${count(stats.data?.note_count ?? nb?.note_count ?? 0)}` },
               { id: 'studio', label: 'Studio' }
             ]}
             value={current}
           />
-          {status ?? panel(current)}
+          {status ??
+            (current === 'sources' ? (
+              <NotebookSources notebookId={notebookId} sources={list} />
+            ) : current === 'notes' ? (
+              <NotebookNotes notebookId={notebookId} />
+            ) : current === 'chat' ? (
+              chat
+            ) : (
+              studio
+            ))}
         </div>
       )}
     </div>

@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from auth_optimized import get_current_user_optimized
 
-from . import learn, providers, sessions, store
+from . import learn, providers, sessions, store, voice_route
 from .rest import _uid
 
 log = logging.getLogger("hermes_ui.harvis")
@@ -153,3 +153,16 @@ async def skill_draft(request: Request, user=Depends(get_current_user_optimized)
     turns = [{"role": m.get("role"), "content": m.get("content") or m.get("text") or ""}
              for m in msgs if isinstance(m, dict)]
     return await learn.draft_skill(pool, uid, s.id, turns)
+
+
+@router.post("/harvis/voice/navigate")
+async def voice_navigate(request: Request, user=Depends(get_current_user_optimized)):
+    """Which page a spoken line asks to open. ``{"page": id|null, "confidence": x}``;
+    null whenever Laya is off, unsure, or the line is not a page request."""
+    body = await request.json()
+    text = " ".join(str(body.get("text") or "").split())[:500]
+    pages = voice_route.clean_pages(body.get("pages"))
+    if not text or not pages:
+        raise HTTPException(400, "text and pages are required")
+    route = await voice_route.pick_page(text, pages)
+    return {"page": route.choice if route else None, "confidence": route.confidence if route else None}

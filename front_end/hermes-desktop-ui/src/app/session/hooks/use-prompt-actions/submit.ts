@@ -10,7 +10,8 @@ import {
   isVoicePlaybackActive,
   markVoicePlaybackInterrupted,
   stopVoicePlayback,
-  takeVoicePlaybackInterrupted
+  takeVoicePlaybackInterrupted,
+  takeVoiceSubmit
 } from '@/lib/voice-playback'
 import {
   $composerAttachments,
@@ -204,6 +205,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
       // Barged mid-speech (here or via the voice loop's VAD)? Flag the submit
       // so the backend notes the interruption to the model.
       const interrupted = takeVoicePlaybackInterrupted()
+      const spoken = takeVoiceSubmit()
 
       // Queue drains carry their source session explicitly. A background drain
       // must never inherit the currently selected session after the user moves
@@ -763,6 +765,8 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
           // Typed into the floating HUD, so the user is looking at another app
           // rather than at Hermes. The gateway turns this into a per-turn hint
           // to read the window underneath and work in it.
+          // Harvis: spoken in the hands-free conversation (the HUD flag below wins).
+          ...(spoken && { surface: 'voice' }),
           ...($hudMode.get() && { surface: 'hud' }),
           // A queue drain is a "run after" message, never a live-turn
           // correction. The flag tells the gateway's busy path to hold it for

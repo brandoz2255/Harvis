@@ -19,7 +19,7 @@ import logging
 import os
 import re
 import uuid
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import httpx
 
@@ -202,8 +202,10 @@ async def draft_skill(pool, user_id: int, session_id: str, messages: list[dict])
 
 
 def after_turn(pool, user_id: int, session_id: str, messages: list[dict],
-               answer: str, ran_workspace: bool) -> None:
-    """Fire-and-forget learning after a completed turn."""
+               answer: str, ran_workspace: bool,
+               on_skill: Optional[Callable[[dict], Awaitable[None]]] = None) -> None:
+    """Fire-and-forget learning after a completed turn. ``on_skill`` hears about a
+    new draft ({name, description}) so the UI can offer to switch it on."""
     user_text = next((str(m.get("content") or "") for m in reversed(messages)
                       if m.get("role") == "user"), "")
 
@@ -213,8 +215,13 @@ def after_turn(pool, user_id: int, session_id: str, messages: list[dict],
             if prefs["memory"]:
                 await extract_memories(pool, user_id, session_id, user_text, answer)
             if prefs["skills"] and (ran_workspace or wants_skill(user_text)):
-                await draft_skill(pool, user_id, session_id,
-                                  [*messages, {"role": "assistant", "content": answer}])
+                drafted = await draft_skill(pool, user_id, session_id,
+                                            [*messages, {"role": "assistant", "content": answer}])
+                if drafted.get("name") and on_skill is not None:
+                    try:
+                        await on_skill(drafted)
+                    except Exception:  # noqa: BLE001 — the socket may be gone by now
+                        log.debug("hermes_ui.learn: could not announce drafted skill", exc_info=True)
 
     async def guarded() -> None:
         try:

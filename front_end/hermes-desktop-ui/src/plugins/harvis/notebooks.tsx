@@ -30,6 +30,7 @@ import { useSearchParams } from 'react-router'
 import { harvisApi } from './api'
 import { relativeTime } from './format'
 import { NotebookDetail, UNTITLED } from './notebook-detail'
+import { embedderKey, fetchEmbedderStatus, NotebooksInstallPanel } from './notebooks-install'
 import { listKey, type NotebookInfo as NotebookRow } from './notebook-shared'
 
 interface SearchHit {
@@ -93,7 +94,15 @@ function SearchHits({ onPick, query }: { onPick: (notebookId: string) => void; q
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 
-function NotebookCard({ notebook, onDelete, onOpen }: { notebook: NotebookRow; onDelete: () => void; onOpen: () => void }) {
+function NotebookCard({
+  notebook,
+  onDelete,
+  onOpen
+}: {
+  notebook: NotebookRow
+  onDelete: () => void
+  onOpen: () => void
+}) {
   return (
     <div className="group relative flex min-h-56 flex-col rounded-xl border bg-(--ui-bg-secondary) transition-colors hover:border-(--ui-stroke-secondary) hover:bg-accent/40">
       <RowButton
@@ -167,6 +176,8 @@ export function NotebooksPage() {
     queryKey: listKey
   })
 
+  const embedder = useQuery({ queryFn: fetchEmbedderStatus, queryKey: embedderKey })
+
   const q = search.trim().toLowerCase()
   const deferredQuery = useDeferredValue(search.trim())
   const rows = (notebooks.data ?? []).filter(
@@ -226,6 +237,12 @@ export function NotebooksPage() {
     >
       <div className="h-full overflow-y-auto px-4 pb-6">
         <div className="mx-auto max-w-7xl space-y-3">
+          {embedder.data && embedder.data.state !== 'ready' && (
+            <NotebooksInstallPanel
+              onInstalled={() => void queryClient.invalidateQueries({ queryKey: embedderKey })}
+              status={embedder.data}
+            />
+          )}
           {error && <p className="text-sm text-destructive">{error}</p>}
           {notebooks.isLoading ? (
             <p className="text-xs text-(--ui-text-tertiary)">Loading…</p>

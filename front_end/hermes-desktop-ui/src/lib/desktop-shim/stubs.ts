@@ -128,7 +128,8 @@ export const stubs = {
   stopPreviewFileWatch: ok,
   onPreviewFileChanged: noopListener,
 
-  // ── PTY ──────────────────────────────────────────────────────────────────
+  // ── PTY ── replaced in index.ts by ./terminal (the chat's sandbox); kept for
+  //    anything that reads the stub table directly.
   terminal: {
     start: async () => ({ id: '', pid: 0 }),
     write: async () => false,

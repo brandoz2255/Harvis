@@ -6,11 +6,25 @@ Provides endpoints to proxy Google Maps API requests without exposing API keys t
 import os
 import httpx
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from pydantic import BaseModel, Field
 from fastapi.responses import Response
 
-router = APIRouter(prefix="/api/tools/maps", tags=["maps"])
+
+async def _signed_in(request: Request) -> dict:
+    """Every maps call spends the server's Google key, so only signed-in users may make one."""
+    from auth_optimized import get_current_user_optimized
+    from fastapi.security import HTTPAuthorizationCredentials
+
+    auth_header = request.headers.get("Authorization")
+    credentials = None
+    if auth_header and auth_header.startswith("Bearer "):
+        credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=auth_header[7:])
+    pool = getattr(request.app.state, "pg_pool", None)
+    return await get_current_user_optimized(credentials=credentials, request=request, pool=pool)
+
+
+router = APIRouter(prefix="/api/tools/maps", tags=["maps"], dependencies=[Depends(_signed_in)])
 
 
 class MapsHealthResponse(BaseModel):
@@ -38,7 +52,7 @@ def get_maps_api_key() -> str:
     """Get Google Maps API key from environment."""
     api_key = os.getenv("GOOGLE_MAPS_API_KEY", "")
     if not api_key:
-        raise HTTPException(status_code=500, detail="Google Maps API key not configured")
+        raise HTTPException(status_code=503, detail="Google Maps API key not configured")
     return api_key
 
 

@@ -755,3 +755,19 @@ export function takeVoicePlaybackInterrupted(): boolean {
 
   return at !== null && Date.now() - at < INTERRUPT_TTL_MS
 }
+
+// Harvis: spoken-turn latch — the next prompt.submit carries `surface: 'voice'`
+// so the backend's voice router (plugins/hermes_ui/voice_route.py) may pick a
+// small or big model for it. Same TTL idea as the interruption latch.
+let spokenAt: null | number = null
+
+export function markVoiceSubmit() {
+  spokenAt = Date.now()
+}
+
+export function takeVoiceSubmit(): boolean {
+  const at = spokenAt
+  spokenAt = null
+
+  return at !== null && Date.now() - at < INTERRUPT_TTL_MS
+}

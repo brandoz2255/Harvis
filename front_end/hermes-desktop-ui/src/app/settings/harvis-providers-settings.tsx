@@ -1,11 +1,14 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
+import { useNavigate } from 'react-router'
 
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Cloud, ExternalLink, KeyRound, Loader2, Terminal } from '@/lib/icons'
+import { Cloud, ExternalLink, KeyRound, Loader2, Network, Terminal } from '@/lib/icons'
 import { cn } from '@/lib/utils'
 import { notify, notifyError } from '@/store/notifications'
+
+import { SETTINGS_ROUTE } from '../routes'
 
 import {
   type CodingEngine,
@@ -164,6 +167,7 @@ function CredentialForm({
 /** Where Harvis gets its models: the local Ollama, cloud keys set on the server, and free hosted tiers. */
 export function HarvisProvidersSettings() {
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
   const free = useQuery({ queryFn: fetchFreeProviders, queryKey: freeKey })
 
   const changed = () => {
@@ -251,6 +255,18 @@ export function HarvisProvidersSettings() {
             )}
           </div>
         )}
+      </SettingsSection>
+
+      <SettingsSection icon={Network} title="Share this machine on your network">
+        <ListRow
+          action={
+            <Button onClick={() => navigate(`${SETTINGS_ROUTE}?tab=hosting`)} size="sm" variant="outline">
+              <Network /> Open Hosting
+            </Button>
+          }
+          description="Kubernetes hosting mode lets other computers on your network chat with the models on this machine, with no accounts to set up. The Hosting page explains what it changes and how to turn it on."
+          title="Kubernetes hosting mode"
+        />
       </SettingsSection>
     </SettingsContent>
   )

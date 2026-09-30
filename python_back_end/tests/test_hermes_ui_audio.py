@@ -25,3 +25,9 @@ def test_voice_config_never_hands_out_a_provider_key():
     config = asyncio.run(audio.voice_config(user={"id": 1}))
     assert config["stt"]["mode"] == "relay" and config["tts"]["mode"] == "relay"
     assert "api_key" not in config["stt"] and "api_key" not in config["tts"]
+
+
+def test_speech_to_text_is_on_by_default():
+    # The UI refuses to send any mic audio while stt.enabled is false.
+    from plugins.hermes_ui import rest
+    assert rest.CONFIG["stt"]["enabled"] is True

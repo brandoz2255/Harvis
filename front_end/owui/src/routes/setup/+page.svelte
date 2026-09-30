@@ -13,6 +13,7 @@
 		postSetupTestModel,
 		postSetupPreferences,
 		postSetupComplete,
+		installNotebooksEmbedder,
 		type SetupTick
 	} from '$lib/apis/setup';
 	import { getNodes, getSystem, recommend, downloadModel, getInstalled } from '$lib/apis/cookbook';
@@ -160,6 +161,9 @@
 	// with `bind: address already in use`. The drop-in re-binds the unit the installer
 	// actually created, which is the only thing that works on a systemd host.
 	const OLLAMA_INSTALL = 'curl -fsSL https://ollama.com/install.sh | sh';
+	// Settings > Hosting in the Hermes UI: explains Kubernetes hosting mode and
+	// shows the installer commands. One place to edit if the Hermes path moves.
+	const HOSTING_SETTINGS_URL = '/hermes/#/settings?tab=hosting';
 	const OLLAMA_EXPOSE =
 		'sudo mkdir -p /etc/systemd/system/ollama.service.d && printf \'[Service]\\nEnvironment="OLLAMA_HOST=0.0.0.0:11434"\\n\' | sudo tee /etc/systemd/system/ollama.service.d/harvis.conf >/dev/null && sudo systemctl daemon-reload && sudo systemctl restart ollama';
 
@@ -450,6 +454,28 @@
 			toast.error(`${e}`);
 		} finally {
 			savingPrefs = false;
+		}
+	};
+
+	// Notebooks' only install is its embedding model, so the Verify step can offer
+	// it in place, then re-verify. The backend pulls into the server it probes.
+	let installingTick = '';
+	let installLog = '';
+	const installTick = async (name: string) => {
+		if (!token || name !== 'notebooks') return;
+		installingTick = name;
+		installLog = '';
+		try {
+			await installNotebooksEmbedder(token, (ev: any) => {
+				const pct = ev?.total ? ` ${Math.round((100 * (ev.completed || 0)) / ev.total)}%` : '';
+				if (ev?.status) installLog = `${ev.status}${pct}`;
+			});
+			toast.success($i18n.t('{{name}} installed', { name: TICK_LABELS[name] || name }));
+			await runVerify();
+		} catch (e) {
+			toast.error(`${e}`);
+		} finally {
+			installingTick = '';
 		}
 	};
 
@@ -990,6 +1016,12 @@
 							</span>
 						</span>
 					</label>
+					<p class="text-xs text-gray-500">
+						{$i18n.t('Want other computers on your network to use the models on this machine?')}
+						<a class="underline hover:text-gray-900 dark:hover:text-white" href={HOSTING_SETTINGS_URL}>
+							{$i18n.t("Share this machine's models on your network with Kubernetes hosting mode")}
+						</a>
+					</p>
 					<button
 						type="button"
 						class="w-full rounded-lg bg-gray-900 text-white dark:bg-white dark:text-black py-2.5 text-sm font-medium disabled:opacity-50"
@@ -1030,6 +1062,30 @@
 											>{/if}
 									</div>
 									<div class="text-xs text-gray-500">{t.reason}</div>
+									{#if t.install?.pullable}
+										<div class="mt-2 flex flex-wrap items-center gap-2 text-xs">
+											<button
+												type="button"
+												class="rounded-md bg-gray-900 text-white dark:bg-white dark:text-black px-3 py-1 font-medium disabled:opacity-50"
+												disabled={!!installingTick}
+												on:click={() => installTick(name)}
+											>
+												{installingTick === name
+													? $i18n.t('Installing…')
+													: $i18n.t('Install {{name}} ({{mb}} MB)', {
+															name: TICK_LABELS[name] || name,
+															mb: t.install?.download_mb
+														})}
+											</button>
+											<span class="text-gray-500">
+												{installingTick === name && installLog
+													? installLog
+													: $i18n.t('Optional — you can skip this and install it later from the {{name}} page.', {
+															name: TICK_LABELS[name] || name
+														})}
+											</span>
+										</div>
+									{/if}
 									{#if t.engines?.length}
 										<ul class="mt-2 space-y-1">
 											{#each t.engines as e}

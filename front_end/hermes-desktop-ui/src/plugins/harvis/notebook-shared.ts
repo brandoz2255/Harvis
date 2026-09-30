@@ -50,6 +50,7 @@ export interface NotebookInfo {
   emoji: null | string
   source_count: number
   note_count: number
+  created_at?: string
   updated_at: string
 }
 

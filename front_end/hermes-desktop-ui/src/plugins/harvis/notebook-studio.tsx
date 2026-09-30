@@ -91,7 +91,7 @@ function Clamped({ text }: { text: string }) {
   )
 }
 
-function Transformations({ notebookId, sources }: { notebookId: string; sources: Source[] }) {
+export function Transformations({ notebookId, sources }: { notebookId: string; sources: Source[] }) {
   const queryClient = useQueryClient()
   const { chosen } = useChosenModel()
   const ready = sources.filter(s => s.status === 'ready')
@@ -287,7 +287,15 @@ function PodcastCard({ notebookId, podcast: p }: { notebookId: string; podcast: 
   )
 }
 
-function AudioOverview({ notebookId, sources, title }: { notebookId: string; sources: Source[]; title: string }) {
+export function AudioOverview({
+  notebookId,
+  sources,
+  title
+}: {
+  notebookId: string
+  sources: Source[]
+  title: string
+}) {
   const { chosen } = useChosenModel()
   const queryClient = useQueryClient()
   const ready = sources.filter(s => s.status === 'ready')

@@ -42,6 +42,7 @@ import {
   MessageCircle,
   Monitor,
   Moon,
+  Network,
   Package,
   Palette,
   PawPrint,
@@ -406,7 +407,10 @@ type NonConfigSettingsLabel =
 const NON_CONFIG_SETTINGS: ReadonlyArray<{
   icon: IconComponent
   keywords?: string[]
-  labelKey: NonConfigSettingsLabel
+  // Harvis-only pages use a literal label (same convention as the Settings
+  // nav) so a new page does not need a key in every locale file.
+  labelKey?: NonConfigSettingsLabel
+  label?: string
   tab: string
 }> = [
   // Harvis: only pages the Settings nav shows. Provider API keys and accounts live
@@ -418,6 +422,12 @@ const NON_CONFIG_SETTINGS: ReadonlyArray<{
     tab: 'providers'
   },
   { icon: Archive, keywords: ['history', 'archived'], labelKey: 'archivedChats', tab: 'sessions' },
+  {
+    icon: Network,
+    keywords: ['hosting', 'kubernetes', 'k8s', 'k3s', 'docker', 'cluster', 'network', 'share', 'lan', 'nodes'],
+    label: 'Hosting',
+    tab: 'hosting'
+  },
   { icon: Info, keywords: ['version', 'about'], labelKey: 'about', tab: 'about' }
 ]
 
@@ -954,7 +964,7 @@ function CommandPaletteBody({ onExited }: { onExited: () => void }) {
             icon: entry.icon,
             id: `set-${entry.tab}`,
             keywords: ['settings', ...(entry.keywords ?? [])],
-            label: t.settings.nav[entry.labelKey],
+            label: entry.labelKey ? t.settings.nav[entry.labelKey] : (entry.label ?? entry.tab),
             run: go(settingsTab(entry.tab))
           }))
         ]
@@ -1244,7 +1254,7 @@ function CommandPaletteBody({ onExited }: { onExited: () => void }) {
             icon: entry.icon,
             id: `sp-${entry.tab}`,
             keywords: ['settings', ...(entry.keywords ?? [])],
-            label: t.settings.nav[entry.labelKey],
+            label: entry.labelKey ? t.settings.nav[entry.labelKey] : (entry.label ?? entry.tab),
             run: go(settingsTab(entry.tab))
           }))
         ]

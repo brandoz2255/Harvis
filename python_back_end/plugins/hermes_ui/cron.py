@@ -38,8 +38,6 @@ def _iso(dt: Optional[datetime]) -> Optional[str]:
     return dt.astimezone(timezone.utc).isoformat() if dt else None
 
 
-_TARGET_IDS = {t["id"] for t in DELIVERY_TARGETS}
-
 
 def job_view(job: CronJob) -> dict[str, Any]:
     """Harvis row -> the desktop's CronJob shape (types/hermes.ts)."""
@@ -56,7 +54,8 @@ def job_view(job: CronJob) -> dict[str, Any]:
         "next_run_at": _iso(job.next_run_at),
         "last_run_at": _iso(job.last_run_at),
         "last_error": job.error_message,
-        "deliver": job.delivery if job.delivery in _TARGET_IDS else "local",
+        # The real target: a Discord-made job shown as "local" would be saved back as local.
+        "deliver": job.delivery or "local",
         "model": meta.get("model_name") or None,
         "provider": meta.get("provider") or None,
         "run_count": job.run_count,

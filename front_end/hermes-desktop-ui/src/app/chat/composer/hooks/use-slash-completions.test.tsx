@@ -20,19 +20,19 @@ const CATALOG = {
 
 // A catalog shaped like a real install: a couple of skills the user lives in,
 // a bundled one they have never opened, and one of their own they haven't
-// either.
+// either. (Not `/research`: Harvis ships that as a built-in deep-research command.)
 const RANKED_CATALOG = {
   categories: [{ name: 'Session', pairs: [['/new', 'Start a new session']] }],
   pairs: [
     ['/new', 'Start a new session'],
     ['/docx', 'Edit Word documents'],
-    ['/research', 'Look it up before answering'],
+    ['/lookup', 'Look it up before answering'],
     ['/research-paper-writing', 'Write an academic paper'],
     ['/work', 'Kick off a task in a fresh worktree']
   ],
   skills: {
     '/docx': { usage: 0, origin: 'local' },
-    '/research': { usage: 60, origin: 'local' },
+    '/lookup': { usage: 60, origin: 'local' },
     '/research-paper-writing': { usage: 0, origin: 'bundled' },
     '/work': { usage: 172, origin: 'local' }
   }
@@ -127,7 +127,7 @@ describe('useSlashCompletions', () => {
 
     const skills = commandsOf((await completions(api, '')).filter(isSkillItem))
 
-    expect(skills).toEqual(['/work', '/research', '/docx'])
+    expect(skills).toEqual(['/work', '/lookup', '/docx'])
   })
 
   // Typing is a search, and a search that hides a match is broken. Order

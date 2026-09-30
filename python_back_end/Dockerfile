@@ -114,7 +114,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Ubuntu 22.04 has no CLI-only package, so this pulls the official static
 # release and keeps one file. Pinned to the host daemon's version.
 ARG DOCKER_CLI_VERSION=29.5.2
-RUN curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_CLI_VERSION}.tgz" \
+RUN curl -fsSL "https://download.docker.com/linux/static/stable/$(uname -m)/docker-${DOCKER_CLI_VERSION}.tgz" \
   | tar -xzC /tmp docker/docker \
   && mv /tmp/docker/docker /usr/bin/docker \
   && rm -rf /tmp/docker \

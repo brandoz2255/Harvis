@@ -523,6 +523,7 @@ async def maybe_handle_workspace(
         # "user" (explicit agent/orchestrate pill) vs "auto" (auto-detected).
         # Auto runs carry no Tier-3 token and get heavy tools withheld downstream.
         launch_mode=launch_mode,
+        sandbox=_chat_sandbox(owui_body, user_id),
     )
 
     needs_approval = _approvals_enabled()
@@ -596,3 +597,26 @@ async def resolve_workspace_approval(request: Request, workspace_id: str, approv
         return {"ok": False, "status": "launch_failed"}
     logger.info("owui workspace_bridge: %s approved + launched", workspace_id)
     return {"ok": True, "status": "approved"}
+
+
+def _chat_sandbox(owui_body: dict, user_id: int) -> Optional[dict]:
+    """The Hermes chat's sandbox for this run, or None (OWUI chats, sandbox off).
+
+    Hermes sends ``harvis_sandbox_session`` (its session id). The folder is
+    resolved inside THIS user's own ``u<uid>`` tree, so a forged id can only
+    ever name another sandbox of the same person. ``session_id`` is the runner
+    key, which makes exec/run_tests land in the same hardened container the
+    right sidebar's terminal uses (terminal_container.ensure_isolated)."""
+    sid = owui_body.get("harvis_sandbox_session")
+    if not sid:
+        return None
+    try:
+        from plugins.hermes_ui import sandbox
+        if not sandbox.enabled():
+            return None
+        path = sandbox.ensure_dir(int(user_id), str(sid))
+        return {"workspace_path": path, "session_id": sandbox.runner_key(int(user_id), str(sid)),
+                "note": sandbox.agent_note(int(user_id), str(sid))}
+    except Exception:  # noqa: BLE001 — no sandbox means the old scratch-dir behaviour
+        logger.warning("owui workspace_bridge: chat sandbox unavailable for %r", sid, exc_info=True)
+        return None

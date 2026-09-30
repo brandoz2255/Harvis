@@ -27,7 +27,7 @@ from .models import (
     # Open Notebook integration models
     TransformationType, TransformationRequest, Transformation, TransformationListResponse,
     PodcastStyle, PodcastStatus, PodcastRequest, Podcast, PodcastListResponse,
-    YouTubeSourceRequest
+    YouTubeSourceRequest, SearchRequest
 )
 from . import podcast_audio
 from .manager import NotebookManager, NotebookNotFoundError, SourceNotFoundError, NoteNotFoundError
@@ -2139,7 +2139,7 @@ async def get_podcast_audio(
 
 @router.post("/search")
 async def search_knowledge_base(
-    search_request: "SearchRequest",
+    search_request: SearchRequest,
     request: Request = None,
     current_user: Dict = Depends(get_current_user_from_request),
     manager: NotebookManager = Depends(get_notebook_manager)
@@ -2149,7 +2149,7 @@ async def search_knowledge_base(
     - type=text: ILIKE search in sources + notes
     - type=vector: pgvector search over notebook_chunks (sources only)
     """
-    from .models import SearchRequest, SearchResponse, SearchResult, SearchType
+    from .models import SearchResponse, SearchResult, SearchType
 
     q = (search_request.query or "").strip()
     if not q:
