@@ -1,5 +1,20 @@
 # Recent Changes and Fixes Documentation
 
+## Date: 2026-09-30 — Ready for the 4090: GPU request, /audio/ leak, re-run and reinstall fixes (branch `harvis1.5`)
+
+- **Problem:** with one NVIDIA card, llmfit (compose `runtime: nvidia`) and the in-cluster Ollama each requested
+  `nvidia.com/gpu: 1`; the second pod would sit Pending and `--k8s` would report failure. **Fix:**
+  `compose_to_k8s.py` gives compose nvidia-runtime services the runtime class only; Ollama alone requests the card.
+  Test `test_one_gpu_box_requests_the_card_once`.
+- **Problem:** `/audio/` served the host's whole `/tmp` with a directory listing, unauthenticated (both modes).
+  **Fix:** `nginx-harvis.conf` serves only `/audio/<id>.wav|.mp3`; everything else under `/audio/` is 404.
+  Verified on the laptop: listing 404, `research_cache.sqlite` 404, a test wav 200.
+- **Problem:** a second `--k8s` after the 11435 LAN-port fallback turned model sharing off; `--k8s-uninstall` kept
+  image stamps so a reinstall skipped imports. **Fix:** `harvis-k8s.sh` reuses the port the `lan-models` Service
+  already has, and uninstall deletes the stamps.
+- Files: `scripts/k8s/{compose_to_k8s.py,harvis-k8s.sh,test_compose_to_k8s.py}`, `nginx-harvis.conf`. 17/17
+  generator tests pass. GPU path still unrun on real NVIDIA hardware.
+
 ## Date: 2026-09-29 — Kubernetes hosting mode (`./install.sh --k8s`)
 
 Ask: *"ok get that done and test it on the proxmox server for me"* (the Kubernetes hosting plan).
