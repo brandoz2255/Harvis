@@ -292,6 +292,8 @@ export interface Translations {
     resetHudLayout: string
     layoutEditor: string
     layoutEditorTitle: (modifier: string) => string
+    harvisAssistant: string
+    harvisAssistantEnd: string
   }
 
   keybinds: {

@@ -317,7 +317,7 @@ describe('MessagingView Harvis setup flow', () => {
     await waitFor(() => expect(dismissPairing).toHaveBeenCalledWith('telegram', '3fa9c1', undefined))
   })
 
-  it('reports the backend save message and warns when the gateway did not apply it', async () => {
+  it('has no on/off switch; saving a set-up platform turns it on', async () => {
     getMessagingPlatforms.mockResolvedValue({ platforms: [telegram({ enabled: false, state: 'disabled' })] })
     updateMessagingPlatform.mockResolvedValue({
       gateway_applied: false,
@@ -329,7 +329,9 @@ describe('MessagingView Harvis setup flow', () => {
     await renderMessaging()
 
     await act(async () => {
-      fireEvent.click(await screen.findByRole('switch', { name: 'Enable Telegram' }))
+      await screen.findByRole('button', { name: /Save changes/ })
+      expect(screen.queryByRole('switch')).toBeNull()
+      fireEvent.click(screen.getByRole('button', { name: /Save changes/ }))
     })
 
     await waitFor(() =>

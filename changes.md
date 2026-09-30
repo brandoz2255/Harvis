@@ -1,5 +1,626 @@
 # Recent Changes and Fixes Documentation
 
+## Date: 2026-09-29 — Kubernetes hosting mode (`./install.sh --k8s`)
+
+Ask: *"ok get that done and test it on the proxmox server for me"* (the Kubernetes hosting plan).
+
+- **One flag moves Harvis onto Kubernetes.** `./install.sh --k8s` installs k3s and runs the same services there on
+  :9000. The cluster objects are generated from `docker compose config` on every run (`scripts/k8s/compose_to_k8s.py`,
+  `k8s_extras.py`), not kept in a Helm chart, so the two modes cannot drift. Both modes use the same Docker volume
+  directories, so data carries across. `--k8s-off` goes back to Docker; `--k8s-status`, `--k8s-uninstall`,
+  `--k8s-join-command` and `--k8s-join URL TOKEN` are there too. Driver: `scripts/k8s/harvis-k8s.sh`.
+- **Models run in the cluster and are shared on the LAN, read-only.** Ollama runs as a pod (on the GPU when NVIDIA is
+  present). Other machines reach it on port 11434 through an nginx allow-list: chat, completions, embeddings and model
+  listing only; pull, delete, create, push and the rest return 403.
+- **Settings → Hosting** shows which mode this machine is in, its nodes, and the shared models address
+  (`plugins/hosting/`, `GET /api/capabilities/hosting`, `hosting-settings.tsx`).
+- **Two bugs found on the test VM and fixed:** the DNS check ran before CoreDNS was up, and its TCP fallback had a
+  syntax error that crash-looped CoreDNS (now waits, retries, uses a valid block, and rolls back if the fallback does not
+  help). Every update re-copied all images into k3s because Docker's containerd store gives each rebuild a new image Id;
+  the skip-stamp now hashes layers + config, and an unchanged update takes 15 s.
+- **Verified** on a fresh Ubuntu VM on pve: Docker → Kubernetes → Docker → Kubernetes, with a database row written in
+  each mode surviving every switch; gemma4:e2b chat and model listing from another machine, blocked routes 403.
+  Tests: `scripts/k8s/test_compose_to_k8s.py` 16, `tests/test_hosting_mode.py` 17, hosting page 5.
+
+Not tested: the NVIDIA GPU path (no NVIDIA on pve) and the Hosting page signed in. Found, not fixed: the update check
+calls a nonexistent `/api/hermes/update`; `docker-compose.prebuilt.yml:96,286` commits a default gateway token.
+
+## Date: 2026-09-28 — First-run polish: install Notebooks from Verify, messaging step-by-step, Harvis mic toggle
+
+Ask: *"in the verify give them the option to install notebooks … tell them the space it takes up … if not put the
+notebooks tab in a darker grey … help the user get their messaging stuff started … discord should be grey if its their
+first time … the harvis global voice button should be hidden unless they press the top right button again"*.
+
+- **Notebooks is installable from the setup wizard.** "Installing Notebooks" means pulling one embedding model,
+  `nomic-embed-text` (274 MB, measured), onto the model server at `OLLAMA_URL`. Without it, adding sources falls back to
+  a chat model, which is slow and makes poor search vectors. The Verify step now shows "Install Notebooks (274 MB)"
+  with live progress, and says it can be skipped. New `python_back_end/notebooks/embedder_status.py`; new routes
+  `GET /api/capabilities/notebooks-embedder` and `POST …/install` (streams the pull) in `setup_flow.py`; the wizard in
+  `front_end/owui/src/routes/setup/+page.svelte` and `src/lib/apis/setup/index.ts`.
+- **Not installed means dimmed.** Until the embedder is there, the Notebooks row in the Hermes sidebar is grey with a
+  "not installed (274 MB download)" tooltip, and the Notebooks page opens with an install card that uses the house
+  glitch transition. New `src/store/nav-status.ts` and `src/plugins/harvis/notebooks-install.tsx`; wired in the
+  sidebar, the Harvis plugin and the Notebooks page.
+- **Messaging gives numbered steps.** Each platform that is not set up shows a numbered list in place of the one-line
+  hint, and its row is grey. The backend writes the steps (`plugins/hermes_ui/messaging_steps.py`) because they depend
+  on how this install runs the platform: on a default install Discord is the in-process bot, which reads its token
+  from `.env` only, so its steps say so and give the `docker compose up -d backend` command.
+- **The floating Harvis mic is off until turned on.** The titlebar Harvis button (next to the layout editor) is now an
+  on/off toggle for the bottom mic pill, remembered across reloads (`hermes.desktop.harvisMicOn`). On shows the pill on
+  every page, including the chat, where it sits at the right just above the composer, and it stays until the button is
+  pressed again. It no longer starts the hands-free call by itself. Off hides the pill and ends any call. `src/store/voice-call.ts`,
+  `titlebar-controls.tsx`, `harvis-chatter.tsx`, en/zh strings.
+
+Found while doing this, not fixed: Discord's token field on the Messaging page does nothing on a default install
+(the legacy bot reads `.env`), and `DISCORD_DEFAULT_USER_ID` defaults to 2 in compose, which is rarely the first user
+on a fresh install.
+
+Verified: backend suite 1,044 passed, 13 skipped (8 new tests); tsc at its 3 known errors; the touched vitest files
+pass; Hermes UI and the owui setup wizard rebuilt and published; gemma4:e2b answers through the backend's model server in 12 s.
+
+## Date: 2026-09-28 — Install fixes: model server reachability, honest health message, verifier, Apple Silicon
+
+Ask: *"make sure our stuff can be put on different machines no problem with easy setup … one install one setup
+script and docker up and down"*. A from-scratch install check found four problems. All four are fixed:
+
+- **The installer said PASS for a model server that containers cannot reach.** On the Linux engine,
+  `host.docker.internal` is the Docker bridge, and stock Linux Ollama listens on 127.0.0.1 only. The installer now
+  also connects to the bridge gateway, which is the same connection a container makes. If that fails, the row
+  becomes WARN, and the exact fix is printed under the table: the `systemctl edit ollama` lines, or
+  `--llm-url http://<LAN IP>:11434`. Docker Desktop (macOS, Windows) skips the check, because it forwards the name to
+  the host's loopback. `install.sh`.
+- **Health said "no model provider configured" when the installer had configured one.** The backend decided
+  "configured" by comparing the URL against the default, and the installer writes that same URL. Compose now passes
+  `HARVIS_LLM_BASE_URL` to the backend as-is (empty when unset). The backend counts it as configured when that value
+  is set. A configured server that is down now reports `down`, and the status is degraded. The no-provider message
+  also names the URL it tried. Files: `python_back_end/main.py` (top-of-file flag and `_check_model_provider`) and
+  `docker-compose.yaml` (backend env).
+- **The installer's closing lines contradicted it.** It said "It has none loaded yet" whatever the model server's
+  state. That line now follows the backend's answer. When the server cannot be reached, the fix is repeated at the
+  very end, because the build prints thousands of lines after the check table.
+- **`scripts/verify-fresh-install.sh` failed every clean install.** Its service list did not include
+  `hermes-ui-builder`. Its footprint check also crashed on macOS and busybox, whose `du` has no `--exclude`. The
+  check now subtracts the size of `.git` instead.
+- **Apple Silicon:** `python_back_end/Dockerfile` and `Dockerfile.core` downloaded an x86_64-only Docker CLI. They now
+  pick the build machine's architecture with `$(uname -m)`. Both URLs return 200. No arm64 machine was available to
+  build on.
+
+## Date: 2026-09-28 — The HARVIS wordmark changes face with five different transitions, not one fade
+
+Ask: *"change up the transitions it does when harvis is moving from one font to another … a little more flashy or at
+least change transitions and not just fade"*. The empty-chat wordmark used to blur-fade between its six faces. It
+now plays a different transition each time, in turn:
+
+- **flip:** split-flap board, letters flip down one after another.
+- **glitch:** the letters jump sideways in slices with a red and blue split.
+- **rise:** a slot-machine roll, the old face drops out and the new one rises in.
+- **scramble:** the letters decode from noise, left to right.
+- **wipe:** a light beam sweeps across and reveals the new face behind it.
+
+There are five transitions for six faces, so the same face rarely arrives the same way twice. Reduced motion still
+holds the original face still. The timing of each face change moved from CSS keyframes into the component, because
+the scramble transition has to change the letters themselves.
+
+Files: `front_end/hermes-desktop-ui/src/components/chat/harvis-wordmark.tsx`, `front_end/hermes-desktop-ui/src/styles.css`
+(the `.harvis-cycle` block only); new test `front_end/hermes-desktop-ui/src/components/chat/harvis-wordmark.test.tsx`
+(4 tests).
+Verified: 4/4 tests pass. Each transition was frozen mid-play in a browser preview of the real component and
+screenshotted, and all five read correctly. The UI was published with `hermes-ui-builder`.
+
+Follow-up the same day: David picked the RGB glitch as his favourite. It is now also a reusable effect,
+`harvis-glitch-in` and `harvis-glitch-out` in `styles.css`, that any element can use. Reduced motion turns it off.
+Nothing uses it yet besides the wordmark. It was checked on a plain panel in the preview. It is not published yet
+and goes out with the next UI build.
+
+## Date: 2026-09-27 — Codebase check: notebook search fixed, four broken routes, internal routes closed at the door
+
+Ask: *"do a code base verification and make sure everything works"*. Swept every backend route signed out, ran the
+full backend and UI suites, and probed the sidecars.
+
+- **Notebook search was broken.** `notebooks/router.py` imported `SearchRequest` inside the function, so FastAPI
+  could not resolve the annotation, read the body as a query parameter, and answered 422 to every search from the
+  Hermes UI. The same unresolved name made `/openapi.json` answer 500. Import moved to module level.
+- `GET /api/models/memory-pressure` answered 500 on a machine without CUDA: the "unknown" branch of
+  `model_manager.check_memory_pressure` left out `auto_cleanup_suggested`. Added.
+- `/api/tools/maps/*` needed no sign-in and answered 500 when the Google key is unset. Now 401 signed out, 503 with
+  no key. Nothing in the repo calls these routes.
+- Front door (`nginx-harvis.conf`) now answers 404 for routes only other services call over `backend:8000` with no
+  sign-in: `/api/opencode/*` (OpenCode's model proxy, which spends the Kimi key), `/api/synthesize-speech`,
+  `/api/jobs/enqueue`, `/api/artifacts/build-status`, and the two debug readouts `/api/{vibe,notebooks}/debug/*`.
+  Their internal callers are unaffected (checked from inside the backend container).
+
+Files: `python_back_end/notebooks/router.py`, `python_back_end/model_manager.py`, `python_back_end/tools/maps.py`,
+`nginx-harvis.conf`; tests `python_back_end/tests/test_notebook_search_route.py`,
+`python_back_end/tests/test_maps_and_memory_pressure.py` (5 new).
+Verified: backend 1,036 passed / 13 skipped; signed-out GET sweep of 245 routes has no 500s; UI vitest at baseline
+(27 failed / 8,591 passed), tsc at its 3 known errors; nginx smoke normal. Not tried signed-in.
+Still open (not changed): some write routes need no sign-in (`/api/web-search`, `/api/fact-check`,
+`/api/comparative-research`, `/api/analyze-screen*`, `/api/vibe-coding`, `/api/vibe/command`,
+`/api/voice-transcribe`, `/api/tts-engine`); `/api/rag/config` shows internal paths (the old UI reads it); the k8s
+nginx configmaps do not have the new 404 blocks; five test sandbox containers `harvis-ws-term-sbx-*` are still up.
+
+## Date: 2026-09-27 — UNFINISHED: voice control of the whole desktop (parked)
+
+Status: **unfinished, parked by David 2026-09-27.** Voice today opens pages, tabs and named on-screen items, types
+into the chat box, and runs several steps in order. It cannot yet operate any control on screen by what you say.
+The agreed direction when it resumes: build one list of everything actionable (the Ctrl+K command palette actions,
+the page/tab tree, and every labelled button, tab, toggle and text box on screen), keep the instant local match, and
+when nothing matches send the sentence plus that numbered list to the small model, which answers with steps the
+existing step runner (`app/harvis-chatter/voice-steps.ts`) carries out. Anything that deletes, sends or spends asks
+first. Icon-only buttons with no label will need labels.
+
+## Date: 2026-09-27 — Scheduled jobs sits like a page; the voice pill and call bubble stay on top
+
+Ask: *"make the shedule jobs tab not like pop up crazy like that or at least let the voice part go over it"*.
+
+- Full-screen panels (Scheduled jobs, Settings, Command Center, Agents, Star Map …) are `z-50`; the Harvis pill and
+  the voice bubble were `z-40`, so they were dimmed under the panel and could not be clicked. Both are now `z-60`:
+  above every panel, still below real dialogs (`--z-modal` 130).
+- `OverlayView` / `Panel` take `quiet`: no dimmed, blurred backdrop, and a click beside the card does not close it.
+  Scheduled jobs uses it; the X and Esc still close it. Other panels are unchanged.
+
+Files: `src/app/overlays/{overlay-view,panel,panel.test}.tsx`, `src/app/cron/index.tsx`,
+`src/app/harvis-chatter/harvis-chatter.tsx`, `src/app/chat/composer/harvis-voice-orb.tsx`.
+Verified: 433 related tests pass (2 new); full vitest at baseline (27 failed / 8,591 passed); tsc at its 3 known
+errors; bundle `index-Bm6OlYed.js` published. Not tried signed-in.
+
+## Date: 2026-09-27 — Voice finds "schedule jobs", follows steps in order, and answers without the workspace
+
+Ask: *"it fails to go to schedule jobs properly / make sure it can follow my steps one by one. dont give it workspace
+we want it to be fast and not use resources while in global chat mode"*.
+
+- **Scheduled jobs.** "schedule jobs" matched no page name exactly, so it fell through to Laya and failed. Names now
+  also match loosely (plural, -ed, -ing dropped: "schedule job" = "scheduled jobs", "setting" = "settings"), and cron
+  gained speech slips: crown/corn/chron jobs, scheduler, schedules, timers, automations. `lib/voice-navigation.ts`.
+- **Steps one by one.** New `app/harvis-chatter/voice-steps.ts` splits a line on sentence ends, "then", "after that",
+  and "and"/commas before a command ("open settings, then go to voice"). Each page it can open is opened in order
+  with a short wait so the next step sees it; "type …" / "put … in my chat" goes to the chat box; anything else goes
+  to Harvis in its place, one turn at a time. Used by both the voice call and the Harvis pill.
+- **Plain voice turns.** The voice assistant's turns (`rest_voice.voice_turn`) now run `_run_turn(..., plain=True)`:
+  chat mode, no recall, no skills, no bot persona, no Laya routing, no thinking, no after-turn learning, and the OWUI
+  router short-circuits `harvis_plain` to `run_plain_completion` (the model and the core files only; no workspace,
+  research, web, file or knowledge injection). The voice prompt now says it has no tools and to ask in the chat for
+  real work.
+- **Trade-off:** the voice assistant can no longer start a workspace job itself; it tells you to ask in the chat.
+
+Files: `python_back_end/owui_compat/{chat_completion,router}.py`, `python_back_end/plugins/hermes_ui/{ws,rest_voice}.py`,
+`python_back_end/tests/{test_voice_session,test_hermes_ui_voice_route}.py`, `src/lib/voice-navigation{,.test}.ts`,
+`src/app/harvis-chatter/{voice-steps,voice-steps.test}.ts`, `voice-call.tsx`, `harvis-chatter.tsx`,
+`src/store/voice-assistant{,.test}.ts`.
+
+Verified: 51 backend tests (voice route, voice session, bots); voice UI tests 1,380 passed; full vitest at baseline
+(27 failed / 8,589 passed); tsc at its 3 known errors; bundle `index-clLGZjfu.js` published. Not tried signed-in.
+
+## Date: 2026-09-26 — Voice navigation works like a tree; messaging footer loses its switch; "go to this code" no longer vanishes
+
+Ask: *"when i say navigate to discord it goes to the messaging app and the discord tab / same with email … detect
+other in depth process trees … leave it at those buttons … a thing that said go to this code but when i expanded it,
+it just went away"*.
+
+- **Tree navigation.** New `lib/voice-nav-tree.ts` lists the tabs inside Messaging (all 32 platforms), Settings
+  (model, fallback, voice, providers, memory, gateway …), Skills (toolsets, MCP), Command Center and Artifacts, each
+  as a deep link the page already reads from its URL. "Open Discord" goes to `/messaging?platform=discord`;
+  "discord in messaging" and "messaging discord" work too. A page beats a tab of the same name; a tab of the page you
+  are on beats one elsewhere.
+- **On-screen items.** New `lib/voice-nav-screen.ts` finds tabs, tree rows, links and list rows on the page by
+  label ("open SOUL.md", "open the skills folder"). Buttons that act (delete, send, save …) never match; dialogs and
+  the voice card are off limits. A closed folder is opened on its own row.
+- `lib/voice-navigation.ts` rewritten around those two (tree, then screen, then Laya with top pages plus the current
+  page's tabs). Repeated speech ("navigate to discord navigate to discord …") is cut at the repeat. Both voice
+  callers now use `openVoiceDestination`.
+- **"Go to this code" bug.** Speech-to-text heard "Discord" as "this code"; the line went to the model, the reply was
+  cut off before its first word, and an empty reply rendered as nothing. Now: "this code" is a Discord alias; an
+  empty interrupted reply shows "Stopped." (`store/voice-assistant.ts`, backend `rest_voice.py` `_shown`); the voice
+  prompt says the app opens pages itself and never to claim it cannot navigate.
+- **Messaging footer.** The enable switch is gone from `platform-detail.tsx`; the bar is Send test message and Save
+  changes. Saving a set-up platform turns it on (`enabled: true`). Trade-off: there is no off switch in the UI now.
+- **Verified:** voice-navigation + messaging tests 23 passed; backend voice tests 20 passed; tsc only the 3 old
+  errors; full vitest at baseline (27 failed / 19 files, 8,582 passed); bundle published with the new code. Not tried
+  signed in.
+
+## Date: 2026-09-26 — Two voice buttons: the chat mic talks to the chat, the titlebar Harvis button runs the assistant
+
+Ask: *"have the button that calls harvis to do all of the extra stuff as a different button not the speaking one …
+leave the regular button alone leave the standard card as is … at the top next to layout editor"*.
+
+- **Chat mic, back to how it was:** `composer/index.tsx`, `controls.tsx`, `controls.test.tsx` and
+  `hooks/use-composer-voice.ts` restored to the committed version. It sends what you say to the open chat, reads the
+  reply aloud, and shows the original card (`w-60`). One addition: starting it ends a running Harvis call.
+- **New titlebar button** (`app/shell/titlebar-controls.tsx`), just left of Layout editor: sparkle icon, "Talk to
+  Harvis". It starts the assistant call from `app/harvis-chatter/voice-call.tsx`: its own conversation, navigation,
+  "type … in the chat" drafts, card on the chat page and bubble elsewhere. The icon turns to a mic while live;
+  clicking again ends it. Starting it ends a running chat mic call.
+- `store/voice-call.ts` now only holds the assistant's live/compact state; the composer-mirroring registry is gone.
+- Labels in `i18n/en.ts`, `types.ts`, `zh.ts`. Test: `app/shell/titlebar-controls.test.tsx` (2).
+- **Trade-off:** the chat mic's call no longer follows you off the chat page as a bubble; that travel now belongs
+  to the Harvis button.
+- **Verified:** tsc only the 3 old errors; related suites 504 passed; full vitest at baseline (27 failed / 19 files,
+  8,578 passed); bundle published and contains the new labels; sign-in page loads with no console errors.
+
+## Date: 2026-09-26 — Clicking a file in the Files pane shows its contents
+
+- **Problem:** clicking `SOUL.md` (or any file) in the sandbox Files pane opened an empty preview.
+- **Cause:** `/hermes-api/api/fs/read-text` returned `{content, size}`, but the preview reads the desktop app's
+  shape `{text, byteSize, binary}` (`HermesReadFileTextResult`), so `text` was always undefined.
+- **Fix:** `plugins/hermes_ui/sandbox.py` `read_text` now returns `text`, `byteSize`, `binary`, `path`.
+  `tests/test_hermes_ui_sandbox.py` asserts the full shape. Markdown files render as formatted text.
+- **Verified:** 42 sandbox/voice tests pass; `read_text` on user 315's newest sandbox returns SOUL.md (614 bytes).
+
+## Date: 2026-09-26 — Voice talks to Harvis in its own conversation; chat text goes in unsent; sandbox is automatic
+
+Ask: *"voice should be do this do that not put what im saying to it in a chat session … respond in its own little
+chat while managing the space … just have it put in text when i tell it to say something in chat but dont tell it to
+send"*, plus core files like `SOUL.md` in its workspace and no sandbox button. Branch `feat/hermes-ui`.
+
+**Voice posted every spoken sentence into the open chat.**
+- **Cause:** the voice call lived inside the chat composer and submitted each transcript as a chat message.
+- **Fix:** voice now has its own hidden backend session (`Voice: Harvis`, kept out of the chat list by `store.py`).
+  - New `plugins/hermes_ui/rest_voice.py`: `POST /hermes-api/api/voice/turn` streams the reply as NDJSON;
+    `GET`/`DELETE /hermes-api/api/voice/session` load and reset it. Tests: `tests/test_voice_session.py` (6).
+  - Text Harvis writes for the chat comes back inside `<chat-draft>` tags. The UI puts it in the chat box **unsent**.
+  - "Type X [in the chat]" is handled on the spot with no model call (`dictationText`).
+  - "Open settings"-style navigation still moves the app first.
+- **UI:** the call is app-level (`app/harvis-chatter/voice-call.tsx`, mounted in `wiring.tsx`), so it runs on every
+  page. Its replies show in `voice-transcript.tsx` on the call card or the bottom bubble. The composer only starts,
+  mirrors and ends the call (`use-composer-voice.ts`, `store/voice-call.ts`). Typing during a call keeps Send.
+- **Removed:** `harvis-chatter/reply.ts`, `reply.test.ts`, `voice-bubble.tsx`. The chatter pill uses the same voice
+  conversation.
+
+**Core files in the workspace.** The sandbox now always holds `AGENTS.md`, `SOUL.md`, `USER.md` and `MEMORY.md`
+(`sandbox.sync_core_files`, called from `rest_sandbox.py`), like Hermes/OpenClaw set up an agent home.
+
+**Sandbox button removed.** `sandbox-button.tsx` became `sandbox-watcher.tsx`: it renders nothing, still starts the
+sandbox, opens Files once and toasts "App ready" with Open. The GPU switch, Delete and app list UI are gone.
+
+**Verified:** backend tests 198 passed; UI tests for voice-assistant, sandbox-watcher, composer and controls green;
+full vitest at the known baseline (27 failed / 19 files); tsc only the 3 old errors; bundle published.
+
+## Date: 2026-09-26 — Sandbox on by default with skills in its tree; voice call survives leaving the chat
+
+Asks: *"the sandbox should be on automatically so it has files it can manage and look like like its skills, its
+own file tree"* and *"if i have the speaker bot it should stay on going from the right side as a card to being a
+small little rounded rectangle bubble on the bottom of the page"*. Branch `feat/hermes-ui`.
+
+**The sandbox looked off until you opened a terminal.**
+- **Cause:** the chat's container only started when a terminal opened, and the Files pane was closed by default.
+- **Fix:** reading a chat's sandbox info now starts its container in the background. It starts once per chat;
+  the response says `starting` while it comes up. This is in `plugins/hermes_ui/rest_sandbox.py`. Setting
+  `HARVIS_SANDBOX_AUTOSTART=false` turns it off.
+- **Skills in the tree:** the user's enabled skills are copied into the sandbox as `skills/<name>/SKILL.md`
+  (`sandbox.sync_skills`).
+  - The container can write this folder too, so the copy never follows a link and only rewrites files it wrote.
+  - It removes skills the user dropped, and leaves the user's own files alone.
+- **Sandbox button:** the Files pane opens by itself the first time a sandbox exists (`sandbox-button.tsx`).
+  - The status dot is always shown: green when on, pulsing while it starts.
+  - The popover has a Status line. The empty-folder text is now "Sandbox opens with your first message".
+- **Tests:** `tests/test_sandbox_skills_mirror.py` (4). It covers mirroring, keeping user files, planted symlinks,
+  and one start per chat.
+
+**A voice conversation died when you left the chat.**
+- **Cause:** full pages replace the chat view, which unmounts the composer and its microphone.
+- **Fix:** `store/voice-call.ts` keeps the call alive across that unmount.
+  - The new `app/harvis-chatter/voice-bubble.tsx` carries the call on every other page. It is a small rounded
+    bubble at the bottom with mute, "Open chat" and end buttons.
+  - Coming back to the chat hands the call back to the composer (`use-composer-voice.ts`).
+- **Shrink on the chat:** the voice card on the chat gets a "Shrink to a bubble" button, and the bubble can
+  expand it again (`harvis-voice-orb.tsx`, `styles.css`).
+- **The Harvis pill** hides while a call is live.
+
+## Date: 2026-09-26 — Deep research from a slash command and the + menu; research page-reader fix
+
+Asks: *"make deep research on a icon or have it as a slash command"* and *"start verifying funtioanltiy on all
+fronts"*. Branch `feat/hermes-ui`.
+
+**`/research` did nothing.**
+- **Symptom:** in the Hermes UI, an unknown slash command goes to `slash.exec`. The facade answers that with
+  "(no output)", so `/research X` never started a run.
+- **Fix:** `/research` (aliases `/deep-research`, `/deepresearch`) is now a desktop action in
+  `lib/desktop-slash-commands.ts` and `use-prompt-actions/slash.ts`.
+  - It sends "Deep research: X" as a chat turn. The backend's existing detector
+    (`owui_compat/research_bridge.py`) then starts the run and shows the research card.
+- **Menu item:** a "Deep research" item in the composer + menu (`chat/composer/context-menu.tsx`) puts
+  `/research` in front of the draft.
+- **Tests:** a new `/research` resolve test. The slash-completion test fixture's skill is renamed `/lookup`.
+
+**Research lost unreadable pages.**
+- **Cause:** `python_back_end/research/extract/html_trafilatura.py` imported `readablity` (typo), so the
+  fallback reader never loaded. Its empty-result branch then passed `test=` instead of `text=` and raised.
+- **Effect:** every page trafilatura couldn't read became an extraction error. The same path feeds
+  OpenClaw's web-fetch proxy.
+- **Fix:** both names corrected, plus `tests/test_html_extract_fallback.py`.
+  - `readability-lxml` is still not installed, so those pages are now a clean miss rather than a crash.
+
+**Also fixed while running the full suite:**
+- `plugins/hermes_ui/cron.py` showed a Discord job's delivery as "local".
+- A settings test depended on a leftover gateway status cache.
+
+**Verified:**
+- **Live checks:**
+  - Voice round trip: speech then transcription gave back the same sentence.
+  - Laya, the Hermes agent (with the backend's key), Ollama and the messaging gateway all answer.
+  - A real deep research run (gemma4:e2b) finished in 432 s with 8 sources and a full report.
+- **Tests:** 207 backend tests and 1,079 UI tests pass. `tsc` shows only the old errors.
+- **Deploy:**
+  - Bundle `index-CKGs04D0.js` is published.
+  - `/health` returns 200, and protected routes return 401 when signed out.
+- **Not verified:** a signed-in session.
+
+**Found, not fixed (needs David):**
+- `harvis-mcp` accepts the hard-coded bearer `dev-key` and offers command execution and env access.
+- It is also on `openclaw-internal`.
+
+## Date: 2026-09-26 — Chat answers instead of bare thoughts; a Harvis pill on every page
+
+Asks: *"fix up the chat it showing thought and not response"* and *"there should be an option for a global
+harvis chatter so we can navigate together … at the bottom of the site"*. Branch `feat/hermes-ui`.
+
+**Thought but no answer.** The Hermes UI sends thinking models a "medium" thinking level. Under Harvis's full
+system prompt, gemma4:e2b sometimes spent the whole turn thinking and stopped with an empty answer. The saved
+"Damn." reply in chat `69b1f597-…` had 845 characters of reasoning and 0 of answer. Bare prompts answer fine
+at every level, so it only happens with the long real prompt.
+- Fix in `python_back_end/plugins/hermes_ui/ws.py`: when a thinking turn ends with thoughts and no answer, ask
+  once more with thinking off (`reasoning_effort: none`) and stream that answer into the same reply.
+- Tests in `tests/test_hermes_ui_voice_route.py`: re-ask happens once; an answered turn is never re-asked.
+
+**Harvis chatter.** New `front_end/hermes-desktop-ui/src/app/harvis-chatter/` (`harvis-chatter.tsx`,
+`reply.ts` plus a test), mounted in `app/contrib/wiring.tsx`.
+- A small "Harvis" pill sits at the bottom of every page except the chat itself.
+- Type or speak "open settings" / "take me to notebooks" and it navigates, using the same matcher and Laya
+  fallback as voice chat.
+- Anything else goes to the current chat in the background. The reply shows in a bubble above the pill, with
+  a link into the full chat.
+
+**Verified:** 61 backend tests pass in `harvis-backend` (test files copied in first). 7 UI tests pass. `tsc`
+shows only the old errors. The backend restarted cleanly. Bundle `index-rjKIzZEx.js` is published and loads
+to sign-in with no console errors. **Not verified:** a signed-in session.
+
+## Date: 2026-09-26 — Harvis speech: the mic works in the Hermes UI
+
+Ask: *"im gettting voice transcription errorts trying to use harvis speech"*. Branch `feat/hermes-ui`.
+
+**Root cause:** the Hermes UI config facade pinned `stt: {"enabled": False}` (`plugins/hermes_ui/rest.py`). The UI
+checks that flag before every clip and throws "Speech-to-text is disabled in settings." without sending
+anything. No user had an override, so dictation and voice chat failed for everyone. The server-side speech
+path (`audio.py` → voice-onnx whisper) was fine the whole time.
+
+**Fix:** default `stt.enabled` to `True`, plus a regression test in `tests/test_hermes_ui_audio.py`.
+
+**Result:**
+- Audio and config tests: 18 pass.
+- The backend restarted with no errors.
+- Server transcription of a browser-format clip (webm/opus) returned "Open Settings Please." in 0.14 s.
+- A page reload is needed to pick up the new setting.
+
+## Date: 2026-09-25 — Bot rooms answer "hi" one by one, room plumbing leaves the chat list, and voice navigation through Laya
+
+Ask: *"i @ ed the tutor and it passed it after a simple hello and the first hi i sent wasnt responded to one by
+one ... laya is something we want to work throguh the main voice chat area so it can have global navigation of
+harvis"*. Branch `feat/hermes-ui`.
+
+**Problem 1, messages reached one bot:** each room member has its own hidden session titled `Group: <room>`.
+The session list and bot previews showed those sessions as normal chats. So "hi" and "@pirate-tutor hello"
+were typed into one bot's plumbing session from the main composer, and never went through the room.
+**Fix:** `store.list_summaries` and `profiles._PREVIEW_SQL` exclude `Group: %` titles. Lookups by id still work.
+
+**Problem 2, bots passed on a greeting:** every room turn's rules said "(pass) is good", and small models took
+it as the safe reply even to the user's own "hi". **Fix:** `group-rounds.ts` passes `userSpoke`. When the turn
+carries a user message, the rules tell the bot to answer and never offer "(pass)".
+
+**Voice navigation:** in the main voice conversation, lines like "open settings", "take me to my notebooks"
+or "start a new chat" now open the page instead of going to the model. The mic goes straight back to
+listening.
+- Page names and aliases are matched in the UI, instantly (`src/lib/voice-navigation.ts`).
+- A short target with no name match ("pull up my study notes") goes to the new
+  `POST /hermes-api/api/harvis/voice/navigate`. That endpoint asks Laya and accepts the answer only at 0.8
+  confidence or higher (`HARVIS_LAYA_PAGE_MIN_CONFIDENCE`), because zero-shot Laya sent "open the star map" to
+  Browser at 0.82.
+
+**Files:** `python_back_end/plugins/hermes_ui/{store,profiles,voice_route,rest_harvis}.py`,
+`python_back_end/tests/test_hermes_ui_{bots,voice_route}.py`,
+`front_end/hermes-desktop-ui/src/plugins/hermes-bots/{group-rounds.ts,cross-connection-bots.test.ts}`,
+`front_end/hermes-desktop-ui/src/lib/voice-navigation{,.test}.ts`,
+`front_end/hermes-desktop-ui/src/app/chat/composer/hooks/use-composer-voice.ts`.
+
+**Result:**
+- Backend: 41 tests pass in the container.
+- UI: 397 tests pass. `tsc` shows no new errors.
+- On gemma4:e2b, bots greet back even when the history is full of passes.
+- The UI bundle is published (`index-FvU3m2W7.js`), and the backend was restarted in place.
+- Not yet tried in a signed-in browser.
+- Limit: full pages (Skills, Messaging, Artifacts, Notebooks, Research, Bots) replace the chat, so hands-free
+  voice ends after opening one. Overlays (Settings, Cron, Profiles, Agents, Command Center, Star Map,
+  Webhooks) keep it running.
+
+## Date: 2026-09-25 — Bot rooms stop looping, a Stop button in the room composer, and a Laya voice router
+
+Ask: *"make sure the group chat function for the two bots actually work and dont just keep passing stuff to
+eachother ... we need a stop button where we press send ... build out the stuff for what we neeed ... for
+laya"*. Branch `feat/hermes-ui`.
+
+**Problem:** after "hi" in a two-bot room, every bot turn went through `auto` mode. The workspace detectors
+read the other bot's reply as a job, so each bot answered with a workspace run, and the room kept passing
+those runs back and forth. The room's only Stop control sat in the activity panel, not beside Send.
+
+**Root cause:** a group-room turn had nothing that kept it out of workspace and research mode.
+
+**Solution:**
+- `plugins/hermes_ui/chat.py`: `is_group_turn(title, text)`. In `ws.py` a group turn is forced to `chat`
+  mode with `harvis_research: False`.
+- `hermes-bots/group-chat-view.tsx`: a Stop button beside Send while the room is running.
+- Laya voice router (opt-in):
+  - `services/laya/Dockerfile` (new): CPU-only `laya[serve]==0.3.20`. The build fails if torch has CUDA.
+  - `docker-compose.yaml`: a `laya` service behind the `laya` profile, with no host port and limits of 3 GB
+    and 2 CPUs. It adds the `laya-models` volume. The backend gets `HARVIS_LAYA_URL`,
+    `HARVIS_VOICE_FAST_MODEL` (default gemma4:e2b), `HARVIS_VOICE_BIG_MODEL` and
+    `HARVIS_LAYA_MIN_CONFIDENCE` (0.5).
+  - `plugins/hermes_ui/voice_route.py` (new): asks Laya one choice question per spoken turn. The four answers
+    are answer fast, escalate, tool and clarify. A reply below the confidence floor is ignored. When the router
+    is down, it is skipped and paused for 60 s.
+  - `ws.py`: `prompt.submit` with `surface: "voice"` runs the router. Typed turns never do.
+  - Front end: `voice-playback.ts` `markVoiceSubmit/takeVoiceSubmit`, `use-composer-voice.ts` and `submit.ts`
+    stamp spoken turns.
+
+**Result:**
+- Backend tests: 41 pass, including 8 in the new `test_hermes_ui_voice_route.py` and the group-turn
+  regression. Front-end tests: 626 pass.
+- Laya runs healthy and answers the backend in 0.4–0.7 s per call.
+- Recreating the backend exposed a password mismatch. `.env`'s `POSTGRES_PASSWORD` (changed 2026-09-14) is not
+  the password the database was created with, so the backend was restored with the database's own password.
+  The Hermes UI bundle was not rebuilt this session.
+
+## Date: 2026-09-25 — The Hermes notebook tab looks and works like open-notebook again
+
+Ask: *"fix up open notebook or the notebook tab more cause it needs to look like how it was before cause it has
+all of the changes i wanted already"*. Branch `feat/hermes-ui`.
+
+**Problem:** the Hermes notebook workspace (2b6b9b90) had a header band that open-notebook had removed. It
+also lacked the Studio rail (Quiz, Flashcards, Study Guide, Briefing Doc, FAQ, Timeline, Audio Overview and a
+"Generated" log), the overview pinned to the top of the chat with suggested questions, and auto-naming that
+writes a synopsis.
+
+**Solution:** a native port that reuses the existing `/onb-api` facade (`onb_compat/router.py`), so there is no
+backend change. The Hermes session cookie already authenticates there.
+- `notebook-detail.tsx`: the header band is gone. The page now has three parts:
+  - Library on the left, with Sources (N) and Notes (N) tabs.
+  - Chat in the middle, with the overview pinned to its top.
+  - Studio rail on the right.
+  - Narrow screens get four tabs. A slim back-and-title bar shows on every tab except Chat.
+- `notebook-overview.tsx` (new): shows the emoji, title, "N sources · date" and the synopsis. Suggested-question
+  chips appear before the first message. Edit, Auto-name and Delete sit in a small row.
+  Auto-naming follows open-notebook's rule and shares its `onb:autoname:<id>` localStorage key. It names the
+  notebook while it is untitled, renames it again as more sources become ready, and stops after a manual rename.
+- `notebook-studio-rail.tsx`, `notebook-artifact-view.tsx`, `notebook-artifacts.ts` (new):
+  - The Create grid and the Generated log. Deleting from the log takes two clicks, and podcasts play inline.
+  - Quizzes can be taken, and flashcards flip.
+  - Reports can be saved as notes.
+  - The per-source transformations moved behind "Transform a source".
+- `notebook-chat.tsx`: new `intro(ask, empty)` slot, and `ask(question?)` lets a chip send a question.
+- `notebook-studio.tsx`: exports `AudioOverview` and `Transformations` for the rail.
+
+**Result:** `npx vitest run src/plugins/harvis` passes 60/60, including the new `notebook-studio-rail.test.tsx`.
+`tsc` shows only the pre-existing fixture errors. The bundle was published through `hermes-ui-builder`, and
+`/onb-api/.../{autoname,suggest-questions,artifacts}` answer 401 when signed out, not 404. There was no
+signed-in visual check.
+
+## Date: 2026-09-25 — Harvis writes its own skills; the right sidebar shows each chat's sandbox
+
+Asks: *"tools and skills are made to be created so the ai can make skills to remember how to do a difficult
+job"* and *"when pressing the right button at the top right corner ... it shows terminal and files inside of
+this container that harvis comes with"*. Decisions: a new skill is saved as a draft and you enable it with one
+click; one sandbox per chat session; the sandbox gets internet on an isolated network. Branch `feat/hermes-ui`.
+
+### Skills Harvis writes itself
+**Problem:** Harvis already drafted skills after a workspace run or when asked to "save this as a skill"
+(`learn.draft_skill`), but a draft could never take effect. It was saved OFF. Switching it on didn't give it the
+human `audit.verdict='supported'` that the fail-closed gate (`owui_compat/skills.gated_skill_blocks`) requires.
+Hermes chats never sent `skill_ids`, so no skill ever reached a Hermes chat. The skill editor's Save also
+404'd, because `/api/learning/node` didn't exist.
+
+**Solution:**
+- `plugins/hermes_ui/rest_skills.py` (new; the toggle moved here from `rest_capabilities.py`, which was over the
+  500-line limit): switching a skill **on** records the approval
+  (`audit = {verdict: supported, approved_by, via, approved_at}`), and a `drafts` skill becomes `learned`.
+  Switching it off leaves the audit alone. `GET/PUT/DELETE /learning/node` handles read/save/delete for the editor.
+- `plugins/hermes_ui/skill_select.py` (new): each chat turn carries at most 2 trusted skills. A skill qualifies if the
+  message names it (`/name`, `$name`, or a multi-word slug written out) or if it shares enough words with the
+  message. Name words count double and the threshold is 3, so one shared word is never enough and nothing is
+  global. That avoids the "pirate skill in every chat" leak OWUI had. The skill bodies still pass the same
+  fail-closed gate. Wired in `ws.py _run_turn`.
+- `learn.after_turn(..., on_skill=)`: when a draft lands, the WS sends `harvis.skill.drafted {name, description}`.
+  `plugins/harvis/learned-skill.ts` turns that into a sticky toast, **"Harvis learned a skill ▸ Enable"**.
+
+### Right sidebar = this chat's sandbox
+**Problem:** the files tree and the xterm terminal existed in the UI but did nothing in the browser. `/api/fs/*`
+404'd, the shim terminal was a stub, and sessions reported `cwd: null`, so the pane just said "no project open".
+
+**Solution:**
+- `plugins/hermes_ui/sandbox.py` (new): each chat's folder lives at `<HARVIS_SANDBOX_ROOT>/u<uid>/<session>`
+  (default `/data/artifacts/sandboxes`). It's created on first look. The UI addresses it as
+  `/sandbox/<session>/workspace`. Every path is resolved inside the **caller's own `u<uid>` folder**, and `..`,
+  symlinks that escape, and anything that isn't a sandbox path are refused. The file API covers list,
+  read-text, read-data-url (8 MB cap), write-text (2 MB cap, parent must exist) and git-root.
+  `HARVIS_SANDBOX_ENABLED=false` turns it all off.
+- `plugins/hermes_ui/rest_sandbox.py` (new): `/api/fs/*` routes and a `/api/terminal/ws` terminal WebSocket.
+  The terminal runs a login shell in the chat's container, which is the existing hardened Build Space runner
+  (`terminal_container.ensure_isolated`): all capabilities dropped, no-new-privileges, uid 1001, mem/CPU/pid
+  limits, the chat folder as its only mount, and the `repo-sandbox` network (internet yes; pgsql/ollama/OpenClaw
+  no; falls back to no network if that network is missing). The container only starts when a terminal opens,
+  and the existing idle sweep stops it again.
+- `sessions.py`: `cwd` is now the sandbox path, which lights up the files pane.
+- `src/lib/desktop-shim/terminal.ts` (new): the browser `hermesDesktop.terminal` is now a WebSocket per tab,
+  in place of the stub. The desktop app's own xterm panes are unchanged.
+
+**Verification:** backend `tests/test_hermes_ui_skills.py` (9) and `test_hermes_ui_sandbox.py` (18) pass, including
+path-escape, symlink and cross-user cases and a socketpair-driven terminal protocol test. All `test_hermes_ui_*`:
+140 passed, and the 9 failures (cron parse ×7, job_view_paused, settings catalog) were already failing before
+these changes. Frontend: the new learned-skill and shim terminal tests pass. Full vitest has 9 UI files / 23 tests
+failing, identical on clean HEAD; the electron-project failures are because this environment has no Electron.
+tsc is clean. **Not yet run against a real Docker daemon**, since there is none in this environment.
+
+**Known gaps / next:** see the next section for joining agent runs to the sandbox. MCP checks and the free
+skills/MCP catalog are still open. On k8s the terminal needs the backend to reach a Docker daemon (the helm
+chart's hostPath docker.sock). Without it the terminal says so.
+
+### "Set up this repo / install Pinokio": Harvis installs into the chat's sandbox
+Ask: *"no app catalog, it should be more like mcp getting added manually … they would just give the ai
+instructions and it can put the repo inside of the container."* Decisions: agent plus a port proxy; the GPU is
+opt-in per chat; disk shows usage with one-click delete and no hard cap.
+
+**Found on the way (security):** a Hermes/OWUI chat that escalated to an `agent-native`/`orchestrated` run
+called `runner.run` with no `session_id`. Its `exec`/`run_tests` therefore ran **inside the backend process**
+(`tools.py` `create_subprocess_shell`), and that process holds docker.sock, which is effectively host root.
+Only Build Space turns used the hardened runner.
+
+**Solution:**
+- Hermes sends `harvis_sandbox_session` with each turn (`ws._turn_extra`).
+  `owui_compat/workspace_bridge._chat_sandbox` resolves it inside the user's own folder, and
+  `run_orchestrated(sandbox=…)` (threaded through `_start_workspace`) then does three things:
+  - Every agent works in the chat's folder, and its commands run in the chat's hardened container, the same one
+    the sidebar terminal shows.
+  - The scratch diff and cleanup are skipped, because it's the user's folder.
+  - A short sandbox briefing (`sandbox.agent_note`) goes ahead of the task. It covers where to put things, no
+    sudo, starting servers with `nohup … &` on 0.0.0.0, the app link prefix, base-path flags, and GPU state.
+  OWUI chats are unchanged.
+- A direct instruction ("install ComfyUI", "can you set up <repo>", "clone …") counts as asking for an agent run
+  (`chat.requested_mode`). Only explicit runs get `exec`: auto-detected launches still have it withheld. Questions
+  like "how do I install python?" don't match.
+- **Serving apps:** `rest_sandbox_apps.py` proxies `/hermes-api/sandbox-app/<cap>/<port>/…` (HTTP and WebSocket)
+  to the runner on the `repo-sandbox` network, and nothing is published on the host. The app is untrusted, so:
+  - Every response carries `Content-Security-Policy: sandbox …` without `allow-same-origin`. The page runs on an
+    opaque origin and can't use the SameSite=Lax `access_token` cookie or Harvis storage.
+  - Cookie/Authorization are stripped going out; Set-Cookie and X-Frame-Options are stripped coming back.
+  - `<cap>` is signed with a per-sandbox secret, so links die when the sandbox is deleted.
+  - Ports below 1024 and port 22 are refused.
+  - Cost: apps that insist on their own localStorage/cookies may misbehave.
+- **GPU:** a `.harvis/gpu` marker in the chat's folder makes `terminal_container._spawn_isolated` add an NVIDIA
+  `device_requests`, and a mismatched existing container is recreated. `POST /api/sandbox/gpu` refuses when the
+  daemon has no `nvidia` runtime (`HARVIS_SANDBOX_GPU=off` forces that). New `drop_isolated()` removes the runner.
+- **Disk / delete:** `GET /api/sandbox/info` returns size, over-warn (`HARVIS_SANDBOX_WARN_GB`, default 20),
+  GPU, and the apps listening. Listening apps are read from `/proc/net/tcp` via exec, without starting the
+  container. `DELETE /api/sandbox` removes the container and the folder.
+- Runner container names now use a hash of the session id (`sandbox.runner_key`). Before, the manager's
+  40-character cut could make two long session ids share a container.
+- UI: `plugins/harvis/sandbox-button.tsx` is a new composer button with a popover showing size (amber when over
+  the warning), apps with **Open** (in the right panel's browser), a GPU switch and Delete sandbox. When a new app
+  starts serving, a toast pops with "Open".
+
+**Verification:** `tests/test_hermes_ui_sandbox.py` (40), covering:
+- bridge and orchestrator threading (no scratch dir, no cleanup, runner `session_id`, briefing first)
+- the install-instruction detector
+- link signing, forgery, and rotation on delete
+- the GPU marker and disk usage
+- `/proc/net/tcp` parsing
+- the proxy stripping credentials and setting the CSP
+
+All hermes_ui plus orchestration tests: 170 passed, and the 9 failures were already failing before these
+changes. Frontend: `sandbox-button.test.tsx` (4) passes; `src/plugins/harvis` + shim: 12 files / 60 tests;
+tsc clean. **Not run against a real Docker daemon or GPU** in this environment.
+
+**Files:** `plugins/hermes_ui/{sandbox,rest_sandbox,rest_sandbox_apps,chat,ws,router}.py`,
+`owui_compat/workspace_bridge.py`, `workspace/workspace_router.py`,
+`workspace/orchestration/orchestrator.py`, `workspace/terminal_container.py`;
+`front_end/hermes-desktop-ui/src/plugins/harvis/{sandbox-button.tsx,format.ts,plugin.tsx}`; tests as above.
+
 ## Date: 2026-09-24 — Bot room chat: missing sessions are 4007, so bots can start talking
 
 **Problem:** in a Bots room, every member's first turn showed "hit an error" and nobody replied.

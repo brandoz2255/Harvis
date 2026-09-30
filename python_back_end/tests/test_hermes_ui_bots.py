@@ -314,7 +314,7 @@ async def test_run_turn_binds_the_bot_every_turn(monkeypatch):
     assert calls["turn"][0]["content"].startswith("You are Paper Bot.")
     assert "[1] p.pdf — N" in calls["turn"][0]["content"]
     assert calls["mode"] == "chat"
-    assert calls["extra"] == {"harvis_research": False}
+    assert calls["extra"] == {"harvis_research": False, "harvis_sandbox_session": "s1"}
     assert calls["origin"] == "http://o"
     assert calls["assistant"] == "42"
     assert "message.complete" in emitted and live.running is False
@@ -366,4 +366,100 @@ async def test_run_turn_without_a_bot_is_unchanged(monkeypatch):
 
     msgs = [{"role": "user", "content": "hi"}]
     await Connection._run_turn(Conn(), sessions.Live(id="s2", user_id=1, model="m"), msgs)
-    assert calls == {"turn": msgs, "mode": "auto", "extra": {}}
+    assert calls == {"turn": msgs, "mode": "auto", "extra": {"harvis_sandbox_session": "s2"}}
+
+
+def test_group_turns_are_recognised_by_title_or_prompt():
+    assert chat.is_group_turn("Group: rmugjsyo7-yumgk", "hi")
+    assert chat.is_group_turn("", '[Group chat: "Pirate Tutor, Harvis"] You are @hermes, …')
+    assert not chat.is_group_turn("Mars notes", "tell me about the group chat feature")
+
+
+@pytest.mark.asyncio
+async def test_group_room_turn_never_starts_a_workspace_or_research_run(monkeypatch):
+    # Regression: the room prompt ("claim or hand off work…") read as a multi-step
+    # task, so each bot launched a workspace run and the bots traded run cards.
+    calls = {}
+
+    async def endpoint(pool, uid):
+        return None
+
+    async def recall(pool, uid, q):
+        return None
+
+    async def thinking():
+        return frozenset()
+
+    async def append(pool, s, role, content, reasoning=""):
+        return []
+
+    async def stream_turn(token, turn, model, ep, mode, effort, origin, extra=None):
+        calls.update(mode=mode, extra=extra)
+        yield "text", "Ahoy!"
+
+    async def section(pool, uid):
+        return {"chat_mode": "auto"}
+
+    monkeypatch.setattr(providers, "resolve_active_endpoint", endpoint)
+    monkeypatch.setattr(store, "get_section", section)
+    monkeypatch.setattr(learn, "recall_message", recall)
+    monkeypatch.setattr(learn, "after_turn", lambda *a, **k: None)
+    monkeypatch.setattr(sessions, "append", append)
+    monkeypatch.setattr("plugins.hermes_ui.ws.thinking_models", thinking)
+    monkeypatch.setattr(chat, "stream_turn", stream_turn)
+
+    class Conn:
+        pool, user_id, token, origin = "pool", 1, "tok", ""
+        turns, runs = {}, {}
+
+        async def emit(self, kind, sid, payload):
+            pass
+
+        _relay = Connection._relay
+
+    prompt = ('[Group chat: "Pirate Tutor, Harvis"] You are @hermes. New messages: You (user): hi '
+              "Rules for this room: claim or hand off work, or report a real result.")
+    live = sessions.Live(id="s3", user_id=1, model="m", title="Group: rmugjsyo7-yumgk")
+    await Connection._run_turn(Conn(), live, [{"role": "user", "content": prompt}])
+    assert calls["mode"] == "chat"
+    assert calls["extra"]["harvis_research"] is False
+
+
+class _SqlConn:
+    def __init__(self, seen):
+        self.seen = seen
+
+    async def fetch(self, sql, *args):
+        self.seen.append(sql)
+        return []
+
+    async def fetchval(self, sql, *args):
+        self.seen.append(sql)
+        return 0
+
+
+class _SqlPool:
+    def __init__(self):
+        self.seen = []
+
+    def acquire(self):
+        conn, seen = _SqlConn(self.seen), self.seen
+
+        class _Ctx:
+            async def __aenter__(self):
+                return conn
+
+            async def __aexit__(self, *exc):
+                return False
+        return _Ctx()
+
+
+@pytest.mark.asyncio
+async def test_room_member_sessions_stay_out_of_the_chat_list():
+    # Listed, a room's per-bot session read as a normal chat: a "hi" typed there
+    # reached one bot as a 1:1 message and the rest of the room never saw it.
+    from plugins.hermes_ui import profiles, store
+    pool = _SqlPool()
+    await store.list_summaries(pool, 1, 50, 0)
+    await profiles._chat_previews(pool, 1, ["b1"])
+    assert pool.seen and all("NOT LIKE 'Group: %'" in sql for sql in pool.seen)

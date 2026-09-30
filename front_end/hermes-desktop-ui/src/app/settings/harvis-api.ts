@@ -171,6 +171,33 @@ export const deleteEndpoint = (id: string) =>
     method: 'DELETE'
   })
 
+/** One machine in the k3s cluster, as GET /api/capabilities/hosting reports it. */
+export interface HostingNode {
+  name: string
+  ready: boolean
+  roles: string[]
+  gpus: number
+  cpu: string
+  memory_gib: number
+  version: string
+}
+
+/** Docker or Kubernetes, and what the installer set up (python_back_end/setup_flow.py). */
+export interface HostingStatus {
+  mode: 'docker' | 'kubernetes'
+  detected_by: 'cluster' | 'default' | 'override'
+  namespace: null | string
+  nodes: HostingNode[]
+  nodes_error: null | string
+  gpu: { available: boolean; count: number }
+  lan_models: { enabled: boolean; url: null | string }
+  docker_socket: boolean
+  commands: { enable: string; disable: string; status: string; join: string }
+}
+
+/** Backend route (not the Hermes gateway): nginx fronts `/api/` on the same origin. */
+export const fetchHostingStatus = () => harvisFetch<HostingStatus>('/api/capabilities/hosting')
+
 export const fetchMemory = () =>
   harvisFetch<{ entries: MemoryEntry[]; settings: LearnSettings; model: string }>('/hermes-api/api/harvis/memory')
 

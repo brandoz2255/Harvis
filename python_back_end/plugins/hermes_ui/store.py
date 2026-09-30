@@ -132,6 +132,8 @@ WHERE user_id = $1
 
 # The UI's ``archived=`` query: exclude (default), include, only.
 _ARCHIVED_SQL = {"exclude": " AND archived = FALSE", "only": " AND archived = TRUE", "include": ""}
+# Voice: rows are the voice assistant's own conversation (rest_voice.py), not a chat.
+_NOT_ROOM_SQL = " AND coalesce(title, '') NOT LIKE 'Group: %' AND coalesce(title, '') NOT LIKE 'Voice: %'"
 
 
 def _summary(r) -> dict:
@@ -147,7 +149,9 @@ def _summary(r) -> dict:
 
 async def list_summaries(pool, user_id: int, limit: int, offset: int,
                          archived: str = "exclude") -> tuple[list[dict], int]:
-    where = _ARCHIVED_SQL.get(archived, _ARCHIVED_SQL["exclude"])
+    # Group-room member sessions are plumbing the room drives; listed, they
+    # read as normal chats and a message typed there reached one bot only.
+    where = _ARCHIVED_SQL.get(archived, _ARCHIVED_SQL["exclude"]) + _NOT_ROOM_SQL
     async with pool.acquire() as conn:
         rows = await conn.fetch(_SUMMARY_SQL + where + " ORDER BY updated_at DESC LIMIT $2 OFFSET $3",
                                 user_id, limit, offset)

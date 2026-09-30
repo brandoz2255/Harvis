@@ -15,14 +15,30 @@ import {
 import { Kbd } from '@/components/ui/kbd'
 import { Tip } from '@/components/ui/tooltip'
 import { useI18n } from '@/i18n'
-import { Clipboard, FileText, FolderOpen, type IconComponent, ImageIcon, Link, MessageSquareText } from '@/lib/icons'
+import {
+  Clipboard,
+  FileText,
+  FolderOpen,
+  type IconComponent,
+  ImageIcon,
+  Link,
+  MessageSquareText,
+  Search
+} from '@/lib/icons'
 import { cn } from '@/lib/utils'
 
 import { useComposerAttachmentProviders } from './contrib'
 import { GHOST_ICON_BTN } from './controls'
+import { requestComposerFocus, requestComposerInsert } from './focus'
 import type { ChatBarState } from './types'
 
 const SNIPPET_KEYS = ['codeReview', 'implementationPlan', 'explainThis']
+
+// Puts /research in front of whatever is typed; sending it starts a deep-research run.
+const startDeepResearch = () => {
+  requestComposerInsert('/research', { mode: 'prefix' })
+  requestComposerFocus()
+}
 
 export function ContextMenu({
   state,
@@ -92,6 +108,9 @@ export function ContextMenu({
 
           <ContextMenuItem icon={MessageSquareText} onSelect={() => setSnippetsOpen(true)}>
             {c.promptSnippets}
+          </ContextMenuItem>
+          <ContextMenuItem icon={Search} onSelect={startDeepResearch}>
+            Deep research
           </ContextMenuItem>
 
           {attachmentProviders.length > 0 && <DropdownMenuSeparator />}

@@ -1678,10 +1678,14 @@ body.guest-pointer-lock :is(webview, iframe) {
   text-transform: uppercase;
 }
 
-/* The empty chat's HARVIS: one layer per face stacked in a single grid cell,
-   cross-fading in turn. Each layer is visible for 1/N of the cycle. */
+/* The empty chat's HARVIS (harvis-wordmark.tsx): the face on screen and, during
+   a change, the face leaving, stacked in one grid cell. `data-transition` on the
+   wordmark picks how the change plays; `--i` is each letter's position, for the
+   left-to-right stagger. */
 .harvis-cycle {
-  --harvis-cycle-step: 6s;
+  --harvis-tx: 820ms;
+  --harvis-stagger: 55ms;
+  --harvis-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
   display: grid;
   justify-items: center;
   align-items: center;
@@ -1690,54 +1694,264 @@ body.guest-pointer-lock :is(webview, iframe) {
   filter: drop-shadow(0 0 22px rgb(91 141 239 / 0.35));
 }
 
-.harvis-cycle > span {
+.harvis-face {
   grid-area: 1 / 1;
+  position: relative;
+  display: inline-flex;
   white-space: nowrap;
   text-transform: uppercase;
+  perspective: 600px;
+}
+
+.harvis-letter {
+  display: inline-block;
   background-image: linear-gradient(180deg, #7fb0ff 0%, #5b8def 55%, #2f5fd8 100%);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
-  opacity: 0;
-  animation: harvis-face calc(var(--harvis-cycle-step) * var(--harvis-cycle-count)) linear infinite both;
-  animation-delay: calc(var(--harvis-cycle-step) * var(--harvis-cycle-index));
+  backface-visibility: hidden;
+  animation-duration: var(--harvis-tx);
+  animation-timing-function: var(--harvis-ease);
+  animation-fill-mode: both;
+  animation-delay: calc(var(--i) * var(--harvis-stagger));
 }
 
-/* Six faces: each holds for 1/6 of the cycle (16.667%) and fades out over
-   the next 4%, while the following face fades in over its own first 4%. */
-@keyframes harvis-face {
+/* Flip: each letter turns over on its baseline like a departure board. */
+.harvis-cycle[data-transition='flip'] .harvis-face[data-phase='in'] .harvis-letter {
+  animation-name: harvis-flip-in;
+  transform-origin: 50% 100%;
+}
+.harvis-cycle[data-transition='flip'] .harvis-face[data-phase='out'] .harvis-letter {
+  animation-name: harvis-flip-out;
+  animation-duration: calc(var(--harvis-tx) * 0.55);
+  transform-origin: 50% 0%;
+}
+@keyframes harvis-flip-in {
   0% {
     opacity: 0;
-    filter: blur(8px);
-    transform: scale(0.97);
+    transform: rotateX(-100deg);
   }
-  4% {
+  45% {
     opacity: 1;
-    filter: blur(0);
-    transform: scale(1);
   }
-  16.667% {
+  75% {
+    transform: rotateX(14deg);
+  }
+  100% {
     opacity: 1;
-    filter: blur(0);
-    transform: scale(1);
+    transform: rotateX(0);
   }
-  20.667% {
+}
+@keyframes harvis-flip-out {
+  from {
+    opacity: 1;
+    transform: rotateX(0);
+  }
+  to {
     opacity: 0;
-    filter: blur(8px);
-    transform: scale(1.02);
+    transform: rotateX(100deg);
+  }
+}
+
+/* Rise: letters roll up through the line like a slot reel. */
+.harvis-cycle[data-transition='rise'] .harvis-face[data-phase='in'] .harvis-letter {
+  animation-name: harvis-rise-in;
+}
+.harvis-cycle[data-transition='rise'] .harvis-face[data-phase='out'] .harvis-letter {
+  animation-name: harvis-rise-out;
+  animation-duration: calc(var(--harvis-tx) * 0.6);
+}
+@keyframes harvis-rise-in {
+  from {
+    opacity: 0;
+    filter: blur(6px);
+    transform: translateY(0.6em) scaleY(1.35);
+  }
+  to {
+    opacity: 1;
+    filter: blur(0);
+    transform: none;
+  }
+}
+@keyframes harvis-rise-out {
+  from {
+    opacity: 1;
+    filter: blur(0);
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    filter: blur(6px);
+    transform: translateY(-0.6em) scaleY(1.35);
+  }
+}
+
+/* Wipe: the new face pushes the old one off behind a beam of light. Both layers
+   clip at the same moving edge, so the handover is one seam. */
+.harvis-cycle[data-transition='wipe'] .harvis-face[data-phase='in'] {
+  animation: harvis-wipe-in var(--harvis-tx) cubic-bezier(0.65, 0, 0.35, 1) both;
+}
+.harvis-cycle[data-transition='wipe'] .harvis-face[data-phase='out'] {
+  animation: harvis-wipe-out var(--harvis-tx) cubic-bezier(0.65, 0, 0.35, 1) both;
+}
+.harvis-cycle[data-transition='wipe'] .harvis-face[data-phase='in']::after {
+  content: '';
+  position: absolute;
+  top: -12%;
+  bottom: -12%;
+  width: 0.07em;
+  border-radius: 999px;
+  background: linear-gradient(180deg, transparent, #e4eeff 30%, #ffffff 50%, #e4eeff 70%, transparent);
+  box-shadow:
+    0 0 0.25em #9cc2ff,
+    0 0 0.6em rgb(91 141 239 / 0.8);
+  animation: harvis-wipe-beam var(--harvis-tx) cubic-bezier(0.65, 0, 0.35, 1) both;
+}
+@keyframes harvis-wipe-in {
+  from {
+    clip-path: inset(-20% 100% -20% 0);
+  }
+  to {
+    clip-path: inset(-20% 0 -20% 0);
+  }
+}
+@keyframes harvis-wipe-out {
+  from {
+    clip-path: inset(-20% 0 -20% 0);
+  }
+  to {
+    clip-path: inset(-20% 0 -20% 100%);
+  }
+}
+@keyframes harvis-wipe-beam {
+  0% {
+    left: 0;
+    opacity: 0;
+    transform: translateX(-100%);
+  }
+  10% {
+    opacity: 1;
+  }
+  85% {
+    opacity: 1;
+  }
+  100% {
+    left: 100%;
+    opacity: 0;
+    transform: translateX(-100%);
+  }
+}
+
+/* Glitch: the new face stutters in through torn slices with its colour split,
+   then snaps clean. drop-shadow rather than text-shadow: the letters are
+   background-clipped, and a text-shadow would paint over the gradient. */
+.harvis-cycle[data-transition='glitch'] .harvis-face[data-phase='in'] {
+  animation: harvis-glitch-in 620ms linear both;
+}
+.harvis-cycle[data-transition='glitch'] .harvis-face[data-phase='out'] {
+  animation: harvis-glitch-out 260ms steps(4, end) both;
+}
+@keyframes harvis-glitch-in {
+  0% {
+    opacity: 0;
+    clip-path: inset(42% 0 44% 0);
+    transform: translateX(-0.08em);
+    filter: drop-shadow(-0.06em 0 #ff3d7f) drop-shadow(0.06em 0 #2ee6ff);
+  }
+  12% {
+    opacity: 1;
+    clip-path: inset(8% 0 72% 0);
+    transform: translateX(0.07em);
+  }
+  24% {
+    clip-path: inset(62% 0 6% 0);
+    transform: translateX(-0.05em) skewX(-10deg);
+  }
+  36% {
+    clip-path: inset(0 0 0 0);
+    transform: translateX(0.04em);
+  }
+  48% {
+    clip-path: inset(28% 0 34% 0);
+    transform: translateX(-0.03em) skewX(6deg);
+  }
+  62% {
+    clip-path: inset(0 0 0 0);
+    transform: translateX(0.015em);
+    filter: drop-shadow(-0.04em 0 #ff3d7f) drop-shadow(0.04em 0 #2ee6ff);
+  }
+  100% {
+    opacity: 1;
+    clip-path: inset(-20% 0 -20% 0);
+    transform: none;
+    filter: drop-shadow(0 0 0 transparent) drop-shadow(0 0 0 transparent);
+  }
+}
+@keyframes harvis-glitch-out {
+  0% {
+    opacity: 1;
+    clip-path: inset(0 0 0 0);
+    transform: none;
+  }
+  50% {
+    opacity: 0.8;
+    clip-path: inset(18% 0 50% 0);
+    transform: translateX(0.08em);
+    filter: drop-shadow(-0.06em 0 #ff3d7f) drop-shadow(0.06em 0 #2ee6ff);
   }
   100% {
     opacity: 0;
-    filter: blur(8px);
+    clip-path: inset(55% 0 12% 0);
+    transform: translateX(-0.1em);
   }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .harvis-cycle > span {
-    animation: none;
+/* Scramble: the letters decode from noise (the JS swaps the characters); CSS
+   only lights each one as it lands and clears the old face out fast. */
+.harvis-cycle[data-transition='scramble'] .harvis-face[data-phase='in'] .harvis-letter {
+  animation-name: harvis-scramble-in;
+  animation-delay: calc(var(--i) * 110ms);
+}
+.harvis-cycle[data-transition='scramble'] .harvis-face[data-phase='out'] .harvis-letter {
+  animation-name: harvis-scramble-out;
+  animation-duration: 220ms;
+  animation-delay: 0ms;
+}
+@keyframes harvis-scramble-in {
+  0% {
+    opacity: 0.55;
+    filter: brightness(2.2) blur(1px);
   }
-  .harvis-cycle > span:first-child {
+  100% {
     opacity: 1;
+    filter: none;
+  }
+}
+@keyframes harvis-scramble-out {
+  to {
+    opacity: 0;
+    transform: scale(0.94);
+  }
+}
+
+/* The glitch as a house effect for anything, not just the wordmark: put
+   `harvis-glitch-in` on an element and it glitches in when it mounts (change its
+   React key to play it again); `harvis-glitch-out` on the way out. The
+   keyframes own `transform`, `filter` and `clip-path`, so put the class on a
+   wrapper when the element positions itself with a transform. */
+.harvis-glitch-in {
+  animation: harvis-glitch-in 620ms linear both;
+}
+.harvis-glitch-out {
+  animation: harvis-glitch-out 260ms steps(4, end) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .harvis-cycle *,
+  .harvis-cycle *::after,
+  .harvis-glitch-in,
+  .harvis-glitch-out {
+    animation: none !important;
   }
 }
 
@@ -1753,6 +1967,14 @@ body.guest-pointer-lock :is(webview, iframe) {
     inset 0 0 18px rgb(111 160 255 / 0.18);
   transform: scale(calc(1 + var(--orb-level) * 0.28));
   transition: opacity 200ms ease-out;
+}
+
+/* The bottom voice bubble's orb: same face, a glow sized for 28px. */
+.harvis-orb-sm {
+  box-shadow:
+    0 0 calc(4px + var(--orb-level) * 12px) rgb(91 141 239 / calc(0.25 + var(--orb-level) * 0.5)),
+    inset 0 0 6px rgb(111 160 255 / 0.18);
+  transform: scale(calc(1 + var(--orb-level) * 0.18));
 }
 
 .harvis-orb-mouth {

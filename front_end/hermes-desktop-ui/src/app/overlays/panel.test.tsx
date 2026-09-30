@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
-import { PanelRowMenu } from './panel'
+import { Panel, PanelRowMenu } from './panel'
 
 beforeAll(() => {
   Element.prototype.hasPointerCapture ??= () => false
@@ -28,5 +28,38 @@ describe('PanelRowMenu', () => {
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Rename' }))
 
     expect(onSelect).toHaveBeenCalledOnce()
+  })
+})
+
+describe('Panel', () => {
+  afterEach(() => {
+    cleanup()
+  })
+
+  it('pops up over a dimmed backdrop that closes it when clicked', () => {
+    const onClose = vi.fn()
+    const { container } = render(<Panel onClose={onClose}>jobs</Panel>)
+    const backdrop = container.querySelector('[data-overlay-surface]') as HTMLElement
+
+    expect(backdrop.className).toContain('bg-black/22')
+    fireEvent.click(backdrop)
+    expect(onClose).toHaveBeenCalledOnce()
+  })
+
+  it('sits like a page when quiet: no dimming, and a click beside it does not close it', () => {
+    const onClose = vi.fn()
+    const { container } = render(
+      <Panel onClose={onClose} quiet>
+        jobs
+      </Panel>
+    )
+    const backdrop = container.querySelector('[data-overlay-surface]') as HTMLElement
+
+    expect(backdrop.className).not.toContain('bg-black')
+    expect(backdrop.className).not.toContain('backdrop-blur')
+    fireEvent.click(backdrop)
+    expect(onClose).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    expect(onClose).toHaveBeenCalledOnce()
   })
 })

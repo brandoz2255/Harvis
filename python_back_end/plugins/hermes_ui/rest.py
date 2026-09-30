@@ -48,7 +48,9 @@ CONFIG = _merge(_load_json("config_defaults.json"), {
                 "interim_assistant_messages": False},
     "desktop": {"repo_scan_enabled": False, "repo_scan_roots": [], "repo_scan_exclude_paths": []},
     "terminal": {"cwd": "", "font_family": ""},
-    "stt": {"enabled": False},
+    # On: audio.py transcribes on the server. Off made the UI refuse every mic
+    # clip ("Speech-to-text is disabled") before it sent one.
+    "stt": {"enabled": True},
     "voice": {"max_recording_seconds": 60, "auto_tts": False},
     "model": {"default": "harvis-default", "provider": "harvis"},
 })

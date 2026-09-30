@@ -688,6 +688,20 @@ def _completion_text(response) -> str:
     return text if isinstance(text, str) else ""
 
 
+async def run_plain_completion(request, owui_body: dict, user_id: int | None = None):
+    """The model and nothing else: no web lookup, files, knowledge, skills or
+    block vocabulary, and no grounded retry. The voice assistant's turns
+    (``harvis_plain``) take this path so they answer fast and start nothing."""
+    from workspace.model_proxy import execute_chat_completion
+
+    inject_core(owui_body.get("messages"))
+    await _apply_default_model(request, owui_body, user_id)
+    from .cloud_chat import is_cloud_chat_model, proxy_cloud_chat
+    if is_cloud_chat_model(owui_body.get("model")):
+        return await proxy_cloud_chat(owui_body, getattr(request.app.state, "pg_pool", None), user_id)
+    return await execute_chat_completion(request, owui_body_to_proxy(owui_body))
+
+
 async def run_chat_completion(request, owui_body: dict, user_id: int | None = None):
     # Lazy import keeps this package free of import-time coupling to the
     # workspace package (avoids any chance of a circular import at load).

@@ -4,7 +4,6 @@ import { Button } from '@/components/ui/button'
 import { DisclosureCaret } from '@/components/ui/disclosure-caret'
 import { ErrorBanner } from '@/components/ui/error-state'
 import { Input } from '@/components/ui/input'
-import { Switch } from '@/components/ui/switch'
 import type { MessagingPlatformInfo, PairingUser } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { openExternalLink } from '@/lib/external-link'
@@ -189,7 +188,17 @@ export function PlatformDetail({
 
       <section>
         <SectionTitle>{m.getCredentials}</SectionTitle>
-        <p className={cn('mt-1', CAPTION_CLASS)}>{introCopy(platform, m)}</p>
+        {platform.setup_steps?.length && platform.state !== 'connected' ? (
+          <ol className={cn('mt-2 list-decimal space-y-1.5 pl-5', CAPTION_CLASS)}>
+            {platform.setup_steps.map(step => (
+              <li className="pl-1" key={step}>
+                {step}
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <p className={cn('mt-1', CAPTION_CLASS)}>{introCopy(platform, m)}</p>
+        )}
         {platform.docs_url && (
           <div className="mt-3">
             <Button asChild size="sm" variant="textStrong">
@@ -285,14 +294,12 @@ export function PlatformActionBar({
   hasEdits,
   onSave,
   onTest,
-  onToggle,
   platform,
   saving
 }: {
   hasEdits: boolean
   onSave: () => void
   onTest: () => void
-  onToggle: (enabled: boolean) => void
   platform: MessagingPlatformInfo
   saving: string | null
 }) {
@@ -301,17 +308,11 @@ export function PlatformActionBar({
   const isSavingEnv = saving === `env:${platform.id}`
   const testing = saving === `test:${platform.id}`
   const unsupported = platform.supported === false
+  // Saving turns a platform on, so a set-up platform that is off can be saved as is.
+  const canSave = hasEdits || (!platform.enabled && platform.configured && !unsupported)
 
   return (
     <>
-      <Switch
-        aria-label={platform.enabled ? m.disableAria(platform.name) : m.enableAria(platform.name)}
-        checked={platform.enabled}
-        disabled={unsupported || saving === `enabled:${platform.id}`}
-        onCheckedChange={onToggle}
-        size="xs"
-      />
-
       <div className="ml-auto flex items-center gap-2">
         {hasEdits && <span className="text-xs text-muted-foreground">{m.unsavedChanges}</span>}
         {!unsupported && (
@@ -330,7 +331,7 @@ export function PlatformActionBar({
             {testing ? 'Sending...' : 'Send test message'}
           </Button>
         )}
-        <Button disabled={!hasEdits || isSavingEnv} onClick={onSave} size="sm">
+        <Button disabled={!canSave || isSavingEnv} onClick={onSave} size="sm">
           <Save />
           {isSavingEnv ? m.saving : m.saveChanges}
         </Button>

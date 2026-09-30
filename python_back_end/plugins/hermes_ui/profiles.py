@@ -238,6 +238,7 @@ WITH picked AS (
            id, chat->>'bot_id' AS bot_id, title, updated_at
     FROM owui_chats
     WHERE user_id = $1 AND chat->>'bot_id' = ANY($2::text[])
+      AND coalesce(title, '') NOT LIKE 'Group: %'
     ORDER BY chat->>'bot_id', title = $3, updated_at DESC
 )
 SELECT p.bot_id, p.id, p.title, p.updated_at,

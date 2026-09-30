@@ -238,6 +238,8 @@ export interface MessagingPlatformInfo {
   runs_on_harvis?: boolean
   /** Where to get the credentials, in the backend's words. */
   setup_hint?: null | string
+  /** Numbered first-run steps written by the backend for how this install runs the platform. */
+  setup_steps?: string[]
   state?: null | string
   /** False for catalog platforms Harvis has no adapter for yet. */
   supported?: boolean

@@ -253,7 +253,9 @@ export const en: Translations = {
     exitHud: 'Exit HUD mode',
     resetHudLayout: 'Reset HUD size and position',
     layoutEditor: 'Layout editor',
-    layoutEditorTitle: mod => `Layout editor — ${mod}-click resets the layout`
+    layoutEditorTitle: mod => `Layout editor — ${mod}-click resets the layout`,
+    harvisAssistant: 'Turn Harvis on — shows the Harvis mic at the bottom',
+    harvisAssistantEnd: 'Turn Harvis off — hides the Harvis mic'
   },
 
   keybinds: {
@@ -2989,7 +2991,7 @@ export const en: Translations = {
     couldNotPreview: path => `Could not preview ${path}`,
     noProjectTitle: 'No project',
     noProjectBody: 'Open a project to browse its files and review changes.',
-    noProjectOpen: 'No project open',
+    noProjectOpen: 'Sandbox opens with your first message',
     noDiffs: 'No diffs',
     unreadableTitle: 'Unreadable',
     unreadableBody: error => `Could not read this folder (${error}).`,

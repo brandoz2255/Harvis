@@ -71,8 +71,21 @@ _MODE_REQUESTS = (
     ("agent", re.compile(
         r"\b(?:use|run|launch|start|spin\s+up)\s+(?:an?\s+|the\s+)?(?:agent|workspace)\b"
         r"|\b(?:run|do)\s+(?:it|this|that)\s+(?:as|with|in)\s+(?:an?\s+|the\s+)?(?:agent|workspace)\b"
-        r"|\buse\s+(?:your\s+)?tools\b", re.I)),
+        r"|\buse\s+(?:your\s+)?tools\b"
+        # A direct instruction to put something in the sandbox ("install ComfyUI",
+        # "can you set up this repo", "clone …") is a request to run things, not a
+        # question about them ("how do I install python?" doesn't start this way).
+        r"|^\s*(?:(?:please|pls|ok|okay|hey\s+harvis|harvis)[,\s]+)*(?:(?:can|could|would)\s+you\s+)?"
+        r"(?:please\s+)?(?:install|set\s*up|clone|download\s+and\s+run)\b", re.I)),
 )
+
+
+def is_group_turn(title: str | None, text: str | None) -> bool:
+    """A bot's turn in a group room (hermes-bots group-rounds.ts). Its prompt wraps
+    the room log in long "claim or hand off work" rules that the workspace and
+    research detectors mistake for a multi-step task, so each bot launched a run
+    and the next bot answered the run card: a loop of jobs after a plain "hi"."""
+    return (title or "").startswith("Group: ") or (text or "").lstrip().startswith("[Group chat:")
 
 
 def requested_mode(text: str) -> str | None:

@@ -63,6 +63,7 @@ export type DesktopActionId =
   | 'new'
   | 'pet'
   | 'profile'
+  | 'research'
   | 'skin'
   | 'title'
   | 'wake'
@@ -192,6 +193,13 @@ const DESKTOP_COMMAND_SPECS: readonly DesktopCommandSpec[] = [
     argumentMode: 'options'
   },
   { name: '/profile', description: 'Switch the active Harvis profile', surface: action('profile') },
+  {
+    name: '/research',
+    description: 'Run deep research on a topic and write a sourced report',
+    aliases: ['/deep-research', '/deepresearch'],
+    surface: action('research'),
+    argumentMode: 'text'
+  },
   {
     name: '/skin',
     description: 'Switch desktop theme or cycle to the next one',

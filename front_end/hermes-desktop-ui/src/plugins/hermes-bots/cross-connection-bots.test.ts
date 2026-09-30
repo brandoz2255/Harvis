@@ -175,4 +175,16 @@ describe('a group room seats members from several machines', () => {
       })
     ).toMatch(/@dixie \[on Mac Mini\]/)
   })
+  it('never offers (pass) on a turn that carries a user message', () => {
+    const input = {
+      deltaLines: ['You (user): hi'],
+      groupName: 'infra',
+      members: [{ name: 'ops' }, { name: 'tutor' }] as GroupMember[],
+      viewer: { name: 'ops' } as GroupMember
+    }
+    const answer = buildGroupChatTurnPrompt({ ...input, userSpoke: true })
+    expect(answer).toMatch(/a greeting gets a short greeting back/)
+    expect(answer).not.toMatch(/Passing is good/)
+    expect(buildGroupChatTurnPrompt(input)).toMatch(/Passing is good/)
+  })
 })

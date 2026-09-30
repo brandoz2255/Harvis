@@ -11,6 +11,7 @@
 
 import { api, gatewayWsUrl, localStore, notify, openExternal, readClipboard, writeClipboard } from './api'
 import { noopListener, stubs } from './stubs'
+import { sandboxTerminal } from './terminal'
 import { installZoom, zoom } from './zoom'
 
 const projectDir = localStore('hermes.web.defaultProjectDir')
@@ -32,6 +33,8 @@ export function installDesktopShim(): void {
     readClipboard,
     writeClipboard,
     getGatewayWsUrl: async () => ({ ok: true, wsUrl: gatewayWsUrl() }),
+    // The chat's sandbox container (right sidebar ▸ Terminal); see ./terminal.
+    terminal: sandboxTerminal,
     zoom,
 
     settings: {

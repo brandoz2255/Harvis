@@ -180,11 +180,17 @@ services:
       # error itself recommends this.) Harmless on the rig.
       PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
       OLLAMA_URL: "${HARVIS_LLM_BASE_URL:-${OLLAMA_URL:-http://host.docker.internal:11434}}"
+      # Passed through as-is (empty when unset) so the backend can tell a provider
+      # the installer chose from the default guess — both can be the same URL.
+      HARVIS_LLM_BASE_URL: "${HARVIS_LLM_BASE_URL:-}"
       # Which optional capability packs the operator turned on. A container cannot
       # see `docker compose --profile`, so without this the health endpoints have
       # no way to tell "engines were never installed" from "openclaw crashed", and
       # a correct default install reports itself degraded.
       HARVIS_ENABLED_PROFILES: "${COMPOSE_PROFILES:-}"
+      # /api/capabilities/hosting reports "NVIDIA runtime wired" from this. The
+      # install.sh pin only reaches compose interpolation, never the container.
+      HARVIS_GPU_RUNTIME: "${HARVIS_GPU_RUNTIME:-}"
       # Workspace task-detector model. Without this the resolver auto-picks the
       # LARGEST installed model (e.g. gpt-oss:20b) which can't load in 15s on the
       # 8GB GPU → detection times out → chat builds never launch. Pin a SMALL/fast
@@ -293,6 +299,14 @@ services:
       HARVIS_TTS_SPEED: "${HARVIS_TTS_SPEED:-1.0}"
       HARVIS_TTS_FORMAT: "${HARVIS_TTS_FORMAT:-wav}"
       HARVIS_TTS_API_KEY: "${HARVIS_TTS_API_KEY:-}"
+      # Voice router (plugins/hermes_ui/voice_route.py): a spoken turn asks the
+      # `laya` sidecar whether to answer fast on the small model, escalate, run a
+      # tool or ask back. With the `laya` profile off the call fails fast and the
+      # turn runs exactly as before. Set HARVIS_LAYA_URL= (empty) to switch it off.
+      HARVIS_LAYA_URL: "${HARVIS_LAYA_URL-http://laya:8000}"
+      HARVIS_VOICE_FAST_MODEL: "${HARVIS_VOICE_FAST_MODEL:-gemma4:e2b}"
+      HARVIS_VOICE_BIG_MODEL: "${HARVIS_VOICE_BIG_MODEL:-}"
+      HARVIS_LAYA_MIN_CONFIDENCE: "${HARVIS_LAYA_MIN_CONFIDENCE:-0.5}"
       BACKEND_URL: "http://backend:8000"
       # HF_HOME is the only cache root, on purpose. Setting TRANSFORMERS_CACHE
       # alongside it looks redundant and is actually a duplicator: HF_HOME means
@@ -1479,6 +1493,38 @@ services:
           memory: 2G
 
   # ═══════════════════════════════════════════════════════════════════════════
+  # Laya — the voice router's decision model (opt-in: COMPOSE_PROFILES=laya)
+  # ───────────────────────────────────────────────────────────────────────────
+  # A 421M text classifier on CPU (the GPU belongs to Ollama). The backend asks
+  # it one "choice" question per spoken turn and picks the model from the
+  # answer. No `ports:` — only the backend reaches it, over the compose network.
+  # The English checkpoint (~1.7 GB) downloads into laya-models on first start.
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  laya:
+    build:
+      context: ./services/laya
+      dockerfile: Dockerfile
+      args:
+        VCS_REF: ${HARVIS_VCS_REF:-unknown}
+    image: harvis-laya:local
+    pull_policy: build
+    container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-laya
+    profiles: ["laya"]
+    restart: unless-stopped
+    environment:
+      LAYA_THREADS: "${LAYA_THREADS:-2}"
+    volumes:
+      - laya-models:/models
+    networks:
+      - ollama-n8n-network
+    deploy:
+      resources:
+        limits:
+          memory: 3G
+          cpus: "2.0"
+
+  # ═══════════════════════════════════════════════════════════════════════════
   # STT Sidecar — speech-to-text off the backend process (FALLBACK)
   # ───────────────────────────────────────────────────────────────────────────
   # Kept as the reference the ONNX benchmark measures against, and the way back
@@ -1832,6 +1878,7 @@ volumes:
   ml-models-cache:
   stt-cache:            # `voice` profile: the STT sidecar's HF cache (uid 1000, not 1001)
   voice-models:         # voice-onnx's ASR/VAD/Kokoro bundles, ~630 MB (uid 1001)
+  laya-models:          # `laya` profile: the voice router's checkpoint (uid 1001)
   embedding-data:
   artifact_data:
   surrealdb_data:

@@ -18,6 +18,8 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from plugins.hosting import MODE_KUBERNETES, hosting_mode, profile_not_enabled_reason
+
 logger = logging.getLogger(__name__)
 
 _HTTP_TIMEOUT = httpx.Timeout(5.0)
@@ -67,7 +69,12 @@ def service_expected(name: str) -> bool:
 
 
 def _not_installed_reason(name: str) -> str:
-    return f"not installed — compose profile '{_SERVICE_PROFILE[name]}' is not enabled"
+    # Under k8s the shared wording already says "not deployed"; prefixing it
+    # with "not installed —" would read as two verdicts for one fact.
+    reason = profile_not_enabled_reason(_SERVICE_PROFILE[name])
+    if hosting_mode()[0] == MODE_KUBERNETES:
+        return reason
+    return f"not installed — {reason}"
 
 
 def _artifact_dir() -> Path:
@@ -349,6 +356,28 @@ async def _probe_notebooks() -> dict[str, Any]:
         return _tick(False, str(exc)[:200], probe)
 
 
+async def _probe_notebook_embedder() -> dict[str, Any]:
+    """The Verify tick for Notebooks: is its embedding model on the model server?
+
+    Replaced the /onb container probe here. The Hermes UI's Notebooks run on this
+    backend, so that pack being absent said nothing about whether they work; the
+    missing embedder is what actually stops a fresh install. ``install`` lets the
+    wizard offer the download with its size.
+    """
+    from notebooks.embedder_status import embedder_status
+
+    st = await embedder_status()
+    state = st["state"]
+    tick = _tick(state == "ready", st["reason"], st["probe"], skipped=state in ("not_installed", "unsupported"))
+    tick["install"] = {
+        "state": state,
+        "tag": st["install_tag"],
+        "download_mb": st["download_mb"],
+        "pullable": state == "not_installed",
+    }
+    return tick
+
+
 def _probe_artifacts() -> dict[str, Any]:
     probe = "write+read+unlink sentinel in ARTIFACT_STORAGE_DIR"
     root = _artifact_dir()
@@ -476,7 +505,7 @@ def create_setup_router(
                 skipped=True,
             )
         speech = await _probe_speech()
-        notebooks = await _probe_notebooks()
+        notebooks = await _probe_notebook_embedder()
         artifacts = _probe_artifacts()
         ticks = {
             "database": db,
@@ -649,6 +678,42 @@ def create_setup_router(
                 """
             )
         return {"ok": True, "setup_complete": True}
+
+    @router.get("/api/capabilities/notebooks-embedder")
+    async def capability_notebooks_embedder(_user=Depends(get_current_user)):
+        """Whether Notebooks can read sources on this install (see embedder_status).
+
+        Any signed-in user: the Notebooks page and the sidebar both need it. The
+        download itself goes through /api/cookbook/download like any other model.
+        """
+        from notebooks.embedder_status import embedder_status
+
+        return await embedder_status()
+
+    @router.post("/api/capabilities/notebooks-embedder/install")
+    async def install_notebooks_embedder(_user=Depends(get_current_user)):
+        """Pull Notebooks' embedding model into the server status is read from.
+
+        Its own route rather than /api/cookbook/download: the tag is fixed here, and
+        the pull lands on OLLAMA_URL, which is the server embedder_status probes.
+        A cookbook node picked client-side could be a different machine.
+        """
+        from fastapi.responses import StreamingResponse
+
+        from cookbook.client import ollama_pull_stream
+        from notebooks.embedder_status import EMBEDDER_TAG, embedder_status
+
+        st = await embedder_status()
+        if st["state"] == "ready":
+            raise HTTPException(status_code=409, detail=f"{st['model']} is already installed")
+        if st["state"] != "not_installed":
+            raise HTTPException(status_code=400, detail=st["reason"])
+        url = os.getenv("OLLAMA_URL", "http://host.docker.internal:11434").rstrip("/")
+        return StreamingResponse(
+            ollama_pull_stream(url, EMBEDDER_TAG),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     @router.get("/api/capabilities/notebooks")
     async def capability_notebooks(_user=Depends(get_current_user)):

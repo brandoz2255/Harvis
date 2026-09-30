@@ -13,6 +13,9 @@
 #   ./install.sh --check-only           # preflight only: changes NOTHING
 #   ./install.sh --no-launch            # configure but don't start the stack
 #   ./install.sh --llm-url URL          # skip detection, use this server
+#   ./install.sh --k8s                  # run Harvis on Kubernetes (k3s) instead of plain Docker
+#   ./install.sh --k8s-off              # back to plain Docker; all data kept
+#   ./install.sh --k8s-status | --k8s-join-command | --k8s-join URL TOKEN | --k8s-uninstall
 set -euo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -23,6 +26,8 @@ NO_LAUNCH=0
 # means --llm-url settled it and detection is skipped entirely.
 LLM_MODE="auto"
 LLM_ENDPOINT=""
+LLM_BRIDGE_GW=""
+LLM_REACH_FIX=""
 LLM_PROVIDER=""
 COMPOSE_FILE=""
 COMPOSE_ARGS=()
@@ -36,6 +41,10 @@ DOCKER_GID=""
 # means plain runc — the portable default. Set to "nvidia" only when this host
 # actually has that runtime registered with dockerd.
 GPU_RUNTIME=""
+# Kubernetes hosting mode (scripts/k8s/harvis-k8s.sh). Empty = plain Docker.
+K8S_ACTION=""
+K8S_JOIN_ARGS=()
+K8S_MODE_FILE=/var/lib/harvis/k8s/mode
 
 # Servers we know how to recognise, probed in this order. Each entry is
 # port|name|path — the path is what distinguishes "something is listening on
@@ -60,6 +69,12 @@ parse_args() {
       --yes|-y) ASSUME_YES=1; shift ;;
       --check-only) CHECK_ONLY=1; shift ;;
       --no-launch) NO_LAUNCH=1; shift ;;
+      --k8s) K8S_ACTION=up; shift ;;
+      --k8s-off) K8S_ACTION=off; shift ;;
+      --k8s-status) K8S_ACTION=status; shift ;;
+      --k8s-uninstall) K8S_ACTION=uninstall; shift ;;
+      --k8s-join-command) K8S_ACTION=join-command; shift ;;
+      --k8s-join) K8S_ACTION=join; K8S_JOIN_ARGS=("${2:-}" "${3:-}"); shift $(( $# >= 3 ? 3 : $# )) ;;
       --llm-url|--ollama-url) LLM_ENDPOINT="${2:-}"; LLM_MODE="manual"; shift 2 ;;
       --llm-url=*|--ollama-url=*) LLM_ENDPOINT="${1#*=}"; LLM_MODE="manual"; shift ;;
       # Accepted and ignored: the stack no longer needs a GPU, so there is no
@@ -78,6 +93,18 @@ parse_args() {
         echo "                  From inside a container 'localhost' is the container,"
         echo "                  not your machine — use host.docker.internal or a LAN IP:"
         echo "                    ./install.sh --llm-url http://host.docker.internal:11434"
+        echo ""
+        echo "  Kubernetes hosting mode (optional; Linux, needs sudo):"
+        echo "  --k8s               Install k3s here and run Harvis in it, same address"
+        echo "                      and data. Ollama runs in the cluster (on the GPU when"
+        echo "                      there is an NVIDIA one) and its models are shared on"
+        echo "                      your network for chat only. With --llm-url, your own"
+        echo "                      model server is used instead."
+        echo "  --k8s-off           Back to plain Docker. Nothing is deleted."
+        echo "  --k8s-status        Nodes, pods and addresses."
+        echo "  --k8s-join-command  Print the command another machine runs to join."
+        echo "  --k8s-join URL TOKEN  Join this machine to another Harvis as a worker."
+        echo "  --k8s-uninstall     --k8s-off, then remove k3s from this machine."
         exit 0 ;;
       *) echo "Unknown arg: $1"; exit 1 ;;
     esac
@@ -224,6 +251,53 @@ llm_probe_hosts() {
   printf 'host.docker.internal\n'
 }
 
+# On the plain Linux engine, host.docker.internal is the Docker bridge gateway,
+# not this machine's loopback. Stock Linux Ollama listens on 127.0.0.1 only, so
+# it answers this shell and never a container: the installer used to say PASS
+# and chat then had no model. Docker Desktop (macOS, Windows, Linux Desktop)
+# forwards the name to loopback, so the gap is the Linux engine alone. Probing
+# the bridge gateway from here is the same connect a container makes, without
+# pulling an image to prove it.
+containers_reach_port() { # port — succeeds when a container could connect
+  case "$(docker info --format '{{.OperatingSystem}}' 2>/dev/null || true)" in
+    *"Docker Desktop"*) return 0 ;;
+  esac
+  [ "$(uname -s)" = "Linux" ] || return 0
+  local gw
+  gw="$(docker network inspect bridge --format '{{range .IPAM.Config}}{{.Gateway}} {{end}}' 2>/dev/null \
+    | tr ' ' '\n' | grep -m1 -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || true)"
+  # No bridge to ask about means no way to tell; do not cry wolf.
+  [ -n "$gw" ] || return 0
+  LLM_BRIDGE_GW="$gw"
+  port_listening "$gw" "$1"
+}
+
+add_unreachable_hint() { # port name
+  local fix
+  if [ "$2" = "Ollama" ]; then
+    fix="  Ollama on Linux listens on 127.0.0.1 only. Let it listen for containers too,
+  then re-run the installer:
+      sudo systemctl edit ollama        # add these two lines and save:
+          [Service]
+          Environment=\"OLLAMA_HOST=0.0.0.0\"
+      sudo systemctl restart ollama
+      ./install.sh --yes"
+  else
+    fix="  Restart ${2} so it listens on 0.0.0.0 instead of 127.0.0.1 (LM Studio: turn on
+  \"Serve on Local Network\"; llama.cpp and vLLM: --host 0.0.0.0), then re-run
+  ./install.sh --yes"
+  fi
+  # Kept for the closing summary too: the build prints thousands of lines
+  # between the check table and the end, and this is the one thing to act on.
+  LLM_REACH_FIX="${fix}"
+  add_hint "⚠ ${2} answers on this machine but not from inside Docker (${LLM_BRIDGE_GW}:${1} refused).
+  Harvis will start, but chat will have no model until this is fixed.
+${fix}
+  0.0.0.0 also opens port ${1} to your network; firewall it if that matters.
+  Or point Harvis at an address containers can reach:
+      ./install.sh --yes --llm-url http://<this machine's LAN IP>:${1}"
+}
+
 # Probe from THIS shell (127.0.0.1) but record the URL a CONTAINER will use
 # (host.docker.internal). Those are the same listener seen from two sides, and
 # conflating them is the classic way a working install can't reach its model.
@@ -245,6 +319,7 @@ detect_provider() {
       LLM_ENDPOINT="http://host.docker.internal:${port}"
       LLM_PROVIDER="${name}"
       add_row WARN "model server" "port ${port} is open but curl is missing — assuming ${name}"
+      containers_reach_port "$port" || add_unreachable_hint "$port" "$name"
       return 0
     fi
     body="$(curl -s -m 4 "http://${host}:${port}${path}" 2>/dev/null || true)"
@@ -263,7 +338,10 @@ detect_provider() {
     # `|| true` is load-bearing: pipefail is on, and grep exits 1 on no match —
     # which is the ordinary "reachable but no models loaded" case, not a failure.
     count="$(printf '%s' "$body" | grep -o '"id"\|"name"' | wc -l | tr -d ' ' || true)"
-    if [ "${count:-0}" -gt 0 ]; then
+    if ! containers_reach_port "$port"; then
+      add_row WARN "model server" "${name} at ${host}:${port}, but containers cannot reach it — see below"
+      add_unreachable_hint "$port" "$name"
+    elif [ "${count:-0}" -gt 0 ]; then
       add_row PASS "model server" "${name} at ${host}:${port}, ${count} model(s)"
     else
       add_row WARN "model server" "${name} at ${host}:${port} but 0 models — chat fails until you load one"
@@ -363,6 +441,10 @@ compose_project_name() {
 
 # ── Host port preflight ─────────────────────────────────────────────────────
 check_ports() {
+  if [ -f "$K8S_MODE_FILE" ]; then
+    add_row SKIP "host ports" "Kubernetes mode holds them (re-run)"
+    return 0
+  fi
   if [ ! -s "${MERGED_JSON:-}" ]; then
     add_row SKIP "host ports" "skipped (compose merge unavailable)"
     return 0
@@ -630,6 +712,9 @@ print_first_admin() {
 }
 
 report_models() {
+  # Kubernetes mode runs its own Ollama in the cluster and has already printed
+  # how to pull a model into it.
+  if [ "$K8S_ACTION" = "up" ] && [ "${HARVIS_K8S_OLLAMA:-1}" = "1" ]; then return 0; fi
   # The model server belongs to the host, not to this stack — there is no
   # container to `docker exec` into and nothing here can pull on its behalf.
   # So: point at the machine that owns it, and say what to run there.
@@ -647,8 +732,14 @@ report_models() {
     return 0
   fi
   echo "  Models come from ${LLM_PROVIDER:-your server} at ${LLM_ENDPOINT}."
+  # $1 is the backend's view of that server. Anything but "up" was already
+  # explained above; advice about loading models would contradict it.
+  if [ -n "${1:-}" ] && [ "$1" != "up" ]; then
+    echo "  Fix the connection above first, then pick a model in the setup wizard."
+    return 0
+  fi
   case "$LLM_PROVIDER" in
-    Ollama) echo "  It has none loaded yet — the setup wizard ranks what this machine can run." ;;
+    Ollama) echo "  The setup wizard ranks the models this machine can run and pulls the one you pick." ;;
     *)      echo "  Load a model there, then pick it in Harvis." ;;
   esac
 }
@@ -672,6 +763,9 @@ health_blockers() { # $1 = /api/health/services body
 STACK_DOWN=""
 check_stack_containers() {
   STACK_DOWN=""
+  # In Kubernetes mode harvis-k8s.sh already waited on every Deployment and
+  # printed the result; docker compose ps would only show nothing running.
+  [ "$K8S_ACTION" = "up" ] && return 0
   local expected states svc line state code
   expected="$(docker compose config --services 2>/dev/null || true)"
   [ -n "$expected" ] || return 0  # can't render the set — don't invent a verdict
@@ -794,9 +888,10 @@ poll_health() {
       echo ""
       echo "  ⚠ ${LLM_ENDPOINT} is configured but the backend cannot reach it yet (${provider_state})."
       echo "    Chat has nothing to talk to until that server answers."
+      if [ -n "$LLM_REACH_FIX" ]; then printf '%s\n' "$LLM_REACH_FIX"; fi
     fi
   fi
-  report_models
+  report_models "${provider_state:-}"
   return 0
 }
 
@@ -839,10 +934,41 @@ launch() {
 }
 
 # ── Main ────────────────────────────────────────────────────────────────────
+run_k8s() { # $@ = harvis-k8s.sh arguments
+  bash scripts/k8s/harvis-k8s.sh "$@"
+}
+
+# Kubernetes mode after the normal preflight and .env: build the images with
+# Docker, then hand the stack to k3s. The generated secrets in .env are the
+# same ones either mode uses, so switching back and forth keeps logins working.
+launch_k8s() {
+  if [ "$(uname -s)" != "Linux" ]; then
+    echo "✗ Kubernetes hosting mode needs Linux (k3s). Plain Docker mode works everywhere."
+    return 1
+  fi
+  if [ "$LLM_MODE" = "manual" ]; then export HARVIS_K8S_OLLAMA=0; fi
+  echo ""
+  echo "Building Harvis images ..."
+  docker compose build
+  run_k8s up
+  poll_health
+}
+
 main() {
   parse_args "$@"
   echo "Harvis installer"
   echo "================"
+  case "$K8S_ACTION" in
+    status|join-command|uninstall) run_k8s "$K8S_ACTION"; exit $? ;;
+    join) run_k8s join "${K8S_JOIN_ARGS[@]}"; exit $? ;;
+    off) run_k8s off && poll_health; exit $? ;;
+  esac
+  if [ -z "$K8S_ACTION" ] && [ -f "$K8S_MODE_FILE" ] && [ "$CHECK_ONLY" -eq 0 ]; then
+    echo "✗ Harvis is running in Kubernetes mode on this machine."
+    echo "  Update it with:          ./install.sh --k8s"
+    echo "  Go back to plain Docker: ./install.sh --k8s-off"
+    exit 1
+  fi
   if ! check_prereqs; then
     print_check_table
     exit 1
@@ -867,7 +993,7 @@ main() {
   fi
   write_env
   ensure_network
-  launch
+  if [ "$K8S_ACTION" = "up" ]; then launch_k8s; else launch; fi
 }
 
 main "$@"

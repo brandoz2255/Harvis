@@ -30,7 +30,8 @@ export const stateLabel = (state: null | string | undefined, m: Translations['me
   state ? m.states[state] || HARVIS_STATES[state] || state.replace(/_/g, ' ') : m.unknown
 
 export function stateTone({ enabled, state, supported }: MessagingPlatformInfo): StatusTone {
-  if (supported === false || !enabled) {
+  // Never set up is not a warning: it is the first-run state, grey like the row.
+  if (supported === false || !enabled || state === 'not_configured') {
     return 'muted'
   }
 
@@ -140,19 +141,32 @@ export function PlatformRow({
 }) {
   const { t } = useI18n()
   const unsupported = platform.supported === false
+  // Not set up yet (a first run) reads the same as unsupported: greyed out,
+  // brand colour dropped, still clickable so its steps are one click away.
+  const notSetUp = !unsupported && platform.state === 'not_configured'
 
   return (
     <button
       className={cn(
         'row-hover flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:text-foreground',
         active ? 'bg-(--ui-row-active-background) text-foreground' : 'text-(--ui-text-secondary)',
-        unsupported && !active && 'opacity-55'
+        (unsupported || notSetUp) && !active && 'opacity-55'
       )}
       onClick={onSelect}
-      title={unsupported ? `${platform.name}: not supported by Harvis yet` : undefined}
+      title={
+        unsupported
+          ? `${platform.name}: not supported by Harvis yet`
+          : notSetUp
+            ? `${platform.name}: not set up yet — open it for the steps`
+            : undefined
+      }
       type="button"
     >
-      <PlatformAvatar platformId={platform.id} platformName={platform.name} />
+      <PlatformAvatar
+        className={cn((unsupported || notSetUp) && !active && 'grayscale')}
+        platformId={platform.id}
+        platformName={platform.name}
+      />
       <span className="flex min-w-0 flex-1 items-center justify-between gap-2">
         <span className="truncate text-[length:var(--conversation-text-font-size)] font-normal">{platform.name}</span>
         <span className="flex shrink-0 items-center gap-1.5">

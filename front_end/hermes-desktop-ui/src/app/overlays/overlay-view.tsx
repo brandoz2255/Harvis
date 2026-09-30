@@ -26,6 +26,9 @@ interface OverlayViewProps {
    *  beside the card, not inside it — the card clips its own overflow. */
   edgeBadge?: ReactNode
   headerContent?: ReactNode
+  /** Sit like a page instead of a pop-up: no dimmed, blurred backdrop, and a
+   *  click beside the card does not close it. */
+  quiet?: boolean
   rootClassName?: string
   /** Controls rendered on the close button's row, to its left. They ride the
    *  titlebar strip, so keep them titlebar-sized and quiet. */
@@ -39,6 +42,7 @@ export function OverlayView({
   contentClassName,
   edgeBadge,
   headerContent,
+  quiet = false,
   rootClassName,
   titlebarActions
 }: OverlayViewProps) {
@@ -74,7 +78,8 @@ export function OverlayView({
   return (
     <div
       className={cn(
-        'fixed inset-0 z-50 bg-black/22 backdrop-blur-[0.125rem]',
+        'fixed inset-0 z-50',
+        !quiet && 'bg-black/22 backdrop-blur-[0.125rem]',
         // Equidistant inset on every side. The top value is driven by the
         // titlebar height so the card clears the OS traffic-lights vertically;
         // since the card top already sits below them, the left needs no extra
@@ -90,7 +95,7 @@ export function OverlayView({
       // e.g. star map's Space, keep working).
       data-overlay-surface=""
       onClick={event => {
-        if (event.target === event.currentTarget) {
+        if (!quiet && event.target === event.currentTarget) {
           closeOverlay()
         }
       }}

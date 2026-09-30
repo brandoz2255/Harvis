@@ -214,6 +214,8 @@ def test_every_catalog_platform_is_listed_and_secrets_are_masked(section, monkey
         return False
     monkeypatch.setattr(messaging.messaging_gateway, "status", no_gateway)
     monkeypatch.setattr(messaging.messaging_gateway, "resync", no_resync)
+    # problem() reads the status cache; another test may have left a reason in it.
+    monkeypatch.setitem(messaging.messaging_gateway._status_cache, "problem", None)
     monkeypatch.setenv("DISCORD_WORKSPACE_BOT_LEGACY_ENABLED", "true")
     entries = messaging.catalog()
     assert len(entries) == 33

@@ -34,6 +34,7 @@ import { cn } from '@/lib/utils'
 import { $activeConnectionId } from '@/store/connections'
 import { $cronJobs } from '@/store/cron'
 import { $bindings } from '@/store/keybinds'
+import { $navDimmed } from '@/store/nav-status'
 import {
   $dismissedAutoProjectIds,
   $panesFlipped,
@@ -329,6 +330,8 @@ export function ChatSidebar({
   // Contributed nav rows (plugins pairing a page with a sidebar entry) render
   // below the built-ins with the same chrome; active = at their route.
   const navContributions = useContributions(SIDEBAR_NAV_AREA)
+  // Features present but not installed yet: their row goes a darker grey.
+  const navDimmed = useStore($navDimmed)
 
   const contributedNav = useMemo<SidebarNavItem[]>(
     () =>
@@ -1486,6 +1489,8 @@ export function ChatSidebar({
                   (Boolean(item.route) && pathname === item.route)
 
                 const isNewSession = item.id === 'new-session'
+                const dimmedReason = item.route ? navDimmed[item.route] : undefined
+                const label = s.nav[item.id] ?? item.label
 
                 const button = (
                   <SidebarMenuButton
@@ -1502,7 +1507,8 @@ export function ChatSidebar({
                       active &&
                         'border-(--ui-stroke-tertiary) bg-(--ui-control-active-background) text-foreground shadow-none hover:border-(--ui-stroke-tertiary)!',
                       !isInteractive &&
-                        'cursor-default hover:border-transparent hover:bg-transparent hover:text-inherit'
+                        'cursor-default hover:border-transparent hover:bg-transparent hover:text-inherit',
+                      dimmedReason && !active && 'text-(--ui-text-quaternary)'
                     )}
                     // A tip anchored to the label points at the end of the
                     // word; the row is what it's actually about.
@@ -1521,11 +1527,11 @@ export function ChatSidebar({
                     tooltip={
                       item.keybindActionId
                         ? {
-                            children: (
-                              <TipKeybindLabel actionId={item.keybindActionId} text={s.nav[item.id] ?? item.label} />
-                            )
+                            children: <TipKeybindLabel actionId={item.keybindActionId} text={label} />
                           }
-                        : (s.nav[item.id] ?? item.label)
+                        : dimmedReason
+                          ? `${label} — ${dimmedReason}`
+                          : label
                     }
                     type="button"
                   >

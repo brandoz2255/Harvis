@@ -17,7 +17,8 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from auth_optimized import decode_token_fast
 
-from . import bots, chat, learn, profiles, providers, runs, sessions, store, turn_models
+from . import (bots, chat, learn, profiles, providers, runs, sandbox, sessions, skill_select, store, turn_models,
+               voice_route)
 from .models import DEFAULT_EFFORT, is_hidden_model, ollama_effort, thinking_models
 from .rest import build_model_options
 from .ws_settings import SettingsMethods
@@ -62,6 +63,15 @@ def _token_from(ws: WebSocket) -> Optional[str]:
     if auth.lower().startswith("bearer "):
         return auth[7:].strip()
     return None
+
+
+def _turn_extra(s: sessions.Live, bot: Optional[dict]) -> dict:
+    """Harvis-only body flags: the bot's switches, plus this chat's session id so a
+    workspace run works in the chat's sandbox (owui_compat.workspace_bridge._chat_sandbox)."""
+    extra = bots.turn_extra(bot)
+    if sandbox.enabled():
+        extra = {**extra, "harvis_sandbox_session": s.id}
+    return extra
 
 
 class Connection(SettingsMethods):
@@ -296,14 +306,17 @@ class Connection(SettingsMethods):
             return _err(rid, ERR_SESSION_BUSY, "session busy", {"session_id": s.id})
         msgs = await sessions.append(self.pool, s, "user", text)
         s.running = True
-        self.turns[s.id] = asyncio.create_task(self._run_turn(s, msgs))
+        # Spoken in the hands-free conversation: the voice router may pick the model.
+        voice = params.get("surface") == "voice"
+        self.turns[s.id] = asyncio.create_task(self._run_turn(s, msgs, voice=voice))
         user_turns = sum(1 for m in msgs if m["role"] == "user")
         return _ok(rid, {"ok": True, "queued": False, "session_id": s.id,
                          "user_turn_count": user_turns, "ordinal": user_turns - 1})
 
     # ---- the turn --------------------------------------------------------
 
-    async def _run_turn(self, s: sessions.Live, msgs: list[dict]) -> None:
+    async def _run_turn(self, s: sessions.Live, msgs: list[dict], voice: bool = False, note: str = "",
+                        plain: bool = False) -> None:
         first_turn = sum(1 for m in msgs if m["role"] == "user") == 1
         parts: list[str] = []
         thoughts: list[str] = []
@@ -318,21 +331,45 @@ class Connection(SettingsMethods):
             # No mode pill: Harvis decides (auto) unless this message asks for a
             # mode outright ("use a team", "just answer"). A chat_mode saved by
             # the old pill is ignored so nobody is stuck in a mode they can't see.
-            mode = chat.requested_mode(query) or "auto"
-            recall = await learn.recall_message(self.pool, self.user_id, query)
+            # A plain turn (the voice assistant) is the model and nothing else:
+            # no recall, skills, bot, routing, thinking, workspace or research.
+            mode = "chat" if plain else chat.requested_mode(query) or "auto"
+            recall = None if plain else await learn.recall_message(self.pool, self.user_id, query)
             turn = [recall, *msgs] if recall else msgs
+            # Trusted skills whose name or description match this message (or that it names).
+            skill = None if plain else await skill_select.skill_message(self.pool, self.user_id, query)
+            turn = [skill, *turn] if skill else turn
+            if plain and model.startswith(turn_models.MOA_PREFIX):
+                model = ""
             # A bot chat: its instructions and knowledge lead every turn, and
             # its tool switches narrow what the turn may start.
-            bot = await bots.get_bot(self.pool, self.user_id, s.bot_id) if s.bot_id else None
+            bot = await bots.get_bot(self.pool, self.user_id, s.bot_id) if s.bot_id and not plain else None
             if bot:
                 turn = await bots.prepare_turn(self.pool, self.user_id, bot, turn, query)
                 mode = bots.turn_mode(bot, mode)
+            extra = _turn_extra(s, bot)
+            if note:
+                # The caller's standing instructions for this turn (rest_voice: the voice assistant's).
+                turn = [*turn[:-1], {"role": "system", "content": note}, turn[-1]]
+            if plain:
+                extra = {"harvis_research": False, "harvis_plain": True}
+            elif chat.is_group_turn(s.title, query):
+                # Room turns are conversation only: no workspace run, no deep research.
+                mode, extra = "chat", {**extra, "harvis_research": False}
+            elif voice and not endpoint and not bot and not model.startswith(turn_models.MOA_PREFIX):
+                route = await voice_route.decide(query)
+                if route:
+                    step = voice_route.plan(route, model, mode)
+                    model, mode = step.model, step.mode
+                    if step.note:
+                        turn = [*turn[:-1], {"role": "system", "content": step.note}, turn[-1]]
+                    await self._relay(s, "reasoning", step.label, parts, thoughts)
             # Only thinking models get a level: Ollama rejects one on any other model.
-            effort = (ollama_effort(s.effort or DEFAULT_EFFORT)
+            effort = (("none" if plain else ollama_effort(s.effort or DEFAULT_EFFORT))
                       if model and not endpoint and model in await thinking_models() else "")
             # Fallback models, mixture of agents and the personality note (Settings ▸ Model / Chat).
             async for kind, delta in turn_models.stream(self.pool, self.user_id, self.token, turn, model, endpoint,
-                                                        mode, effort, self.origin, extra=bots.turn_extra(bot),
+                                                        mode, effort, self.origin, extra=extra,
                                                         bot=bot is not None):
                 if kind != "run":
                     await self._relay(s, kind, delta, parts, thoughts)
@@ -348,6 +385,14 @@ class Connection(SettingsMethods):
                 async for kind2, delta2 in runs.follow_run(self.token, run_id, self.origin):
                     await self._relay(s, kind2, delta2, parts, thoughts)
                 self.runs.pop(s.id, None)
+            if effort and effort != "none" and thoughts and not "".join(parts).strip():
+                # A small thinking model (gemma4:e2b) can spend the whole turn
+                # thinking and stop without an answer; ask again with thinking off.
+                async for kind, delta in turn_models.stream(self.pool, self.user_id, self.token, turn, model,
+                                                            endpoint, "chat", "none", self.origin, extra=extra,
+                                                            bot=bot is not None):
+                    if kind == "text":
+                        await self._relay(s, kind, delta, parts, thoughts)
         except asyncio.CancelledError:
             parts.append("\n\n[interrupted]")
             status = "interrupted"
@@ -364,8 +409,9 @@ class Connection(SettingsMethods):
                 await sessions.append(self.pool, s, "assistant", text, "".join(thoughts))
             except Exception:  # noqa: BLE001
                 log.exception("hermes_ui: could not persist assistant turn for %s", s.id)
-        if status is None and text.strip():
-            learn.after_turn(self.pool, self.user_id, s.id, msgs, text, ran_workspace)
+        if status is None and text.strip() and not plain:
+            learn.after_turn(self.pool, self.user_id, s.id, msgs, text, ran_workspace,
+                             on_skill=lambda drafted, sid=s.id: self.emit("harvis.skill.drafted", sid, drafted))
         s.running = False
         done = {"text": text}
         if status == "error":

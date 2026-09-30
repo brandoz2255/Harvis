@@ -35,6 +35,8 @@ interface PanelProps {
   closeLabel?: string
   contentClassName?: string
   onClose: () => void
+  /** See OverlayView: a page, not a pop-up. */
+  quiet?: boolean
 }
 
 export function Panel({
@@ -42,7 +44,8 @@ export function Panel({
   className,
   closeLabel = translateNow('common.close'),
   contentClassName,
-  onClose
+  onClose,
+  quiet
 }: PanelProps) {
   return (
     <OverlayView
@@ -51,6 +54,7 @@ export function Panel({
       // OVERLAY_TOP_CLEARANCE, the shared clearance every overlay column uses.
       contentClassName={cn('flex h-full min-h-0 flex-col px-4 pb-4 sm:px-5', OVERLAY_TOP_CLEARANCE, contentClassName)}
       onClose={onClose}
+      quiet={quiet}
       rootClassName={cn('flex h-full w-full flex-col', className)}
     >
       {children}

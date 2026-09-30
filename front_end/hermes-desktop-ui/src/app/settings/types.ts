@@ -10,6 +10,7 @@ export type SettingsView =
   | 'connections'
   | 'gateway'
   | 'harvis-memory'
+  | 'hosting'
   | 'keybinds'
   | 'keys'
   | 'notifications'

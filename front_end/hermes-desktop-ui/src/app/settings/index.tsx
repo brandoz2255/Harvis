@@ -18,6 +18,7 @@ import {
   Globe,
   Info,
   Keyboard,
+  Network,
   RefreshCw,
   Search,
   Terminal,
@@ -44,6 +45,7 @@ import { ConfigSettings } from './config-settings'
 import { HARVIS_SECTIONS } from './constants'
 import { GatewaySettings } from './gateway-settings'
 import { CodingEnginesSettings, HarvisProvidersSettings } from './harvis-providers-settings'
+import { HostingSettings } from './hosting-settings'
 import { KeybindSettings } from './keybind-settings'
 import { MemoryLearningSettings } from './memory-learning-settings'
 import { MODEL_VIEW_LABELS, MODEL_VIEWS, type ModelView } from './model-views'
@@ -65,6 +67,7 @@ const SETTINGS_VIEWS: readonly SettingsViewId[] = [
   'keybinds',
   'notifications',
   'sessions',
+  'hosting',
   'about'
 ]
 
@@ -305,8 +308,15 @@ export function SettingsView({ onClose, onConfigSaved, onMainModelChanged }: Set
         onSelect: () => setActiveView('sessions')
       },
       {
-        active: activeView === 'about',
+        active: activeView === 'hosting',
         gapBefore: true,
+        icon: Network,
+        id: 'hosting',
+        label: 'Hosting',
+        onSelect: () => setActiveView('hosting')
+      },
+      {
+        active: activeView === 'about',
         icon: Info,
         id: 'about',
         label: t.settings.nav.about,
@@ -423,6 +433,8 @@ export function SettingsView({ onClose, onConfigSaved, onMainModelChanged }: Set
       <CodingEnginesSettings />
     ) : activeView === 'harvis-memory' ? (
       <MemoryLearningSettings onClose={onClose} />
+    ) : activeView === 'hosting' ? (
+      <HostingSettings />
     ) : activeView === 'providers' ? (
       <ProvidersSettings
         onClose={onClose}

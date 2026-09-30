@@ -13,7 +13,7 @@ except Exception:
     trafilatura = None 
 
 try:
-    from readablity import Document 
+    from readability import Document  # readability-lxml
 except Exception:
     Document = None 
 
@@ -61,7 +61,7 @@ def _trafilatura_extract(html: str) -> HtmlExtractionResult:
 
 def readablity_fallback(html: str) -> HtmlExtractionResult:
     if not  Document:
-        return HtmlExtractionResult(title="", test="", language=None, meta={})
+        return HtmlExtractionResult(title="", text="", language=None, meta={})
     try:
         doc = Document(html)
         title = (doc.short_title() or "").strip()

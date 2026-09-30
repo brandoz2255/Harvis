@@ -246,7 +246,9 @@ export const zh: Translations = {
     exitHud: '退出 HUD 模式',
     resetHudLayout: '重置 HUD 大小和位置',
     layoutEditor: '布局编辑器',
-    layoutEditorTitle: mod => `布局编辑器 — ${mod} 点击重置布局`
+    layoutEditorTitle: mod => `布局编辑器 — ${mod} 点击重置布局`,
+    harvisAssistant: '打开 Harvis — 在底部显示 Harvis 麦克风',
+    harvisAssistantEnd: '关闭 Harvis（隐藏 Harvis 麦克风）'
   },
 
   keybinds: {
