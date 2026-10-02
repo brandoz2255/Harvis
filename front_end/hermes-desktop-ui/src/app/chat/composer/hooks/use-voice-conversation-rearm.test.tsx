@@ -146,6 +146,34 @@ function renderRearmConversation(responseId: string, responseText: string) {
   )
 }
 
+function renderMuteDuringTranscriptionConversation() {
+  let response: null | { id: string; pending: boolean; text: string } = null
+  let resolveTranscript: null | ((value: string) => void) = null
+
+  const hook = renderHook(
+    ({ enabled }) =>
+      useVoiceConversation({
+        busy: false,
+        consumePendingResponse: vi.fn(),
+        enabled,
+        onSubmit: async () => {
+          response = { id: 'reply-muted', pending: false, text: 'I can still answer.' }
+        },
+        onTranscribeAudio: () =>
+          new Promise<string>(resolve => {
+            resolveTranscript = resolve
+          }),
+        pendingResponse: () => response
+      }),
+    { initialProps: { enabled: false } }
+  )
+
+  return {
+    hook,
+    resolveTranscript: (value: string) => resolveTranscript?.(value)
+  }
+}
+
 async function beginReply(hook: ReturnType<typeof renderRearmConversation>) {
   hook.rerender({ enabled: true })
   await waitFor(() => expect(mocks.handle.start).toHaveBeenCalledTimes(1))
@@ -254,5 +282,28 @@ describe('useVoiceConversation playback rearm', () => {
     )
     await waitFor(() => expect(mocks.handle.start).toHaveBeenCalledTimes(2))
     expect(hook.result.current.status).toBe('listening')
+  })
+
+  it('continues an already captured turn when the microphone is muted', async () => {
+    const { hook, resolveTranscript } = renderMuteDuringTranscriptionConversation()
+    hook.rerender({ enabled: true })
+    await waitFor(() => expect(mocks.handle.start).toHaveBeenCalledTimes(1))
+
+    act(() => {
+      hook.result.current.stopTurn()
+    })
+    await waitFor(() => expect(hook.result.current.status).toBe('transcribing'))
+
+    act(() => {
+      hook.result.current.toggleMute()
+    })
+    expect(hook.result.current.muted).toBe(true)
+
+    await act(async () => {
+      resolveTranscript('Hello Harvis')
+    })
+
+    await waitFor(() => expect(mocks.startSpeechStream).toHaveBeenCalled())
+    expect(hook.result.current.status).toBe('speaking')
   })
 })
