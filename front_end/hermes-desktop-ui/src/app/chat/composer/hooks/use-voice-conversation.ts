@@ -458,7 +458,10 @@ export function useVoiceConversation({
 
         // The full-duplex monitor is normally already live (armed at submit);
         // this is a safety net for read-aloud-style entries into the loop.
-        ensureBargeMonitor()
+        // Muting only disables user capture, never Harvis's reply audio.
+        if (!mutedRef.current) {
+          ensureBargeMonitor()
+        }
 
         const playback = playSpeechText(response.text, { source: 'voice-conversation' })
         // playSpeechText performs its normal cleanup synchronously before
@@ -498,7 +501,11 @@ export function useVoiceConversation({
       // the not-yet-spoken remainder, AND keeps capturing — the interruption
       // is transcribed from its first syllable instead of losing the opening
       // words to a mic re-open. Usually already live (armed at submit).
-      ensureBargeMonitor()
+      // A muted microphone must not prevent Harvis from speaking, but it must
+      // not open a new capture monitor either.
+      if (!mutedRef.current) {
+        ensureBargeMonitor()
+      }
 
       void (async () => {
         const session = await startSpeechStream({ source: 'voice-conversation' })
@@ -625,8 +632,14 @@ export function useVoiceConversation({
 
       if (next) {
         clearTurnTimeout()
-        handle.cancel()
-        setStatus('idle')
+        // Mute is input-only. It may stop an active recording, but an audio
+        // chunk already handed to STT must still be transcribed and its reply
+        // must still play. Cancelling/changing state during transcription or
+        // speech used to mute Harvis as well as the user.
+        if (statusRef.current === 'listening') {
+          handle.cancel()
+          setStatus('idle')
+        }
       } else if (enabledRef.current && !busyRef.current && statusRef.current === 'idle') {
         pendingStartRef.current = true
       }
@@ -663,7 +676,7 @@ export function useVoiceConversation({
   // fill the gap; they stop the INSTANT speech starts, the mic re-arms, or the
   // conversation ends. Gated by voice.thinking_sound + the shared sound mute.
   useEffect(() => {
-    if (enabled && !muted && status === 'thinking') {
+    if (enabled && status === 'thinking') {
       startThinkingSound()
 
       return stopThinkingSound
@@ -672,14 +685,14 @@ export function useVoiceConversation({
     stopThinkingSound()
 
     return undefined
-  }, [enabled, muted, status])
+  }, [enabled, status])
 
   // Drive the loop: when a voice-submitted reply appears, open a live speech
   // session (which feeds itself from then on). Otherwise start listening when
   // idle between turns.
   // eslint-disable-next-line no-restricted-syntax -- legitimate non-atom ref write (see eslint rule comment)
   useEffect(() => {
-    if (!enabled || muted) {
+    if (!enabled) {
       return
     }
 
@@ -687,7 +700,7 @@ export function useVoiceConversation({
       // Generation phase: the turn is in flight but no reply audio exists
       // yet. Keep the mic live so speech can interrupt the model mid-
       // generation (full-duplex) instead of going deaf until playback.
-      if (status === 'thinking' && (busy || bargeCapturePendingRef.current)) {
+      if (!muted && status === 'thinking' && (busy || bargeCapturePendingRef.current)) {
         ensureBargeMonitor()
       }
 
