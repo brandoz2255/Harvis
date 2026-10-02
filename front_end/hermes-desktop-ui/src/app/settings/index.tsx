@@ -8,6 +8,7 @@ import { KbdCombo } from '@/components/ui/kbd'
 import { Tip } from '@/components/ui/tooltip'
 import { getHermesConfigDefaults, getHermesConfigRecord, saveHermesConfig } from '@/hermes'
 import { useI18n } from '@/i18n'
+import { $session } from '@/lib/harvis-session'
 import { triggerHaptic } from '@/lib/haptics'
 import {
   Archive,
@@ -22,7 +23,9 @@ import {
   RefreshCw,
   Search,
   Terminal,
-  Upload
+  Upload,
+  User,
+  Users
 } from '@/lib/icons'
 import { isEditableTarget } from '@/lib/keybinds/combo'
 import { typeToFocusChar } from '@/lib/keybinds/composer-focus-keys'
@@ -40,6 +43,7 @@ import { OverlayView } from '../overlays/overlay-view'
 import { SKILLS_ROUTE } from '../routes'
 
 import { AboutSettings } from './about-settings'
+import { AccountSettings } from './account-settings'
 import { AppearanceSettings } from './appearance-settings'
 import { ConfigSettings } from './config-settings'
 import { HARVIS_SECTIONS } from './constants'
@@ -50,6 +54,7 @@ import { KeybindSettings } from './keybind-settings'
 import { MemoryLearningSettings } from './memory-learning-settings'
 import { MODEL_VIEW_LABELS, MODEL_VIEWS, type ModelView } from './model-views'
 import { NotificationsSettings } from './notifications-settings'
+import { PeopleSettings } from './people-settings'
 import { PROVIDER_VIEWS, ProvidersSettings, type ProviderView } from './providers-settings'
 import { SessionsSettings } from './sessions-settings'
 import type { SettingsPageProps, SettingsView as SettingsViewId } from './types'
@@ -68,6 +73,8 @@ const SETTINGS_VIEWS: readonly SettingsViewId[] = [
   'notifications',
   'sessions',
   'hosting',
+  'people',
+  'account',
   'about'
 ]
 
@@ -91,6 +98,8 @@ export function SettingsView({ onClose, onConfigSaved, onMainModelChanged }: Set
   }, [navigate, search])
 
   const [activeView, setActiveView] = useRouteEnumParam('tab', SETTINGS_VIEWS, 'config:model' as SettingsViewId)
+  const session = useStore($session)
+  const isAdmin = session.status === 'signed-in' && session.user.role === 'admin'
 
   // Connections merged into the unified Gateways page: land old
   // `?tab=connections` routes/bookmarks there instead of a dead entry.
@@ -315,6 +324,24 @@ export function SettingsView({ onClose, onConfigSaved, onMainModelChanged }: Set
         label: 'Hosting',
         onSelect: () => setActiveView('hosting')
       },
+      ...(isAdmin
+        ? [
+            {
+              active: activeView === 'people',
+              icon: Users,
+              id: 'people',
+              label: 'People',
+              onSelect: () => setActiveView('people')
+            }
+          ]
+        : []),
+      {
+        active: activeView === 'account',
+        icon: User,
+        id: 'account',
+        label: 'Account',
+        onSelect: () => setActiveView('account')
+      },
       {
         active: activeView === 'about',
         icon: Info,
@@ -323,7 +350,7 @@ export function SettingsView({ onClose, onConfigSaved, onMainModelChanged }: Set
         onSelect: () => setActiveView('about')
       }
     ],
-    [activeView, modelView, providerView, t, setActiveView, openProviderView, openModelView]
+    [activeView, isAdmin, modelView, providerView, t, setActiveView, openProviderView, openModelView]
   )
 
   // Type-to-search: printable keystrokes on the Settings surface (outside any
@@ -411,6 +438,8 @@ export function SettingsView({ onClose, onConfigSaved, onMainModelChanged }: Set
   const activeSettingsContent =
     activeView === 'config:appearance' ? (
       <AppearanceSettings />
+    ) : activeView === 'account' ? (
+      <AccountSettings />
     ) : activeView === 'about' ? (
       <AboutSettings />
     ) : activeView === 'gateway' || activeView === 'connections' ? (
@@ -435,6 +464,8 @@ export function SettingsView({ onClose, onConfigSaved, onMainModelChanged }: Set
       <MemoryLearningSettings onClose={onClose} />
     ) : activeView === 'hosting' ? (
       <HostingSettings />
+    ) : activeView === 'people' && isAdmin ? (
+      <PeopleSettings />
     ) : activeView === 'providers' ? (
       <ProvidersSettings
         onClose={onClose}

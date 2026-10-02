@@ -27,7 +27,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from auth_optimized import get_current_user_optimized
 
 from . import messaging_gateway, providers, settings_store
-from .messaging_gateway import GATEWAY_START_COMMAND, SUPPORTED_PLATFORMS
+from .messaging_gateway import SUPPORTED_PLATFORMS
 from .messaging_steps import setup_steps
 from .messaging_pairing import (  # noqa: F401 — re-exported for callers and tests
     PAIRING_KEY, WEBHOOKS_KEY, pairing, pairing_approve, pairing_dismiss, pairing_revoke, webhooks,
@@ -114,7 +114,17 @@ def _discord_state(app: Any) -> tuple[bool, str, str | None]:
 
 
 def _legacy_discord_active(app: Any) -> bool:
-    return os.getenv("DISCORD_WORKSPACE_BOT_LEGACY_ENABLED", "true").lower() == "true"
+    """True only while the in-process bot can actually own Discord: cutover flag on AND a
+    token reached the backend (or the client exists). With the flag on but no token —
+    every fresh install, and any cluster — Discord belongs to the gateway, which reads
+    the token this page saves; steering people to .env there sent them to a file they
+    cannot reach."""
+    if os.getenv("DISCORD_WORKSPACE_BOT_LEGACY_ENABLED", "true").lower() != "true":
+        return False
+    if os.getenv("DISCORD_WORKSPACE_ENABLED", "true").lower() in ("0", "false", "no"):
+        return False
+    client = getattr(getattr(app, "state", None), "discord_client", None)
+    return client is not None or bool(os.getenv("DISCORD_BOT_TOKEN"))
 
 
 def _stored_var(saved: dict, key: str) -> tuple[bool, str | None]:
@@ -206,8 +216,8 @@ async def messaging_platforms(request: Request, user=Depends(get_current_user_op
     saved = await _saved(pool, uid)
     gw = await messaging_gateway.status()
     return {
-        "env_path": "harvis backend .env",
-        "gateway_start_command": GATEWAY_START_COMMAND,
+        "env_path": messaging_gateway.env_path(),
+        "gateway_start_command": messaging_gateway.gateway_start_command(),
         "gateway_reachable": gw is not None,
         "gateway_error": None if gw is not None else _gateway_stopped_message(),
         "gateway_last_sync_ok": bool((gw or {}).get("last_sync_ok")),

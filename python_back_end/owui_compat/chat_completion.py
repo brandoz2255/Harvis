@@ -19,18 +19,20 @@ from __future__ import annotations
 import asyncio
 import base64
 import copy
+import functools
 import json
 import logging
 import os
 import re
 
+from . import file_content
 from .system_prompt import inject_core
 from .translate import owui_body_to_proxy
 
 logger = logging.getLogger(__name__)
 
 # Cap injected text so a giant attachment can't blow the context budget.
-_MAX_TEXT_FILE_CHARS = 24_000
+_MAX_TEXT_FILE_CHARS = file_content.MAX_TEXT_FILE_CHARS
 
 
 def _last_user_index(messages: list) -> int:
@@ -86,6 +88,15 @@ def _chat_transcript(chat_obj: dict, max_chars: int = _MAX_TEXT_FILE_CHARS) -> s
     if len(text) > max_chars:
         text = text[:max_chars] + "\n…[truncated]"
     return text
+
+
+@functools.lru_cache(maxsize=16)
+def _render_upload(path: str, mtime_ns: int, size: int, filename: str, ctype: str) -> str:
+    """One upload's prompt text. A chat's files ride along on every turn, so the
+    render is cached per file version (mtime and size are in the key)."""
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    return file_content.render_attachment(filename, ctype, raw)
 
 
 async def _inject_files(request, owui_body: dict, user_id: int | None = None) -> None:
@@ -157,37 +168,46 @@ async def _inject_files(request, owui_body: dict, user_id: int | None = None) ->
                         fid,
                         int(user_id),
                     )
-                if not row or not os.path.exists(row["path"]):
+                if not row:
+                    continue
+                if not os.path.exists(row["path"]):
+                    # The row outlived its bytes (a restart on a host whose upload dir
+                    # was not persisted). Say so where the model will repeat it rather
+                    # than silently answering as if nothing had been attached.
+                    logger.warning(
+                        "owui_compat: attachment %s (%s) has a DB row but no file at %s",
+                        fid, row["filename"], row["path"],
+                    )
+                    text_blocks.append(file_content.missing_file_note(row["filename"]))
                     continue
                 ctype = (row["content_type"] or "").lower()
                 # Audio/video are ingested by _inject_media (Whisper transcript) —
                 # never decode their raw bytes as a "text file" (that injects garbage).
                 if ctype.startswith(("audio/", "video/")):
                     continue
-                with open(row["path"], "rb") as fh:
-                    raw = fh.read()
                 if ctype.startswith("image/"):
+                    with open(row["path"], "rb") as fh:
+                        raw = fh.read()
                     b64 = base64.b64encode(raw).decode("ascii")
                     image_parts.append(
                         {"type": "image_url", "image_url": {"url": f"data:{ctype};base64,{b64}"}}
                     )
                 else:
-                    try:
-                        text = raw.decode("utf-8", errors="replace")
-                    except Exception:
-                        text = ""
+                    # Profiling a 50 MB CSV or parsing a PDF is CPU work; keep it off
+                    # the event loop so other chats keep streaming meanwhile.
+                    st = os.stat(row["path"])
+                    text = await asyncio.to_thread(
+                        _render_upload, row["path"], st.st_mtime_ns, st.st_size, row["filename"], ctype,
+                    )
                     if text.strip():
-                        if len(text) > _MAX_TEXT_FILE_CHARS:
-                            text = text[:_MAX_TEXT_FILE_CHARS] + "\n…[truncated]"
-                        text_blocks.append(f"### Attached file: {row['filename']}\n{text}")
+                        text_blocks.append(text)
                 continue
 
             # 3) Inline non-image file content carried in the body (rare).
             inline = f.get("content") or (f.get("file") or {}).get("content")
             name = f.get("name") or (f.get("file") or {}).get("filename") or "attachment"
             if isinstance(inline, str) and inline.strip():
-                t = inline[:_MAX_TEXT_FILE_CHARS]
-                text_blocks.append(f"### Attached file: {name}\n{t}")
+                text_blocks.append(file_content.render_inline_text(name, inline))
         except Exception:
             logger.warning("owui_compat: file injection skipped one entry", exc_info=True)
 

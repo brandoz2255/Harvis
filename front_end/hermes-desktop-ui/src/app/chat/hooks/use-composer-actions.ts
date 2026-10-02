@@ -7,6 +7,13 @@ import { useI18n } from '@/i18n'
 import { attachmentId, contextPath, pathLabel } from '@/lib/chat-runtime'
 import { readDesktopFileDataUrlLocalFirst, selectDesktopPaths } from '@/lib/desktop-fs'
 import { desktopGit } from '@/lib/desktop-git'
+import {
+  isBrowserShell,
+  pickBrowserFiles,
+  readBlobDataUrl,
+  trackBrowserUpload,
+  uploadHarvisFile
+} from '@/lib/harvis-uploads'
 import { downscaleDataUrlForPreview } from '@/lib/image-resize'
 import { normalize } from '@/lib/text'
 import {
@@ -394,8 +401,68 @@ export function useComposerActions({
     [attachToMain, currentCwd, scope]
   )
 
+  /** Browser build: the bytes go to Harvis' upload route and the chip carries
+   *  the returned id. The chip shows at once and spins until the upload
+   *  settles; a refusal (size cap, sign-out) lands on the chip and as a toast. */
+  const attachBrowserFile = useCallback(
+    (file: File) => {
+      const isImage = file.type.startsWith('image/') || isImagePath(file.name)
+      const kind = isImage ? 'image' : 'file'
+      const occurrenceId = createComposerAttachmentOccurrenceId()
+      const baseAttachment: ComposerAttachment = {
+        id: attachmentId(kind, `upload/${occurrenceId}/${file.name}`),
+        occurrenceId,
+        kind,
+        label: file.name || (isImage ? 'image' : 'file'),
+        uploadState: 'uploading'
+      }
+
+      attachToMain(baseAttachment)
+
+      if (isImage) {
+        void readBlobDataUrl(file)
+          .then(dataUrl => downscaleDataUrlForPreview(dataUrl))
+          .then(thumbnailUrl => scope.updateIfCurrent(baseAttachment, { thumbnailUrl }))
+          .catch(() => undefined)
+      }
+
+      const upload = (async (): Promise<ComposerAttachmentPatch> => {
+        try {
+          const uploaded = await uploadHarvisFile(file)
+
+          return { fileId: uploaded.id, label: uploaded.name, uploadState: undefined }
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+
+          notify({ kind: 'error', title: isImage ? copy.imageAttachFailed : copy.attachFailed, message })
+
+          return { uploadState: 'error', detail: message }
+        }
+      })()
+
+      trackBrowserUpload(baseAttachment.id, upload)
+      void upload.then(patch => scope.updateIfCurrent(baseAttachment, patch))
+
+      return true
+    },
+    [attachToMain, copy.attachFailed, copy.imageAttachFailed, scope]
+  )
+
   const pickContextPaths = useCallback(
     async (kind: 'file' | 'folder') => {
+      if (isBrowserShell()) {
+        // A page cannot attach a folder by path; files come through the browser picker.
+        if (kind === 'folder') {
+          return
+        }
+
+        for (const file of await pickBrowserFiles()) {
+          attachBrowserFile(file)
+        }
+
+        return
+      }
+
       const paths = await selectDesktopPaths({
         title: kind === 'file' ? 'Add files as context' : 'Add folders as context',
         defaultPath: currentCwd || undefined,
@@ -419,7 +486,7 @@ export function useComposerActions({
         })
       }
     },
-    [attachToMain, currentCwd]
+    [attachBrowserFile, attachToMain, currentCwd]
   )
 
   const insertContextPathInlineRef = useCallback(
@@ -515,6 +582,13 @@ export function useComposerActions({
         return false
       }
 
+      if (isBrowserShell()) {
+        const file =
+          blob instanceof File ? blob : new File([blob], `pasted-image${blobExtension(blob)}`, { type: blob.type })
+
+        return attachBrowserFile(file)
+      }
+
       try {
         const buffer = await blob.arrayBuffer()
         const data = new Uint8Array(buffer)
@@ -533,10 +607,18 @@ export function useComposerActions({
         return false
       }
     },
-    [attachImagePath, copy.imageAttach, copy.imageAttachFailed, copy.imageWriteFailed]
+    [attachBrowserFile, attachImagePath, copy.imageAttach, copy.imageAttachFailed, copy.imageWriteFailed]
   )
 
   const pickImages = useCallback(async () => {
+    if (isBrowserShell()) {
+      for (const file of await pickBrowserFiles({ accept: 'image/*' })) {
+        attachBrowserFile(file)
+      }
+
+      return
+    }
+
     const paths = await selectDesktopPaths({
       title: copy.attachImages,
       defaultPath: currentCwd || undefined,
@@ -555,7 +637,7 @@ export function useComposerActions({
     for (const path of paths) {
       await attachImagePath(path)
     }
-  }, [attachImagePath, copy.attachImages, currentCwd, t.composer.images])
+  }, [attachBrowserFile, attachImagePath, copy.attachImages, currentCwd, t.composer.images])
 
   const pasteClipboardImage = useCallback(
     async ({ silent = false }: { silent?: boolean } = {}) => {
@@ -659,6 +741,14 @@ export function useComposerActions({
           continue
         }
 
+        // A browser drop has bytes but no path on any machine Hermes can read.
+        if (isBrowserShell() && !knownPath) {
+          attachBrowserFile(file)
+          attached = true
+
+          continue
+        }
+
         const fallbackPath =
           !knownPath && window.hermesDesktop?.getPathForFile ? window.hermesDesktop.getPathForFile(file) : ''
 
@@ -699,7 +789,14 @@ export function useComposerActions({
 
       return attached
     },
-    [attachContextFilePath, attachContextFolderPath, attachImageBlob, attachImagePath, copy.dropFiles]
+    [
+      attachBrowserFile,
+      attachContextFilePath,
+      attachContextFolderPath,
+      attachImageBlob,
+      attachImagePath,
+      copy.dropFiles
+    ]
   )
 
   const removeAttachment = useCallback(

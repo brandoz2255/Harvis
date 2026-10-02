@@ -61,3 +61,58 @@ async def test_config_set_reasoning_sets_the_session_effort(monkeypatch):
     assert result["result"] == {"ok": True}
     assert live.effort == "high"
     assert emitted == [("session.info", "high")]
+
+
+class _Handshake:
+    def __init__(self, **headers):
+        self.headers = headers
+
+
+def test_socket_refuses_a_cross_origin_handshake():
+    from plugins.hermes_ui.ws import _origin_allowed
+
+    # A sandbox preview on another port of the same machine must not ride the cookie.
+    assert not _origin_allowed(_Handshake(origin="http://localhost:5173", host="localhost:9000"))
+    assert not _origin_allowed(_Handshake(origin="https://evil.example", host="harvis.lan:9000"))
+
+
+def test_socket_accepts_its_own_origin_and_non_browser_clients():
+    from plugins.hermes_ui.ws import _origin_allowed
+
+    assert _origin_allowed(_Handshake(origin="http://192.168.4.201:9000", host="192.168.4.201:9000"))
+    assert _origin_allowed(_Handshake(origin="http://localhost:9000", host="backend:8000"))
+    assert _origin_allowed(_Handshake(host="localhost:9000"))
+
+
+def test_user_body_never_carries_the_jwt():
+    from owui_compat.translate import harvis_user_to_owui
+
+    body = harvis_user_to_owui({"id": 5, "username": "ada", "email": "a@x.test"}, expires_at=123)
+
+    assert "token" not in body and "token_type" not in body
+    assert body["expires_at"] == 123
+
+
+@pytest.mark.asyncio
+async def test_socket_ends_quietly_when_the_browser_vanished_mid_send(monkeypatch):
+    import types
+
+    from plugins.hermes_ui import ws as ws_mod
+
+    monkeypatch.setattr(ws_mod, "decode_token_fast", lambda tok: {"sub": "3"})
+
+    class GoneSocket:
+        headers = {"host": "localhost:9000"}
+        cookies = {"access_token": "t"}
+        app = types.SimpleNamespace(state=types.SimpleNamespace(pg_pool=None))
+
+        async def accept(self):
+            pass
+
+        async def send_text(self, text):
+            raise RuntimeError("Unexpected ASGI message 'websocket.send'")
+
+        async def receive_text(self):
+            raise RuntimeError('WebSocket is not connected. Need to call "accept" first.')
+
+    await ws_mod.hermes_ws(GoneSocket())  # must return, not raise

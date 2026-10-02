@@ -31,6 +31,8 @@ from typing import Any, Optional
 import docker
 from docker.errors import APIError, NotFound
 
+from workspace.host_mounts import host_mounts_from_env
+
 logger = logging.getLogger(__name__)
 
 
@@ -517,6 +519,12 @@ class WorkspaceTerminalManager:
         named volume). Inspecting our own container's Mounts gives the
         Destination→Source map to translate with."""
         if self._own_mounts is not None:
+            return self._own_mounts
+        # Kubernetes mode: the backend is a pod, not a Docker container, so there is
+        # nothing to inspect. The manifest generator hands over the same table.
+        table = host_mounts_from_env()
+        if table is not None:
+            self._own_mounts = table
             return self._own_mounts
         candidates = [
             (os.getenv("HARVIS_BACKEND_CONTAINER") or "").strip(),

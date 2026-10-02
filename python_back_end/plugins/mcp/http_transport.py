@@ -27,9 +27,12 @@ SSRF: the backend is dual-homed onto the internal network with pgsql, ollama
 and openclaw on it, so a connection URL is attacker-reachable infrastructure if
 it is left unchecked. ``guard_url`` resolves the host and refuses private,
 loopback and link-local addresses unless ``HARVIS_MCP_ALLOW_PRIVATE_URLS`` is
-set (which a self-hoster pointing at a LAN server legitimately needs). This is
-a connect-time check and therefore does not defeat DNS rebinding — stated
-plainly rather than implied away.
+set (which a self-hoster pointing at a LAN server legitimately needs). The
+check runs inside the httpx transport, so every request — including each hop
+of a redirect chain — is vetted against the address it is about to be sent to,
+not just the URL the user typed. It still resolves rather than pins, so a DNS
+rebind between the check and the connect is not defeated — stated plainly
+rather than implied away.
 """
 
 from __future__ import annotations
@@ -138,6 +141,40 @@ async def guard_url_async(url: str) -> str:
     return await asyncio.to_thread(guard_url, url)
 
 
+# A redirect chain longer than this is not an MCP endpoint moving house.
+_MAX_REDIRECTS = 5
+
+
+class GuardedTransport(httpx.AsyncBaseTransport):
+    """httpx transport that runs ``guard_url`` on every request before sending.
+
+    httpx follows a redirect by building a new request and handing it back to
+    the transport, so vetting here covers every hop a server redirects to — the
+    one place ``follow_redirects=True`` would otherwise let a public URL bounce
+    the backend onto pgsql or the cluster metadata address. A refused hop raises
+    McpError straight out of the client call. ``inner`` is the real transport;
+    tests substitute a mock.
+    """
+
+    def __init__(self, inner: Optional[httpx.AsyncBaseTransport] = None) -> None:
+        self._inner = inner or httpx.AsyncHTTPTransport()
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        await guard_url_async(str(request.url))
+        return await self._inner.handle_async_request(request)
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
+def guarded_client(**kwargs) -> httpx.AsyncClient:
+    """An AsyncClient whose every request, redirects included, is SSRF-checked."""
+    kwargs.setdefault("follow_redirects", True)
+    kwargs.setdefault("max_redirects", _MAX_REDIRECTS)
+    kwargs.setdefault("transport", GuardedTransport())
+    return httpx.AsyncClient(**kwargs)
+
+
 # -- SSE framing -----------------------------------------------------------
 
 
@@ -203,8 +240,7 @@ class HttpMcpSession(_McpMethods):
         self._endpoint_ready = asyncio.Event()
         self._pump: Optional[asyncio.Task] = None
         self._pump_error: Optional[Exception] = None
-        self._client = httpx.AsyncClient(
-            follow_redirects=True,
+        self._client = guarded_client(
             timeout=httpx.Timeout(_CALL_TIMEOUT, connect=15.0, read=_CALL_TIMEOUT),
         )
 

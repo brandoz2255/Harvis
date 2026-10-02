@@ -41,6 +41,10 @@ logger = logging.getLogger("harvis-messaging-gateway")
 # unapproved chat cannot make the bot spam the channel.
 PAIRING_NOTICE_TTL_S = 6 * 3600
 
+# Sent once when a run outlives ack_after_s, so a slow model reads as "busy"
+# rather than "ignored". A CPU-only model can take minutes on a plain question.
+WORKING_NOTICE = "_(harvis: working on it — a reply can take a few minutes while the model is busy)_"
+
 
 class GatewayRunner:
     def __init__(self, cfg: GatewayConfig, bridge: HarvisBridge):
@@ -106,7 +110,14 @@ class GatewayRunner:
         workspace_id = resp.workspace_id
         logger.info("[%s] workspace launched: %s", adapter.key, workspace_id)
 
-        final = await self._bridge.wait_for_terminal(workspace_id)
+        ack = None
+        if adapter.interim_notices and self._cfg.ack_after_s > 0:
+            ack = asyncio.create_task(self._working_notice(adapter, msg), name=f"ack:{workspace_id}")
+        try:
+            final = await self._bridge.wait_for_terminal(workspace_id)
+        finally:
+            if ack is not None:
+                ack.cancel()
         if final is None:
             await adapter.send_text(
                 target=msg.source,
@@ -124,9 +135,16 @@ class GatewayRunner:
 
         await adapter.send_text(
             target=msg.source,
-            text=_format_terminal(final),
+            text=_format_terminal(final, self._cfg.poll_timeout_s),
             reply_to_message_id=msg.message_id,
         )
+
+    async def _working_notice(self, adapter: BasePlatformAdapter, msg: InboundMessage) -> None:
+        await asyncio.sleep(self._cfg.ack_after_s)
+        try:
+            await adapter.send_text(target=msg.source, text=WORKING_NOTICE, reply_to_message_id=msg.message_id)
+        except Exception:  # noqa: BLE001 — a failed courtesy notice must not break the real reply
+            logger.warning("[%s] working-on-it notice failed", adapter.key, exc_info=True)
 
     async def _pairing_notice(self, adapter: BasePlatformAdapter, msg: InboundMessage) -> None:
         """Unknown sender: queue a pairing request, answer once, never relay."""
@@ -157,7 +175,7 @@ class GatewayRunner:
         await adapter.send_text(target=msg.source, text=text, reply_to_message_id=msg.message_id)
 
 
-def _format_terminal(snap: RunStatus) -> str:
+def _format_terminal(snap: RunStatus, poll_timeout_s: float = 0) -> str:
     if snap.status == "completed":
         return snap.final_summary or "_(harvis: completed with no summary)_"
     if snap.status in ("failed", "error"):
@@ -165,7 +183,10 @@ def _format_terminal(snap: RunStatus) -> str:
     if snap.status == "cancelled":
         return "_(harvis: run cancelled)_"
     if snap.status == "timeout":
-        return f"_(harvis: timed out — {snap.error_message or ''})_"
+        minutes = max(1, int(round(poll_timeout_s / 60))) if poll_timeout_s else 0
+        waited = f"after {minutes} minute{'s' if minutes != 1 else ''}" if minutes else "in time"
+        return (f"_(harvis: no answer {waited} — the model is overloaded or stuck. "
+                "Try again in a while, or ask something shorter.)_")
     if snap.status == "missing":
         return "_(harvis: run missing in backend)_"
     return f"_(harvis: unknown terminal status {snap.status})_"

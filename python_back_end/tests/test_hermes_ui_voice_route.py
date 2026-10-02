@@ -272,6 +272,6 @@ async def test_a_plain_voice_turn_is_the_model_and_nothing_else(monkeypatch):
                                [{"role": "user", "content": "build me a website"}], voice=True, plain=True)
 
     assert (seen["model"], seen["mode"], seen["effort"]) == ("gemma4:e2b", "chat", "none")
-    assert seen["extra"] == {"harvis_research": False, "harvis_plain": True}
+    assert seen["extra"] == {"harvis_research": False, "harvis_plain": True, "max_tokens": 80}
     assert "asked" not in calls  # Laya never picks a heavier lane
     assert not {"recall", "skill", "learned"} & seen.keys()

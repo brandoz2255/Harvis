@@ -116,7 +116,12 @@ def parse_listening(proc_net: str) -> list[dict]:
             port = int(port_hex, 16)
         except ValueError:
             continue
-        loopback = addr in ("0100007F", "00000000000000000000000001000000")
+        # Docker's own DNS resolver (127.0.0.11) listens in every container on a
+        # user-defined network; it is not the user's app.
+        if addr == "0B00007F":
+            continue
+        # /proc writes IPv4 little-endian, so 127.x.x.x ends in 7F.
+        loopback = (len(addr) == 8 and addr.endswith("7F")) or addr == "00000000000000000000000001000000"
         ports[port] = ports.get(port, False) or not loopback
     return [{"port": p, "public": pub} for p, pub in sorted(ports.items()) if p > 0]
 
@@ -177,10 +182,28 @@ async def _core_sources(request: Request, user_id: int) -> tuple[str, list[str]]
     except Exception:  # noqa: BLE001 — no soul table yet
         soul = soul_loader.DEFAULT_SOUL_MD
     try:
-        memories = [m["content"] for m in await learn.list_memories(pool, user_id, 60)]
+        memories = [m["content"] for m in await learn.list_memories(pool, user_id, 60) if not m["pending"]]
     except Exception:  # noqa: BLE001 — no memory table yet
         memories = []
     return soul, memories
+
+
+async def _save_user_md_additions(request: Request, user_id: int, session: str) -> None:
+    """New lines in USER.md become memories before it is mirrored again. They wait
+    for the user's OK in Settings before any chat sees them: the agent may have
+    written them on the say-so of a web page or a cloned repo."""
+    pool = getattr(request.app.state, "pg_pool", None)
+    if pool is None:
+        return
+    added = await asyncio.to_thread(sandbox.user_md_additions, user_id, session)
+    if not added:
+        return
+    try:
+        if (await learn.settings(pool, user_id))["memory"]:
+            await learn.save_facts(pool, user_id, added, source=learn.WORKSPACE_SOURCE,
+                                   metadata={"session_id": session, "pending": True})
+    except Exception:  # noqa: BLE001 — the mirror below still runs
+        log.warning("saving USER.md additions failed for u%s/%s", user_id, session, exc_info=True)
 
 
 @router.get(f"{API}/sandbox/info")
@@ -189,6 +212,7 @@ async def sandbox_info(request: Request, session: str, user=Depends(get_current_
     await asyncio.to_thread(_guard, sandbox.ensure_dir, uid, session)
     try:
         await asyncio.to_thread(sandbox.sync_skills, uid, session, await _enabled_skills(request, uid))
+        await _save_user_md_additions(request, uid, session)
         soul, memories = await _core_sources(request, uid)
         await asyncio.to_thread(sandbox.sync_core_files, uid, session, soul, memories)
     except OSError:

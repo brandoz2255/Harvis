@@ -68,14 +68,30 @@ class AuthzResult:
     needs_approval: bool = False
 
 
+def _mcp_enabled() -> bool:
+    """Whether any MCP transport may run here — the same answer tool discovery
+    (plugins.mcp.tool_bridge) gives, so a tool offered to the model is a tool the
+    gate lets through. Remote (http/sse) servers are on by default and only
+    stdio/container servers need HARVIS_MCP_RUNTIME_ENABLED; the bridge already
+    refuses an stdio session while that flag is off, so an stdio tool can never
+    reach this gate with the runtime disabled. Fails closed if the runtime
+    module cannot be imported."""
+    try:
+        from plugins.mcp.runtime import any_transport_enabled
+    except Exception as exc:  # pragma: no cover - import failure is deploy breakage
+        logger.warning("authz: MCP runtime unavailable, denying mcp__ tools: %s", exc)
+        return False
+    return any_transport_enabled()
+
+
 def _lane_flag_enabled(lane: int, tool_name: str = "") -> bool:
     """Deployment-level enablement per lane. Lanes 1-3 are always on; higher
     lanes each map to an env flag (truthy set: 1/true/yes/on).
 
     Lane 5 holds more than one capability, so the flag is chosen per capability
     rather than per lane: SSH answers to HARVIS_SSH_ENABLED, MCP connectors to
-    HARVIS_MCP_RUNTIME_ENABLED. Sharing one flag across both would mean turning
-    on remote shell access to use a filesystem connector."""
+    the MCP runtime's own transport flags. Sharing one flag across both would
+    mean turning on remote shell access to use a filesystem connector."""
     if lane <= DEFAULT_SAFE_LANE:
         return True
     if lane == LANE_LOCAL_DESKTOP:
@@ -86,9 +102,7 @@ def _lane_flag_enabled(lane: int, tool_name: str = "") -> bool:
     if lane == LANE_EXTERNAL_SERVICES:
         name = (tool_name or "").lower()
         if name.startswith("mcp__"):
-            return (
-                os.getenv("HARVIS_MCP_RUNTIME_ENABLED") or ""
-            ).strip().lower() in _TRUTHY
+            return _mcp_enabled()
         # Screenshot-to-code verify loop — renders model HTML in browser-runner.
         if name == "screenshot_preview":
             return (

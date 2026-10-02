@@ -68,6 +68,25 @@ _META_QUESTION = re.compile(
 )
 
 
+class ModelTimeout(RuntimeError):
+    """The model accepted the request but did not answer within the fast-path timeout."""
+
+
+class ModelUnreachable(RuntimeError):
+    """Nothing answered at the model server's address."""
+
+
+def timeout_message(timeout_s: float) -> str:
+    """What the person on the phone reads when the model was too slow — the wait, not a stack trace."""
+    minutes = max(1, int(round(timeout_s / 60)))
+    unit = "minute" if minutes == 1 else "minutes"
+    return (f"the model did not answer within {minutes} {unit} — it is busy or still loading. "
+            "Try again in a few minutes.")
+
+
+UNREACHABLE_MESSAGE = "could not reach the model server (Ollama). Check that it is running, then try again."
+
+
 _FAST_PATH_SYSTEM_PROMPT_BASE = (
     "You are Harvis, a helpful AI assistant. Give concise, direct answers.\n"
     "\n"
@@ -208,6 +227,12 @@ async def direct_llm_reply(
             r = await client.post(f"{base}/api/chat", json=payload)
             r.raise_for_status()
             data = r.json() or {}
+    except httpx.ConnectError as exc:
+        logger.warning("fast_path: model server unreachable at %s/api/chat: %s", base, exc.__class__.__name__)
+        raise ModelUnreachable(UNREACHABLE_MESSAGE) from exc
+    except httpx.TimeoutException as exc:
+        logger.warning("fast_path: %s gave no answer within %.0fs at %s/api/chat", model, timeout_s, base)
+        raise ModelTimeout(timeout_message(timeout_s)) from exc
     except Exception:
         logger.exception("fast_path: direct_llm_reply failed against %s/api/chat", base)
         return None
@@ -314,6 +339,10 @@ async def finish_fast_path_run(
             persona_block=persona_block,
             recall_block=recall_block,
         )
+    except (ModelTimeout, ModelUnreachable) as exc:
+        # Already worded for the chat user; the gateway relays error_message verbatim.
+        await mark_run_terminal(pool, workspace_id, success=False, error_message=str(exc))
+        return
     except Exception as exc:
         logger.exception("fast_path background LLM call raised")
         await mark_run_terminal(

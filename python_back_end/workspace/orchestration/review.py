@@ -252,6 +252,8 @@ async def run_review_conversation(
     # with the mandatory VERDICT line appended so _parse_verdict keeps working. Agreement then
     # requires EVERY reviewer to approve. Each is a dict: {label, system_prompt, model}.
     reviewers: list[dict] = [{"label": "Reviewer", "system_prompt": _REVIEWER_SYSTEM, "model": model}]
+    from plugins.people.controls import allowed_for
+    _allowed = await allowed_for(pool, int(user_id)) if user_id else None  # Settings ▸ People
     if reviewer_ids:
         try:
             from .subagent_defs import load_subagents
@@ -264,6 +266,8 @@ async def run_review_conversation(
                 _rm = (d.get("model") or "").strip()
                 # Local-model pin only; cloud/sentinel → the shared session model.
                 if not _rm or _rm.lower() in ("auto", "default") or _rm.startswith(("anthropic/", "openai/")):
+                    _rm = model
+                if _allowed is not None and _rm not in _allowed:
                     _rm = model
                 _sp = (d.get("system_prompt") or "").strip() or _REVIEWER_SYSTEM
                 _sp += (

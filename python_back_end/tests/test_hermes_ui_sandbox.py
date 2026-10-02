@@ -299,6 +299,13 @@ def test_listening_ports_are_parsed_from_proc_net():
         {"port": 7850, "public": True}, {"port": 8000, "public": True}, {"port": 8080, "public": False}]
 
 
+def test_dockers_resolver_is_not_an_app():
+    from plugins.hermes_ui.rest_sandbox import parse_listening
+    proc = """   0: 0B00007F:995B 00000000:0000 0A 00000000:00000000
+   1: 0200007F:1F90 00000000:0000 0A 00000000:00000000"""
+    assert parse_listening(proc) == [{"port": 8080, "public": False}]
+
+
 def test_app_proxy_strips_credentials_and_sandboxes_the_page(monkeypatch, root):
     import httpx
     from fastapi import FastAPI

@@ -62,6 +62,7 @@ import { TerminalBackendPanel } from '../settings/terminal-backend-panel'
 import { ToolsetConfigPanel } from '../settings/toolset-config-panel'
 import type { SetStatusbarItemGroup } from '../shell/statusbar-controls'
 
+import { AddSkillButton } from './add-skill-dialog'
 import { EmbeddedHubPicker } from './embedded-hub-picker'
 
 // Harvis skills live in owui_skills; the Nous Skills Hub is not its catalog.
@@ -577,12 +578,13 @@ export function SkillsView({
   // Full-bleed empty state, matching the MCP tab (spans both columns, not a
   // cramped note in the left rail). Query-aware, and says "tools" not the
   // internal "toolsets".
-  const capabilityEmpty = (noun: string) => {
+  const capabilityEmpty = (noun: string, action?: React.ReactNode) => {
     const q = query.trim()
 
     return (
       <div className="flex h-full min-h-0 flex-1">
         <PanelEmpty
+          action={action}
           description={q ? t.skills.emptyNothingMatches(q) : t.skills.emptyNoneAvailable(noun)}
           icon="search"
           title={t.skills.emptyNoneFound(noun)}
@@ -820,13 +822,21 @@ export function SkillsView({
               // and "changes apply" footer can no longer be starved to 0px
               // and painted over by the hub header.
               visibleSkills.length === 0 ? (
-                capabilityEmpty('skills')
+                capabilityEmpty(
+                  'skills',
+                  <AddSkillButton onAdded={() => void refreshCapabilities()} profile={scopeProfile} size="sm" />
+                )
               ) : (
                 <MasterDetail pane={skillEditorPane} resizeId="capabilities-split" split="wide">
                   <ListColumn
                     header={
                       <ListStrip
-                        left={sortButton(skillsSortDesc, () => $skillsSortDesc.set(!$skillsSortDesc.get()))}
+                        left={
+                          <>
+                            {sortButton(skillsSortDesc, () => $skillsSortDesc.set(!$skillsSortDesc.get()))}
+                            <AddSkillButton onAdded={() => void refreshCapabilities()} profile={scopeProfile} />
+                          </>
+                        }
                         right={
                           <ListStripMenu
                             items={[

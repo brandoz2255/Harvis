@@ -1,3 +1,5 @@
+import { reportUnauthorized } from '../harvis-session'
+
 // The members of `window.hermesDesktop` that have a real browser equivalent.
 //
 // Everything else lives in `./stubs`. Splitting them keeps the "this actually
@@ -31,7 +33,7 @@ export async function api<T>(request: HermesApiRequest): Promise<T> {
     // Harvis authenticates with a session cookie, not the Electron token, so
     // every call has to carry credentials or the backend answers 401.
     credentials: 'include',
-    signal: controller.signal,
+    signal: controller.signal
   }
 
   if (upload) {
@@ -39,7 +41,7 @@ export async function api<T>(request: HermesApiRequest): Promise<T> {
     form.append(
       'file',
       new Blob([upload.bytes], { type: upload.contentType || 'application/octet-stream' }),
-      upload.filename,
+      upload.filename
     )
     init.body = form // no Content-Type: the browser sets the multipart boundary
   } else if (body !== undefined) {
@@ -50,6 +52,7 @@ export async function api<T>(request: HermesApiRequest): Promise<T> {
   try {
     const res = await fetch(`${API_BASE}${path}`, init)
     if (!res.ok) {
+      if (res.status === 401) reportUnauthorized()
       const detail = await res.text().catch(() => '')
       throw new Error(`${res.status} ${res.statusText}${detail ? `: ${detail.slice(0, 500)}` : ''}`)
     }
@@ -125,6 +128,6 @@ export function localStore(key: string) {
       } catch {
         /* private mode / quota: a lost preference is not worth an exception */
       }
-    },
+    }
   }
 }

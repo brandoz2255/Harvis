@@ -101,7 +101,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # requirements.txt.
 RUN pip install --no-cache-dir --no-deps websockify
 
-COPY app.py display.py camofox_api.py ./
+COPY app.py display.py camofox_api.py sessions.py ./
 
 # Non-root. This image had no USER at all, so it ran as root — and of every
 # service in the default set this is the one that renders hostile input by

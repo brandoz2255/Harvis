@@ -173,10 +173,12 @@ async def run_orchestrated(
         # Custom sub-agents (Customize → Sub-agents): the planner uses their name+description
         # roster to auto-delegate a step to the right specialist; each resolved profile then
         # carries that sub-agent's model / system prompt / tool-allowlist / skills / connectors.
+        from plugins.people.controls import allowed_for
         subagents = await load_subagents(pool, user_id)
         plan = await plan_agents(
             task_brief, model_name=model_name, uniform_model=uniform_model,
             model_pool=model_pool, subagents=subagents,
+            allowed=await allowed_for(pool, int(user_id)) if user_id else None,
         )
 
         planned = "; ".join(f"{p['label']} on {p['model']}" for p in plan)

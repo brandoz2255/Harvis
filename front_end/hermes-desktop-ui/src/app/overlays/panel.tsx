@@ -35,6 +35,8 @@ interface PanelProps {
   closeLabel?: string
   contentClassName?: string
   onClose: () => void
+  /** Render in place (a workspace page or side tile) instead of as an overlay card. */
+  inline?: boolean
   /** See OverlayView: a page, not a pop-up. */
   quiet?: boolean
 }
@@ -44,9 +46,18 @@ export function Panel({
   className,
   closeLabel = translateNow('common.close'),
   contentClassName,
+  inline,
   onClose,
   quiet
 }: PanelProps) {
+  if (inline) {
+    return (
+      <div className={cn('flex h-full min-h-0 w-full flex-col px-3 pt-2 pb-3', className, contentClassName)}>
+        {children}
+      </div>
+    )
+  }
+
   return (
     <OverlayView
       closeLabel={closeLabel}

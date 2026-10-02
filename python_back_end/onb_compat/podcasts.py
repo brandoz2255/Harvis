@@ -262,6 +262,7 @@ async def _generate_episode_task(
     style: str,
     speakers: int,
     duration_minutes: int,
+    model: Optional[str] = None,
 ):
     """Background task: run the podcast pipeline, synthesize audio via
     tts-service, and write the result back onto the existing
@@ -295,6 +296,7 @@ async def _generate_episode_task(
         #    we synthesize via the GPU tts-service below to match the native
         #    /generate/stream path).
         generator = PodcastGenerator()
+        generator.script_generator.model = model
         result = await generator.generate(
             content=content,
             title=title,
@@ -592,6 +594,9 @@ async def generate_podcast(
     generation pipeline as a BackgroundTask. Returns the
     PodcastGenerationResponse shape."""
     body = await request.json()
+    # The admin's limits (Settings ▸ People): refused, or counted, on their own model.
+    from plugins.people.controls import require_turn
+    model = await require_turn(getattr(request.app.state, "pg_pool", None), int(current_user["id"]), "") or None
 
     episode_profile = body.get("episode_profile") or "conversational"
     speaker_profile = body.get("speaker_profile") or _DEFAULT_SPEAKER_PROFILE_ID
@@ -643,6 +648,7 @@ async def generate_podcast(
         style,
         2,   # speakers (Host + Guest built-in duo)
         10,  # duration_minutes
+        model,
     )
 
     return {
@@ -712,6 +718,7 @@ async def delete_episode(
 @router.post("/podcasts/episodes/{episode_id}/retry")
 async def retry_episode(
     episode_id: str,
+    request: Request,
     background_tasks: BackgroundTasks,
     current_user: Dict = Depends(get_current_user_from_request),
     manager: NotebookManager = Depends(get_notebook_manager),
@@ -724,6 +731,8 @@ async def retry_episode(
         raise HTTPException(status_code=400, detail="Invalid episode id")
 
     user_id = current_user["id"]
+    from plugins.people.controls import require_turn
+    model = await require_turn(getattr(request.app.state, "pg_pool", None), int(user_id), "") or None
     async with manager.db_pool.acquire() as conn:
         row = await conn.fetchrow(
             """
@@ -769,6 +778,7 @@ async def retry_episode(
         row["style"] or "conversational",
         row["speakers"] or 2,
         row["duration_minutes"] or 10,
+        model,
     )
 
     return {

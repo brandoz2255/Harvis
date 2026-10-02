@@ -33,7 +33,7 @@ def new_chat_blob(model: str) -> dict:
 
 
 def make_message(role: str, content: str, parent_id: Optional[str], model: str,
-                 reasoning: str = "") -> dict:
+                 reasoning: str = "", files: Optional[list[dict]] = None) -> dict:
     now = int(time.time())
     msg = {
         "id": str(uuid.uuid4()), "parentId": parent_id, "childrenIds": [],
@@ -41,6 +41,9 @@ def make_message(role: str, content: str, parent_id: Optional[str], model: str,
     }
     if role == "user":
         msg["models"] = [model] if model else []
+        if files:
+            # OWUI's own key for a message's uploads ({type, id, name, size, ...}).
+            msg["files"] = list(files)
     else:
         msg.update({"model": model, "modelName": model, "modelIdx": 0,
                     "done": True, "completedAt": int(time.time() * 1000)})
@@ -88,6 +91,9 @@ def linear_messages(blob: dict) -> list[dict]:
         row = {"role": role, "content": content, "timestamp": float(m.get("timestamp") or 0)}
         if reasoning:
             row["reasoning"] = reasoning
+        files = [f for f in (m.get("files") or []) if isinstance(f, dict) and f.get("id")]
+        if role == "user" and files:
+            row["attachments"] = files
         out.append(row)
     return out
 

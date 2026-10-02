@@ -183,8 +183,14 @@ async def _dispatch_chat(app, job: CronJob, meta: dict) -> tuple[bool, Optional[
                 "tick loop; using local default", job.id, model,
             )
             model = ""
-        if not model:
-            model = await _user_default_model(pool, job.user_id)
+        # The admin's limits (Settings ▸ People): a scheduled message counts like a typed one.
+        # Checked before the user's default fills in, so "no model" means their first
+        # allowed model, not a default the admin never allowed.
+        from plugins.people import admit_turn
+        admitted = await admit_turn(pool, job.user_id, model)
+        if not admitted.ok:
+            return False, admitted.reason
+        model = admitted.model or model or await _user_default_model(pool, job.user_id)
         answer = await _generate_chat_answer(model, job.prompt, job.name)
         await _append_to_chat(pool, job, model, answer)
         logger.info("cron chat delivered job %s (%s) via %s", job.id, job.name, model)
@@ -212,7 +218,15 @@ def _make_dispatch(app):
             return await _dispatch_chat(app, job, meta)
         try:
             from fastapi import Request
+            from plugins.people import admit_turn
             from workspace.workspace_router import launch_workspace_internal  # type: ignore
+
+            # The admin's limits (Settings ▸ People): a turned-off or used-up
+            # account's routines do not run, and they run on an allowed model.
+            admitted = await admit_turn(getattr(app.state, "pg_pool", None), job.user_id,
+                                        str(meta.get("model_name") or ""))
+            if not admitted.ok:
+                return False, admitted.reason
 
             req = Request(scope={"type": "http", "app": app})
             # Automations created from Agent Studio carry metadata.agent_id =
@@ -224,7 +238,7 @@ def _make_dispatch(app):
                 user_id=job.user_id,
                 task_brief=job.prompt,
                 agent_id=str(meta.get("agent_id") or "main"),
-                model_name=str(meta.get("model_name") or ""),
+                model_name=admitted.model or str(meta.get("model_name") or ""),
                 # Tag every fire with a stable per-job session so the Automations
                 # dashboard can aggregate real run outcomes (Successful/Failed 7d)
                 # + a Run History from workspace_runs.

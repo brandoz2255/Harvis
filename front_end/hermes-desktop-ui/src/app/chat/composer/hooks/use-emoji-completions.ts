@@ -30,8 +30,8 @@ let indexLoaded = false
 
 async function loadIndex(): Promise<EmojiEntry[]> {
   const [dataRes, codesRes] = await Promise.all([
-    fetch('./emojibase/en/data.json'),
-    fetch('./emojibase/en/shortcodes/emojibase.json')
+    fetch(`${import.meta.env.BASE_URL}emojibase/en/data.json`),
+    fetch(`${import.meta.env.BASE_URL}emojibase/en/shortcodes/emojibase.json`)
   ])
 
   const data: { emoji: string; hexcode: string; label: string; tags?: string[] }[] = await dataRes.json()

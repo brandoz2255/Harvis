@@ -23,6 +23,7 @@ import { createRoot } from 'react-dom/client'
 import { HashRouter } from 'react-router'
 
 import App from './app'
+import { SessionGate } from './app/sign-in/session-gate'
 import { RootErrorBoundary } from './components/error-boundary'
 import { HapticsProvider } from './components/haptics-provider'
 import { RootTooltipProvider } from './components/ui/tooltip'
@@ -69,16 +70,15 @@ if (winParam === 'overlay') {
     <StrictMode>
       <RootErrorBoundary>
         <QueryClientProvider client={queryClient}>
-          <I18nProvider>
-            <ThemeProvider>
-              <HapticsProvider>
-                {/* ONE tooltip provider for the whole app. Every `Tip` used to
+          <ThemeProvider>
+            <HapticsProvider>
+              {/* ONE tooltip provider for the whole app. Every `Tip` used to
                     carry its own, and with ~107 call sites those subtrees
                     dominated unrelated interactions (52,784 TooltipProvider
                     renders in a single sash drag). Radix's provider holds only
                     refs and stable callbacks, so hoisting is what it's for. */}
-                <RootTooltipProvider>
-                  {/* useTransitions={false}: react-router v7's HashRouter wraps every
+              <RootTooltipProvider>
+                {/* useTransitions={false}: react-router v7's HashRouter wraps every
                     route state update in React.startTransition() by default. In
                     React 19's concurrent renderer, transitions are non-urgent — React
                     can yield mid-render and resume later. When the app is under load
@@ -87,13 +87,20 @@ if (winParam === 'overlay') {
                     the route change commit. The session sidebar highlight + main pane
                     both freeze for seconds despite the main thread being free.
                     Disabling transitions makes navigate() commit at default priority. */}
-                  <HashRouter useTransitions={false}>
-                    <App />
-                  </HashRouter>
-                </RootTooltipProvider>
-              </HapticsProvider>
-            </ThemeProvider>
-          </I18nProvider>
+                {/* Harvis: the app mounts only once someone is signed in; the
+                    gate draws the sign-in / first-admin screens itself. The
+                    language lives in the signed-in user's config, so it loads
+                    inside the gate, not before a session exists. */}
+                <SessionGate>
+                  <I18nProvider>
+                    <HashRouter useTransitions={false}>
+                      <App />
+                    </HashRouter>
+                  </I18nProvider>
+                </SessionGate>
+              </RootTooltipProvider>
+            </HapticsProvider>
+          </ThemeProvider>
         </QueryClientProvider>
       </RootErrorBoundary>
     </StrictMode>

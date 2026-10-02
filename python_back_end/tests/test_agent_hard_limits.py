@@ -69,6 +69,28 @@ def test_enter_key_inside_a_send_control_is_sending():
     assert hl.classify("press", {"ref": "r1", "key": "Enter"}, _refs(name="Send message")) == hl.SEND
 
 
+def test_a_public_action_as_the_user_is_sending():
+    # A like, follow or vote shows up under the user's name: it is a send.
+    for label in ("Like", "Like 1.2K", "Unlike", "Follow", "Follow @sam", "Following", "Unfollow",
+                  "Repost", "Retweet", "Quote", "Quote post", "Upvote", "Downvote", "Share",
+                  "Comment", "Reply", "Post", "Add a comment", "like this video along with 1,234 other people"):
+        assert hl.classify("click", {"ref": "r1"}, _refs(name=label)) == hl.SEND, label
+    # The label may live on aria-label rather than the accessible name.
+    assert hl.classify("click", {"ref": "r1"}, _refs(role="button", aria_label="Like")) == hl.SEND
+
+
+def test_subscribe_is_a_hard_limit_whichever_kind():
+    # On a video site it is a public follow; on a SaaS it is a charge. Pay is
+    # judged first because the costlier miss is money, and either way it asks.
+    assert hl.classify("click", {"ref": "r1"}, _refs(name="Subscribe")) in (hl.PAY, hl.SEND)
+
+
+def test_links_that_merely_mention_a_social_word_are_not_sending():
+    for label in ("More like this", "Who to follow", "People you may like", "Shared with you",
+                  "Posts", "Comments (12)"):
+        assert hl.classify("click", {"ref": "r1"}, _refs(name=label)) is None, label
+
+
 # ─── delete ──────────────────────────────────────────────────────────────────
 
 
@@ -83,6 +105,10 @@ def test_delete_and_close_account_are_deleting():
 def test_reading_the_page_is_never_a_hard_limit():
     for verb in ("snapshot", "screenshot", "scroll", "back"):
         assert hl.classify(verb, {}, {}) is None, verb
+    # Scrolling and opening a feed are browsing, even on a page full of Like buttons.
+    assert hl.classify("scroll", {"direction": "down"}, _refs(name="Like")) is None
+    assert hl.classify("navigate", {"url": "https://www.instagram.com/"}, {}) is None
+    assert hl.classify("click", {"ref": "r1"}, _refs(role="link", name="Explore")) is None
 
 
 def test_navigating_to_a_login_page_is_not_signing_in():

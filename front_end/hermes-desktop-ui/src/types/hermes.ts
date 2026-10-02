@@ -616,6 +616,11 @@ export interface SessionMessage {
   display_metadata?: string | TimelineDisplayMetadata
   role: 'assistant' | 'system' | 'tool' | 'user'
   /**
+   * Harvis: the uploads a user turn carried (`{id, name, content_type, size}`
+   * each), kept beside the row rather than as `@image:` lines in the text.
+   */
+  attachments?: unknown
+  /**
    * Durable `messages.id` from the backend. The renderer's own message ids are
    * ephemeral (derived from timestamp+index, and a different shape for live vs
    * rehydrated vs optimistic rows), so anything addressing a specific persisted

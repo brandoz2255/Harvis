@@ -27,6 +27,8 @@ import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
+from plugins.hosting import MODE_KUBERNETES, hosting_mode
+
 from . import providers, settings_store
 from .store import SETTINGS_KEY
 
@@ -38,7 +40,10 @@ router = APIRouter(prefix="/api/messaging", tags=["messaging"])
 # used when the gateway is unreachable so cards still say "supported, stopped".
 SUPPORTED_PLATFORMS: tuple[str, ...] = ("telegram", "slack", "discord", "matrix", "email", "whatsapp_cloud", "signal")
 WEBHOOK_PLATFORMS: tuple[str, ...] = ("whatsapp_cloud",)
-GATEWAY_START_COMMAND = "COMPOSE_PROFILES=messaging docker compose up -d harvis-messaging-gateway"
+# The docker compose wording; gateway_start_command() picks the right one for this install.
+GATEWAY_START_COMMAND = "docker compose up -d harvis-messaging-gateway"
+GATEWAY_DEPLOYMENT = "harvis-messaging-gateway"
+K8S_INSTALL_COMMAND = "./install.sh --k8s"
 MESSAGING_KEY = "messaging"
 PAIRING_KEY = "pairing"
 MAX_PENDING = 50
@@ -63,6 +68,47 @@ def webhook_url(platform: str) -> Optional[str]:
     return f"{base}/api/messaging/webhooks/{platform}" if base and platform in WEBHOOK_PLATFORMS else None
 
 
+# ── operator instructions, worded for how this install runs ──────────────────
+# Under compose the operator edits .env and runs docker compose. Under k3s the
+# pods read a Secret rendered from .env by the installer, so "docker compose up"
+# does nothing and the kubectl wrapper is `sudo k3s kubectl` (scripts/k8s/harvis-k8s.sh).
+
+def on_kubernetes() -> bool:
+    return hosting_mode()[0] == MODE_KUBERNETES
+
+
+def _kubectl() -> str:
+    namespace = (os.getenv("HARVIS_K8S_NAMESPACE") or "").strip() or "harvis"
+    return f"sudo k3s kubectl -n {namespace}"
+
+
+def gateway_start_command() -> str:
+    if on_kubernetes():
+        return (f"{_kubectl()} rollout restart deploy/{GATEWAY_DEPLOYMENT} on the cluster node "
+                f"(or re-run {K8S_INSTALL_COMMAND} there if the deployment is missing)")
+    return GATEWAY_START_COMMAND
+
+
+def gateway_restart_command() -> str:
+    if on_kubernetes():
+        return f"{_kubectl()} rollout restart deploy/{GATEWAY_DEPLOYMENT}"
+    return f"docker restart {GATEWAY_DEPLOYMENT}"
+
+
+def env_path() -> str:
+    if on_kubernetes():
+        return f"Harvis .env on the cluster node (re-run {K8S_INSTALL_COMMAND} after editing it)"
+    return "harvis backend .env"
+
+
+def apply_env_instruction(service: str) -> str:
+    """How an edited .env reaches ``service`` (a compose service name)."""
+    if on_kubernetes():
+        return (f"In that folder run: {K8S_INSTALL_COMMAND}. It re-renders the secrets and rolls the pods; "
+                "a plain pod restart does not re-read .env.")
+    return f"In that folder run: docker compose up -d {service}. A plain restart does not re-read .env."
+
+
 # ── backend -> gateway ───────────────────────────────────────────────────────
 
 _status_cache: dict[str, Any] = {"at": 0.0, "value": None, "problem": None}
@@ -83,15 +129,19 @@ async def _call(method: str, path: str, *, timeout: float = 5.0, **kwargs) -> Op
 def _problem_for(r: Optional[httpx.Response]) -> Optional[str]:
     """Why the gateway's status is unavailable, in words the Messaging page can show."""
     if not gateway_token():
+        if on_kubernetes():
+            return ("Messaging needs a shared secret: set MESSAGING_GATEWAY_TOKEN in the Harvis .env on the cluster "
+                    f"node (any long random string) and re-run {K8S_INSTALL_COMMAND} there; it re-renders the "
+                    "secrets and rolls the backend and gateway pods.")
         return ("Messaging needs a shared secret: set MESSAGING_GATEWAY_TOKEN in the Harvis .env (any long random "
                 f"string), recreate the backend, then start the gateway with: {GATEWAY_START_COMMAND}")
     if r is None:
-        return f"The messaging gateway is not running. Start it with: {GATEWAY_START_COMMAND}"
+        return f"The messaging gateway is not running. Start it with: {gateway_start_command()}"
     if r.status_code == 401:
         return "The messaging gateway rejected the backend's token: MESSAGING_GATEWAY_TOKEN must match in both containers."
     if r.status_code == 404:
         return ("The messaging gateway is running an older build without the settings API. "
-                "Restart it: docker restart harvis-messaging-gateway")
+                f"Restart it: {gateway_restart_command()}")
     if r.status_code != 200:
         return f"The messaging gateway answered http {r.status_code}."
     return None

@@ -146,7 +146,9 @@ class ResearchStartRequest(BaseModel):
 async def research_start(body: ResearchStartRequest, request: Request, current_user: Dict = Depends(get_current_user_from_request)):
     owner = _owner(current_user)
     session_id = f"rp-{uuid.uuid4().hex[:12]}"
-    model = (body.model or await _resolve_research_model(request, current_user.get("id"))).strip()
+    from plugins.people.controls import require_turn
+    model = await require_turn(getattr(request.app.state, "pg_pool", None), int(current_user["id"]), body.model or "")
+    model = (model or await _resolve_research_model(request, current_user.get("id"))).strip()
     effective_max_rounds = body.max_rounds if body.max_rounds > 0 else 20
     _handler.start_research(
         session_id=session_id, query=body.query, llm_model=model,

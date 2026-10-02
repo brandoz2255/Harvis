@@ -113,8 +113,12 @@ async def open(pool, user_id: int, sid: str) -> tuple[Optional[Live], list[dict]
     return s, store.linear_messages(blob)
 
 
-async def append(pool, s: Live, role: str, content: str, reasoning: str = "") -> list[dict]:
-    """Persist one message in OWUI's shape; returns the transcript after it."""
+async def append(pool, s: Live, role: str, content: str, reasoning: str = "",
+                 files: Optional[list[dict]] = None) -> list[dict]:
+    """Persist one message in OWUI's shape; returns the transcript after it.
+
+    ``files`` are the user's upload references (attachments.reference) for a
+    user message; they come back on the row as ``attachments``."""
     blob = await store.get_blob(pool, s.user_id, s.id) if s.persisted else None
     if blob is None:
         blob, s.persisted = store.new_chat_blob(s.model), False
@@ -126,7 +130,7 @@ async def append(pool, s: Live, role: str, content: str, reasoning: str = "") ->
             # first-message derivation. Bot Mode relies on "Bot Chat" sticking.
             blob["title"] = s.title
     parent = (blob.get("history") or {}).get("currentId")
-    store.append_to_blob(blob, store.make_message(role, content, parent, s.model, reasoning))
+    store.append_to_blob(blob, store.make_message(role, content, parent, s.model, reasoning, files))
     if s.persisted:
         s.title = await store.save_messages(pool, s.user_id, s.id, blob)
     else:

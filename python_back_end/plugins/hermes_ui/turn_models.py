@@ -28,6 +28,8 @@ from datetime import datetime
 from typing import Any, AsyncIterator
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from plugins import people
+
 from . import chat, providers, settings_store
 
 log = logging.getLogger("hermes_ui.turn_models")
@@ -202,12 +204,25 @@ def aggregator_prompt(responses: list[str]) -> str:
     return f"{AGGREGATOR_SYSTEM_PROMPT}\n\n{numbered}"
 
 
-async def _collect(pool, uid, token, turn, slot, origin, timeout) -> str:
+NOT_ALLOWED = "not on the models the Harvis admin allows you"
+
+
+async def _held_back(model: str, endpoint: dict | None, allowed: list[str] | None) -> bool:
+    """Is this target a model on this server (or its network) outside the admin's list?"""
+    if allowed is None:
+        return False
+    on_server = endpoint is None or await people.is_server_endpoint(endpoint.get("base_url", ""))
+    return on_server and (endpoint or {}).get("model", model) not in allowed
+
+
+async def _collect(pool, uid, token, turn, slot, origin, timeout, allowed=None, extra=None) -> str:
     model, endpoint = await resolve_target(pool, uid, slot.get("provider", ""), slot.get("model", ""))
+    if await _held_back(model, endpoint, allowed):
+        raise chat.ChatError(NOT_ALLOWED)
 
     async def run() -> str:
         parts = []
-        async for kind, delta in chat.stream_turn(token, turn, model, endpoint, "chat", "", origin):
+        async for kind, delta in chat.stream_turn(token, turn, model, endpoint, "chat", "", origin, extra=extra):
             if kind == "text":
                 parts.append(delta)
         return "".join(parts).strip()
@@ -219,7 +234,8 @@ async def _collect(pool, uid, token, turn, slot, origin, timeout) -> str:
 
 
 async def run_moa(pool, uid: int, token: str, turn: list[dict], name: str, preset: dict, mode: str,
-                  origin: str, extra: dict | None) -> AsyncIterator[tuple[str, Any]]:
+                  origin: str, extra: dict | None,
+                  allowed: list[str] | None = None) -> AsyncIterator[tuple[str, Any]]:
     if not moa_ready(preset):
         raise chat.ChatError(f"Mixture of agents preset '{name}' is off or has no reference and aggregator models")
     refs = [r for r in preset.get("reference_models") or []
@@ -230,7 +246,7 @@ async def run_moa(pool, uid: int, token: str, turn: list[dict], name: str, prese
         timeout = DEFAULT_REFERENCE_TIMEOUT
     loud = preset.get("degraded_reference_policy") != "silent"
     yield "reasoning", f"Mixture of agents '{name}': asking {len(refs)} reference model(s).\n"
-    results = await asyncio.gather(*(_collect(pool, uid, token, turn, r, origin, timeout) for r in refs),
+    results = await asyncio.gather(*(_collect(pool, uid, token, turn, r, origin, timeout, allowed, extra) for r in refs),
                                    return_exceptions=True)
     answers = []
     for slot, result in zip(refs, results):
@@ -248,6 +264,8 @@ async def run_moa(pool, uid: int, token: str, turn: list[dict], name: str, prese
     yield "reasoning", (f"{len(answers)} of {len(refs)} reference(s) answered; "
                         f"{_label(agg.get('provider'), agg.get('model'))} is writing the reply.\n")
     model, endpoint = await resolve_target(pool, uid, agg.get("provider", ""), agg.get("model", ""))
+    if await _held_back(model, endpoint, allowed):
+        raise chat.ChatError(f"the aggregator {_label(agg.get('provider'), agg.get('model'))} is {NOT_ALLOWED}")
     lead = [m for m in turn if m.get("role") == "system"]
     rest = [m for m in turn if m.get("role") != "system"]
     agg_turn = [*lead, {"role": "system", "content": aggregator_prompt(answers)}, *rest]
@@ -259,11 +277,13 @@ async def run_moa(pool, uid: int, token: str, turn: list[dict], name: str, prese
 
 async def stream(pool, uid: int, token: str, turn: list[dict], model: str, endpoint: dict | None, mode: str,
                  effort: str, origin: str, *, extra: dict | None = None,
-                 config: dict | None = None, bot: bool = False) -> AsyncIterator[tuple[str, Any]]:
+                 config: dict | None = None, bot: bool = False,
+                 allowed: list[str] | None = None) -> AsyncIterator[tuple[str, Any]]:
     """chat.stream_turn with the Model settings applied (same items out).
 
     A bot chat keeps its own instructions, so the personality note is left out
-    of it; fallbacks and MoA apply to every chat."""
+    of it; fallbacks and MoA apply to every chat. ``allowed`` is the admin's model
+    list for this person (None = any): a fallback on this server outside it is skipped."""
     if config is None:
         from .rest import CONFIG
         config = await settings_store.config_for(pool, uid, CONFIG)
@@ -274,7 +294,7 @@ async def stream(pool, uid: int, token: str, turn: list[dict], model: str, endpo
 
     def primary() -> AsyncIterator[tuple[str, Any]]:
         if moa:
-            return run_moa(pool, uid, token, turn, moa[0], moa[1], mode, origin, extra)
+            return run_moa(pool, uid, token, turn, moa[0], moa[1], mode, origin, extra, allowed)
         return chat.stream_turn(token, turn, model, endpoint, mode, effort, origin, extra=extra)
 
     chain = fallback_chain(config)
@@ -295,6 +315,9 @@ async def stream(pool, uid: int, token: str, turn: list[dict], model: str, endpo
             fb_model, fb_endpoint = await resolve_target(pool, uid, row["provider"], row["model"])
         except chat.ChatError as exc:
             why = _short(exc)
+            continue
+        if await _held_back(fb_model, fb_endpoint, allowed):
+            why = NOT_ALLOWED
             continue
         try:
             async for item in _guarded(chat.stream_turn(token, turn, fb_model, fb_endpoint, mode, "", origin,

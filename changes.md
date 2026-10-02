@@ -1,5 +1,410 @@
 # Recent Changes and Fixes Documentation
 
+## Date: 2026-10-02 — Attach files in the browser UI; plain chat can drive the browser (branch `harvis1.5`)
+
+**Problem.** The browser Hermes UI could not attach files, and "scroll Instagram for me" only worked through a
+teammate. A review of the first cut found ordinary questions ("check my threads implementation") routed to the
+browser, the chat assistant could inherit another teammate's pay/send clearances, and likes/follows were not gated.
+
+**Root cause.** `prompt.submit` was text only; plain chat had no path to an agent run; the browse detector matched
+loose words anywhere; `ensure_default_assistant` promoted the first teammate it found.
+
+**Solution.** Uploads go through `/api/v1/files/` and ride on `prompt.submit` (ownership checked, newest 10 per
+turn, render cached, safe file names). `plugins/agents/browse.py` starts a gated agent run only for a driving verb
+at the start plus a real site; chat runs never use cleared limits; social actions count as "send". Details:
+`~/Nexusys/code/harvis/2026-10-02-vm920-coverage-test.md` (second pass).
+
+**Result.** 1339 backend tests pass. Live: a 50,000-row CSV answered correctly from the socket; "go to example.com
+and tell me the main heading" opened the page through the gated computer with audit rows.
+
+## Date: 2026-10-02 — Server test fixes: big files, MCP tools, longer browser sessions, healthier Kubernetes (branch `harvis1.5`)
+
+**Problem.** A test of every area on the VM 920 Kubernetes server found: a 50,000-row CSV cut to 24k characters
+with no notice (the model invented totals); PDFs sent to the model as raw bytes; uploads lost on restart; MCP tool
+calls denied and the MCP tab empty; harvis-mcp with a hardcoded key; MCP redirects not checked; browser sessions
+killed at 5 minutes; messaging timeouts shown as stack traces; no health checks, resource requests or backups in
+Kubernetes.
+
+**Root cause.** Attachment text was head-cut; the MCP gate read a flag tool discovery does not use; the config
+endpoint never read the `mcp_servers` table; the k8s generator ignored compose healthchecks and resources.
+
+**Solution.** See `~/Nexusys/code/harvis/2026-10-02-vm920-coverage-test.md` for the file list. In short: whole-file
+CSV/XLSX overview plus a stated row count, PDF/DOCX/PPTX text extraction, 50 MB streamed cap, attachments on the
+artifacts volume; MCP gate follows transport flags, tab lists the table, redirects re-checked, server token from
+env only; browser idle/max clocks and noVNC up at start; k8s probes (backend with a 10-minute startup window),
+requests on every pod, nightly `pgsql-backup`, `--amd-gpu` overlay.
+
+**Result.** Backend 1220 passed (1 known failure deselected); browser_runner, messaging-gateway, k8s generator
+green; `docker compose config` valid. Not yet deployed to VM 920. Still open: attaching files from the browser
+Hermes UI, browser tools in plain chat, GPU passthrough (David).
+
+## Date: 2026-10-01 (late night) — Settings ▸ People: the admin sees who uses this Harvis and can limit or turn them off (branch `harvis1.5`)
+
+- **Problem.** The admin who set up a Harvis could not see who else had signed up, which messaging contacts were
+  paired to whom, or stop one person from running up the server's models.
+- **Fix.** New admin-only **Settings ▸ People** tab (hidden for everyone else; the routes answer 403):
+  - every account with today's and this week's messages, chats, last seen, and its paired contacts (Unpair button);
+  - **Turn off / Turn on**: a turned-off account is refused on every request and socket at once
+    (`plugins/people/gate.py`, ASGI middleware in front of every auth helper), and cannot sign in;
+  - **Limits**: messages per day (resets at midnight UTC; 0 = chat off) and "Any model" / "Only these" models,
+    where the first one picked is their default;
+  - **Allow new sign-ups** switch (the existing `ENABLE_SIGNUP` admin config).
+  - The admin is counted but never limited, so the admin cannot lock themselves out.
+- **Where limits apply.** One check, `plugins/people/controls.admit_turn`, counts in Postgres with an atomic upsert
+  (ten simultaneous messages against a limit of 3 let exactly 3 through). It runs on the Hermes chat socket,
+  `/api/chat/completions`, `/api/chat`, `/api/vision-chat`, `/api/mic-chat`, `/api/research-chat`, notebook chat,
+  messaging dispatch (a paired contact spends the account's messages) and scheduled jobs. The socket's own calls
+  to `/api/chat/completions` carry a server-signed mark so one message is counted once, not once per fallback.
+  The model list covers this server's models, Integrations cloud models, teammates, and any custom endpoint that
+  points back at this server or its network; only a custom endpoint on a public address, with the person's own key,
+  is exempt.
+- **Review fixes (same night).** An independent review found: a turned-off token was let through when a second
+  token came first (the gate now checks the Bearer header, both cookies and `?token=`, and clears the cookie on
+  refusal); direct API calls skipped the limits; a custom endpoint at `http://ollama:11434` skipped the model list;
+  scheduled jobs ignored the admin. All fixed and tested.
+- **Second review fixes (same night).** A re-check of those fixes found more model routes outside the check. Now:
+  - `/api/analyze-screen`, `/api/analyze-and-respond`, `/api/analyze-screen-with-tts`, `/api/fact-check` and
+    `/api/comparative-research` took no sign-in at all; they now need one and face the limits;
+  - deep research start, notebook chat / ask / transformations, the IDE assistant (chat, diff proposals; inline
+    suggestions are checked but not counted) and workspace launch / Build-chat turn / rerun call `require_turn`;
+  - the socket's marked calls to `/api/chat/completions` skip the count but still face the model list and the off
+    switch (a `moa:` preset or a fallback could reach an unlisted model before);
+  - `is_server_endpoint` treats every non-public address (Tailscale 100.64/10 included) as this network, and a name
+    that does not resolve as this server, instead of exempting it;
+  - a refused request clears the terminal's `token` cookie too; the People copy now says exactly what turning someone
+    off and the model list do.
+  - **Not changed, needs a decision:** `docker-compose.prebuilt.yml` publishes Ollama on `0.0.0.0:11434` with no
+    auth, so anyone on the LAN can use the models directly and no People limit applies there.
+- **Third review fixes (same night).** A check of the second round found places that still picked a model around
+  the list. Now:
+  - notebook and onb fallback chains (`RAGChatService._models_to_try`), autoname, suggested questions, insights,
+    transformations and all podcast routes (`/api/notebooks/podcasts/generate[/stream]`, `/{id}/podcasts`,
+    `/onb-api/podcasts/generate`, retry) take the person's model through the check and only fall back inside the list;
+  - workspace runs: the `main` and NVIDIA cloud lanes run locally on a listed model (with a note in the run), the
+    orchestrated pool and the Hermes-native persona are filtered to the list;
+  - scheduled jobs check the job's model (chat and coding lanes) and run a limited person's jobs on their first model;
+  - mixture-of-agents reference and aggregator slots and the fallback chain refuse unlisted models on this server;
+  - deep research uses the person's first listed local model instead of the server default;
+  - a database error while counting refuses when a limit is set (it no longer lets the message through);
+  - an endpoint with no address counts as this server; `/onb-api/search/ask` rejects an empty question before
+    counting it. Helpers `allowed_for` / `only_allowed` added to `plugins/people`.
+  - Left as notes: screen vision is not used by Hermes; title generation and the curator are not counted; "midnight
+    UTC" follows the Postgres server's time zone.
+- **Fourth check (same night).** An independent check of the third round found runs that still reached unlisted
+  models. Now:
+  - every workspace run refuses a model off the person's list when it starts (`_run_workspace_bg`), not only at the
+    launch route, so traces, reviews, teammates, Discord and messaging are covered; `POST /api/harvis/runs` and
+    the vibecode review route also count and check the model up front;
+  - the orchestrator's planner, its default sub-agent pool and custom sub-agents' own models are held to the list
+    (`planner.plan_agents(allowed=)`, `_held_to`); teammate plans and "what next" suggestions too;
+  - teammate runs (`POST /api/agents/{id}/run`) count, and the teammate's model is their list's model
+    (`plugins/agents/models.resolve_run_model`); reviewer sub-agents fall back to the run's model;
+  - the Hermes curator (memory and skill drafts after a chat) runs on a listed model;
+  - the Hermes persona is switched off only when its own default model is not listed;
+  - `/onb-api/models/{id}/test` will not ping an unlisted model; notebook chat with no model uses the person's
+    default instead of the built-in `gpt-oss:latest`.
+  - Fifth check (Opus) fixes: a lane id no branch claims (it reached OpenClaw's server-wide model via
+    `/api/harvis/runs`) now runs locally for a limited person; the Hermes Agent engine keeps the admitted model
+    when its own pick is off the list (`engine_adapter.py`); the curator's fallback chain (`MODEL`, default,
+    smallest installed) only tries listed models; a Build turn with no model checks the session's model but no
+    longer fills it in, which had flipped opencode / hermes-native sessions to `native` for everyone.
+  - Found, not fixed here (existed before): podcast generation reads notebook sources and notes by id without an
+    owner check (`onb_compat/podcasts._resolve_notebook_content`, `notebooks/router._fetch_podcast_content`).
+- **Files:** `python_back_end/migrations/020_user_controls.sql` (new), `python_back_end/plugins/people/`
+  (`__init__`, `controls`, `gate`, `routes`; new), `main.py`, `owui_compat/router.py`, `notebooks/router.py`,
+  `plugins/hermes_ui/{chat,ws,turn_models,router}.py`, `plugins/messaging/dispatcher.py`, `plugins/cron/runtime.py`;
+  Hermes UI `src/app/settings/{people-settings,people-helpers}.tsx/.ts` (new), `harvis-api.ts`, `index.tsx`,
+  `types.ts`; second review: `deep_research/router.py`, `onb_compat/router.py`, `vibecoding/{ai_assistant,ide_ai}.py`,
+  `workspace/workspace_router.py`, Hermes UI `src/lib/harvis-session.ts` (comment); third review:
+  `notebooks/rag_chat.py`, `onb_compat/podcasts.py`, `open_notebook/podcast/script.py`, `owui_compat/research_bridge.py`;
+  fourth check: `workspace/harvis_trace.py`, `workspace/orchestration/{planner,orchestrator,coordinator,review}.py`,
+  `plugins/agents/{routes,models}.py`, `plugins/hermes_ui/learn.py`, `workspace/orchestration/engine_adapter.py`.
+  Tests: `tests/test_people_controls.py` (new, 16), `tests/test_people_model_routes.py` (new, 14),
+  `people-helpers.test.ts` and `people-settings.test.tsx` (new, 16).
+- **VM 920 server test (2026-10-01 evening).** All 11 pods running, front door answers, a local-lane workspace
+  run finishes in 38 s, a multi-agent run finishes (over 4 min on the CPU-only model), web search and the chat
+  search tools return results, deep research works through planning, searching and reading but needs over 7 min.
+  Two failures found and fixed:
+  - **Workspace runs on the default lane failed on Kubernetes** ("Name or service not known"): the default lane is
+    OpenClaw, which the k8s install does not run, and scheduled routines and Discord use it. Runs headed for OpenClaw
+    now check that it answers and otherwise run on the local lane with a note saying so
+    (`workspace/workspace_router.py`, `_goes_to_openclaw` / `_openclaw_reachable`).
+  - **Deep research failed whenever the model was busy:** its start-up check sent a real chat turn and timed out
+    behind other work on a one-at-a-time CPU server. It now asks Ollama whether the model is installed (`/api/show`)
+    and says plainly if Ollama is unreachable or the model is not pulled (`deep_research/handler.py`).
+- **Discord bot held to the People limits.** The bot speaks as one Harvis account (`DISCORD_DEFAULT_USER_ID`,
+  default 2, not an admin) and skipped that account's block, daily limit and model list. It now checks before any
+  model runs, keeps local models on the allowed list, and skips escalation to an unlisted model
+  (`integrations/discord_workspace_bot.py`).
+  A reviewer agent then found that the OpenClaw check tried only the first address (the client also has a backup
+  address, which is the one that works on the laptop), that a cloud model name was passed to the local lane, and
+  that the bot let cloud models past the admin's list while workspace runs refuse them. All three fixed: the backup
+  address is tried and used, a cloud model on fallback is swapped for the default local model, and every model the
+  bot runs is held to the list.
+  Tests: `tests/test_workspace_openclaw_fallback.py` (new, 5), `tests/test_discord_people_gate.py` (new, 2).
+- **Result after the server test fixes:** full backend suite 1148 pass (same one known temp-dir failure); live on
+  the laptop a `main` run connects to OpenClaw through the backup address with no fallback note.
+- **Result after the fifth check:** full backend suite 1141 pass (same one known temp-dir failure); People 30.
+- **Result after the fourth check:** full backend suite 1139 pass (the one failure is the known temp-dir-only
+  audit test); People tests 28; live, a `main`-lane run asking for an unlisted model ends with "not on the models the
+  Harvis admin allows you", and `/api/harvis/runs` answers 403 for a limit-0 account and for an unlisted model.
+- **Result after the third review:** 297 backend tests pass (People 24, Hermes UI, admin, notebooks, onb, cron,
+  workspace); 16 People UI tests pass; live, the notebook transform and four podcast routes answer 403 for a limit-0
+  account and nothing is counted; the new People wording is served by nginx.
+- **Result:** 271 backend tests pass (People 16, Hermes UI, admin, notebooks); 16 People UI tests and 326 settings
+  tests pass; type check shows only the 3 errors that were there before. Live on the laptop: the five screen and
+  research routes answer 401 without a sign-in; fact-check and deep research answer 403 for a limit-0 account; an
+  IDE suggestion with an unlisted model is refused; a marked completions call with an unlisted model is refused and
+  nothing is counted; a member gets 403 and no People tab; a direct `/api/chat/completions` call over the limit gets 403 and a forged mark changes nothing; a normal
+  chat through the app still answers and counts once. **Not yet seen:** the People tab signed in as the admin.
+
+## Date: 2026-10-01 (night) — Memory that sticks, user-added skills, web search and messaging on by default, quieter scheduled jobs (branch `harvis1.5`)
+
+- **Memory.** "remember that i love cake" was lost on VM 920. **Root cause:** memory extraction asked for
+  `llama3.1:8b`, which that machine does not have (it has only `gemma4:e2b`); every call failed quietly.
+  **Fix:** `learn.py` now asks Ollama what is installed and falls back to the default model, then to any
+  installed chat model. A plain "remember …" / "don't forget …" is saved directly, without the model, before the
+  extraction gate. The workspace `USER.md` is two-way: new "- " lines the AI or the user adds there are saved to
+  memory the next time the sandbox opens (a mirror file under `.harvis` keeps deleted memories from coming back),
+  and the workspace guide tells the AI that the core files are its own to read and edit.
+- **Skills.** The Skills tab had no way to add a skill. New **Add skill** button: paste instructions or upload a
+  `SKILL.md`. The person adding it vouches for it, so it is saved on, with the same approval record the toggle
+  writes. New route `POST /hermes-api/api/skills`; names are checked, duplicates refused.
+- **Web search.** `HARVIS_AGENT_REACH_ENABLED` now defaults to true, so chat grounding and the workspace's
+  `web_search` / `web_read` work on a fresh install. Instagram, Facebook and Threads pages answer an anonymous
+  reader with a sign-in page; `web_read` now reports that as a login wall and points at search, which still
+  returns profile snippets. There is no cookie login.
+- **Messaging gateway** is on by default (no `messaging` profile), in Docker and in the generated k8s manifests.
+  It idles until a platform is connected on the Messaging page. Adds a ~294 MB image to a default install.
+- **Scheduled jobs** open as a side tile or workspace page instead of a full-screen pop-up, including when a model
+  change asks you to review jobs.
+- **Deep research:** one entry, the "+" menu's `/research`; the duplicate composer button is gone.
+- **Files:** `python_back_end/plugins/hermes_ui/{learn,sandbox,rest_sandbox,rest_skills,messaging_gateway}.py`,
+  `python_back_end/agent_reach/tools.py`, `docker-compose.yaml`, `install.sh`; Hermes UI `src/app/skills/
+  {add-skill-dialog,index}.tsx`, `src/api/skills.ts`, `src/app/cron/{page,index}.tsx`, `src/app/overlays/panel.tsx`,
+  `src/app/routes.ts`, `src/app/contrib/{surfaces,wiring}.tsx`, `src/app/chat/route-tile.tsx`,
+  `src/app/session/hooks/use-session-actions/index.ts`, `src/plugins/harvis/plugin.tsx`. Tests:
+  `tests/test_hermes_ui_memory.py` (new), `tests/test_agent_reach_login_wall.py` (new), `tests/test_hermes_ui_skills.py`,
+  `src/app/routes.workspace-reveal.test.ts`.
+- **Result:** 263 backend tests pass (Hermes UI, sandbox, reach, notebooks); Skills and route tests pass; type check
+  clean. Live on the laptop: a forced chat search about NASA's Instagram returned NASA's Instagram pages; an
+  Instagram `web_read` reports the login wall; the gateway answers on :18800; the sandbox network reaches pypi.org
+  and cannot reach pgsql or Ollama (same on VM 920). Not yet deployed to VM 920.
+- **Review fixes (same night).** An independent review found three real problems, now fixed:
+  1. Anything in the sandbox (a cloned repo's script, or the agent obeying a web page) could write `USER.md` lines
+     that became memories in every later chat. Lines imported from `USER.md` are now saved as *waiting*: chats skip
+     them until the user presses **Keep** in Settings → Memory (new `POST /hermes-api/api/harvis/memory/{id}/keep`).
+     The recall query over-fetches so waiting lines cannot crowd out real ones. The workspace guide now says this.
+  2. If the agent rewrote `USER.md` without the mirror mark, a memory deleted in Settings came back on every poll.
+     Lines are now recorded as seen the moment they are imported.
+  3. The "remember that …" pattern backtracked badly on long runs of spaces (about 40 s for 4,000), on the event
+     loop. It is now linear, and messages over 600 characters are left to the model.
+  Also: the last-resort extraction model is the smallest installed one (not whichever Ollama lists first); sandbox
+  file reads and writes no longer block on a planted named pipe; `threads.com` joins the login-wall list.
+  Extra files: `python_back_end/plugins/memory/preamble.py`, `python_back_end/plugins/hermes_ui/rest_harvis.py`,
+  Hermes UI `src/app/settings/{memory-learning-settings.tsx,harvis-api.ts}`. 242 backend tests and 387 Settings,
+  Skills, cron and route tests pass; the new SQL was run against the local database.
+
+## Date: 2026-10-01 (evening) — Workspace files open again in the browser (branch `harvis1.5`)
+
+- **Problem:** in the Files pane, folders expanded but double-clicking a file (a skill's `SKILL.md`, `AGENTS.md`)
+  opened nothing, and no read request reached the server. **Root cause:** the web build's desktop shim
+  (`src/lib/desktop-shim/stubs.ts`) answered `normalizePreviewTarget` by echoing the raw path string back.
+  `normalizeOrLocalPreviewTarget` took that string as a finished preview target, so the preview pane got a bare
+  path and showed nothing. The Electron app returns a real target object, which is why the desktop build worked.
+- **Fix:** the stub returns null, so the renderer classifies the file itself and reads it over `/api/fs/read-text`.
+- **Files:** `src/lib/desktop-shim/stubs.ts`, `src/lib/local-preview.test.ts` (new test: the web shim opens a
+  workspace file as a file preview; it fails on the old stub).
+- **Result:** on VM 920 (Kubernetes mode) `AGENTS.md` and `skills/harvis-coding/SKILL.md` open in the preview pane
+  with Preview / Source / Edit; the Capabilities page lists every skill.
+
+## Date: 2026-10-01 (evening) — Kubernetes mode restarts a pod when its image is rebuilt (branch `harvis1.5`)
+
+- **Problem:** on VM 920, `./install.sh --k8s` rebuilt and re-imported the backend image, but the backend pod kept
+  running the old code. **Root cause:** a rebuilt image keeps its tag (`harvis-backend:latest`), so the rendered
+  pod template was byte-for-byte the same and Kubernetes saw nothing to roll. Docker mode never had this problem
+  because `docker compose up --build -d` recreates a container whose image changed.
+- **Fix:** `harvis-k8s.sh import_images()` records each image's content id, and `render()` hands them to
+  `compose_to_k8s.py --image-ids`. Each pod template gets a `harvis.dev/image-hash` annotation built from the ids
+  of the images it runs, so a rebuilt image rolls exactly the pods that use it and nothing else.
+- **Follow-up (same evening):** the first unchanged rerun still restarted browser-runner and preview-runner.
+  Both build the one `harvis-browser-runner:latest` tag, and Compose stamps it with a
+  `com.docker.compose.service` label naming whichever build finished last, so the hash flipped run to run.
+  The id now hashes the layers and config without Compose's own `com.docker.compose.*` labels. The first run
+  after this change re-imports every image once, because every id changes.
+- **Chat sandboxes failed in Kubernetes mode** ("Waking up …" never cleared). The backend binds a session folder
+  into a sibling Docker container by its HOST path, which it learns by inspecting its own container's mounts. As a
+  pod it has no container, so every warm-up raised "cannot inspect the backend's own container". **Fix:** the
+  generator (`k8s_extras.extra_env`) puts the backend's mount table, mount point to host path, in
+  `HARVIS_HOST_MOUNTS`, and `terminal_container._backend_mounts` uses it when set. Docker mode is unchanged. A path
+  outside every mount is still refused. Tests: `test_backend_gets_its_host_mount_table`,
+  `python_back_end/tests/test_terminal_host_mounts.py`.
+- **A sandbox showed a bogus "app on port 53xxx"**: the port watcher counted Docker's own DNS resolver
+  (127.0.0.11), which listens in every container on a user-defined network. `rest_sandbox.parse_listening` now
+  skips it. Test: `test_dockers_resolver_is_not_an_app`.
+- **VibeCode Run had the same blind spot** (found by the verifier): `owui_compat/workspace_sandbox._resolve_mount_root`
+  also inspected its own container. It now reads the same table first. The table is parsed in one place,
+  `workspace/host_mounts.py`, which refuses malformed values with a readable reason instead of a raw parse error.
+- **One-time restart:** the first `--k8s` run after this change adds the annotation to every pod, so each restarts once.
+- **Files:** `scripts/k8s/compose_to_k8s.py`, `scripts/k8s/harvis-k8s.sh`, `scripts/k8s/k8s_extras.py`,
+  `scripts/k8s/test_compose_to_k8s.py` (new tests `test_rebuilt_image_rolls_only_the_pods_that_run_it`,
+  `test_backend_gets_its_host_mount_table`), `python_back_end/workspace/host_mounts.py` (new),
+  `python_back_end/workspace/terminal_container.py`, `python_back_end/owui_compat/workspace_sandbox.py`,
+  `python_back_end/plugins/hermes_ui/rest_sandbox.py`, `python_back_end/tests/test_terminal_host_mounts.py` (new),
+  `python_back_end/tests/test_hermes_ui_sandbox.py`.
+- **Result:** converter tests 19 pass; backend hermes_ui + owui suites 193 pass, sandbox/mount suites 45 pass. On VM 920 the backend restarted after the rerun and now refuses a
+  cross-origin socket (403, logged), which the old process did not.
+
+## Date: 2026-10-01 (later) — Hermes is the only frontend: its own sign-in, OWUI retired, review fixes (branch `harvis1.5`)
+
+- **Problem:** after the entry below, OWUI still owned sign-in, and after signing in its router could show the
+  old OWUI home. **Fix:** sign-in, sign-up, first-admin setup, an expired-session card, sign-out and password
+  change are Hermes screens (`src/app/sign-in/`, `src/lib/harvis-session.ts`, Settings → Account). The app
+  mounts only after the server confirms a session. A session that ends mid-use covers the app, which is
+  `inert`, so drafts survive re-sign-in. Any API 401 re-checks the session. This replaces the
+  `/auth?redirect=/` exit described in the entry below.
+- **The address is `host:9000/harvis/`** (David: keep the Harvis tag, drop the Hermes one). Vite builds with
+  `base: '/harvis/'`; nginx serves the shell and its files under `/harvis/`, and any other `/harvis/<path>`
+  gets the shell too (it routes on the #fragment). `/`, `/hermes...`, `/auth`, `/c/<id>` and every other
+  retired path redirect to `/harvis/`; sign-out reloads to the build base. The installer and README print
+  `/harvis/`.
+- **Sign-in looks like the old one David liked:** on wide screens a brand panel (robot logo, the cycling HARVIS,
+  "Agents, models and memory that run on your own machine.") beside the form; on narrow screens the robot
+  above it. "Sign in to Harvis" / "Create your Harvis account". The new validation and fixes are unchanged.
+- **OWUI retired:** `owui-builder` is gone from compose and nginx no longer mounts or serves the OWUI build.
+  `verify-fresh-install.sh` gates on the Hermes shell at `/harvis/`, a 401 when signed out, and the
+  redirects. README, `install.sh` and the
+  size-guard workflow name Hermes. `front_end/owui/` source stays for reference.
+- **Review fixes (confirmed by an adversarial review of this diff):**
+  - Sign-in, sign-up and the session check no longer echo the 7-day JWT in the JSON body
+    (`harvis_user_to_owui`). It lives only in the HttpOnly cookie.
+  - `/hermes-api/ws` refuses a handshake whose Origin is neither its own host nor the front door nor
+    `HARVIS_EXTRA_ORIGINS` (cross-site socket hijack from a sandbox preview port).
+  - Sign-in is rate-limited: zone `auth_signin`, 30/min per IP with burst 10, looser than signup because a lab
+    shares one NAT address. Covers `/api/v1/auths/signin` and `/api/auth/login`.
+  - Emoji autocomplete and the reaction picker fetched `./emojibase`, which broke once the page moved off the build's base path.
+    They now use the build base.
+  - The language provider loaded the user's language before anyone was signed in, so a non-English user saw
+    English until a reload. It now loads inside the session gate.
+  - The session watch now notices a different user signed in from another tab and restarts the app. The card
+    stays up until the reload, so the previous person's chats are never uncovered.
+  - A failed session check while signed in no longer strands the app on "unreachable". A stale probe can no
+    longer overwrite a fresh sign-in.
+  - Sign-up refuses a blank name or malformed email and says why under the field. A 409 says "email or name
+    is already in use" (the name is the unique username), instead of blaming the email.
+  - The Hermes socket loop no longer logs a traceback when the browser vanished mid-send. Starlette raises
+    `RuntimeError`, not `WebSocketDisconnect`, there. The verifier was failing on it.
+  - The size guard now also triggers on `repo-sandbox-engine/**`.
+- **Verified:**
+  - Laptop: ui vitest for sign-in, session and i18n 19+46 passed; backend 778 passed across the
+    owui_compat/hermes_ui suites (plus the new socket tests); compose→k8s converter 17 passed; `nginx -t` OK.
+    The 20 thread-test failures and 3 tsc errors are identical on a clean HEAD worktree.
+  - pve VM 901, patch applied to HEAD 9fa3eaa and rebuilt:
+    - the verifier passes everything except the old disk budget;
+    - sign-in and session bodies carry no `token`;
+    - `/hermes/emojibase/en/data.json` returns 200, and the bundle has no `./emojibase` left;
+    - the socket answers 101 same-origin and 403 cross-origin, and the refusal is logged;
+    - 45 bad sign-ins give 14 401s, then 31 429s;
+    - in the browser: sign-out, the sign-in screen, and the blank-name message.
+- **Known / not done:**
+  - Upgraded installs keep a stopped `harvis-owui-builder` container (no `--remove-orphans`).
+  - OWUI-only features have no Hermes screen yet: CAD Studio, VibeCode IDE + GitHub OAuth (callback defaults
+    to `/ide`), Projects, repo KBs, Evaluations, skill editor, model profiles, admin signup toggle, Inference
+    Nodes. Backend links to `/harvis/vibecode` and `/harvis/notebooks` now open the Hermes home.
+  - Still open from the review:
+    - nginx CORS still reflects localhost:3000/3001/5173/8000 with credentials;
+    - an expired card leaves the previous app mounted (blurred);
+    - `docker-compose.prebuilt.yml`/`dev`/`with-services` never mount `nginx-harvis.conf` or the Hermes build.
+
+## Date: 2026-10-01 — Hermes at `/` with no `/hermes/` in the address; installer restarts nginx; sandbox paths; saved model server (branch `harvis1.5`)
+
+- **Problem:** the address bar read `host:9000/hermes/#/<chat>`. **Fix:** nginx serves the Hermes shell itself at
+  `/` (same session gate); `/hermes`, `/hermes/` and `/hermes/index.html` 301 to `/` and the browser keeps the
+  `#/<chat>` fragment. Files stay under `/hermes/assets/` (Vite base unchanged). The signed-out exit is now
+  `/auth?redirect=/`. Links that built `/hermes/#/...` (research report footer, setup wizard hosting link) and the
+  `verify-fresh-install.sh` front-door gate now use `/`. The OWUI sign-in page hands the `#/<chat>` back after
+  sign-in instead of dropping it.
+- **Problem:** re-running `./install.sh` after `git pull` kept serving the old routes and the old UI: nginx
+  bind-mounts its config and both UI builds, those paths get replaced (new inode), and `compose up` leaves an
+  unchanged nginx container running. **Fix:** `launch()` always runs `docker compose restart nginx` after `up`.
+- **Problem:** the AI's file tools refused `/workspace/fib.py` ("outside your workspace") although the chat
+  sandbox shows every file under `/workspace`. **Fix:** `tools.py` `_sandbox_path_to_rel()` strips the
+  `/workspace` prefix before `validate_agent_path`, which still refuses `/workspace/../x`.
+- **Problem:** with the model server on another machine, a re-run printed "no model server found / chat has
+  nothing to talk to" while chat worked. **Fix:** `detect_provider` honours a non-auto-detected
+  `HARVIS_LLM_BASE_URL` already saved in `.env` (as `--llm-url` does), probes it and reports PASS or WARN.
+- **Verified:** laptop backend 22 passed (`test_research_from_chat`, `test_sandbox_path_to_rel`), 84 passed across
+  tool/orchestration/sandbox/runner suites; `nginx -t` passes. On pve VM 901 (Docker mode, model server
+  192.168.4.244): `./install.sh --yes` exit 0 three times, "model server ... (saved in .env), 14 model(s)";
+  signed out `/` → 302 `/auth?redirect=/`, `/hermes/` → 301 `/`; signed in, `/hermes/#/<chat>` reloads to
+  `/#/<chat>` with the chat open, WebSocket opens, no failed asset loads.
+- **Not done / known:** OWUI is still the sign-in page, and after sign-in its client router can render the
+  old OWUI home at `/` (David saw this). The served OWUI build is also stale: `owui-builder` skips when
+  `/out/index.html` exists, so OWUI source edits never reach a machine that built once. Next step is a
+  Hermes-native sign-in/setup and retiring OWUI (vault note 2026-10-01-hermes-only-frontend-handoff).
+
+## Date: 2026-09-30 — The AI can run code in its chat sandbox; leaving Kubernetes runs the full launch (branch `harvis1.5`)
+
+- **Problem:** on the 4090 the AI never ran the code it wrote. Plain chat launches agent runs in "auto" mode,
+  and `runner.py` withheld `exec` from every auto run, then told the model "you cannot run commands". It was
+  withheld because, outside a sandbox, `dispatch_tool` runs commands inside the backend, which mounts
+  docker.sock. **Fix:** `_launch_withholds()` offers `exec` on an auto run only when the run has a chat sandbox
+  session id and `HARVIS_BUILD_ISOLATED_RUNNER` is on: the exact condition under which `dispatch_tool` sends
+  the command to the socket-less per-session container. Everywhere else it stays withheld. `run_tests` is now
+  withheld alongside it; it was never advertised, but `dispatch_tool` runs it as a shell command, so a model
+  naming it on an auto run without a sandbox would have run in the backend. The prompt text follows the offer.
+- **Problem:** `./install.sh --k8s-off` (and `--k8s-uninstall`) ended with a bare `docker compose up -d`, which
+  skipped new `.env` secrets, the database password sync and image builds. That is the path the 4090 took
+  into the password failure. **Fix:** the installer now leaves Kubernetes, then runs its normal preflight,
+  `.env` and launch. `launch()` also restarts a backend whose logs show the password failure, because it
+  opens its database pool only once.
+- **Verified:** 6 new tests (`tests/test_runner_launch_withholds.py`), 46 pass with the sandbox and
+  orchestration suites. On blank-rig VM 920 (harvis1.5 at 9fa3eaa plus this patch, in Kubernetes mode, old
+  database volume from 09-29, `POSTGRES_PASSWORD` removed from `.env`): `./install.sh --k8s-off` generated a
+  new password and the messaging token, printed "Database password matches .env", and all 12 services came up
+  with the database up. The new password logged in over the network and a wrong one was refused.
+  `verify-fresh-install.sh` passed every functional check; its only FAIL is the 7 GB disk budget, which was
+  already over before this. `./install.sh --k8s --yes` then went back to Kubernetes, synced the password, did
+  not import the sandbox image, and came up healthy.
+
+## Date: 2026-09-30 — Fresh installs build the sandbox image and get every shared secret (branch `harvis1.5`)
+
+Follow-up to the 4090 session's fixes, which were made by hand on that one machine. These make the
+machine-level parts happen on every install.
+- **Problem:** nothing built `harvis-repo-sandbox:local`, the image every chat sandbox, the AI's code runner
+  and MCP servers run in (the terminal and isolated runner are on by default). Every machine had built it by
+  hand; a fresh one got a Workspace with no terminal and no code execution. **Fix:** one-shot compose service
+  `repo-sandbox-image` (build only, `network_mode: none`, exits 0), so `install.sh`'s `up --build` builds it.
+  Kubernetes mode skips it, and `harvis-k8s.sh` no longer imports one-shot images nothing depends on.
+  `scripts/verify-fresh-install.sh` expects the new service.
+- **Problem:** turning messaging on required adding `MESSAGING_GATEWAY_TOKEN` to `.env` by hand. **Fix:**
+  `install.sh` generates it like the other shared secrets (added once, never rotated).
+- **Problem:** `docker-compose.prebuilt.yml`, `docker-compose.dev.yml`, `docker-compose-with-services.yaml` and
+  `embedding/docker-compose.yml` hardcoded `pgpassword`, so they could not reach a database whose password
+  follows `.env`. **Fix:** they read `${POSTGRES_PASSWORD:-pgpassword}`.
+- **Verified:** `docker compose up --build -d repo-sandbox-image` built the image (Node 20.20, Python 3.11.2,
+  git 2.39) and exited 0; the k8s generator prints "skipped" for it; the import list is unchanged apart from
+  dropping it; 17/17 generator tests pass; the token is added once (64 hex) and kept on rerun; prebuilt and
+  embedding files render with the `.env` value (dev and with-services already failed to render before this,
+  on a missing `front_end/jfrontend/.env.local`).
+
+## Date: 2026-09-30 — The database follows .env on every launch (branch `harvis1.5`)
+
+- **Problem:** on the 4090 the backend started with no database: "password authentication failed for user pguser".
+  Postgres reads `POSTGRES_PASSWORD` only when it first creates its data directory, so a data directory left by an
+  earlier install (or by a `--k8s` run, whose hostPath creates the directory with no Docker volume object) keeps its
+  old password while a fresh clone writes a new random one to `.env`. The backend opens its pool once and never
+  retries, so sign-in and sign-up both failed. The old guard in `write_env` that was meant to reuse the password
+  never fired (it read the project name literally as `${HARVIS_STACK_NAME:-harvis}`).
+- **Fix:** `install.sh` gains `sync_db_password`, run in `launch()` before `docker compose up --build`: it starts
+  `pgsql` alone and sets `pguser`'s password from the container's own `POSTGRES_PASSWORD` over Postgres's trusted
+  local socket. Idempotent; the value never leaves the container. The dead guard is gone, so `.env` always gets a
+  generated password. `scripts/k8s/harvis-k8s.sh` does the same in `cmd_up` and restarts the backend if its logs
+  show the password failure.
+- **Verified:** throwaway pgvector:pg15 database created with password A, recreated with B on the same volume. A
+  network login with B failed before the sync and succeeded after; A failed after. 17/17 generator tests pass.
+  Not yet run through a full `./install.sh` on a blank machine.
+
 ## Date: 2026-09-30 — Ready for the 4090: GPU request, /audio/ leak, re-run and reinstall fixes (branch `harvis1.5`)
 
 - **Problem:** with one NVIDIA card, llmfit (compose `runtime: nvidia`) and the in-cluster Ollama each requested
@@ -4811,3 +5216,6 @@ interface VideoResult {
 - ✅ Videos filtered to YouTube-only results
 
 ---
+
+## 2026-10-02 — Voice call speed
+Problem: voice call slow to answer. Cause: browser waited for whole reply + whole-reply TTS; 1.25 s silence wait; model reloads. Fix: per-sentence speech, 0.9 s silence wait, voice model warm-up (voice_warm.py, /voice/warm). Files: voice-playback.ts, use-voice-conversation.ts, voice-assistant.ts, voice-call.tsx, rest_voice.py, voice_warm.py, model_proxy.py. Result: speech starts ~1.2 s after a warm turn (was ~7.8 s). Open: first turn can still hit a different model than the one warmed.

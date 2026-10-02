@@ -7,8 +7,8 @@ name: Docker size guard 📦
 #
 # Its own workflow rather than a job on backend-ci.yaml, because that one only
 # fires on `python_back_end/**`. The default set's size is also moved by
-# docker-compose.yaml, browser_runner/, services/voice-onnx/ and
-# front_end/owui/, so a compose-only regression would never reach it.
+# docker-compose.yaml, browser_runner/, services/voice-onnx/,
+# repo-sandbox-engine/ and front_end/hermes-desktop-ui/, so a compose-only regression would never reach it.
 
 # The two path lists below are identical and have to stay that way. GitHub
 # Actions does not support YAML anchors, so they cannot be shared — editing one
@@ -22,8 +22,9 @@ on:
       - "python_back_end/requirements*.txt"
       - "browser_runner/**"
       - "services/voice-onnx/**"
-      - "front_end/owui/Dockerfile"
-      - "front_end/owui/package*.json"
+      - "repo-sandbox-engine/**"
+      - "front_end/hermes-desktop-ui/Dockerfile"
+      - "front_end/hermes-desktop-ui/package*.json"
       - ".github/workflows/docker-size-guard.yaml"
   pull_request:
     paths:
@@ -32,8 +33,9 @@ on:
       - "python_back_end/requirements*.txt"
       - "browser_runner/**"
       - "services/voice-onnx/**"
-      - "front_end/owui/Dockerfile"
-      - "front_end/owui/package*.json"
+      - "repo-sandbox-engine/**"
+      - "front_end/hermes-desktop-ui/Dockerfile"
+      - "front_end/hermes-desktop-ui/package*.json"
       - ".github/workflows/docker-size-guard.yaml"
   workflow_dispatch:
 

@@ -16,6 +16,8 @@ import re
 import uuid
 from typing import Any, Optional
 
+import asyncpg
+
 # ─── vocabulary ──────────────────────────────────────────────────────────────
 
 # Which runner executes a step. "auto" lets the coordinator choose per step.
@@ -429,9 +431,11 @@ async def set_default_assistant(pool, user_id: int, agent_id: str) -> Optional[d
     return agent_to_dict(row) if row else None
 
 
-# What Work mode gets when the user has no teammate yet: a general-purpose
-# one with the computer. Named after the product so the picker reads naturally;
-# the user can rename it or make another the default later.
+# What Work mode and chat browsing get when the user has not chosen a default
+# teammate: a general-purpose one with the computer and no standing
+# clearances, so every sign-in, payment, send and delete asks. Named after the
+# product so the picker reads naturally; the user can rename it or make
+# another the default later.
 DEFAULT_ASSISTANT = {
     "name": "Harvis",
     "title": "Harvis",
@@ -441,10 +445,14 @@ DEFAULT_ASSISTANT = {
         "when they ask for one). Ask before signing in, paying, sending or deleting."
     ),
     "avatar": {"mascot": "claw", "tint": "#7c5cff"},
+    "autonomy": {},
 }
+# Handles tried in order when "harvis" is already a sub-agent of this user's.
+_DEFAULT_NAMES = ("Harvis", "harvis-assistant")
 
 
 async def get_default_assistant(pool, user_id: int) -> Optional[dict]:
+    """The teammate the user explicitly made the default, if it is enabled."""
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT * FROM owui_subagents WHERE user_id=$1 AND is_teammate "
@@ -454,27 +462,72 @@ async def get_default_assistant(pool, user_id: int) -> Optional[dict]:
     return agent_to_dict(row) if row else None
 
 
-async def ensure_default_assistant(pool, user_id: int) -> dict:
-    """The teammate Work mode talks to — found, promoted, or created.
+async def _create_fresh_default(pool, user_id: int) -> dict:
+    last_error: Exception = ValidationError("could not name the default assistant")
+    for name in (*_DEFAULT_NAMES, f"harvis-{uuid.uuid4().hex[:6]}"):
+        try:
+            return await create_agent(pool, user_id, {**DEFAULT_ASSISTANT, "name": name})
+        except ValidationError as exc:
+            # The handle belongs to another of this user's sub-agents; try the next.
+            last_error = exc
+    raise last_error
 
-    Order: an existing default; else the oldest enabled teammate becomes it;
-    else a fresh DEFAULT_ASSISTANT. Idempotent, so the frontend may call it on
-    every switch into Work mode.
+
+async def ensure_default_assistant(pool, user_id: int) -> dict:
+    """The teammate Work mode and chat browsing talk to: the one the user made
+    the default (and left enabled), else a fresh DEFAULT_ASSISTANT.
+
+    No existing teammate is ever promoted. A teammate carries its own job, a
+    browser profile with its saved logins, and whatever hard limits the user
+    cleared *for that teammate*; picking one by accident (the first by name)
+    would hand all of that to a plain chat message. Idempotent, so the
+    frontend may call it on every switch into Work mode, and safe to race:
+    two first calls at once end with one default and one row, because the
+    partial unique index on (user_id) WHERE is_default_assistant and the
+    (user_id, name) unique decide the winner and the loser re-reads.
     """
     found = await get_default_assistant(pool, user_id)
     if found:
         return found
-    teammates = await list_teammates(pool, user_id, enabled_only=True)
-    if teammates:
-        promoted = await set_default_assistant(pool, user_id, teammates[0]["id"])
-        if promoted:
-            return promoted
     try:
-        created = await create_agent(pool, user_id, DEFAULT_ASSISTANT)
-    except ValidationError:
-        # The name is taken by a non-teammate sub-agent row; still make one.
-        created = await create_agent(pool, user_id, {**DEFAULT_ASSISTANT, "name": "Harvis teammate"})
-    return (await set_default_assistant(pool, user_id, created["id"])) or created
+        created = await _create_fresh_default(pool, user_id)
+    except asyncpg.UniqueViolationError:
+        # Lost the race on the name: the other call's row is the one to use.
+        found = await get_default_assistant(pool, user_id)
+        if found:
+            return found
+        created = await _create_fresh_default(pool, user_id)
+    try:
+        promoted = await _claim_default_slot(pool, user_id, created["id"])
+    except asyncpg.UniqueViolationError:
+        promoted = None
+    if promoted:
+        return promoted
+    # Lost the race on the default slot: drop our spare row, use the winner.
+    await delete_agent(pool, user_id, created["id"])
+    found = await get_default_assistant(pool, user_id)
+    if found:
+        return found
+    raise ValidationError("Could not make a default assistant; try again.")
+
+
+async def _claim_default_slot(pool, user_id: int, agent_id: str) -> Optional[dict]:
+    """Make ``agent_id`` the default only if the user has none yet.
+
+    Unlike set_default_assistant this never clears an existing default: that
+    one swaps on the user's say-so, this one must not undo a default that
+    another call made a moment ago. Two claims at once: the partial unique
+    index lets one through and raises UniqueViolationError for the other.
+    """
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE owui_subagents SET is_default_assistant = TRUE, updated_at = NOW() "
+            "WHERE id=$1 AND user_id=$2 AND is_teammate AND NOT EXISTS ("
+            "  SELECT 1 FROM owui_subagents WHERE user_id=$2 AND is_default_assistant"
+            ") RETURNING *",
+            agent_id, int(user_id),
+        )
+    return agent_to_dict(row) if row else None
 
 
 async def set_pinned_chat(pool, user_id: int, agent_id: str, chat_id: Optional[str]) -> None:

@@ -4,6 +4,7 @@ import type { QuickModelOption } from '@/app/chat/composer/types'
 import type { ClientSessionState, CommandDispatchResponse } from '@/app/types'
 import { formatRefValue } from '@/components/assistant-ui/directive-text'
 import { type ChatMessage, type ChatMessagePart, chatMessageText, textPart } from '@/lib/chat-messages'
+import { harvisFileUrl } from '@/lib/harvis-uploads'
 import { normalize } from '@/lib/text'
 import type { ComposerAttachment } from '@/store/composer'
 import type { ModelOptionsResponse, SessionInfo } from '@/types/hermes'
@@ -228,6 +229,14 @@ export function attachmentDisplayText(attachment: ComposerAttachment): string | 
 
   if (attachment.refText) {
     return attachment.refText
+  }
+
+  // A Harvis upload (browser build) has no path: the image is fetched back by
+  // id and a document shows as a named chip.
+  if (attachment.fileId) {
+    return attachment.kind === 'image'
+      ? `@image:${harvisFileUrl(attachment.fileId)}`
+      : `@file:${formatRefValue(attachment.label)}`
   }
 
   if (attachment.kind === 'image') {

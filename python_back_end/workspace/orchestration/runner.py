@@ -46,6 +46,7 @@ from .tools import (
     COMPUTER_PROMPT,
     COMPUTER_TOOLS,
     WIRE_TOOL_SCHEMA,
+    _isolated_runner_enabled,
     dispatch_tool,
     filter_wire_schema,
     lane_for_tool,
@@ -291,6 +292,25 @@ def _ws_fingerprint(path: str) -> str:
     except Exception:
         return ""
     return h.hexdigest()
+
+
+def _launch_withholds(launch_mode: str, session_id: str | None) -> set[str]:
+    """Tools an auto-detected launch withholds from the offered schema.
+
+    exec is withheld on auto launches because, outside a chat sandbox, dispatch_tool
+    runs it inside the backend process, which mounts docker.sock. A run that carries
+    a sandbox session id with the isolated runner on executes in the socket-less
+    per-session container instead, so withholding it there only left the model
+    unable to check its own code. The condition mirrors dispatch_tool's routing
+    exactly: if exec would not go to the isolated container, it is not offered.
+    run_tests is never advertised but dispatch_tool runs it as a shell command too,
+    so it is withheld alongside exec or a model naming it would slip past.
+    """
+    if launch_mode != "auto":
+        return set()
+    if session_id and _isolated_runner_enabled():
+        return set()
+    return {"exec", "run_tests"}
 
 
 def _default_system(label: str, disabled: set[str]) -> str:
@@ -749,7 +769,7 @@ class SubAgentRunner:
         # web. Writing into an isolated, initially-empty scratch directory behind
         # validate_agent_path is not the risk this withhold was defending against;
         # running code is, and that stays withheld.
-        disabled: set[str] = ({"exec"} if launch_mode == "auto" else set())
+        disabled: set[str] = _launch_withholds(launch_mode, session_id)
         # A custom sub-agent's allowed-tools ALLOWLIST arrives already inverted to a
         # withhold set by the orchestrator; union it in. 'finish' is never withheld
         # (the loop needs it to terminate). authorize_action at dispatch stays the

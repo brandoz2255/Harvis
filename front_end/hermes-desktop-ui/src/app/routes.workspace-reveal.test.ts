@@ -28,7 +28,8 @@ import {
   sessionRoute,
   SETTINGS_ROUTE,
   SKILLS_ROUTE,
-  syncWorkspaceRoute
+  syncWorkspaceRoute,
+  WEBHOOKS_ROUTE
 } from './routes'
 
 vi.mock('@/components/pane-shell/tree/store', async importOriginal => ({
@@ -104,6 +105,13 @@ describe('syncWorkspaceRoute', () => {
     expect(fronted()).toBe(true)
   })
 
+  it('treats Scheduled jobs as a page, not a pop-up overlay', () => {
+    syncWorkspaceRoute(CRON_ROUTE)
+
+    expect($workspaceIsPage.get()).toBe(true)
+    expect(fronted()).toBe(true)
+  })
+
   it('fronts on a page route reached with a query', () => {
     syncWorkspaceRoute(`${SKILLS_ROUTE}?tab=mcp`)
 
@@ -140,7 +148,7 @@ describe('syncWorkspaceRoute', () => {
     ['the new-chat route', NEW_CHAT_ROUTE],
     ['an overlay', SETTINGS_ROUTE],
     ['an overlay with a query', `${SETTINGS_ROUTE}?tab=keys`],
-    ['another overlay', CRON_ROUTE],
+    ['another overlay', WEBHOOKS_ROUTE],
     ['yet another overlay', AGENTS_ROUTE]
   ])('leaves the tab alone on %s', (_label, to) => {
     syncWorkspaceRoute(to)

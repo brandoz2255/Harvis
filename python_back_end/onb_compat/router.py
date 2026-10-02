@@ -259,6 +259,17 @@ async def create_notebook(
     return nb_to_onb(nb)
 
 
+async def _person_model(request: Request, user_id, chosen: Optional[str], *, count: bool = True) -> str:
+    """The admin's limits (Settings ▸ People): the model to run for this person, or a 403.
+
+    An empty ``chosen`` means the default: their first allowed model if they have
+    a list, else this server's default chat model.
+    """
+    from plugins.people.controls import require_turn
+    model = await require_turn(getattr(request.app.state, "pg_pool", None), int(user_id), chosen or "", count=count)
+    return model or await _default_chat_model()
+
+
 @router.post("/notebooks/{notebook_id}/autoname")
 async def onb_autoname_notebook(
     notebook_id: str,
@@ -282,7 +293,11 @@ async def onb_autoname_notebook(
     )
 
     gen_title, gen_emoji, gen_synopsis = None, None, None
-    if sources:
+    from plugins.people.controls import admit_turn, allowed_for, only_allowed
+    pool = getattr(request.app.state, "pg_pool", None)
+    may_run = (await admit_turn(pool, int(current_user["id"]), None, count=False)).ok
+    allowed = await allowed_for(pool, int(current_user["id"]))
+    if sources and may_run:
         # Include a short content excerpt per source, not just the title — a generic
         # source title (e.g. "Pasted text") alone yields a generic notebook name, so
         # feed the LLM what the content is actually ABOUT.
@@ -331,7 +346,7 @@ async def onb_autoname_notebook(
             FALLBACK_MODELS = []
         autoname_models = ["granite4.1:8b", "llama3.1:8b", "gemma4:e4b"]
         autoname_models += [m for m in FALLBACK_MODELS if m not in autoname_models]
-        for model in autoname_models:
+        for model in only_allowed(autoname_models, allowed) or (allowed or [])[:1]:
             try:
                 async with httpx.AsyncClient(timeout=60.0) as c:
                     r = await c.post(
@@ -947,10 +962,12 @@ async def chat_execute(
     if not s:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    model = body.get("model_override") or s["model_override"] or await _default_chat_model()
+    from plugins.people.controls import allowed_for
+    model = await _person_model(request, uid, body.get("model_override") or s["model_override"])
     source_ids = _context_source_ids(body.get("context") or {})
 
-    rag = RAGChatService(manager)
+    rag = RAGChatService(manager, allowed_models=await allowed_for(getattr(request.app.state, "pg_pool", None),
+                                                                   int(uid)))
     cits = []
     try:
         answer, cits = await rag.answer_for_session(
@@ -1215,10 +1232,13 @@ async def onb_execute_transformation(
 ):
     tid = (body or {}).get("transformation_id")
     input_text = (body or {}).get("input_text") or ""
-    model = (body or {}).get("model_id") or await _default_chat_model()
     t = await _resolve_transformation(tid, current_user["id"], manager)
     if not t:
         raise HTTPException(status_code=404, detail="Transformation not found")
+    from plugins.people.controls import require_turn
+    model = await require_turn(getattr(request.app.state, "pg_pool", None), int(current_user["id"]),
+                               (body or {}).get("model_id") or "")
+    model = model or await _default_chat_model()
     try:
         output = await _run_transformation_llm(t["prompt"], input_text, model)
     except httpx.HTTPError as e:
@@ -1464,7 +1484,7 @@ async def onb_notebook_generate(
                 else "This notebook has no source content to generate from yet."
             ),
         )
-    model = (body or {}).get("model_id") or await _default_chat_model()
+    model = await _person_model(request, current_user["id"], (body or {}).get("model_id"))
 
     if kind in _MARKDOWN_GENERATORS:
         gen = _MARKDOWN_GENERATORS[kind]
@@ -1647,7 +1667,12 @@ async def onb_suggest_questions(
     if not content or not content.strip():
         return {"questions": []}
 
-    model = (body or {}).get("model_id") or await _default_chat_model()
+    from plugins.people.controls import admit_turn, only_allowed
+    picked = await admit_turn(getattr(request.app.state, "pg_pool", None), int(current_user["id"]),
+                              (body or {}).get("model_id") or "", count=False)
+    if not picked.ok:
+        return {"questions": []}
+    model = picked.model or await _default_chat_model()
     prompt = (
         "You are looking at the source material of a research notebook. Suggest 5 "
         "specific, interesting questions a curious reader could ask about this material. "
@@ -1660,7 +1685,7 @@ async def onb_suggest_questions(
         from notebooks.rag_chat import FALLBACK_MODELS
     except Exception:
         FALLBACK_MODELS = []
-    candidates = [model] + [m for m in FALLBACK_MODELS if m != model]
+    candidates = only_allowed([model] + [m for m in FALLBACK_MODELS if m != model], picked.allowed)
     questions: List[str] = []
     for m in candidates[:3]:
         try:
@@ -1827,7 +1852,7 @@ async def onb_create_source_insight(
     content = srow["content_text"]
     if not content or not content.strip():
         raise HTTPException(status_code=400, detail="Source has no extracted content to transform")
-    insight_model = await _default_chat_model()
+    insight_model = await _person_model(request, current_user["id"], None)
     try:
         output = await _run_transformation_llm(t["prompt"], content, insight_model)
     except httpx.HTTPError as e:
@@ -2426,6 +2451,12 @@ async def onb_test_model(
             provider = m.get("provider") or "ollama"
             break
 
+    from plugins.people.controls import allowed_for
+    allowed = await allowed_for(getattr(request.app.state, "pg_pool", None), int(current_user["id"]))
+    if allowed is not None and model_id not in allowed:
+        return {"success": False, "message": f"Not pinged — {model_id} is not on the models the Harvis admin "
+                "allows you.", "details": model_id}
+
     if provider != "ollama":
         return {
             "success": True,
@@ -2886,10 +2917,18 @@ async def onb_search_ask(
     body: {question, strategy_model, answer_model, final_answer_model}
     """
     question = (body.get("question") or "").strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="question is required")
     ask_default = await _default_chat_model()
-    strategy_model = (body.get("strategy_model") or ask_default).strip()
-    answer_model = (body.get("answer_model") or ask_default).strip()
-    final_model = (body.get("final_answer_model") or ask_default).strip()
+    # One question is one message; all three models face the admin's list.
+    from plugins.people.controls import require_turn
+    pool = getattr(request.app.state, "pg_pool", None)
+    strategy_model = await require_turn(pool, int(current_user["id"]), body.get("strategy_model") or "", count=False)
+    final_model = await require_turn(pool, int(current_user["id"]), body.get("final_answer_model") or "", count=False)
+    answer_model = await require_turn(pool, int(current_user["id"]), body.get("answer_model") or "")
+    strategy_model = (strategy_model or ask_default).strip()
+    answer_model = (answer_model or ask_default).strip()
+    final_model = (final_model or ask_default).strip()
     uid = current_user["id"]
 
     if not question:

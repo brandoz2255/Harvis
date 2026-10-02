@@ -128,6 +128,8 @@ import {
 import { isWatchWindow } from '@/store/windows'
 import type { SessionCreateResponse, SessionMessage, SessionResumeResponse, UsageStats } from '@/types/hermes'
 
+import { openRouteTile } from '@/store/route-tiles'
+
 import { navigateToWorkspacePage, NEW_CHAT_ROUTE, sessionRoute, SETTINGS_ROUTE } from '../../../routes'
 import type { ClientSessionState, SidebarNavItem } from '../../../types'
 import { sessionContextDrift } from '../session-context-drift'
@@ -658,6 +660,13 @@ export function useSessionActions({
       if (item.action === 'new-session') {
         setWorkspaceScope('sessions')
         startFreshSessionDraft()
+
+        return
+      }
+
+      // Scheduled jobs open as a side tile beside the chat, not a full page.
+      if (item.id === 'cron' && item.route) {
+        openRouteTile(item.route)
 
         return
       }

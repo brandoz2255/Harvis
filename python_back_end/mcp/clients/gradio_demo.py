@@ -1,7 +1,7 @@
 import gradio as gr, requests, uuid, os, json
 
 API = os.getenv("MCP_URL", "http://127.0.0.1:8000/mcp/invoke")
-KEY = os.getenv("MCP_KEY", "dev-key")
+KEY = os.getenv("MCP_KEY", "")  # the value of HARVIS_MCP_SERVER_TOKEN on the server
 
 def call_tool(name, args_json):
     try:

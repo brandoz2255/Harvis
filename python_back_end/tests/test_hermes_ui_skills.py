@@ -63,6 +63,10 @@ class _Conn:
         self.log.append((sql, args))
         return self.rows[0] if self.rows else None
 
+    async def fetchval(self, sql, *args):
+        self.log.append((sql, args))
+        return 1 if self.rows else None
+
 
 class _Pool:
     def __init__(self, rows=()):
@@ -164,3 +168,46 @@ def test_after_turn_announces_a_drafted_skill(monkeypatch):
         await asyncio.gather(*list(learn._tasks))
     asyncio.run(run())
     assert heard == [{"name": "docker-compose-debug", "description": "When compose won't start."}]
+
+
+# ─── adding a skill from the Skills tab ──────────────────────────────────────
+
+SKILL_MD = """---
+name: weekly-report
+description: Use when I ask for my weekly report.
+---
+# Weekly report
+
+1. Collect what I did since Monday.
+"""
+
+
+def test_skill_name_comes_from_the_box_then_frontmatter_then_heading():
+    assert rest_skills.skill_name(SKILL_MD, "  mine ") == "mine"
+    assert rest_skills.skill_name(SKILL_MD) == "weekly-report"
+    assert rest_skills.skill_name("# Cake facts\n\nAlways cake.") == "Cake facts"
+    assert rest_skills.skill_name("no heading at all") == ""
+
+
+def test_adding_a_skill_saves_it_on_and_approved():
+    pool = _Pool()
+    out = asyncio.run(rest_skills.skill_create(_Req(pool, {"content": SKILL_MD}), {"id": 7}))
+    assert out["ok"] and out["name"] == "weekly-report"
+    sql, args = pool.log[-1]
+    assert "INSERT INTO owui_skills" in sql and "TRUE" in sql
+    assert args[1] == 7 and args[2] == "weekly-report"
+    assert args[3] == "Use when I ask for my weekly report."
+    meta = json.loads(args[6])
+    assert meta["audit"]["verdict"] == "supported" and meta["audit"]["approved_by"] == 7
+
+
+def test_adding_refuses_empty_unnamed_bad_names_and_duplicates():
+    from fastapi import HTTPException
+
+    for body in ({"content": "  "}, {"content": "no heading"}, {"content": "# x", "name": "../etc"}):
+        with pytest.raises(HTTPException) as e:
+            asyncio.run(rest_skills.skill_create(_Req(_Pool(), body), {"id": 7}))
+        assert e.value.status_code == 400
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(rest_skills.skill_create(_Req(_Pool([1]), {"content": SKILL_MD}), {"id": 7}))
+    assert e.value.status_code == 409

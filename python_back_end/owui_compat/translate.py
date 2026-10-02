@@ -116,8 +116,11 @@ def _default_permissions(role: str) -> dict:
     }
 
 
-def harvis_user_to_owui(user: dict, token: str, *, expires_at: Optional[int] = None) -> dict:
-    """Build OWUI's user object from a Harvis ``users`` row + a minted JWT.
+def harvis_user_to_owui(user: dict, *, expires_at: Optional[int] = None) -> dict:
+    """Build OWUI's user object from a Harvis ``users`` row.
+
+    The JWT is deliberately absent: it rides only in the HttpOnly cookie, and a
+    copy in the body would let any script on the page lift a 7-day credential.
 
     Harvis has no ``role`` column, so role is synthesized: the first registrant
     (id == 1, override via ``HARVIS_OWUI_ADMIN_USER_IDS``) is ``admin``,
@@ -141,8 +144,6 @@ def harvis_user_to_owui(user: dict, token: str, *, expires_at: Optional[int] = N
         # The Account pane binds this straight to <input type="date">, which
         # only accepts YYYY-MM-DD. asyncpg hands back a datetime.date.
         "date_of_birth": dob.isoformat() if hasattr(dob, "isoformat") else dob,
-        "token": token,
-        "token_type": "Bearer",
         "expires_at": expires_at,
         "permissions": _default_permissions(role),
     }

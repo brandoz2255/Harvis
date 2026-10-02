@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from . import profiles, sessions, settings_store
+from . import profiles, rest_mcp, sessions, settings_store
 from .rest import CONFIG, apply_model_choice
 
 ERR_PARAMS = -32602
@@ -52,6 +52,8 @@ class SettingsMethods:
     # ── config ───────────────────────────────────────────────────────────
     async def m_config_get(self, rid, params):
         config = await settings_store.config_for(self.pool, self.user_id, CONFIG)
+        # Same projection REST /config carries, so both readers list one set of servers.
+        config["mcp_servers"] = await rest_mcp.config_servers(self.pool, self.user_id)
         key = str(params.get("key") or "").strip()
         result: dict[str, Any] = {"config": config, **config}
         if key:
@@ -93,6 +95,21 @@ class SettingsMethods:
     async def m_reload_env(self, rid, params):
         # Provider keys live in the backend's own environment; nothing to reload per user.
         return _ok(rid, {"ok": True, "reloaded": False})
+
+    async def m_reload_mcp(self, rid, params):
+        """The MCP tab calls this after every mcp.json save. The rows are already
+        in the table; what goes stale is a live session opened against the old
+        config, so this user's cached sessions are dropped and reconnect lazily."""
+        from plugins.mcp.runtime import mcp_runtime
+
+        prefix = f"{self.user_id}:"
+        dropped = 0
+        for key in mcp_runtime.live_keys():
+            if key.startswith(prefix) and await mcp_runtime.disconnect(
+                self.user_id, key[len(prefix):]
+            ):
+                dropped += 1
+        return _ok(rid, {"ok": True, "reloaded": True, "disconnected": dropped})
 
     # ── profiles (hermes-bots plugin) ────────────────────────────────────
     async def _profile(self, rid, run):

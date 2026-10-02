@@ -50,6 +50,8 @@ class ScriptGenerator:
     """Generates podcast scripts from content"""
     
     def __init__(self, prompts_dir: Optional[str] = None):
+        # A caller may pin the model (Harvis: the admin's list for this person).
+        self.model: Optional[str] = None
         self.prompts_dir = prompts_dir or os.path.join(
             os.path.dirname(os.path.dirname(__file__)), '..', 'prompts'
         )
@@ -192,7 +194,7 @@ SCRIPT (JSON only, no markdown):"""
     
     async def _call_llm(self, prompt: str, model: str = None) -> str:
         """Call LLM for script generation"""
-        model = model or DEFAULT_MODEL
+        model = model or self.model or DEFAULT_MODEL
         
         # Try local Ollama. requests is blocking; run it off the event loop so a
         # multi-minute podcast generation doesn't freeze the whole backend.

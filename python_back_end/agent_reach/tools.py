@@ -214,7 +214,30 @@ async def web_read(url: str) -> dict[str, Any]:
         timeout=30.0,
     )
     text = (resp.text or "")[:_MAX_CHARS]
+    if _login_walled(url, text):
+        # Reading the wall as the page would let the model "summarise" a sign-in
+        # form. Search snippets still carry bios and follower counts.
+        return {
+            "ok": False,
+            "url": url,
+            "via": "jina",
+            "error": "login wall: this site shows its content only to signed-in users; "
+            "use agent_reach_web_search for public snippets about it",
+        }
     return {"ok": True, "url": url, "via": "jina", "text": text, "chars": len(text)}
+
+
+# Sites that answer an anonymous reader with a sign-in page instead of the post.
+_LOGIN_WALLED_HOSTS = ("instagram.com", "facebook.com", "threads.net", "threads.com")
+_LOGIN_WALL_MARKERS = ("log in", "login", "sign up", "create new account")
+
+
+def _login_walled(url: str, text: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    if not any(host == h or host.endswith("." + h) for h in _LOGIN_WALLED_HOSTS):
+        return False
+    head = text[:3000].lower()
+    return any(m in head for m in _LOGIN_WALL_MARKERS)
 
 
 async def web_search(query: str, max_results: int = 5) -> dict[str, Any]:

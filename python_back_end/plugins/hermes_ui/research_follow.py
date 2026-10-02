@@ -62,7 +62,7 @@ def report_text(research_id: str, result: str, sources: list, origin: str) -> st
     if listed and len(listed) * 2 > len(urls):
         titles = {s.get("url"): s.get("title") for s in sources if isinstance(s, dict)}
         body += "\n\n### Sources\n\n" + "\n".join(f"- [{titles.get(u) or u}]({u})" for u in listed)
-    page = f"{origin}/hermes/#/research?id={research_id}" if origin else ""
+    page = f"{origin}/#/research?id={research_id}" if origin else ""
     footer = f"[Open the report page]({page}) · " if page else ""
     return f"{body}\n\n---\n{footer}{len(urls)} sources · research `{research_id}`"
 

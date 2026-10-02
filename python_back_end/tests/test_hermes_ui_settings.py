@@ -122,7 +122,9 @@ def test_config_put_persists_overrides_and_reset_clears_them(section):
     # Reset = PUT the full default record -> nothing left to store.
     run(rest.config_put(FakeRequest({"config": copy.deepcopy(rest.CONFIG)}), USER))
     assert section[7][settings_store.CONFIG_KEY] == {}
-    assert run(rest.config(FakeRequest(), USER)) == rest.CONFIG
+    record = run(rest.config(FakeRequest(), USER))
+    assert record.pop("mcp_servers") == {}  # projected from the mcp_servers table, never stored
+    assert record == rest.CONFIG
     assert rest.CONFIG[key][sub] != "changed-by-test"  # defaults were never mutated
 
 
@@ -405,7 +407,9 @@ def test_rpc_config_get_returns_value_for_dotted_key(section):
     key = next(k for k, v in rest.CONFIG.items() if isinstance(v, dict) and v)
     sub = next(iter(rest.CONFIG[key]))
     result = run(Conn().m_config_get(1, {"key": f"{key}.{sub}"}))["result"]
-    assert result["value"] == rest.CONFIG[key][sub] and result["config"] == rest.CONFIG
+    config = dict(result["config"])
+    assert config.pop("mcp_servers") == {}
+    assert result["value"] == rest.CONFIG[key][sub] and config == rest.CONFIG
     assert run(Conn().m_config_get(2, {"key": "profile"}))["result"]["home"] == ""
     assert "value" not in run(Conn().m_config_get(3, {}))["result"]
 

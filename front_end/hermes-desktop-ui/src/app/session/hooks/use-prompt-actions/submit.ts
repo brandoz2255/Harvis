@@ -5,6 +5,7 @@ import type { Translations } from '@/i18n'
 import { type ChatMessage, textPart } from '@/lib/chat-messages'
 import { optimisticAttachmentRef } from '@/lib/chat-runtime'
 import { sanitizeComposerInput } from '@/lib/composer-input-sanitize'
+import { promptFiles } from '@/lib/harvis-uploads'
 import { setMutableRef } from '@/lib/mutable-ref'
 import {
   isVoicePlaybackActive,
@@ -754,10 +755,14 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         attachmentRefs = syncedAttachments.map(optimisticAttachmentRef).filter((r): r is string => Boolean(r))
         rewriteOptimistic(liveSessionId)
         const text = buildContextText(syncedAttachments)
+        // Harvis uploads (browser build): the ids the facade resolves into the
+        // completion body. Their content is not in `text`.
+        const files = promptFiles(syncedAttachments)
 
         const submitParams = (targetId: string) => ({
           session_id: targetId,
           text,
+          ...(files.length > 0 && { files }),
           ...(interrupted && { interrupted }),
           // Off-screen widget intent: the gateway types the persisted user
           // row display_kind=hidden so no client renders it as a bubble.

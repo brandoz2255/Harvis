@@ -128,7 +128,7 @@ const assistantUiSubscribeFix = () => ({
 })
 
 export default defineConfig(({ command }) => ({
-  base: '/hermes/',
+  base: '/harvis/',
   plugins: [react(), babel({ presets: [compilerPreset()] }), tailwindcss(), emojibaseAssets(), assistantUiSubscribeFix()],
   css: {
     // Pin an explicit (empty) PostCSS config. Tailwind is handled entirely by

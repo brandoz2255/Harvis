@@ -790,7 +790,13 @@ async def run_external_engine_adapter(
         await _ensure_hermes_home(container, user_id)
         try:
             from owui_compat.hermes_chat import resolve_hermes_model
+            from plugins.people.controls import allowed_for
+            _checked_model = model_name
             model_name = await resolve_hermes_model(pool, user_id)
+            # Settings ▸ People: off the person's list, keep the model the run was admitted on.
+            _allowed = await allowed_for(pool, int(user_id)) if user_id else None
+            if _allowed is not None and model_name not in _allowed:
+                model_name = _checked_model
         except Exception:
             pass  # fail-soft: _build_hermes_command falls back to _HERMES_DEFAULT_MODEL
 

@@ -947,6 +947,72 @@ async def proxy_chat_completions(
     return await execute_chat_completion(request, body)
 
 
+async def resolve_auto_model() -> str:
+    """The model an ``auto`` (or empty) request runs on: the user's saved pick when an
+    Ollama we can see has it, else HARVIS_AUTO_MODEL_FALLBACK, else whatever is installed.
+    The voice call warms the same model (plugins/hermes_ui/voice_warm.py)."""
+    cfg = await _get_openclaw_config()
+    # Configurable safety net: the model used when the user has no saved pick
+    # AND when the saved pick can't be served (laptop missing it + desktop
+    # unreachable). HARVIS_AUTO_MODEL_FALLBACK pins it; qwen3.5:latest is the
+    # preferred shape (fits 8GB VRAM with usable context, reliable tool-calling)
+    # but is only a PREFERENCE, not a guarantee — it is verified below.
+    # `or` not getenv's default — compose declares this var as "" so a .env
+    # override reaches the container, and an empty value must mean "use the
+    # preference", not "use the empty string".
+    fallback = (os.getenv("HARVIS_AUTO_MODEL_FALLBACK") or "qwen3.5:latest").strip()
+    resolved = (cfg or {}).get("model_id") or fallback
+
+    # Check if the resolved model is actually reachable. Probe laptop
+    # first (the path we'll use), then desktop. If neither has it, swap
+    # in the fallback so the request doesn't 404 mid-task.
+    async def _ollama_has(base_url: str, name: str) -> bool:
+        try:
+            tags = base_url.rstrip("/").replace("/v1", "") + "/api/tags"
+            async with httpx.AsyncClient(timeout=httpx.Timeout(3.0)) as hc:
+                r = await hc.get(tags)
+            if r.status_code == 200:
+                return any(m.get("name") == name for m in r.json().get("models", []))
+        except Exception:
+            pass
+        return False
+
+    laptop = LOCAL_OLLAMA_URL.rstrip("/")
+    desktop = (os.getenv("DESKTOP_OLLAMA_URL", "") or "").rstrip("/")
+    # A Claude model (Path A) is served by Anthropic, not Ollama — don't let
+    # the reachability probe swap it out for the local fallback.
+    from .model_proxy_anthropic import is_anthropic_model as _is_anthropic
+
+    async def _reachable(name: str) -> bool:
+        """Installed on either Ollama we can see."""
+        if await _ollama_has(laptop, name):
+            return True
+        return bool(desktop) and await _ollama_has(desktop, name)
+
+    if not _is_anthropic(resolved) and not await _reachable(resolved):
+        # The fallback is NOT trusted either — on a fresh clone or a new machine
+        # neither the saved pick nor qwen3.5:latest may be pulled, and returning
+        # an uninstalled tag turns every `auto` request into a 404 mid-task with
+        # no way to change it short of editing env and restarting. Verify the
+        # fallback, then let the adaptive resolver name whatever IS installed, so
+        # `auto` always lands on a real model and the user's own pick (Build
+        # picker / Discord /model) still wins whenever it is servable.
+        replacement = fallback if await _reachable(fallback) else None
+        if replacement is None:
+            try:
+                from plugins.models.resolver import resolve_default_local_model
+                replacement = await resolve_default_local_model(ollama_url=laptop)
+            except Exception:
+                logger.exception("model_proxy: adaptive fallback resolution failed")
+        logger.warning(
+            "model_proxy: resolved %r unreachable on laptop/desktop — using %r",
+            resolved, replacement or resolved,
+        )
+        if replacement:
+            resolved = replacement
+    return resolved
+
+
 async def execute_chat_completion(request: Request, body: dict):
     """Post-auth chat-completion pipeline: model routing, streaming, SSE-wrap.
 
@@ -1003,65 +1069,7 @@ async def execute_chat_completion(request: Request, body: dict):
     # first token; it means "no pick" exactly like the named sentinels.
     _AUTO_SENTINELS = {"", "auto", "default", "user-pref", "dynamic"}
     if model_name in _AUTO_SENTINELS:
-        cfg = await _get_openclaw_config()
-        # Configurable safety net: the model used when the user has no saved pick
-        # AND when the saved pick can't be served (laptop missing it + desktop
-        # unreachable). HARVIS_AUTO_MODEL_FALLBACK pins it; qwen3.5:latest is the
-        # preferred shape (fits 8GB VRAM with usable context, reliable tool-calling)
-        # but is only a PREFERENCE, not a guarantee — it is verified below.
-        # `or` not getenv's default — compose declares this var as "" so a .env
-        # override reaches the container, and an empty value must mean "use the
-        # preference", not "use the empty string".
-        fallback = (os.getenv("HARVIS_AUTO_MODEL_FALLBACK") or "qwen3.5:latest").strip()
-        resolved = (cfg or {}).get("model_id") or fallback
-
-        # Check if the resolved model is actually reachable. Probe laptop
-        # first (the path we'll use), then desktop. If neither has it, swap
-        # in the fallback so the request doesn't 404 mid-task.
-        async def _ollama_has(base_url: str, name: str) -> bool:
-            try:
-                tags = base_url.rstrip("/").replace("/v1", "") + "/api/tags"
-                async with httpx.AsyncClient(timeout=httpx.Timeout(3.0)) as hc:
-                    r = await hc.get(tags)
-                if r.status_code == 200:
-                    return any(m.get("name") == name for m in r.json().get("models", []))
-            except Exception:
-                pass
-            return False
-
-        laptop = LOCAL_OLLAMA_URL.rstrip("/")
-        desktop = (os.getenv("DESKTOP_OLLAMA_URL", "") or "").rstrip("/")
-        # A Claude model (Path A) is served by Anthropic, not Ollama — don't let
-        # the reachability probe swap it out for the local fallback.
-        from .model_proxy_anthropic import is_anthropic_model as _is_anthropic
-
-        async def _reachable(name: str) -> bool:
-            """Installed on either Ollama we can see."""
-            if await _ollama_has(laptop, name):
-                return True
-            return bool(desktop) and await _ollama_has(desktop, name)
-
-        if not _is_anthropic(resolved) and not await _reachable(resolved):
-            # The fallback is NOT trusted either — on a fresh clone or a new machine
-            # neither the saved pick nor qwen3.5:latest may be pulled, and returning
-            # an uninstalled tag turns every `auto` request into a 404 mid-task with
-            # no way to change it short of editing env and restarting. Verify the
-            # fallback, then let the adaptive resolver name whatever IS installed, so
-            # `auto` always lands on a real model and the user's own pick (Build
-            # picker / Discord /model) still wins whenever it is servable.
-            replacement = fallback if await _reachable(fallback) else None
-            if replacement is None:
-                try:
-                    from plugins.models.resolver import resolve_default_local_model
-                    replacement = await resolve_default_local_model(ollama_url=laptop)
-                except Exception:
-                    logger.exception("model_proxy: adaptive fallback resolution failed")
-            logger.warning(
-                "model_proxy: resolved %r unreachable on laptop/desktop — using %r",
-                resolved, replacement or resolved,
-            )
-            if replacement:
-                resolved = replacement
+        resolved = await resolve_auto_model()
         logger.info("model_proxy: auto-routing %r → %r", model_name, resolved)
         model_name = resolved
         body = {**body, "model": model_name}

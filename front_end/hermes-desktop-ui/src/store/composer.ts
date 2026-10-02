@@ -24,6 +24,9 @@ export interface ComposerAttachment {
    * workspace (remote upload or local stage), and 'error' if that failed.
    * Drives the spinner / error state on the composer attachment card. */
   uploadState?: 'uploading' | 'error'
+  /** Harvis upload id (`POST /api/v1/files/`) in the browser build, where
+   * there is no `path`; `prompt.submit` sends it in `files`. */
+  fileId?: string
 }
 
 export type ComposerAttachmentPatch = Partial<Omit<ComposerAttachment, 'id' | 'occurrenceId'>>

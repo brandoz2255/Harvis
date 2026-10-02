@@ -338,6 +338,7 @@ async def get_models():
 @router.post("/chat", response_model=AIResponse)
 async def chat(
     request: ChatRequest,
+    http_request: Request,
     user: Dict = Depends(get_current_user),
     session_manager: SessionManager = Depends(get_session_manager),
     container_manager: ContainerManager = Depends(get_container_manager)
@@ -356,6 +357,10 @@ async def chat(
     
     # Verify user has access to this session
     await session_manager.get_session(request.session_id, user_id)
+
+    from plugins.people.controls import require_turn
+    request.model = await require_turn(getattr(http_request.app.state, "pg_pool", None), int(user_id),
+                                       request.model) or request.model
     
     # Get AI response
     response = await get_ai_response(

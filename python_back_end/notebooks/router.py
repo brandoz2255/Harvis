@@ -79,6 +79,20 @@ async def get_current_user_from_request(request: Request) -> Dict:
     return await get_current_user_optimized(credentials=credentials, request=request, pool=pool)
 
 
+def _pool_of(request: Optional[Request]):
+    return getattr(getattr(getattr(request, "app", None), "state", None), "pg_pool", None)
+
+
+async def _person_model(request: Optional[Request], current_user: Dict, model: Optional[str],
+                        *, count: bool = True) -> str:
+    """The admin's limits (Settings ▸ People): the model this person may use here, or a 403.
+
+    An empty ``model`` means "the default", which becomes their first allowed model.
+    """
+    from plugins.people.controls import require_turn
+    return await require_turn(_pool_of(request), int(current_user["id"]), model or "", count=count)
+
+
 # ─── Notebook CRUD ─────────────────────────────────────────────────────────────
 
 @router.get("", response_model=NotebookListResponse)
@@ -190,7 +204,11 @@ async def autoname_notebook(
     )
 
     gen_title, gen_emoji = None, None
-    if sources:
+    from plugins.people.controls import admit_turn, allowed_for, only_allowed
+    pool = _pool_of(request)
+    may_run = (await admit_turn(pool, int(current_user["id"]), None, count=False)).ok
+    allowed = await allowed_for(pool, int(current_user["id"]))
+    if sources and may_run:
         source_lines = "\n".join(
             f"- {(s.title or 'Untitled source')} ({getattr(s.type, 'value', s.type)})"
             for s in sources[:12]
@@ -205,7 +223,7 @@ async def autoname_notebook(
         # they go last (via FALLBACK_MODELS) only as a backstop.
         autoname_models = ["granite4.1:8b", "llama3.1:8b", "gemma4:e4b"]
         autoname_models += [m for m in FALLBACK_MODELS if m not in autoname_models]
-        for model in autoname_models:
+        for model in only_allowed(autoname_models, allowed) or (allowed or [])[:1]:
             try:
                 r = _requests.post(
                     f"{OLLAMA_URL}/api/generate",
@@ -771,10 +789,16 @@ async def chat_with_notebook(
     manager: NotebookManager = Depends(get_notebook_manager)
 ):
     """Chat with a notebook using RAG"""
+    # The admin's limits (Settings ▸ People): refused, or counted.
+    from plugins.people.controls import allowed_for
+    # A request with no model gets the person's default, not the built-in "gpt-oss:latest".
+    picked = chat_request.model if "model" in chat_request.model_fields_set else ""
+    chat_request.model = await _person_model(request, current_user, picked) or chat_request.model
+    allowed = await allowed_for(_pool_of(request), int(current_user["id"]))
     try:
         from .rag_chat import RAGChatService
 
-        rag_service = RAGChatService(manager)
+        rag_service = RAGChatService(manager, allowed_models=allowed)
         response = await rag_service.chat(
             notebook_id=notebook_id,
             user_id=current_user["id"],
@@ -1040,7 +1064,10 @@ async def transform_source(
         "simplify": "Rewrite the following content in simpler language that a general audience can understand:\n\n{content}",
         "action_items": "Extract action items, recommendations, and next steps from the following content:\n\n{content}",
     }
-    
+    # The request model's own default is not a choice the person made.
+    picked = transform_request.model if "model" in transform_request.model_fields_set else ""
+    picked = await _person_model(request, current_user, picked)
+
     try:
         source = await manager.get_source(source_id, current_user["id"])
         
@@ -1054,7 +1081,7 @@ async def transform_source(
             raise HTTPException(status_code=400, detail="Source has no content to transform")
         
         transformation_type = transform_request.transformation if isinstance(transform_request.transformation, str) else transform_request.transformation.value
-        model = transform_request.model or "mistral"
+        model = picked or transform_request.model or "mistral"
         
         if transform_request.custom_prompt:
             prompt = transform_request.custom_prompt.replace("{content}", content_text[:8000])
@@ -1560,7 +1587,8 @@ async def generate_standalone_podcast(
 ):
     """Generate a podcast script from content using Ollama."""
     import httpx
-    
+
+    podcast_request.model = await _person_model(request, current_user, getattr(podcast_request, "model", None)) or None
     try:
         content = await _fetch_podcast_content(podcast_request, logger, manager)
         
@@ -1590,7 +1618,8 @@ async def generate_standalone_podcast_stream(
 ):
     """Generate a podcast with SSE progress streaming using Ollama."""
     from fastapi.responses import StreamingResponse
-    
+
+    podcast_request.model = await _person_model(request, current_user, getattr(podcast_request, "model", None)) or None
     user_id = current_user["id"]
     
     async def generate_sse_events():
@@ -1897,7 +1926,8 @@ async def generate_podcast(
 ):
     """Generate a podcast from notebook content"""
     from .models import PodcastRequest, PodcastStatus
-    
+
+    model = await _person_model(request, current_user, None) or None
     try:
         # Verify notebook ownership
         notebook = await manager.get_notebook(notebook_id, current_user["id"])
@@ -1924,7 +1954,8 @@ async def generate_podcast(
                 podcast_id,
                 notebook_id,
                 current_user["id"],
-                podcast_request
+                podcast_request,
+                model,
             )
         
         return dict(row)
@@ -1936,7 +1967,8 @@ async def generate_podcast(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-async def _run_podcast_generation(db_pool, podcast_id: UUID, notebook_id: UUID, user_id: int, request):
+async def _run_podcast_generation(db_pool, podcast_id: UUID, notebook_id: UUID, user_id: int, request,
+                                  model: Optional[str] = None):
     """Background task for podcast generation using Ollama"""
     from .models import PodcastStatus
     import httpx
@@ -1996,6 +2028,7 @@ async def _run_podcast_generation(db_pool, podcast_id: UUID, notebook_id: UUID, 
             duration_minutes=request.duration_minutes,
             content=content,
             custom_speakers=getattr(request, "custom_speakers", None),
+            model=model,
         )
         result = await _generate_podcast_with_ollama(content, mock_request, logger)
         

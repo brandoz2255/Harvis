@@ -1337,7 +1337,8 @@ code {
   outline: none;
 }
 
-.desktop-input-chrome[aria-invalid='true'] {
+.desktop-input-chrome[aria-invalid='true'],
+.desktop-input-chrome:has(> [aria-invalid='true']) {
   border-color: var(--dt-destructive);
 }
 
@@ -1692,6 +1693,12 @@ body.guest-pointer-lock :is(webview, iframe) {
   font-size: clamp(3rem, 10vw, 6.75rem);
   line-height: 1;
   filter: drop-shadow(0 0 22px rgb(91 141 239 / 0.35));
+}
+
+/* The sign-in screen's wordmark: same cycle, sized to sit above a form. */
+.harvis-cycle.harvis-cycle-brand {
+  justify-items: start;
+  font-size: clamp(3rem, 6vw, 5.5rem);
 }
 
 .harvis-face {

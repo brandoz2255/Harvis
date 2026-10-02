@@ -42,6 +42,20 @@ export function setSkillEnabled(
   })
 }
 
+/** Add a skill the user wrote or uploaded (SKILL.md text). Saved on: adding it is the approval. */
+export function createSkill(
+  content: string,
+  name?: string,
+  profile?: ProfileScope
+): Promise<{ message: string; name: string; ok: boolean }> {
+  return window.hermesDesktop.api<{ message: string; name: string; ok: boolean }>({
+    ...capabilityScoped(profile),
+    path: '/api/skills',
+    method: 'POST',
+    body: { content, name: name || undefined }
+  })
+}
+
 export function getStarmapGraph(): Promise<StarmapGraph> {
   return hermesApi<StarmapGraph>({
     ...profileScoped(),

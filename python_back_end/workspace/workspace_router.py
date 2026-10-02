@@ -1153,6 +1153,31 @@ async def _db_enable_interactive(
 
 # ─── Background task ────────────────────────────────────────────────────────────
 
+# Lanes that run a model Harvis picks; any other id is sent to OpenClaw.
+_MODEL_LANES = ("local", "kimi", "claude", "kimi-code", "nvidia-kimi", "cloud-ollama", "gpt-oss",
+                "orchestrated", "agent-native", "vibecode-turn", "vibecode-review", "engine-adapter")
+
+
+def _goes_to_openclaw(agent_id: str) -> bool:
+    return agent_id not in _MODEL_LANES and not agent_id.startswith("agent:")
+
+
+async def _openclaw_reachable(url: str) -> bool:
+    """True when something accepts a connection at the OpenClaw gateway address."""
+    from urllib.parse import urlparse
+    parsed = urlparse(url or "")
+    if not parsed.hostname:
+        return False
+    try:
+        _reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(parsed.hostname, parsed.port or (443 if parsed.scheme in ("wss", "https") else 80)),
+            timeout=3.0)
+    except Exception:
+        return False
+    writer.close()
+    return True
+
+
 async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> None:
     """
     Background asyncio.Task that drives the OpenClaw WebSocket stream to completion.
@@ -1250,6 +1275,67 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
                     logger.warning("[workspace:%s] artifact event emit failed for %r: %s", workspace_id, _ap, _exc)
         _oc_writes.clear()
 
+    # The admin's model list (Settings ▸ People). Checked here, not only at launch,
+    # because runs also start from traces, reviews, teammates, Discord and messaging.
+    # OpenClaw ("main", and any id no lane claims) runs the server-wide model and NVIDIA NIM
+    # the server's key, so a limited person runs on the local lane instead; the orchestrator
+    # filters its own pools.
+    from plugins.people.controls import allowed_for, only_allowed
+    _allowed = await allowed_for(pool, int(ws["user_id"])) if ws.get("user_id") is not None else None
+    _people_refusal = ""
+    if _allowed is not None:
+        model_name = model_name or (_allowed[0] if _allowed else "")
+        if _goes_to_openclaw(agent_id) or agent_id == "nvidia-kimi":
+            agent_id = "local"
+            _people_note = OpenClawEvent("log", {
+                "message": f"Running on {model_name}: the Harvis admin limits which models your account uses.",
+            })
+            seq = await allocate_event_seq(pool, workspace_id)
+            await _db_save_event(pool, workspace_id, seq, _people_note)
+            await broadcaster.put((seq, _people_note))
+            event_count += 1
+        if model_name not in _allowed:
+            _people_refusal = f"{model_name or 'This run'} is not on the models the Harvis admin allows you."
+        # The Hermes persona swaps in its own default model for any non-Hermes model.
+        _hermes_default = os.getenv("HARVIS_HERMES_DEFAULT_MODEL", "hermes3:3b")
+        if (ws.get("vibecode_persona_engine") == "hermes-native" and "hermes" not in model_name.lower()
+                and _hermes_default not in _allowed):
+            ws["vibecode_persona_engine"] = ""
+
+    # OpenClaw is an optional service: the Kubernetes install has none, and a Docker
+    # install may leave it off. Scheduled routines, Discord and the API default to it
+    # ("main"), so with no OpenClaw those runs used to fail with "Name or service not
+    # known"; they run on the local lane instead.
+    if _goes_to_openclaw(agent_id) and not await _openclaw_reachable(client.gateway_url):
+        from workspace.openclaw_client import OPENCLAW_FALLBACK_URL, OPENCLAW_FALLBACK_TOKEN
+        if OPENCLAW_FALLBACK_URL and OPENCLAW_FALLBACK_URL != client.gateway_url \
+                and await _openclaw_reachable(OPENCLAW_FALLBACK_URL):
+            # Same switch the client makes on a failed connect, without its wait.
+            client.gateway_url = OPENCLAW_FALLBACK_URL
+            client.gateway_token = OPENCLAW_FALLBACK_TOKEN or client.gateway_token
+    if _goes_to_openclaw(agent_id) and not await _openclaw_reachable(client.gateway_url):
+        agent_id = "local"
+        try:
+            from owui_compat.cloud_chat import is_cloud_chat_model
+            if model_name and is_cloud_chat_model(model_name):
+                model_name = ""  # the local lane runs Ollama models only
+        except Exception:
+            pass
+        if not model_name:
+            try:
+                from plugins.models.resolver import resolve_default_local_model
+                model_name = await resolve_default_local_model(pool=pool, user_id=ws.get("user_id")) or ""
+            except Exception:
+                logger.debug("[workspace:%s] no default local model for the OpenClaw fallback", workspace_id,
+                             exc_info=True)
+        _oc_note = OpenClawEvent("log", {
+            "message": f"OpenClaw is not running on this server, so this run uses {model_name or 'the local model'} instead.",
+        })
+        seq = await allocate_event_seq(pool, workspace_id)
+        await _db_save_event(pool, workspace_id, seq, _oc_note)
+        await broadcaster.put((seq, _oc_note))
+        event_count += 1
+
     # ── Select the event stream based on agent_id ────────────────────────────
     event_stream = None
     use_parallel = ws.get("parallel", True)
@@ -1258,7 +1344,16 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
     # that silently drops them is how "the model ignored my screenshot" happens.
     _attachments = ws.get("attachments") or []
 
-    if agent_id == "local":
+    async def _refused():
+        yield OpenClawEvent("error", {
+            "message": _people_refusal,
+            "fix_hint": "Pick one of your allowed models, or ask the Harvis admin (Settings ▸ People).",
+        })
+
+    if _people_refusal:
+        event_stream = _refused()
+
+    elif agent_id == "local":
         if use_parallel:
             event_stream = stream_parallel_workspace(
                 task_brief, chat_history, model=model_name, provider="local",
@@ -1391,6 +1486,8 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
                 _custom_pool = _cfg["models"]
         except Exception:
             _custom_pool = None
+        if _custom_pool and _allowed is not None:
+            _custom_pool = only_allowed(_custom_pool, _allowed) or None
         event_stream = run_orchestrated(
             task_brief, chat_history,
             model_name=model_name, pool=pool,
@@ -2906,6 +3003,8 @@ async def launch_workspace(
     task_brief = _resolve_task_brief(req.task_brief, req.chat_history)
     task_brief = await _prepend_attachments(task_brief, req.attachments or [])
     pool = getattr(request.app.state, "pg_pool", None)
+    from plugins.people.controls import require_turn
+    req.model_name = await require_turn(pool, int(current_user["id"]), req.model_name or "") or req.model_name
 
     # Normalize agent_id — accept legacy 'qwen3' as alias for 'cloud-ollama'.
     # This allowlist must list EVERY agent_id _run_workspace_bg dispatches, or the run
@@ -4627,6 +4726,10 @@ async def start_vibecode_turn(
     # you can switch a Build chat from local to Claude mid-conversation. When the lane the
     # model needs is not available at all, refuse HERE with a sentence that names the
     # engine, instead of letting the wrong lane fail with a hostname.
+    from plugins.people.controls import require_turn
+    _checked_model = await require_turn(pool, int(uid), req.model_name or dict(sess).get("model_name") or "")
+    if req.model_name:
+        req.model_name = _checked_model or req.model_name
     _req_model = (req.model_name or "").strip()
     if _req_model:
         _want_engine = _engine_for_model(_req_model)
@@ -4817,6 +4920,8 @@ async def start_vibecode_review(
     wp = s.get("workspace_path")
     if not wp or not os.path.isdir(wp):
         raise HTTPException(status_code=404, detail="The session workspace is no longer available.")
+    from plugins.people.controls import require_turn
+    req.model_name = await require_turn(pool, int(uid), req.model_name or "") or req.model_name
     if req.mode == "github" and not s.get("repo_path"):
         raise HTTPException(
             status_code=400,
@@ -5957,6 +6062,8 @@ async def rerun_workspace(
 
     if not task_brief:
         raise HTTPException(status_code=404, detail="Workspace run not found")
+    from plugins.people.controls import require_turn
+    model_name = await require_turn(pool, int(current_user["id"]), "")
 
     workspace_id = str(uuid.uuid4())[:8]
     session_id = f"ws-{workspace_id}"
@@ -5971,6 +6078,7 @@ async def rerun_workspace(
         user_id=current_user["id"],
         pool=pool,
         started_epoch=started_epoch,
+        model_name=model_name,
     )
 
     try:

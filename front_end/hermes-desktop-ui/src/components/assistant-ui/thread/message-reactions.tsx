@@ -12,7 +12,8 @@ import type { MessageReaction } from '@/types/hermes'
 // Served from the app's own origin (vite.config.ts `hermes:emojibase-assets`
 // plugin bundles emojibase-data): Electron must work offline, and the app
 // should never phone a CDN to draw a picker.
-const EMOJIBASE_URL = './emojibase'
+// Anchored to the build base (`/harvis/`), so it resolves the same from any page.
+const EMOJIBASE_URL = `${import.meta.env.BASE_URL}emojibase`
 
 // Slack tints its picker cells in a repeating palette (green, blue, yellow,
 // pink, brown, purple…) so long scrolls stay scannable. Same trick, in the

@@ -163,7 +163,7 @@
 	const OLLAMA_INSTALL = 'curl -fsSL https://ollama.com/install.sh | sh';
 	// Settings > Hosting in the Hermes UI: explains Kubernetes hosting mode and
 	// shows the installer commands. One place to edit if the Hermes path moves.
-	const HOSTING_SETTINGS_URL = '/hermes/#/settings?tab=hosting';
+	const HOSTING_SETTINGS_URL = '/#/settings?tab=hosting';
 	const OLLAMA_EXPOSE =
 		'sudo mkdir -p /etc/systemd/system/ollama.service.d && printf \'[Service]\\nEnvironment="OLLAMA_HOST=0.0.0.0:11434"\\n\' | sudo tee /etc/systemd/system/ollama.service.d/harvis.conf >/dev/null && sudo systemctl daemon-reload && sudo systemctl restart ollama';
 
@@ -363,7 +363,7 @@
 	};
 
 	// Where a finished setup lands. `/` is the front door, and nginx — not this
-	// router — decides what the front door is (today: a 302 to /hermes/). A
+	// router — decides what the front door is (today: the Hermes shell). A
 	// goto('/') would be handled entirely inside this SPA and quietly drop the
 	// new admin into OpenWebUI, which is how a fresh signup ended up in the
 	// wrong application. A real navigation asks nginx, so there is one answer to
@@ -1018,7 +1018,7 @@
 					</label>
 					<p class="text-xs text-gray-500">
 						{$i18n.t('Want other computers on your network to use the models on this machine?')}
-						<a class="underline hover:text-gray-900 dark:hover:text-white" href={HOSTING_SETTINGS_URL}>
+						<a class="underline hover:text-gray-900 dark:hover:text-white" href={HOSTING_SETTINGS_URL} data-sveltekit-reload>
 							{$i18n.t("Share this machine's models on your network with Kubernetes hosting mode")}
 						</a>
 					</p>

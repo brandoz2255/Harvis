@@ -333,6 +333,15 @@ services:
       # owned by appuser(1001), whereas /data itself is root-owned and not writable,
       # so the default /data/notebooks fails makedirs with EACCES.
       NOTEBOOK_STORAGE_PATH: "/data/artifacts/notebooks"
+      # Chat attachments (POST /api/v1/files/). The code default is /app/owui_files,
+      # which is the container's own writable layer: every restart dropped the bytes
+      # while the owui_files rows survived, and the next turn read "nothing attached".
+      # Same persisted subtree as notebooks, for the same reason, so it rides the
+      # artifact_data volume here and the hostPath compose_to_k8s.py makes of it.
+      OWUI_FILES_DIR: "/data/artifacts/owui_files"
+      # The backend's own upload cap. nginx.conf's client_max_body_size is 50m and
+      # the two must agree, or one of them answers 413 for a file the other allows.
+      HARVIS_MAX_UPLOAD_MB: "50"
       # For Docker Compose, run code locally (not in separate containers)
       # This avoids needing Docker socket access
       CODE_EXECUTOR_LOCAL: "true"
@@ -429,7 +438,7 @@ services:
       HARVIS_CAD_EVIDENCE_V2: "${HARVIS_CAD_EVIDENCE_V2:-false}"
       # Adaptive Workspace Repo Runner — clone + run an untrusted repo in an isolated,
       # cap-dropped sandbox on the repo-sandbox network. Flag default OFF (untrusted code).
-      # Build the polyglot image: docker build -t harvis-repo-sandbox:local ./repo-sandbox-engine
+      # The polyglot image is built by the repo-sandbox-image service.
       HARVIS_ADAPTIVE_REPO_RUN_ENABLED: "${HARVIS_ADAPTIVE_REPO_RUN_ENABLED:-false}"
       HARVIS_ADAPTIVE_REPO_SANDBOX_IMAGE: "${HARVIS_ADAPTIVE_REPO_SANDBOX_IMAGE:-harvis-repo-sandbox:local}"
       HARVIS_ADAPTIVE_REPO_SANDBOX_NETWORK: "${HARVIS_ADAPTIVE_REPO_SANDBOX_NETWORK:-harvis_repo-sandbox}"
@@ -454,11 +463,12 @@ services:
       HARVIS_MCP_SANDBOX_MEM: "${HARVIS_MCP_SANDBOX_MEM:-768m}"
       HARVIS_MCP_IDLE_TIMEOUT_S: "${HARVIS_MCP_IDLE_TIMEOUT_S:-900}"
       HARVIS_MCP_MAX_SESSIONS: "${HARVIS_MCP_MAX_SESSIONS:-8}"
-      # Agent Reach — lane-5 public-web research (web_read / yt_transcript /
-      # gh_view / rss_read). Flag default OFF: every tool reaches the public
-      # internet from the backend, so it is opt-in per deploy. NEVER enable this
-      # inside the egress-denied OpenClaw pod.
-      HARVIS_AGENT_REACH_ENABLED: "${HARVIS_AGENT_REACH_ENABLED:-false}"
+      # Agent Reach — lane-5 public-web research (web_search / web_read /
+      # yt_transcript / gh_view / rss_read) for chat and workspace runs. On by
+      # default since 2026-10-01: every call runs from the backend through the
+      # SSRF guard (public addresses only, no cookies); set false to turn it off.
+      # NEVER enable this inside the egress-denied OpenClaw pod.
+      HARVIS_AGENT_REACH_ENABLED: "${HARVIS_AGENT_REACH_ENABLED:-true}"
       # Screenshot-to-code self-check — renders the model's own HTML in the
       # locked-down preview container and feeds the PNG back for comparison.
       # Flag default OFF; costs one browser render + one vision call per loop.
@@ -756,6 +766,21 @@ services:
       retries: 3
       start_period: 15s
 
+  # Builds the image every per-chat sandbox, the AI's code runner and MCP servers
+  # run in. The backend starts those containers itself, so nothing in compose
+  # used to need this image and nothing built it: a fresh machine got a
+  # Workspace that could not open a terminal or run code. This service exists so
+  # `up --build` builds it; it exits at once and Kubernetes mode skips it.
+  repo-sandbox-image:
+    image: harvis-repo-sandbox:local
+    build:
+      context: ./repo-sandbox-engine
+    pull_policy: build
+    container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-repo-sandbox-image
+    restart: "no"
+    command: ["true"]
+    network_mode: none
+
   # Next.js Frontend (New UI)
   # REBUILD TIPS:
   #   Quick rebuild (use cache):   docker-compose build frontend
@@ -797,51 +822,9 @@ services:
     networks:
       - ollama-n8n-network
 
-  # Builds the OpenWebUI (Svelte) static frontend INSIDE Docker so a fresh clone
-  # needs no host Node/npm. Reuses the `build` stage of the owui Dockerfile
-  # (npm ci → npm run build → /app/build), then copies the static bundle into the
-  # host ./front_end/owui/build dir that nginx serves. Runs once and exits (0).
-  #
-  # Idempotent: skips the copy when a build is already present, so a host-side
-  # `npm run build` dev loop is left untouched. To force a refresh on a deploy:
-  # clear front_end/owui/build (or `docker compose build owui-builder`) then `up`.
-  # NOTE: the frontend build fetches pyodide, so it needs internet at BUILD time.
-  owui-builder:
-    build:
-      context: ./front_end/owui
-      dockerfile: Dockerfile
-      # `artifact` = busybox + the compiled output only. Targeting `build`
-      # tagged the whole Node build stage (5.25 GB) to ship ~263 MB.
-      target: artifact
-      args:
-        # Stamped into org.opencontainers.image.revision. Unset locally, so a
-        # developer build is honestly labelled "unknown" rather than carrying a
-        # stale sha; CI exports HARVIS_VCS_REF and gets the real one.
-        VCS_REF: ${HARVIS_VCS_REF:-unknown}
-    image: harvis-owui-builder:local
-    # Local build tag — tell Compose to build it, not pull it (a bare
-    # `docker compose up -d` without --build otherwise fails: pull access denied).
-    pull_policy: build
-    container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-owui-builder
-    restart: "no"
-    volumes:
-      - ./front_end/owui/build:/out
-    command:
-      - sh
-      - -c
-      - >
-        if [ -f /out/index.html ]; then
-          echo 'owui build already present in ./front_end/owui/build — skipping (clear it to force a rebuild)';
-        else
-          echo 'Populating ./front_end/owui/build from the Docker build...';
-          cp -a /app/build/. /out/ && echo 'owui frontend build ready';
-        fi
-    networks:
-      - ollama-n8n-network
-
-  # Same idea as owui-builder, for the vendored Hermes desktop UI. Hermes is
-  # Harvis's primary application shell, so its static build is part of the
-  # normal install. This is a one-shot build step; it neither starts a model
+  # Builds the vendored Hermes desktop UI inside Docker so a fresh clone needs
+  # no host Node/npm. Hermes is Harvis's only frontend, so its static build is
+  # part of the normal install. This is a one-shot build step; it neither starts a model
   # service nor downloads model weights.
   #
   # Context is ./front_end (not the UI dir) because the build also needs
@@ -917,10 +900,7 @@ services:
       - "${HARVIS_BIND_ADDR_PUBLIC:-0.0.0.0}:${HARVIS_HTTPS_PORT:-9443}:443"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./front_end/owui/build:/usr/share/nginx/owui:ro
-      # Vendored Hermes desktop UI, served at /hermes (see nginx-harvis.conf).
-      # Read-only and independent of owui: if the dir is empty /hermes 404s and
-      # every other route is unaffected.
+      # Vendored Hermes desktop UI, served at /harvis/ (see nginx-harvis.conf).
       - ./front_end/hermes-desktop-ui/dist:/usr/share/nginx/hermes:ro
       # Every route, shared by the HTTP and HTTPS listeners so they cannot drift.
       - ./nginx-harvis.conf:/etc/nginx/harvis.conf:ro
@@ -931,10 +911,8 @@ services:
       - ./nginx/tls:/etc/nginx/tls:ro
       - /tmp:/tmp:ro
     depends_on:
-      # long-form so nginx waits for the one-shot owui-builder to finish
+      # long-form so nginx waits for the one-shot hermes-ui-builder to finish
       # populating the static bundle before it starts serving.
-      owui-builder:
-        condition: service_completed_successfully
       hermes-ui-builder:
         condition: service_completed_successfully
       backend:
@@ -1345,6 +1323,10 @@ services:
     environment:
       BACKEND_INTERNAL_URL: "http://backend:8000"
       OPENCLAW_GATEWAY_TOKEN: "${OPENCLAW_GATEWAY_TOKEN_BUNDLED:-${OPENCLAW_GATEWAY_TOKEN}}"
+      # The bearer every /mcp/invoke call must carry (mcp/server/auth.py). No
+      # default on purpose: unset, the server answers 503 to every request
+      # rather than accepting a value that is published in the repo.
+      HARVIS_MCP_SERVER_TOKEN: "${HARVIS_MCP_SERVER_TOKEN:-}"
       PYTHONPATH: "/app"
     depends_on:
       backend:
@@ -1601,13 +1583,10 @@ services:
     image: harvis-messaging-gateway:local
     pull_policy: build
     container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-messaging-gateway
-    # Opt-in. The crash loop that first motivated a profile here is fixed — with
-    # no adapters enabled the gateway idles rather than exiting — but idling
-    # still costs a 294 MB image, a running container and a bound host port on
-    # every default install, for Slack/Discord bridges nobody has configured.
-    # Enable with COMPOSE_PROFILES=messaging (the backend reads the same var as
-    # HARVIS_ENABLED_PROFILES, so its health endpoints stay in agreement).
-    profiles: ["messaging"]
+    # On by default (2026-10-01): chatting with Harvis from Slack/Discord/phone
+    # is a core feature, so the gateway is up on every install and the Messaging
+    # page only has to connect a platform. With no adapter configured it idles
+    # (the old crash loop is fixed). Cost: a ~294 MB image and one idle container.
     restart: unless-stopped
     environment:
       MESSAGING_GATEWAY_TOKEN: "${MESSAGING_GATEWAY_TOKEN:-}"
@@ -1638,6 +1617,21 @@ services:
     depends_on:
       backend:
         condition: service_started
+    # /health is the one unauthenticated control route; the k8s generator turns
+    # this into the pod's readinessProbe, so the cluster can see a wedged gateway.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:18800/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    # Idles at ~25 MB; discord.py and slack-bolt stay well under this. The limit
+    # keeps a leaking adapter from eating the host (k8s renders the memory part).
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
     networks:
       - ollama-n8n-network
 

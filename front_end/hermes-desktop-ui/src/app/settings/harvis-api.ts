@@ -4,6 +4,8 @@
  * of the web build. Credentials are only ever sent, never read back.
  */
 
+import { reportUnauthorized } from '@/lib/harvis-session'
+
 export async function harvisFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     credentials: 'include',
@@ -12,6 +14,10 @@ export async function harvisFetch<T>(path: string, init?: RequestInit): Promise<
   })
 
   if (!res.ok) {
+    if (res.status === 401) {
+      reportUnauthorized()
+    }
+
     let detail = `${res.status} ${res.statusText}`
 
     try {
@@ -109,6 +115,8 @@ export interface MemoryEntry {
   content: string
   source: string
   created_at: null | string
+  /** Imported from a sandbox's USER.md; chats ignore it until the user keeps it. */
+  pending?: boolean
 }
 
 export interface LearnSettings {
@@ -203,8 +211,67 @@ export const fetchMemory = () =>
 
 export const addMemory = (content: string) => post<{ ok: boolean }>('/hermes-api/api/harvis/memory', { content })
 
+export const keepMemory = (id: number) => post<{ ok: boolean }>(`/hermes-api/api/harvis/memory/${id}/keep`, {})
+
 export const deleteMemory = (id: number) =>
   harvisFetch<{ ok: boolean }>(`/hermes-api/api/harvis/memory/${id}`, { method: 'DELETE' })
 
 export const saveLearnSettings = (patch: Partial<LearnSettings>) =>
   post<LearnSettings>('/hermes-api/api/harvis/learn/settings', patch)
+
+/** A messaging contact (Discord, Telegram …) paired to an account; it talks to Harvis as that account. */
+export interface PairedContact {
+  id: number
+  platform: string
+  identifier: string
+  name: null | string
+  enabled: boolean
+  since: null | string
+}
+
+/** One account on this Harvis, as the admin's People page shows it. */
+export interface Person {
+  id: number
+  name: string
+  email: string
+  joined: null | string
+  is_admin: boolean
+  blocked: boolean
+  /** Chat messages per day; null = no limit, 0 = no chatting. */
+  daily_message_limit: null | number
+  /** Models on this server they may chat with; null = any. */
+  allowed_models: null | string[]
+  messages_today: number
+  messages_week: number
+  last_active: null | string
+  chats: number
+  paired: PairedContact[]
+}
+
+export type PersonControls = Partial<Pick<Person, 'allowed_models' | 'blocked' | 'daily_message_limit'>>
+
+const PEOPLE = '/hermes-api/api/harvis/admin'
+
+export const fetchPeople = () => harvisFetch<{ users: Person[] }>(`${PEOPLE}/users`)
+
+export const updatePerson = (id: number, patch: PersonControls) =>
+  harvisFetch<{ ok: boolean } & Required<PersonControls>>(`${PEOPLE}/users/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(patch)
+  })
+
+export const unpairContact = (id: number) =>
+  harvisFetch<{ ok: boolean }>(`${PEOPLE}/senders/${id}`, { method: 'DELETE' })
+
+export const fetchServerModels = () =>
+  harvisFetch<{ models: { id: string; provider: string }[]; error?: string }>(`${PEOPLE}/models`)
+
+export interface InstanceConfig {
+  ENABLE_SIGNUP: boolean
+  DEV_MODE: boolean
+}
+
+export const fetchInstanceConfig = () => harvisFetch<InstanceConfig>('/api/v1/auths/admin/config')
+
+export const saveInstanceConfig = (patch: Partial<InstanceConfig>) =>
+  post<InstanceConfig>('/api/v1/auths/admin/config', patch)

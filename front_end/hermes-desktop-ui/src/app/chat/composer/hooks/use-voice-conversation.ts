@@ -233,10 +233,11 @@ export function useVoiceConversation({
     }
 
     try {
-      // VAD tuning mirrors `tools.voice_mode` defaults so the browser loop matches the CLI.
+      // VAD tuning follows `tools.voice_mode` defaults, except a shorter end-of-speech
+      // wait (Harvis: 900 ms, not 1.25 s) so a spoken turn feels conversational.
       await handle.start({
         silenceLevel: 0.075,
-        silenceMs: 1_250,
+        silenceMs: 900,
         idleSilenceMs: 12_000,
         onError: error => {
           notifyError(error, voiceCopy.microphoneFailed)

@@ -18,7 +18,9 @@ Mapping, in short:
   environment          -> a Secret per service (envFrom)
   one-shot services    -> initContainers of the services that wait on them
   healthy/started deps -> an initContainer that waits for the dependency's DNS name
-  healthcheck          -> readinessProbe
+  healthcheck          -> readiness + liveness probes (+ startup when start_period is set);
+                          services without one get the probe k8s_extras.DEFAULT_PROBES names
+  deploy.resources     -> resources.limits (limits) and resources.requests (reservations)
   compose networks     -> NetworkPolicies (see k8s_extras.network_policies)
 
 Standard library only: this runs on a machine that has nothing but python3.
@@ -62,6 +64,35 @@ def parse_duration(value, default):
     return max(1, int(round(total))) if total else default
 
 
+def cpu_quantity(value):
+    """Compose renders `cpus: '0.25'` as the number 0.25; Kubernetes wants '250m'."""
+    try:
+        cores = float(value)
+    except (TypeError, ValueError):
+        return None
+    if cores <= 0:
+        return None
+    milli = int(round(cores * 1000))
+    return str(milli // 1000) if milli % 1000 == 0 else f"{milli}m"
+
+
+def resources_for(svc):
+    """deploy.resources -> {limits, requests}; empty when compose says nothing."""
+    res = (svc.get("deploy") or {}).get("resources") or {}
+    out = {}
+    for src, dst in (("limits", "limits"), ("reservations", "requests")):
+        part = {}
+        mem = parse_bytes((res.get(src) or {}).get("memory"))
+        cpu = cpu_quantity((res.get(src) or {}).get("cpus"))
+        if mem:
+            part["memory"] = str(mem)
+        if cpu:
+            part["cpu"] = cpu
+        if part:
+            out[dst] = part
+    return out
+
+
 def image_for(name, svc, project):
     if svc.get("image"):
         return svc["image"]
@@ -87,6 +118,10 @@ class Generator:
         self.networks = compose.get("networks", {}) or {}
         self.objects = []
         self.busybox = self._find_busybox()
+        self.image_ids = {}
+        if opts.image_ids:
+            with open(opts.image_ids) as fh:
+                self.image_ids = json.load(fh)
 
     # ── helpers ──────────────────────────────────────────────────────────
     def _find_busybox(self):
@@ -161,24 +196,37 @@ class Generator:
             mounts.append({"name": vname, "mountPath": t.split(":")[0]})
         return vols, mounts
 
-    def probe(self, svc):
+    def probes(self, name, svc):
+        """{readinessProbe, livenessProbe[, startupProbe]} from the compose healthcheck.
+
+        Readiness keeps compose's own cadence. Liveness is the same check with
+        more patience (six misses, 30 s apart) because its failure restarts the
+        container: a slow reply must not become an outage. start_period becomes
+        a startupProbe, which holds both others off until the first success and
+        allows twice compose's grace, instead of a fixed initial delay.
+        """
         hc = svc.get("healthcheck") or {}
         test = hc.get("test")
-        if not test or hc.get("disable") or test[0] == "NONE":
-            return None
+        if hc.get("disable") or (test and test[0] == "NONE"):
+            return {}
+        if not test:
+            return extras.default_probes(name, svc)
         if test[0] == "CMD-SHELL":
             cmd = ["sh", "-c", " ".join(test[1:])]
         elif test[0] == "CMD":
             cmd = list(test[1:])
         else:
             cmd = ["sh", "-c", " ".join(test)]
-        return {
-            "exec": {"command": cmd},
-            "periodSeconds": min(parse_duration(hc.get("interval"), 30), 15),
-            "timeoutSeconds": parse_duration(hc.get("timeout"), 5),
-            "failureThreshold": int(hc.get("retries") or 3),
-            "initialDelaySeconds": min(parse_duration(hc.get("start_period"), 0), 30),
+        check = {"exec": {"command": cmd}, "timeoutSeconds": parse_duration(hc.get("timeout"), 5)}
+        period = min(parse_duration(hc.get("interval"), 30), 15)
+        start = parse_duration(hc.get("start_period"), 0)
+        out = {
+            "readinessProbe": {**check, "periodSeconds": period, "failureThreshold": int(hc.get("retries") or 3)},
+            "livenessProbe": {**check, "periodSeconds": 30, "failureThreshold": 6},
         }
+        if start:
+            out["startupProbe"] = {**check, "periodSeconds": 5, "failureThreshold": max(12, (2 * start + 4) // 5)}
+        return out
 
     def container(self, name, svc):
         vols, mounts = self.mounts(name, svc)
@@ -200,12 +248,10 @@ class Generator:
         ports = self.container_ports(svc)
         if ports:
             c["ports"] = [{"containerPort": p} for p in ports]
-        probe = self.probe(svc)
-        if probe:
-            c["readinessProbe"] = probe
-        mem = parse_bytes((((svc.get("deploy") or {}).get("resources") or {}).get("limits") or {}).get("memory"))
-        if mem:
-            c["resources"] = {"limits": {"memory": str(mem)}}
+        c.update(self.probes(name, svc))
+        res = resources_for(svc) or extras.default_resources(name)
+        if res:
+            c["resources"] = res
         # No nvidia.com/gpu request here: compose's `runtime: nvidia` shares the card
         # (NVIDIA_VISIBLE_DEVICES), and on a one-GPU box a request would leave this
         # pod or Ollama Pending forever. The runtime class alone gives the same view.
@@ -246,8 +292,9 @@ class Generator:
             condition = (cond or {}).get("condition", "service_started")
             if condition == "service_completed_successfully" or is_one_shot(dsvc):
                 c, vols = self.container(dep, dsvc)
-                c.pop("readinessProbe", None)
-                c.pop("ports", None)
+                # An initContainer may not carry probes; the API server rejects them.
+                for k in ("readinessProbe", "livenessProbe", "startupProbe", "ports"):
+                    c.pop(k, None)
                 sc = self.security_context(dsvc)
                 if sc:
                     c["securityContext"] = sc
@@ -267,6 +314,9 @@ class Generator:
 
     def pod_labels(self, name, svc):
         labels = {LABEL_APP: dns_name(name), LABEL_PART: "harvis"}
+        if name in extras.ISOLATED:
+            # Reached only through its own allowlist policy, never the network-wide one.
+            return labels
         for net in (svc.get("networks") or {}):
             labels[extras.net_label(net)] = "1"
         return labels
@@ -323,9 +373,20 @@ class Generator:
                 "strategy": {"type": "Recreate"},
                 "selector": {"matchLabels": {LABEL_APP: dns_name(name)}},
                 "template": {"metadata": {"labels": labels, "annotations": {
-                    "harvis.dev/config-hash": extras.config_hash(self, name, svc)}}, "spec": spec},
+                    "harvis.dev/config-hash": extras.config_hash(self, name, svc),
+                    **self.image_hash(spec)}}, "spec": spec},
             },
         })
+
+    def image_hash(self, spec):
+        # A rebuilt image keeps its tag, so the pod spec alone never changes and k8s
+        # keeps the old process. Its content id does change; carry it into the template.
+        used = sorted({c["image"] for c in spec["containers"] + spec.get("initContainers", [])
+                       if c["image"] in self.image_ids})
+        if not used:
+            return {}
+        h = hashlib.sha256("".join(f"{i}={self.image_ids[i]}\n" for i in used).encode())
+        return {"harvis.dev/image-hash": h.hexdigest()[:16]}
 
     def services_for(self, name, svc):
         aliases = {dns_name(name)}
@@ -377,10 +438,20 @@ def parse_args(argv):
     p.add_argument("--dns-ip", default="10.43.0.10", help="cluster DNS service IP (nginx resolver)")
     p.add_argument("--repo", required=True, help="repo root (to read nginx configs)")
     p.add_argument("--gpu", action="store_true", help="an NVIDIA GPU is schedulable")
+    p.add_argument("--amd-gpu", choices=("plugin", "privileged"), default="",
+                   help="give Ollama an AMD GPU over Vulkan: via the amd.com/gpu device plugin, "
+                        "or by handing it /dev/dri directly (privileged)")
     p.add_argument("--ollama-image", default="", help="run Ollama in the cluster with this image")
     p.add_argument("--ollama-dir", default="/var/lib/harvis/ollama")
+    # Defaults sized for a 14 GB / 8 core box; harvis-k8s.sh scales them from the node.
+    p.add_argument("--ollama-memory-request", default="6Gi")
+    p.add_argument("--ollama-memory-limit", default="10Gi")
+    p.add_argument("--ollama-cpu-request", default="2")
+    p.add_argument("--backup-dir", default="/var/lib/harvis/backups", help="where the nightly pg_dump lands")
+    p.add_argument("--backup-schedule", default="0 3 * * *", help="cron schedule of the database backup")
     p.add_argument("--lan-models-port", type=int, default=0, help="0 = do not share models on the LAN")
     p.add_argument("--lan-models-url", default="")
+    p.add_argument("--image-ids", default="", help="JSON {image: content id}; a changed id restarts its pods")
     return p.parse_args(argv)
 
 

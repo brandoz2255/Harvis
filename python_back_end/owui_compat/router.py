@@ -143,12 +143,16 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
             )
         if not user or not deps.verify_password(payload.password, user["password"]):
             raise HTTPException(status_code=401, detail="Incorrect email or password")
+        from plugins.people import BLOCKED_MESSAGE, is_blocked
+
+        if await is_blocked(pool, int(user["id"])):
+            raise HTTPException(status_code=403, detail=BLOCKED_MESSAGE)
         token = deps.create_access_token(
             {"sub": str(user["id"])},
             expires_delta=timedelta(minutes=deps.access_token_expire_minutes),
         )
         owui_user = harvis_user_to_owui(
-            dict(user), token, expires_at=_now() + deps.access_token_expire_minutes * 60
+            dict(user), expires_at=_now() + deps.access_token_expire_minutes * 60
         )
         return _login_cookie(JSONResponse(content=owui_user), token)
 
@@ -168,13 +172,13 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
             )
         token = token_resp.access_token
         owui_user = harvis_user_to_owui(
-            dict(user), token, expires_at=_now() + deps.access_token_expire_minutes * 60
+            dict(user), expires_at=_now() + deps.access_token_expire_minutes * 60
         )
         return _login_cookie(JSONResponse(content=owui_user), token)
 
     @router.get("/api/v1/auths/")
     async def owui_session(request: Request, user=Depends(get_current_user)):
-        # Echo the real token + its exp so OWUI's 15s expiry poll is accurate.
+        # Report the cookie's real exp; the token itself never goes in the body.
         token = request.cookies.get("access_token")
         if token is None:
             auth = request.headers.get("authorization") or request.headers.get("Authorization")
@@ -201,7 +205,6 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
                 "gender": getattr(user, "gender", None),
                 "date_of_birth": getattr(user, "date_of_birth", None),
             },
-            token or "",
             expires_at=expires_at or (_now() + deps.access_token_expire_minutes * 60),
         )
 
@@ -303,6 +306,17 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
     @router.post("/api/chat/completions")
     async def owui_chat_completions(request: Request, user=Depends(get_current_user)):
         owui_body = await request.json()
+        # The admin's limits (Settings ▸ People). A Hermes socket turn was already
+        # admitted and counted, and says so with a mark only the server can make;
+        # its calls still face the model list (mixture-of-agents, fallbacks).
+        from plugins.people import controls as people
+
+        auth = request.headers.get("authorization", "")
+        token = auth[7:].strip() if auth[:7].lower() == "bearer " else request.cookies.get("access_token")
+        counted = people.is_admitted(token, request.headers.get(people.ADMITTED_HEADER))
+        owui_body["model"] = await people.require_turn(
+            getattr(request.app.state, "pg_pool", None), int(user.id), str(owui_body.get("model") or ""),
+            count=not counted)
         # The voice assistant's turns: straight to the model, no detector below
         # may start a run (plugins/hermes_ui/rest_voice.py).
         if owui_body.get("harvis_plain") is True:
@@ -349,6 +363,15 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
         research = await maybe_handle_research(request, owui_body, user)
         if research is not None:
             return research
+        # A site to drive ("open instagram and scroll my feed", or Hermes's
+        # harvis_mode=browse) goes to the user's default assistant through the
+        # teammate door, because only a teammate has the watchable, gated
+        # browser. Ahead of the workspace detector, whose lanes cannot browse.
+        from plugins.agents.browse import maybe_handle_browse
+
+        browse = await maybe_handle_browse(request, owui_body, user)
+        if browse is not None:
+            return browse
         # Auto-detect workspace tasks → launch a run + return a WorkspaceRunCard
         # marker (the OWUI card attaches to /api/workspace/stream/{id}). Falls
         # through to a normal chat completion when it's not a workspace task.

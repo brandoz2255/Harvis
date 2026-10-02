@@ -79,7 +79,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      DATABASE_URL: "postgresql://pguser:pgpassword@pgsql:5432/database"
+      DATABASE_URL: "postgresql://pguser:${POSTGRES_PASSWORD:-pgpassword}@pgsql:5432/database"
       JWT_SECRET: "${JWT_SECRET:?JWT_SECRET must be set in .env}"
       OLLAMA_URL: "http://ollama:11434"
       BACKEND_URL: "http://backend:8000"
@@ -177,7 +177,7 @@ services:
     container_name: harvis-document-worker
     restart: unless-stopped
     environment:
-      DATABASE_URL: "postgresql://pguser:pgpassword@pgsql:5432/database"
+      DATABASE_URL: "postgresql://pguser:${POSTGRES_PASSWORD:-pgpassword}@pgsql:5432/database"
       OLLAMA_URL: "http://ollama:11434"
       BACKEND_URL: "http://backend:8000"
       ENVIRONMENT: "production"
@@ -223,7 +223,7 @@ services:
           echo 'PostgreSQL not ready, retrying in 2s...'; sleep 2;
         done &&
         echo 'Creating OpenClaw tables...' &&
-        psql postgresql://pguser:pgpassword@pgsql:5432/database <<'SQL'
+        psql postgresql://pguser:${POSTGRES_PASSWORD:-pgpassword}@pgsql:5432/database <<'SQL'
           CREATE TABLE IF NOT EXISTS openclaw_sessions (
             id           SERIAL PRIMARY KEY,
             session_key  TEXT UNIQUE NOT NULL,
@@ -287,7 +287,7 @@ services:
       # Ollama discovery key (any non-empty value enables local-model mode)
       OLLAMA_API_KEY: "ollama-local"
       # Session storage — shared DB, separate tables (openclaw_sessions/messages)
-      DATABASE_URL: "postgresql://pguser:pgpassword@pgsql:5432/database"
+      DATABASE_URL: "postgresql://pguser:${POSTGRES_PASSWORD:-pgpassword}@pgsql:5432/database"
       # Harvis GitHub bot — used by the harvis-github skill for PR creation.
       # GH_TOKEN is the standard env var consumed by gh CLI and git credential helper.
       GH_TOKEN: "${HARVIS_GITHUB_TOKEN:-}"
@@ -343,7 +343,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: pguser
-      POSTGRES_PASSWORD: pgpassword
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pgpassword}
       POSTGRES_DB: database
       POSTGRES_INITDB_ARGS: "-E UTF8 --locale=C"
     volumes:

@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { getSession } from '@/hermes'
 import { textPart } from '@/lib/chat-messages'
 import { createClientSessionState } from '@/lib/chat-runtime'
+import { trackBrowserUpload } from '@/lib/harvis-uploads'
 import { $composerAttachments, $composerDraft, type ComposerAttachment, setComposerDraft } from '@/store/composer'
 import { $queuedPromptsBySession, getQueuedPrompts } from '@/store/composer-queue'
 import { requestGatewayForAgent } from '@/store/gateway'
@@ -3249,6 +3250,116 @@ describe('usePromptActions eager-upload races', () => {
     // Exactly one file.attach (submit reused the eager result), then the send.
     expect(methods.filter(m => m === 'file.attach').length).toBe(1)
     expect(methods).toContain('prompt.submit')
+  })
+})
+
+// Browser build (Harvis): a chip has no path, its bytes already went to
+// POST /api/v1/files/ and prompt.submit names the ids in `files`.
+describe('usePromptActions Harvis upload attachments', () => {
+  afterEach(() => {
+    cleanup()
+    $composerAttachments.set([])
+    $connection.set(null)
+    clearNotifications()
+    vi.restoreAllMocks()
+  })
+
+  function captureSubmits() {
+    const submitted: (Record<string, unknown> | undefined)[] = []
+
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'prompt.submit') {
+        submitted.push(params)
+      }
+
+      return {} as never
+    })
+
+    return { requestGateway, submitted }
+  }
+
+  it('sends the upload ids in `files` and keeps their content out of the text', async () => {
+    $connection.set({ mode: 'remote' } as never)
+    const { requestGateway, submitted } = captureSubmits()
+
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness onReady={h => (handle = h)} refreshSessions={async () => undefined} requestGateway={requestGateway} />
+    )
+
+    const ok = await handle!.submitText('what is in these?', {
+      attachments: [
+        { id: 'file:upload/1/sales.csv', kind: 'file', label: 'sales.csv', fileId: 'f1' },
+        { id: 'image:upload/2/cat.png', kind: 'image', label: 'cat.png', fileId: 'f2' }
+      ]
+    })
+
+    expect(ok).toBe(true)
+    expect(requestGateway.mock.calls.map(c => c[0])).toEqual(['prompt.submit'])
+    expect(submitted[0]).toEqual({
+      session_id: RUNTIME_SESSION_ID,
+      text: 'what is in these?',
+      files: [{ id: 'f1' }, { id: 'f2' }]
+    })
+  })
+
+  it('waits for an upload still in flight and sends with an empty text', async () => {
+    $connection.set({ mode: 'remote' } as never)
+    const { requestGateway, submitted } = captureSubmits()
+
+    let finish!: (patch: { fileId: string; uploadState: undefined }) => void
+    trackBrowserUpload(
+      'file:upload/3/notes.pdf',
+      new Promise(resolve => {
+        finish = resolve
+      })
+    )
+
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness onReady={h => (handle = h)} refreshSessions={async () => undefined} requestGateway={requestGateway} />
+    )
+
+    const submitting = handle!.submitText('', {
+      attachments: [{ id: 'file:upload/3/notes.pdf', kind: 'file', label: 'notes.pdf', uploadState: 'uploading' }]
+    })
+
+    expect(submitted).toEqual([])
+    finish({ fileId: 'f3', uploadState: undefined })
+
+    expect(await submitting).toBe(true)
+    expect(submitted[0]).toEqual({ session_id: RUNTIME_SESSION_ID, text: '', files: [{ id: 'f3' }] })
+  })
+
+  it('refuses to send when an upload failed, showing why', async () => {
+    $connection.set({ mode: 'remote' } as never)
+    const { requestGateway, submitted } = captureSubmits()
+
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness onReady={h => (handle = h)} refreshSessions={async () => undefined} requestGateway={requestGateway} />
+    )
+
+    const ok = await handle!.submitText('read this', {
+      attachments: [
+        {
+          id: 'file:upload/4/big.pdf',
+          kind: 'file',
+          label: 'big.pdf',
+          uploadState: 'error',
+          detail: 'File too large: uploads are limited to 50 MB on this server (HARVIS_MAX_UPLOAD_MB).'
+        }
+      ]
+    })
+
+    expect(ok).toBe(false)
+    expect(submitted).toEqual([])
+    expect(
+      $notifications
+        .get()
+        .map(n => n.message)
+        .join('\n')
+    ).toContain('File too large')
   })
 })
 

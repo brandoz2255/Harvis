@@ -27,7 +27,7 @@ from fastapi.responses import StreamingResponse
 
 from auth_optimized import get_current_user_optimized
 
-from . import sessions, store
+from . import sessions, store, voice_warm
 from .rest import _token
 from .ws import Connection
 
@@ -40,6 +40,9 @@ VOICE_TITLE = "Voice: Harvis"
 HISTORY_TURNS = 20  # messages of the voice session the model sees each turn
 SHOWN_TURNS = 30
 INTERRUPTED = "[interrupted]"
+# A spoken turn should be a quick back-and-forth, not a chat-sized essay. This
+# cap is a backstop for small models that ignore the prose instruction below.
+VOICE_MAX_TOKENS = 80
 
 VOICE_NOTE = """You are Harvis on a voice call with the user. This is your own side conversation,
 not their chat: you help them get around Harvis and get things done while they work.
@@ -142,6 +145,18 @@ async def voice_session(request: Request, user=Depends(get_current_user_optimize
     return {"session_id": s.id, "running": s.running, "messages": _shown(msgs)}
 
 
+@router.post(f"{API}/voice/warm")
+async def voice_warm_model(request: Request, user=Depends(get_current_user_optimized)):
+    """The call is opening: load the voice model before the first spoken turn."""
+    pool, uid = request.app.state.pg_pool, _uid(user)
+    # The browser loads the transcript and asks for warm-up independently.
+    # Opening the session here avoids racing that load and warming a saved
+    # default while the persisted Voice session runs a different model.
+    s, _ = await open_session(pool, uid)
+    voice_warm.schedule(pool, uid, s.model)
+    return {"ok": True}
+
+
 @router.delete(f"{API}/voice/session")
 async def voice_session_reset(request: Request, user=Depends(get_current_user_optimized)):
     """Start the voice conversation over. The old one keeps a ``Voice:`` title, so it stays hidden."""
@@ -172,6 +187,7 @@ async def voice_turn(request: Request, user=Depends(get_current_user_optimized))
     s.running = True
     task = asyncio.create_task(conn._run_turn(s, msgs[-HISTORY_TURNS:], voice=True, plain=True,
                                               note=voice_note(str(body.get("page") or ""))))
+    task.add_done_callback(lambda _t: voice_warm.rewarm_after_turn(conn.pool, uid, s.model))
 
     async def lines():
         finished = False

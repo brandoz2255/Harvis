@@ -125,21 +125,23 @@ say "Check 2a — the default set is actually up"
 # What a clean deploy gets. Grew from 8 to 10 on 2026-09-15: `llmfit` arrived
 # with the FreeToken inference-node work and `preview-runner` with the
 # multi-file build preview. Both are unprofiled in docker-compose.yaml, so a
-# fresh `./install.sh` starts them. Update this list when that file changes.
-EXPECTED="artifact-init backend browser-runner harvis-mcp hermes-ui-builder llmfit nginx owui-builder pgsql preview-runner voice-onnx"
+# fresh `./install.sh` starts them. `repo-sandbox-image` (2026-09-30) only builds
+# the per-chat sandbox image. `owui-builder` left on 2026-10-01 when Hermes
+# became the only frontend. Update this list when that file changes.
+EXPECTED="artifact-init backend browser-runner harvis-mcp hermes-ui-builder llmfit nginx pgsql preview-runner repo-sandbox-image voice-onnx"
 # -f pins this to the file we SHIP. Without it Compose silently merges
 # docker-compose.override.yml, which is gitignored and personal — on a
 # developer box that makes this check measure their machine, not the deploy.
 RENDERED=$(docker compose -f docker-compose.yaml config --services 2>/dev/null | sort | tr '\n' ' ' | sed 's/ $//')
 if [ "$RENDERED" = "$(echo $EXPECTED | tr ' ' '\n' | sort | tr '\n' ' ' | sed 's/ $//')" ]; then
-  pass "compose renders exactly the 10 default services"
+  pass "compose renders exactly the $(echo $EXPECTED | wc -w) default services"
 else
   fail "default service set changed"
   note "expected: $EXPECTED"
   note "rendered: $RENDERED"
 fi
 
-# artifact-init and owui-builder are one-shot: they populate a bind mount and
+# artifact-init and hermes-ui-builder are one-shot: they populate a bind mount and
 # exit 0. Treating their absence from `ps` as a failure would be wrong.
 for svc in backend browser-runner harvis-mcp llmfit nginx pgsql preview-runner voice-onnx; do
   state=$(docker compose ps --format '{{.Service}} {{.State}}' 2>/dev/null | awk -v s="$svc" '$1==s {print $2}')
@@ -150,7 +152,7 @@ for svc in backend browser-runner harvis-mcp llmfit nginx pgsql preview-runner v
   esac
 done
 
-for svc in artifact-init owui-builder hermes-ui-builder; do
+for svc in artifact-init hermes-ui-builder repo-sandbox-image; do
   code=$(docker compose ps -a --format '{{.Service}} {{.ExitCode}}' 2>/dev/null | awk -v s="$svc" '$1==s {print $2}')
   if [ "$code" = "0" ]; then pass "$svc completed (exit 0)"
   else fail "$svc exit code '$code' (expected 0)"; fi
@@ -158,26 +160,42 @@ done
 
 say "Check 2b — the UI loads"
 
-# `/` is a redirect to the Hermes shell now, and an unsigned-in visitor is
-# redirected again to the account screen. Follow both: without -L this check
-# passes on the 302 alone and never touches a real page, which is exactly how a
-# broken shell would slip through.
-if curl -fsSL --max-time 20 "$UI_URL" -o /dev/null 2>/dev/null; then
-  pass "nginx serves $UI_URL"
+# `/harvis/` serves the Hermes shell to everyone. Sign-in is a screen inside
+# Hermes, and the backend checks every API and WebSocket call, so nginx no longer
+# gates the page itself. A 200 alone proves little (an empty dist dir still
+# answers), so the body must reference the built asset bundle.
+BODY=$(curl -fsS --max-time 20 "$UI_URL/harvis/" 2>/dev/null || true)
+if printf '%s' "$BODY" | grep -q '/harvis/assets/'; then
+  pass "$UI_URL/harvis/ serves the Hermes shell"
 else
-  fail "$UI_URL did not answer — nginx up but no frontend? check owui-builder's bind mount"
+  fail "$UI_URL/harvis/ did not serve the Hermes shell — check hermes-ui-builder's bind mount (front_end/hermes-desktop-ui/dist)"
 fi
 
-# The front door must land a signed-out visitor on the account screen. A 500
-# here means the Hermes session gate is pointed at an endpoint the backend does
-# not serve: nginx turns any auth_request answer that is not 2xx/401/403 into a
-# 500, and `nginx -t` cannot see it.
-GATE=$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' --max-time 20 "$UI_URL/hermes/" 2>/dev/null)
-case "$GATE" in
-  302*"/auth"*) pass "signed-out /hermes/ redirects to the account screen" ;;
-  200*)         pass "/hermes/ served (an existing session is signed in)" ;;
-  *)            fail "/hermes/ answered '$GATE' — expected a 302 to /auth or a 200" ;;
+# The bundle the shell points at must load, or the page is blank.
+ASSET=$(printf '%s' "$BODY" | grep -o '/harvis/assets/[^"]*\.js' | head -n1)
+if [ -n "$ASSET" ] && curl -fsS -o /dev/null --max-time 20 "$UI_URL$ASSET" 2>/dev/null; then
+  pass "the Hermes bundle loads ($ASSET)"
+else
+  fail "the Hermes bundle '${ASSET:-none found}' did not load"
+fi
+
+# Signed out, the session endpoint must say 401 (the shell shows its sign-in
+# screen on that) rather than 500 or a proxy error page.
+SESSION=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$UI_URL/api/v1/auths/" 2>/dev/null)
+case "$SESSION" in
+  401) pass "signed-out session check answers 401 (the sign-in screen shows)" ;;
+  *)   fail "/api/v1/auths/ answered '$SESSION' signed out — expected 401" ;;
 esac
+
+# The bare address and old OWUI and /hermes/ addresses (bookmarks, /auth,
+# /c/<id>) must land on the shell, not 404.
+for old in / /auth /c/old-chat /hermes/; do
+  GOT=$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' --max-time 20 "$UI_URL$old" 2>/dev/null)
+  case "$GOT" in
+    30[12]*"$UI_URL/harvis/") pass "$old redirects to /harvis/" ;;
+    *)                        fail "$old answered '$GOT' — expected a redirect to /harvis/" ;;
+  esac
+done
 
 # ------------------------------------------------------- the no-engine case
 
