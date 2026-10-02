@@ -122,6 +122,15 @@ async def dispatch_inbound(
         await audit(pool, event, user_id=user_id, direction=Direction.INBOUND, status="rejected_empty")
         return DispatchResult(ok=False, user_id=user_id, error="empty message")
 
+    # The admin's limits (Settings ▸ People): a paired contact talks as the
+    # account it is paired to, so it spends that account's messages.
+    from plugins.people import admit_turn
+
+    admitted = await admit_turn(pool, user_id)
+    if not admitted.ok:
+        await audit(pool, event, user_id=user_id, direction=Direction.INBOUND, status="rejected_limit")
+        return DispatchResult(ok=False, user_id=user_id, error=admitted.reason)
+
     # Plugin hook — pre_gateway_dispatch. Phase 3 honors a single action
     # vocabulary: {"action": "skip", "reason": ...} drops the message;
     # any other return value (or None) means allow. "rewrite" is reserved
@@ -232,6 +241,9 @@ async def dispatch_inbound(
         logger.exception("workspace_router import failed")
         return DispatchResult(ok=False, user_id=user_id, error=f"workspace unavailable: {e}")
 
+    # The default agent ("main") is the OpenClaw lane. Kubernetes installs have no
+    # OpenClaw: _run_workspace_bg, reached only through this entry point, moves such
+    # runs to the local lane, so nothing here may open its own OpenClaw connection.
     try:
         data = await launch_workspace_internal(
             request=request,

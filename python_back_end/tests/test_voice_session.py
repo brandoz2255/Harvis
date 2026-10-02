@@ -67,6 +67,27 @@ def test_a_reply_spoken_over_shows_as_stopped():
     assert [m["text"] for m in shown] == ["Go to this code.", "Stopped.", "Opening it."]
 
 
+def test_warmup_opens_the_voice_session_before_choosing_a_model(monkeypatch):
+    seen = {}
+    live = sessions.Live(id="voice-1", user_id=7, model="hermes3:3b", persisted=True)
+
+    async def open_session(pool, uid):
+        seen["opened"] = (pool, uid)
+        return live, []
+
+    def schedule(pool, uid, model):
+        seen["scheduled"] = (pool, uid, model)
+
+    monkeypatch.setattr(rest_voice, "open_session", open_session)
+    monkeypatch.setattr(rest_voice.voice_warm, "schedule", schedule)
+
+    result = asyncio.run(rest_voice.voice_warm_model(_request({}), {"id": 7}))
+
+    assert result == {"ok": True}
+    assert seen["opened"][1] == 7
+    assert seen["scheduled"][1:] == (7, "hermes3:3b")
+
+
 def test_a_turn_streams_its_own_reply(monkeypatch):
     seen = {}
     _fake_turn(monkeypatch, seen)

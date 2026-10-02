@@ -153,3 +153,125 @@ def test_clean_text_absent_stays_absent():
 def test_clean_text_rejects_overlong():
     with pytest.raises(store.ValidationError):
         store.clean_text("x" * 11, limit=10, field="job")
+
+
+# ─── the default assistant ───────────────────────────────────────────────────
+# ensure_default_assistant is exercised against stand-ins for the row-level
+# functions: what matters is which it calls, and what it does when the
+# database says another call got there first.
+
+import asyncio  # noqa: E402
+
+import asyncpg  # noqa: E402
+
+
+def _unique_violation():
+    return asyncpg.UniqueViolationError("duplicate key value violates unique constraint")
+
+
+def _fake_store(monkeypatch, *, default=None, create=None, claim=None):
+    calls: dict = {"create": [], "claim": [], "delete": [], "list": 0, "promote": []}
+    defaults = list(default) if isinstance(default, (list, tuple)) else [default]
+
+    async def get_default(pool, user_id):
+        return defaults.pop(0) if len(defaults) > 1 else defaults[0]
+
+    async def create_agent(pool, user_id, fields):
+        calls["create"].append(fields["name"])
+        if callable(create):
+            return create(fields)
+        return {"id": "new-1", "name": fields["name"], "autonomy": fields.get("autonomy", {}),
+                "is_default_assistant": False}
+
+    async def claim_slot(pool, user_id, agent_id):
+        calls["claim"].append(agent_id)
+        if callable(claim):
+            return claim(agent_id)
+        return {"id": agent_id, "is_default_assistant": True, "autonomy": {}}
+
+    async def delete_agent(pool, user_id, agent_id):
+        calls["delete"].append(agent_id)
+        return True
+
+    async def list_teammates(pool, user_id, *, enabled_only=False):
+        calls["list"] += 1
+        return [{"id": "scout", "autonomy": {"cleared_limits": ["send"]}, "enabled": True}]
+
+    async def set_default(pool, user_id, agent_id):
+        calls["promote"].append(agent_id)
+        return {"id": agent_id}
+
+    monkeypatch.setattr(store, "get_default_assistant", get_default)
+    monkeypatch.setattr(store, "create_agent", create_agent)
+    monkeypatch.setattr(store, "_claim_default_slot", claim_slot)
+    monkeypatch.setattr(store, "delete_agent", delete_agent)
+    monkeypatch.setattr(store, "list_teammates", list_teammates)
+    monkeypatch.setattr(store, "set_default_assistant", set_default)
+    return calls
+
+
+def test_an_explicit_enabled_default_is_used_as_is(monkeypatch):
+    chosen = {"id": "chosen", "is_default_assistant": True, "autonomy": {"cleared_limits": ["pay"]}}
+    calls = _fake_store(monkeypatch, default=chosen)
+    assert asyncio.run(store.ensure_default_assistant("pool", 7)) is chosen
+    assert calls["create"] == [] and calls["claim"] == []
+
+
+def test_no_teammate_is_ever_promoted_a_fresh_one_is_made_instead(monkeypatch):
+    # "scout" exists, enabled, with a cleared limit — and must stay untouched.
+    calls = _fake_store(monkeypatch, default=None)
+    got = asyncio.run(store.ensure_default_assistant("pool", 7))
+    assert calls["list"] == 0 and calls["promote"] == []
+    assert calls["create"] == ["Harvis"]
+    assert calls["claim"] == ["new-1"]
+    assert got["is_default_assistant"] is True and got["autonomy"] == {}
+
+
+def test_the_fresh_default_carries_no_clearances():
+    assert store.clean_autonomy(store.DEFAULT_ASSISTANT["autonomy"]) == {}
+    assert store.clean_name(store.DEFAULT_ASSISTANT["name"]) == "harvis"
+    for name in store._DEFAULT_NAMES:
+        store.clean_name(name)  # every fallback handle is a legal one
+
+
+def test_a_taken_handle_falls_back_to_the_next(monkeypatch):
+    def create(fields):
+        if fields["name"] == "Harvis":
+            raise store.ValidationError("An agent named 'harvis' already exists.")
+        return {"id": "new-2", "name": fields["name"], "autonomy": {}}
+
+    calls = _fake_store(monkeypatch, default=None, create=create)
+    got = asyncio.run(store.ensure_default_assistant("pool", 7))
+    assert calls["create"] == ["Harvis", "harvis-assistant"]
+    assert got["id"] == "new-2"
+
+
+def test_losing_the_race_on_the_name_uses_the_winners_row(monkeypatch):
+    winner = {"id": "theirs", "is_default_assistant": True}
+
+    def create(fields):
+        raise _unique_violation()
+
+    calls = _fake_store(monkeypatch, default=[None, winner], create=create)
+    assert asyncio.run(store.ensure_default_assistant("pool", 7)) is winner
+    assert calls["claim"] == [] and calls["delete"] == []
+
+
+def test_losing_the_race_on_the_default_slot_drops_the_spare_row(monkeypatch):
+    winner = {"id": "theirs", "is_default_assistant": True}
+
+    def claim(agent_id):
+        raise _unique_violation()
+
+    calls = _fake_store(monkeypatch, default=[None, winner], claim=claim)
+    assert asyncio.run(store.ensure_default_assistant("pool", 7)) is winner
+    assert calls["delete"] == ["new-1"]
+
+
+def test_a_default_that_appeared_meanwhile_wins_without_an_error(monkeypatch):
+    # The claim is conditional on "no default yet", so it updates nothing
+    # rather than demoting the one another call just made.
+    winner = {"id": "theirs", "is_default_assistant": True}
+    calls = _fake_store(monkeypatch, default=[None, winner], claim=lambda _id: None)
+    assert asyncio.run(store.ensure_default_assistant("pool", 7)) is winner
+    assert calls["delete"] == ["new-1"]

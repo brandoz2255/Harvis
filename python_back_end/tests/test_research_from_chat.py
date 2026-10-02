@@ -89,7 +89,7 @@ def test_report_links_its_page_and_lists_missing_sources():
         "rp-0123456789ab", "# Findings\nbody", [{"url": "https://a", "title": "A"}, {"url": "https://b"}],
         "http://localhost:9000",
     )
-    assert "[Open the report page](http://localhost:9000/hermes/#/research?id=rp-0123456789ab)" in text
+    assert "[Open the report page](http://localhost:9000/#/research?id=rp-0123456789ab)" in text
     assert "- [A](https://a)" in text and "- [https://b](https://b)" in text
     assert "rp-0123456789ab" in text
 

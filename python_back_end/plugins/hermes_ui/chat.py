@@ -15,6 +15,9 @@ from typing import Any, AsyncIterator
 
 import httpx
 
+from plugins.agents.browse import is_explicit_browser_request
+from plugins.people.controls import ADMITTED_HEADER, admitted_mark
+
 from .research_follow import follow_research
 
 log = logging.getLogger("hermes_ui.chat")
@@ -51,23 +54,31 @@ def research_marker(text: str) -> str | None:
     return m.group(1) if m else None
 
 
-CHAT_MODES = ("auto", "chat", "agent", "orchestrate")
+CHAT_MODES = ("auto", "chat", "agent", "orchestrate", "browse")
 
 # There is no mode pill: every turn is "auto" (answer in chat, start a run when
 # the task needs one) unless the message itself tells Harvis how to handle it.
 # Only deliberate instructions count, never topic words, so "tell me about
 # multi-agent systems" stays a normal auto turn. Order matters: a refusal
-# ("don't use agents") must win over the agent phrasing inside it.
+# ("don't use agents") must win over the agent phrasing inside it, and a site
+# to drive ("open instagram and scroll my feed") wins over the generic agent
+# wording, because only the browse lane has a browser.
 _MODE_REQUESTS = (
     ("chat", re.compile(
         r"\b(?:just|only)\s+(?:answer|reply|chat|respond)\b"
-        r"|\b(?:don'?t|do\s+not|no\s+need\s+to)\s+(?:run|use|start|launch)\s+(?:any\s+|a\s+|an\s+|the\s+)?"
-        r"(?:tools?|agents?|workspace|runs?)\b"
-        r"|\bwithout\s+(?:any\s+)?(?:tools|agents|a\s+workspace)\b", re.I)),
+        r"|\b(?:don'?t|do\s+not|no\s+need\s+to)\s+(?:run|use|start|launch|open)\s+(?:any\s+|a\s+|an\s+|the\s+)?"
+        r"(?:tools?|agents?|workspace|runs?|browser)\b"
+        r"|\bwithout\s+(?:any\s+)?(?:tools|agents|a\s+workspace|a\s+browser)\b", re.I).search),
     ("orchestrate", re.compile(
         r"\b(?:use|spin\s+up|assemble|put\s+together|get)\s+(?:a\s+|the\s+)?team\b"
         r"|\bteam\s+of\s+agents\b"
-        r"|\b(?:use|with)\s+(?:multiple|several|many)\s+agents\b", re.I)),
+        r"|\b(?:use|with)\s+(?:multiple|several|many)\s+agents\b", re.I).search),
+    # Only an ask for the browser by name ("use the browser to …") is a mode
+    # request. Wording that merely drives a site ("open instagram and scroll
+    # my feed") stays "auto": the browse lane still claims it there, but when
+    # the browser runner is down the turn falls through to a chat answer
+    # instead of an apology the user never asked for.
+    ("browse", is_explicit_browser_request),
     ("agent", re.compile(
         r"\b(?:use|run|launch|start|spin\s+up)\s+(?:an?\s+|the\s+)?(?:agent|workspace)\b"
         r"|\b(?:run|do)\s+(?:it|this|that)\s+(?:as|with|in)\s+(?:an?\s+|the\s+)?(?:agent|workspace)\b"
@@ -76,7 +87,7 @@ _MODE_REQUESTS = (
         # "can you set up this repo", "clone …") is a request to run things, not a
         # question about them ("how do I install python?" doesn't start this way).
         r"|^\s*(?:(?:please|pls|ok|okay|hey\s+harvis|harvis)[,\s]+)*(?:(?:can|could|would)\s+you\s+)?"
-        r"(?:please\s+)?(?:install|set\s*up|clone|download\s+and\s+run)\b", re.I)),
+        r"(?:please\s+)?(?:install|set\s*up|clone|download\s+and\s+run)\b", re.I).search),
 )
 
 
@@ -90,8 +101,8 @@ def is_group_turn(title: str | None, text: str | None) -> bool:
 
 def requested_mode(text: str) -> str | None:
     """The mode the user explicitly asked for in this message, if any."""
-    for mode, pattern in _MODE_REQUESTS:
-        if pattern.search(text or ""):
+    for mode, asks in _MODE_REQUESTS:
+        if asks(text or ""):
             return mode
     return None
 
@@ -141,14 +152,16 @@ async def _stream_completion(token: str, messages: list[dict], model: str, endpo
         headers = {"Authorization": f"Bearer {endpoint['api_key']}"} if endpoint.get("api_key") else {}
     else:
         # "auto" lets the OWUI compat detectors claim image / workspace turns;
-        # "agent" / "orchestrate" force a workspace run and "chat" never starts
-        # one (the composer's mode pill). The run marker is followed by runs.follow_run.
+        # "agent" / "orchestrate" force a workspace run, "browse" hands the turn
+        # to the default assistant's browser, and "chat" never starts a run.
+        # The run marker is followed by runs.follow_run.
         body["harvis_mode"] = mode if mode in CHAT_MODES else os.getenv("HARVIS_HERMES_UI_CHAT_MODE", "auto")
         if effort:
             body["reasoning_effort"] = effort
         if extra:
             body.update(extra)
-        headers = {"Authorization": f"Bearer {token}", "Cookie": f"access_token={token}"}
+        headers = {"Authorization": f"Bearer {token}", "Cookie": f"access_token={token}",
+                   ADMITTED_HEADER: admitted_mark(token)}
     timeout = httpx.Timeout(connect=10.0, read=600.0, write=30.0, pool=10.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         async with client.stream("POST", target_url, json=body, headers=headers) as resp:

@@ -306,7 +306,32 @@ detect_provider() {
     add_row PASS "model server" "using ${LLM_ENDPOINT} (--llm-url)"
     return 0
   fi
-  local entry port name path body count host
+  local entry port name path body count host saved
+  # A server already saved in .env is the user's earlier choice and outranks the
+  # local probe, as --llm-url does. Re-running on a stack whose server lives on
+  # another machine used to print "none found" and "chat has nothing to talk to"
+  # while chat worked, and a local server that appeared later silently replaced
+  # the saved one. host.docker.internal values were auto-detected, so re-probe.
+  saved="$(sed -n 's/^HARVIS_LLM_BASE_URL=//p' .env 2>/dev/null | tail -n 1)"
+  case "$saved" in
+    ""|*host.docker.internal*) : ;;
+    *)
+      LLM_ENDPOINT="$saved"
+      LLM_PROVIDER="the server saved in .env"
+      body=""
+      if command -v curl >/dev/null 2>&1; then
+        body="$(curl -s -m 4 "${saved%/}/api/tags" 2>/dev/null || true)"
+        case "$body" in *'"models"'*) : ;; *) body="$(curl -s -m 4 "${saved%/}/v1/models" 2>/dev/null || true)" ;; esac
+      fi
+      case "$body" in
+        *'"models"'*|*'"data"'*)
+          count="$(printf '%s' "$body" | grep -o '"id"\|"name"' | wc -l | tr -d ' ' || true)"
+          add_row PASS "model server" "${saved} (saved in .env), ${count:-0} model(s)" ;;
+        *)
+          add_row WARN "model server" "${saved} is saved in .env but not answering now — kept; --llm-url changes it" ;;
+      esac
+      return 0 ;;
+  esac
   local -a hosts=()
   while IFS= read -r host; do [ -n "$host" ] && hosts+=("$host"); done < <(llm_probe_hosts)
   for entry in "${KNOWN_PROVIDERS[@]}"; do
@@ -649,27 +674,18 @@ write_env() {
   # was a bad trade. An operator who IS exposing one adds HARVIS_SETUP_CODE to
   # .env by hand; the backend and the signup form both pick it up from there.
   # POSTGRES_PASSWORD — the database ships with a well-known default that is
-  # published in this repo, so every install used to share one credential. It
-  # is only settable at initdb time: once a data volume exists, Postgres
-  # ignores this variable and the old password is what the cluster still
-  # expects. So generate one ONLY when there is no volume yet — rotating it
-  # under a live database would lock the backend out of its own data.
-  compose_project="$(sed -n 's/^name:[[:space:]]*//p' docker-compose.yaml | head -1)"
-  compose_project="${compose_project:-${COMPOSE_PROJECT_NAME:-harvis}}"
-  if docker volume inspect "${compose_project}_pgsql_data" >/dev/null 2>&1; then
-    if ! grep -q '^POSTGRES_PASSWORD=' .env; then
-      echo "• Keeping the default database password — ${compose_project}_pgsql_data"
-      echo "  already exists, and the password is fixed at database creation."
-      echo "  To rotate it: ALTER USER pguser WITH PASSWORD '<new>'; then put the"
-      echo "  same value in .env as POSTGRES_PASSWORD."
-    fi
-  else
-    ensure_env_secret POSTGRES_PASSWORD "$(rand_hex 24)" "a POSTGRES_PASSWORD"
-  fi
+  # published in this repo, so every install used to share one credential.
+  # Postgres only reads this variable at initdb, so an existing database keeps
+  # whatever it was created with; sync_db_password makes the database follow
+  # .env on every launch, which is what lets a fresh .env sit beside old data.
+  ensure_env_secret POSTGRES_PASSWORD "$(rand_hex 24)" "a POSTGRES_PASSWORD"
 
   # OPENCLAW_GATEWAY_TOKEN — SHARED across backend/openclaw/harvis-mcp; a running
   # stack authenticated with the old value breaks if this ever regenerates.
   ensure_env_secret OPENCLAW_GATEWAY_TOKEN "$(rand_hex 32)" "an OPENCLAW_GATEWAY_TOKEN"
+  # MESSAGING_GATEWAY_TOKEN — shared by the backend and the messaging
+  # gateway (on by default). Without it the gateway cannot reach the backend.
+  ensure_env_secret MESSAGING_GATEWAY_TOKEN "$(rand_hex 32)" "a MESSAGING_GATEWAY_TOKEN"
   if [ -n "$LLM_ENDPOINT" ]; then
     echo "✓ Wrote .env  (HARVIS_LLM_BASE_URL=${LLM_ENDPOINT})"
   else
@@ -757,7 +773,7 @@ health_blockers() { # $1 = /api/health/services body
 # The status table the user sees, built from the ACTUAL default service set —
 # not from the backend's capability report, which names the external provider
 # alongside real containers. `ps` without -a hides exited containers, and two
-# services (artifact-init, owui-builder) are one-shot jobs that SHOULD exit 0,
+# services (artifact-init, hermes-ui-builder) are one-shot jobs that SHOULD exit 0,
 # so read states with -a and judge exited containers by their exit code.
 # Failed services land in STACK_DOWN for the caller to act on.
 STACK_DOWN=""
@@ -827,7 +843,7 @@ poll_health() {
     return 1
   fi
   echo ""
-  echo "✓ Harvis is up → http://localhost:9000"
+  echo "✓ Harvis is up → http://localhost:9000/harvis/"
   # The endpoint returns {"needs_setup":..,"setup_complete":..} — extract the
   # one field we need without anchoring to the whole body (a second key was
   # added later, and an anchored match silently yields empty → a false
@@ -895,6 +911,29 @@ poll_health() {
   return 0
 }
 
+# The database keeps the password it was created with, while every service
+# connects with the one in .env. A fresh clone beside an old database (or one a
+# --k8s run created) left the backend running with no database: "password
+# authentication failed for user pguser". Postgres trusts its own local socket,
+# so set the role's password from the container's env before anything else
+# starts. Idempotent, and the value never leaves the container.
+sync_db_password() {
+  local i
+  echo "Starting the database ..."
+  docker compose up -d pgsql >/dev/null || return 1
+  for i in $(seq 1 30); do
+    if printf "ALTER ROLE pguser WITH PASSWORD :'pw';\n" | docker compose exec -T pgsql \
+        sh -c 'psql -q -v ON_ERROR_STOP=1 -v pw="$POSTGRES_PASSWORD" -U pguser -d postgres' >/dev/null 2>&1; then
+      echo "✓ Database password matches .env"
+      return 0
+    fi
+    sleep 2
+  done
+  echo "⚠ Could not confirm the database password; if sign-in fails with \"Database"
+  echo "  unavailable\", run ./install.sh --yes again."
+  return 1
+}
+
 launch() {
   echo ""
   if [ -n "$LLM_ENDPOINT" ]; then
@@ -921,6 +960,7 @@ launch() {
     # so the retry fails with a name conflict instead of the original error and
     # the user chases the wrong problem. Tear this project's own containers down
     # — only ever ours, selected by the compose project label — and say so.
+    sync_db_password || true
     if ! docker compose up --build -d; then
       echo ""
       echo "✗ Startup failed. Removing the containers this attempt created so a"
@@ -929,6 +969,18 @@ launch() {
       echo "  Cleaned up. Fix the error above, then run ./install.sh again."
       return 1
     fi
+    # The backend opens its database pool once at start. One left running from an
+    # earlier attempt with the old password keeps failing until it restarts.
+    if docker compose logs --tail 200 backend 2>/dev/null | grep -q 'password authentication failed'; then
+      echo "Restarting the backend so it signs in with the synced password ..."
+      docker compose restart backend >/dev/null || true
+    fi
+    # nginx bind-mounts its config files and the two UI builds. `git pull` and the
+    # builders replace those paths rather than writing into them, and a running
+    # container keeps the old ones: a re-run served the previous routes and the
+    # previous UI until someone restarted nginx by hand. `up` leaves an unchanged
+    # container alone, so restart it here; it takes about a second.
+    docker compose restart nginx >/dev/null 2>&1 || true
     poll_health
   fi
 }
@@ -959,9 +1011,12 @@ main() {
   echo "Harvis installer"
   echo "================"
   case "$K8S_ACTION" in
-    status|join-command|uninstall) run_k8s "$K8S_ACTION"; exit $? ;;
+    status|join-command) run_k8s "$K8S_ACTION"; exit $? ;;
     join) run_k8s join "${K8S_JOIN_ARGS[@]}"; exit $? ;;
-    off) run_k8s off && poll_health; exit $? ;;
+    # Leaving Kubernetes runs the full Docker launch below rather than a bare
+    # `compose up`: that skipped the new .env secrets, the database password sync
+    # and the image builds, so a switch back could start a backend that cannot sign in.
+    off|uninstall) HARVIS_K8S_OFF_SKIP_START=1 run_k8s "$K8S_ACTION" || exit $?; K8S_ACTION=""; ASSUME_YES=1 ;;
   esac
   if [ -z "$K8S_ACTION" ] && [ -f "$K8S_MODE_FILE" ] && [ "$CHECK_ONLY" -eq 0 ]; then
     echo "✗ Harvis is running in Kubernetes mode on this machine."

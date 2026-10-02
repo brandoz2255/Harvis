@@ -258,12 +258,15 @@ async def mcp_servers_replace(request: Request, user=Depends(get_current_user_op
         # _upsert_server seals creds + guards remote URLs but does not touch the
         # enabled column, so apply enabled after (default True — an omitted flag
         # re-enables, matching the editor's replace semantics).
+        # The editor's mcp.json shape spells it `auth: oauth`; a save must not
+        # downgrade a server the user authorized to auth_method none.
+        auth = str(cfg.get("auth_method") or cfg.get("auth") or "none").strip().lower()
         await _upsert_server(
             request, user, name=name, transport=cfg["transport"],
             url=str(cfg.get("url") or "").strip() or None,
             command=str(cfg.get("command") or "").strip() or None,
             args=list(cfg.get("args") or []),
-            auth_method=str(cfg.get("auth_method") or "none"),
+            auth_method="oauth" if auth == "oauth" else "none",
             env={}, credentials={str(k): str(v) for k, v in (cfg.get("env") or {}).items()})
         async with _pool(request).acquire() as conn:
             await conn.execute(

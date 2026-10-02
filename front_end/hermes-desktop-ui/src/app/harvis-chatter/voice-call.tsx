@@ -17,7 +17,8 @@ import {
   pendingVoiceReply,
   sendVoiceTurn,
   stopVoiceTurn,
-  takeChatDrafts
+  takeChatDrafts,
+  warmVoiceModel
 } from '@/store/voice-assistant'
 import { $voiceCallCompact, $voiceCallLive, setVoiceCallCompact, setVoiceCallLive } from '@/store/voice-call'
 import { $voiceStopPhrase } from '@/store/voice-prefs'
@@ -96,6 +97,7 @@ export function HarvisVoiceCall({ transcribeAudio }: HarvisVoiceCallProps) {
     }
 
     void loadVoiceSession()
+    warmVoiceModel()
 
     wakePauseRef.current = (async () => {
       try {

@@ -15,7 +15,7 @@ services:
       - ./logs:/app/logs
     environment:
       # Database connection (Docker network)
-      - VECTOR_DATABASE_URL=postgresql://pguser:pgpassword@pgsql:5432/database
+      - VECTOR_DATABASE_URL=postgresql://pguser:${POSTGRES_PASSWORD:-pgpassword}@pgsql:5432/database
       - VECTOR_COLLECTION_NAME=n8n_workflows
       
       # Workflow paths (mounted volumes)
@@ -46,7 +46,7 @@ services:
     container_name: pgsql
     environment:
       - POSTGRES_USER=pguser
-      - POSTGRES_PASSWORD=pgpassword
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-pgpassword}
       - POSTGRES_DB=database
     volumes:
       - postgres_data:/var/lib/postgresql/data

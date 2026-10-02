@@ -53,7 +53,18 @@ _PAY_WORDS = re.compile(
 _SEND_WORDS = re.compile(
     r"\b(?:send|send\s+message|reply|reply\s+all|forward|post|publish|tweet|"
     r"submit\s+(?:review|comment|application|form)|comment|share|invite|"
-    r"rsvp|book\s+now|reserve|apply\s+now|contact\s+(?:us|seller))\b",
+    r"rsvp|book\s+now|reserve|apply\s+now|contact\s+(?:us|seller)|"
+    r"(?:add|post|write|leave)\s+(?:a\s+)?(?:comment|reply))\b",
+    re.IGNORECASE,
+)
+# A public action taken as the user — a like, a follow, a repost, a vote — is
+# a send: it shows up under their name. These words are also ordinary English
+# in links ("More like this", "Who to follow"), so they only count when the
+# control's own label *starts* with one ("Like", "Like 1.2K", "Follow @sam",
+# "Following", "Upvote").
+_SOCIAL_ACTION = re.compile(
+    r"^\s*(?:like|unlike|follow|following|unfollow|repost|reposted|retweet|retweeted|"
+    r"quote(?:\s+(?:tweet|post))?|upvote|downvote|share|subscribe|subscribed|react)\b",
     re.IGNORECASE,
 )
 
@@ -131,8 +142,8 @@ def classify_ref(ref_meta: dict | None) -> Optional[str]:
         # A card number or CVV field is about to spend money; a password or
         # one-time code is about to sign in.
         return PAY if re.search(r"card|cvv|cvc|iban|routing|account", field, re.I) else SIGN_IN
-    label = _blob(ref_meta.get("name"), ref_meta.get("text"), ref_meta.get("value"),
-                  ref_meta.get("aria_label"), ref_meta.get("title"))
+    parts = [str(ref_meta.get(k) or "") for k in ("name", "text", "value", "aria_label", "title")]
+    label = _blob(*parts)
     href = str(ref_meta.get("href") or "")
     # Order matters: pay before send, because "Confirm and pay" contains
     # neither a send verb nor a delete verb but must never be read as generic.
@@ -142,7 +153,7 @@ def classify_ref(ref_meta: dict | None) -> Optional[str]:
         return DELETE
     if _SIGN_IN_WORDS.search(label):
         return SIGN_IN
-    if _SEND_WORDS.search(label):
+    if _SEND_WORDS.search(label) or any(_SOCIAL_ACTION.match(p) for p in parts):
         return SEND
     return None
 

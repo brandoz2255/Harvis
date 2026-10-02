@@ -170,6 +170,4 @@ def register_account_routes(
                 raise HTTPException(status_code=404, detail="User not found")
 
         logger.info("owui: profile updated for user id=%s", user.id)
-        # Returned without a token on purpose: this is not a re-auth, and the
-        # pane refetches the session itself right after a successful save.
-        return harvis_user_to_owui(dict(row), "")
+        return harvis_user_to_owui(dict(row))

@@ -176,14 +176,24 @@ check_dns() {
 # so no registry is needed. A stamp per image skips the copy when unchanged.
 import_images() {
   $SUDO mkdir -p "$STATE_DIR/images"
-  local img id stamp
+  local img id stamp ids
+  # Every image's content id, changed or not, goes to the generator: a rebuilt image
+  # keeps its tag, and only this id in the pod template makes k8s restart its pods.
+  IMAGE_IDS_FILE="$(mktemp)"; ids="$(mktemp)"
   while IFS= read -r img; do
     [ -n "$img" ] || continue
     # Not .Id: with Docker's containerd image store every rebuild gets a new Id
-    # (fresh provenance timestamp) even when nothing in the image changed.
-    id="$(docker image inspect -f '{{json .RootFS.Layers}}{{json .Config}}' "$img" 2>/dev/null)" \
+    # (fresh provenance timestamp) even when nothing in the image changed. Compose's
+    # own labels are left out too: two services that build one tag (browser-runner,
+    # preview-runner) stamp it with whichever finished last, which flips run to run.
+    id="$(docker image inspect "$img" 2>/dev/null | python3 -c '
+import hashlib, json, sys
+d = json.load(sys.stdin)[0]
+c = dict(d["Config"])
+c["Labels"] = {k: v for k, v in (c.get("Labels") or {}).items() if not k.startswith("com.docker.compose.")}
+print(hashlib.sha256(json.dumps([d["RootFS"]["Layers"], c], sort_keys=True).encode()).hexdigest())' 2>/dev/null)" \
       || die "image $img is missing — run: docker compose build"
-    id="$(printf '%s' "$id" | sha256sum | cut -d' ' -f1)"
+    printf '%s\t%s\n' "$img" "$id" >> "$ids"
     stamp="$STATE_DIR/images/$(printf '%s' "$img" | tr '/:@' '___').id"
     if [ "$($SUDO cat "$stamp" 2>/dev/null || true)" = "$id" ]; then continue; fi
     say "  importing $img into k3s ..."
@@ -193,9 +203,16 @@ import_images() {
 import json, sys
 d = json.load(sys.stdin)
 proj = d.get("name") or "harvis"
+needed = {dep for s in d["services"].values() for dep in (s.get("depends_on") or {})}
 for n, s in sorted(d["services"].items()):
+    # Same rule as compose_to_k8s.py: a one-shot nothing waits on is not rendered.
+    if str(s.get("restart", "")).strip("\"") in ("no", "") and n not in needed:
+        continue
     if s.get("build"):
         print(s.get("image") or f"{proj}-{n}:latest")' | sort -u)
+  python3 -c 'import json, sys; print(json.dumps(dict(l.rstrip("\n").split("\t", 1) for l in open(sys.argv[1]) if l.strip())))' \
+    "$ids" > "$IMAGE_IDS_FILE"
+  rm -f "$ids"
   say "✓ Harvis images available to k3s"
 }
 
@@ -223,7 +240,8 @@ render() { # $1 node  $2 node ip  $3 dns ip
   env "${llm_env[@]+"${llm_env[@]}"}" docker compose config --format json \
     | python3 "$HERE/compose_to_k8s.py" --namespace "$NS" --node-name "$1" --node-ip "$2" \
         --dns-ip "$3" --repo "$REPO" \
-        --volume-root "$(docker info -f '{{.DockerRootDir}}')/volumes" "${gen_args[@]}"
+        --volume-root "$(docker info -f '{{.DockerRootDir}}')/volumes" \
+        ${IMAGE_IDS_FILE:+--image-ids "$IMAGE_IDS_FILE"} "${gen_args[@]}"
 }
 
 pick_lan_port() {
@@ -252,6 +270,26 @@ wait_rollout() {
   [ -z "$failed" ] || { say "✗ Not ready:$failed — see: sudo k3s kubectl -n $NS describe pod -l app.kubernetes.io/name=<name>"; return 1; }
 }
 
+# Same reason as install.sh's sync_db_password: an old data directory keeps the
+# password it was created with. The backend opens its pool once, so if it
+# already failed against the old password it is restarted.
+sync_db_password() {
+  local i
+  kc -n "$NS" rollout status deploy/pgsql --timeout=300s >/dev/null 2>&1 || { say "⚠ Database not ready; skipped the password check"; return 0; }
+  for i in $(seq 1 30); do
+    if printf "ALTER ROLE pguser WITH PASSWORD :'pw';\n" | kc -n "$NS" exec -i deploy/pgsql -- \
+        sh -c 'psql -q -v ON_ERROR_STOP=1 -v pw="$POSTGRES_PASSWORD" -U pguser -d postgres' >/dev/null 2>&1; then
+      say "  ✓ Database password matches .env"
+      if kc -n "$NS" logs deploy/backend --all-containers 2>/dev/null | grep -q 'password authentication failed'; then
+        kc -n "$NS" rollout restart deploy/backend >/dev/null
+      fi
+      return 0
+    fi
+    sleep 2
+  done
+  say "⚠ Could not confirm the database password; if sign-in fails, run ./install.sh --k8s again"
+}
+
 cmd_up() {
   command -v docker >/dev/null || die "Docker is required (Harvis builds its images and runs workspace sandboxes with it)"
   install_k3s
@@ -267,6 +305,8 @@ cmd_up() {
   $SUDO mkdir -p /var/lib/harvis/ollama
   say "Applying Harvis to the cluster (namespace $NS) ..."
   render "$node" "$ip" "$dns" | kc apply -f - >/dev/null
+  rm -f "${IMAGE_IDS_FILE:-}"
+  sync_db_password
   say "Waiting for Harvis to start in Kubernetes:"
   wait_rollout
   printf 'k8s\n' | $SUDO tee "$STATE_DIR/mode" >/dev/null
@@ -293,6 +333,8 @@ cmd_off() {
     say "✓ Kubernetes namespace $NS removed"
   fi
   $SUDO rm -f "$STATE_DIR/mode"
+  # install.sh --k8s-off sets this and runs its own full launch next.
+  [ "${HARVIS_K8S_OFF_SKIP_START:-0}" = "1" ] && return 0
   say "Starting Harvis on Docker again ..."
   docker compose up -d
 }

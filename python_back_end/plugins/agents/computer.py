@@ -18,10 +18,14 @@ Two rules shape everything here:
   from anything, dies with its session, and grants exactly one screen. So the
   frontend gets the token and nothing else about the runner.
 
-Sessions are tracked in memory. A backend restart forgets them — the runner
-keeps the Firefox alive, but nobody owns it any more and it is closed by the
-runner's own idle reaper. Persisting the map is a follow-up; for now the pane
-simply shows nothing after a restart and the user starts a fresh one.
+Sessions are tracked in memory, and the runner is the source of truth. A
+backend restart forgets the table, but the runner still has the Firefox, so
+``resync`` rebuilds it from the runner's own session list: the owner is read
+back from the profile name (``u<uid>-...``), which only this module ever
+writes. Without that, the first call after a restart would try to start a
+second Firefox on a profile that is still open and hang on its lock. The same
+resync drops sessions the runner has closed or timed out, so the pane shows
+"start again" instead of a dead screen.
 """
 
 from __future__ import annotations
@@ -29,7 +33,6 @@ from __future__ import annotations
 import logging
 import os
 import re
-import threading
 import time
 from typing import Any, Dict, List, Optional
 
@@ -45,84 +48,41 @@ logger = logging.getLogger(__name__)
 
 RUNNER_URL = os.getenv("HARVIS_AGENT_BROWSER_URL", "http://browser-runner:8765").rstrip("/")
 
-# The one path the browser needs. It is relative on purpose: the page builds
-# ``<origin>/agents/vnc/vnc.html?path=<this>`` itself, so the same value works
-# on localhost:9000, behind a LAN hostname, and under any TLS terminator.
-VNC_WS_PATH = "agents/vnc/websockify"
+from .computer_registry import (  # noqa: F401 — re-exported for callers and tests
+    TOKEN_RE as _TOKEN_RE,
+    VNC_WS_PATH,
+    _forget,
+    _lock,
+    _mine,
+    _remember,
+    _sessions,
+    adopt,
+    owned,
+    owner_of_profile,
+    profile_key_for,
+    public_view,
+    vnc_path,
+)
 
-_TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
 _REF_RE = re.compile(r"^ref_\d{1,4}$")
+
+SESSION_ENDED = "The browser session ended (closed or timed out). Open the browser again."
 
 router = APIRouter(prefix="/computer", tags=["agents-computer"])
 
-_lock = threading.Lock()
-_sessions: Dict[str, Dict[str, Any]] = {}
 
-
-# ── pure helpers (tested) ────────────────────────────────────────────────────
-
-
-def profile_key_for(user_id: int, agent_id: Optional[str]) -> str:
-    """The Firefox profile a session opens.
-
-    One per (user, teammate): a teammate's logins are its own, never shared
-    with another teammate or another user. The runner only accepts
-    ``[a-z0-9-_]{1,64}``; a uuid's first block is enough to tell teammates apart
-    and keeps the name readable in the volume.
-    """
-    head = re.sub(r"[^a-z0-9-_]", "", (agent_id or "").lower())[:8] or "default"
-    return f"u{int(user_id)}-{head}"
-
-
-def vnc_path(token: str) -> str:
-    """What the page passes to noVNC as ``path``. Refuses anything that is not
-    a runner-shaped token, so a bad value can never become part of a URL."""
-    if not _TOKEN_RE.match(token or ""):
-        raise ValueError("not a vnc token")
-    return f"{VNC_WS_PATH}?token={token}"
-
-
-def public_view(rec: Dict[str, Any]) -> Dict[str, Any]:
-    """The session as the frontend sees it: no user id, no runner port."""
-    return {
-        "sessionId": rec["session_id"],
-        "agentId": rec.get("agent_id"),
-        "profile": rec["profile"],
-        "vncPath": vnc_path(rec["token"]),
-        "display": rec.get("display"),
-        "width": rec.get("width"),
-        "height": rec.get("height"),
-        "takenOver": bool(rec.get("taken_over")),
-        "createdAt": rec["created_at"],
-    }
-
-
-def owned(user_id: int, session_id: str) -> Optional[Dict[str, Any]]:
-    """The caller's record for ``session_id`` — None for anyone else's.
-
-    404 rather than 403 at the route: a session id must not confirm to a
-    stranger that it exists.
-    """
-    with _lock:
-        rec = _sessions.get(session_id)
-    if rec is None or rec["user_id"] != int(user_id):
-        return None
-    return rec
-
-
-def _remember(rec: Dict[str, Any]) -> None:
-    with _lock:
-        _sessions[rec["session_id"]] = rec
-
-
-def _forget(session_id: str) -> None:
-    with _lock:
-        _sessions.pop(session_id, None)
-
-
-def _mine(user_id: int) -> List[Dict[str, Any]]:
-    with _lock:
-        return [r for r in _sessions.values() if r["user_id"] == int(user_id)]
+async def resync() -> bool:
+    """Ask the runner what is really open. False when it could not be asked, in
+    which case the table is left as it was rather than emptied."""
+    try:
+        data = await _runner("GET", "/sessions", timeout=8.0)
+    except HTTPException as exc:
+        logger.info("computer: resync skipped, runner said %s", exc.detail)
+        return False
+    n = adopt(list(data.get("items") or []))
+    if n:
+        logger.info("computer: adopted %d live session(s) from the runner", n)
+    return True
 
 
 # ── runner client ────────────────────────────────────────────────────────────
@@ -187,6 +147,10 @@ async def computer_health(current_user=Depends(get_current_user_optimized)):
 
 @router.get("/sessions")
 async def computer_list(current_user=Depends(get_current_user_optimized)):
+    # The pane polls this. Reconciling here is what makes a session that the
+    # runner closed disappear from the pane (so it offers "Open browser" again)
+    # and a session that outlived a backend restart reappear in it.
+    await resync()
     return {"items": [public_view(r) for r in _mine(_uid(current_user))]}
 
 
@@ -212,17 +176,32 @@ async def ensure_session(
     """
     uid = int(user_id)
     found = find_session(uid, agent_id)
+    if found is None:
+        # Not in our table does not mean not open: after a backend restart the
+        # runner still has it. Adopt before asking for a new one.
+        await resync()
+        found = find_session(uid, agent_id)
     if found is not None:
         return found
     profile = profile_key_for(uid, agent_id)
 
     # A first start may download geckodriver; the runner's own timeout is long.
-    data = await _runner(
-        "POST", "/session",
-        json={"headed": True, "headless": False, "profile": profile,
-              "width": width, "height": height},
-        timeout=120.0,
-    )
+    try:
+        data = await _runner(
+            "POST", "/session",
+            json={"headed": True, "headless": False, "profile": profile,
+                  "width": width, "height": height},
+            timeout=120.0,
+        )
+    except HTTPException as exc:
+        if exc.status_code != 409:
+            raise
+        # The runner refused a second Firefox on a profile it still has open.
+        await resync()
+        found = find_session(uid, agent_id)
+        if found is None:
+            raise HTTPException(status_code=409, detail="That browser profile is already open.") from exc
+        return found
     token = data.get("vncToken") or ""
     if not _TOKEN_RE.match(token):
         # Runner came up headless (no Xvfb in this build). A screen nobody can
@@ -277,6 +256,7 @@ async def computer_get(session_id: str, current_user=Depends(get_current_user_op
     except HTTPException as exc:
         if exc.status_code == 404:
             _forget(session_id)
+            raise HTTPException(status_code=404, detail=SESSION_ENDED) from exc
         raise
     screen = info.get("screen") or {}
     rec["taken_over"] = bool(screen.get("takenOver", rec.get("taken_over")))
@@ -388,16 +368,76 @@ def snapshot_text(snap: Dict[str, Any], *, max_refs: int = SNAPSHOT_MAX_REFS,
 
 def hard_limit_for(ctx: Dict[str, Any], tool_name: str, args: Dict[str, Any]) -> Optional[str]:
     """Which hard limit this call crosses, judged by the latest snapshot's refs.
-    None when it crosses none or the user cleared that limit for this teammate."""
+    None when it crosses none or the user cleared that limit for this teammate
+    (and this run is allowed to use the teammate's clearances)."""
     verb = verb_of(tool_name)
     if not verb:
         return None
     rec = find_session(ctx.get("user_id", 0), ctx.get("agent_id"))
     refs = (rec or {}).get("refs") or {}
     limit = hard_limits.classify(verb, args or {}, refs)
-    if limit and limit in set(ctx.get("cleared_limits") or []):
+    if limit and limit in set(ctx.get("cleared_limits") or []) and not clearances_withheld(ctx):
         return None
     return limit
+
+
+# ── runs that must not use the teammate's standing clearances ───────────────
+# A chat message ("open instagram and like my sister's post") runs on the
+# default assistant's screen, but the clearances the user gave that teammate
+# on the Agents page were for its own jobs, not for whatever a chat says. So
+# browse.py announces such a run here before launching it (keyed by whose
+# teammate, since the run id does not exist yet) and binds the run id once the
+# launch returns. hard_limit_for consults both, so there is no moment between
+# launch and first click at which the run could read the clearances. The
+# coordinator re-reads the teammate from the database, which is why this
+# cannot ride on the agent dict the launcher holds.
+_WITHHELD_PENDING: Dict[tuple, List[float]] = {}
+_WITHHELD_RUNS: Dict[str, float] = {}
+_WITHHELD_PENDING_TTL = 120.0      # a launch takes seconds; a crash mid-launch must not linger
+_WITHHELD_RUN_TTL = 8 * 3600.0     # past any run budget (BUDGET_CEILINGS max_minutes = 240)
+
+
+def _prune_withheld(now: float) -> None:
+    for key, stamps in list(_WITHHELD_PENDING.items()):
+        live = [s for s in stamps if now - s < _WITHHELD_PENDING_TTL]
+        if live:
+            _WITHHELD_PENDING[key] = live
+        else:
+            _WITHHELD_PENDING.pop(key, None)
+    for run_id, stamp in list(_WITHHELD_RUNS.items()):
+        if now - stamp >= _WITHHELD_RUN_TTL:
+            _WITHHELD_RUNS.pop(run_id, None)
+
+
+def withhold_clearances(user_id: int, agent_id: str) -> None:
+    """Announce that the next run of this teammate must ignore its cleared limits."""
+    now = time.monotonic()
+    _prune_withheld(now)
+    _WITHHELD_PENDING.setdefault((int(user_id), str(agent_id)), []).append(now)
+
+
+def bind_withheld_run(user_id: int, agent_id: str, run_id: str) -> None:
+    """The announced run now has an id; keep withholding by that id."""
+    _WITHHELD_RUNS[str(run_id)] = time.monotonic()
+    release_withheld(user_id, agent_id)
+
+
+def release_withheld(user_id: int, agent_id: str) -> None:
+    """Drop one pending announcement (the launch failed, or it has been bound)."""
+    key = (int(user_id), str(agent_id))
+    stamps = _WITHHELD_PENDING.get(key)
+    if stamps:
+        stamps.pop(0)
+        if not stamps:
+            _WITHHELD_PENDING.pop(key, None)
+
+
+def clearances_withheld(ctx: Dict[str, Any]) -> bool:
+    """Whether this run's context must not use the teammate's cleared limits."""
+    if str(ctx.get("run_id") or "") in _WITHHELD_RUNS:
+        return True
+    key = (int(ctx.get("user_id") or 0), str(ctx.get("agent_id") or ""))
+    return bool(_WITHHELD_PENDING.get(key))
 
 
 async def record_gate(ctx: Dict[str, Any], pool, tool: str, args: Dict[str, Any],
@@ -472,7 +512,8 @@ async def act(ctx: Dict[str, Any], tool_name: str, args: Dict[str, Any]) -> tupl
                     "back, then try again.", False)
         if exc.status_code == 404:
             _forget(sid)
-            return ("The browser session ended. Try the call again; a fresh one will start.", False)
+            return ("The browser session ended (closed or timed out) and its page state is "
+                    "gone. Call computer_open again; a fresh browser will start.", False)
         if exc.status_code == 409:
             return ("That ref is stale — the page changed. Call computer_snapshot and "
                     "use a ref from the new one.", False)

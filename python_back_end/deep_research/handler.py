@@ -181,22 +181,23 @@ class ResearchHandler:
 
     @staticmethod
     async def _probe_model(llm_model: str):
-        """Quick liveness probe (local Ollama direct) so we fail fast."""
+        """Quick check (local Ollama direct) that the model is pulled, so we fail fast.
+
+        Asks /api/show, not /api/chat: a chat probe waits in Ollama's queue, so on a
+        CPU-only server where someone else is chatting it timed out after 30 s and the
+        run failed with "is it pulled?" for a model that was pulled and merely busy."""
         import httpx
         base = os.getenv("DEEP_RESEARCH_OLLAMA_URL",
                          os.getenv("OLLAMA_URL", "http://ollama:11434")).rstrip("/")
         try:
             async with httpx.AsyncClient(timeout=30) as cli:
-                r = await cli.post(
-                    f"{base}/api/chat",
-                    json={"model": llm_model, "messages": [{"role": "user", "content": "hi"}],
-                          "stream": False, "options": {"num_predict": 5}},
-                )
-            r.raise_for_status()
+                r = await cli.post(f"{base}/api/show", json={"model": llm_model})
         except Exception as e:
-            raise RuntimeError(
-                f"Cannot reach model '{llm_model}' at {base} — is it pulled in Ollama? ({e})"
-            ) from e
+            raise RuntimeError(f"Cannot reach Ollama at {base} ({type(e).__name__}: {e})") from e
+        if r.status_code == 404:
+            raise RuntimeError(f"Model '{llm_model}' is not pulled in Ollama at {base}.")
+        if r.status_code >= 400:
+            raise RuntimeError(f"Ollama at {base} refused model '{llm_model}' ({r.status_code}: {r.text[:200]})")
 
     # ------------------------------------------------------------------
     # Read / control surface

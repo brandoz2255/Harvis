@@ -10,6 +10,7 @@ import { type ChatMessage, textPart } from '@/lib/chat-messages'
 import { pathLabel, SLASH_COMMAND_RE } from '@/lib/chat-runtime'
 import { sanitizeComposerInput } from '@/lib/composer-input-sanitize'
 import { triggerHaptic } from '@/lib/haptics'
+import { pendingBrowserUpload } from '@/lib/harvis-uploads'
 import { setMutableRef } from '@/lib/mutable-ref'
 import { normalize } from '@/lib/text'
 import { transcribeAudioClientDirect } from '@/lib/voice-client-direct'
@@ -368,6 +369,19 @@ export function usePromptActions({
           attachment = $composerAttachments.get().find(item => item.id === attachment.id) ?? attachment
         }
 
+        // Browser build: the chip's bytes went to Harvis' upload route when it
+        // was dropped; wait for that id. A refused upload fails the send here
+        // rather than quietly sending the message without its file.
+        const browserUpload = pendingBrowserUpload(attachment.id)
+
+        if (browserUpload) {
+          attachment = { ...attachment, ...(await browserUpload) }
+        }
+
+        if (!attachment.path && attachment.uploadState === 'error') {
+          throw new Error(attachment.detail || `${copy.attachFailed}: ${attachment.label}`)
+        }
+
         // Already-synced or pathless refs (terminal, url, etc.) pass through.
         // A drop-time eager upload may already have staged this one (matching
         // attachedSessionId) — don't re-upload it. Compare against the LIVE id:
@@ -417,7 +431,7 @@ export function usePromptActions({
 
       return { attachments: synced, sessionId: liveSessionId }
     },
-    [activeSessionIdRef, requestGateway, selectedStoredSessionIdRef]
+    [activeSessionIdRef, copy.attachFailed, requestGateway, selectedStoredSessionIdRef]
   )
 
   // Stage a freshly dropped file as soon as it lands (when a session already

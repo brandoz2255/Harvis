@@ -48,21 +48,25 @@
 
 	// This app is built with adapter-static and `fallback: index.html`, so its
 	// client router owns the whole origin: goto() on a path with no route here
-	// renders THIS app's 404 instead of leaving it. /hermes/ is a separate
-	// bundle served by nginx, and it is where the front door sends people — so
-	// a redirect that points outside the SvelteKit route table has to be a real
-	// browser navigation, not a client-side one.
+	// renders THIS app's 404 instead of leaving it. The Hermes UI is a separate
+	// bundle served by nginx at `/`, the front door — so a redirect that points
+	// outside the SvelteKit route table has to be a real browser navigation, not
+	// a client-side one.
 	const EXTERNAL_PREFIXES = ['/hermes', '/onb'];
 
 	const goAfterAuth = (path: string) => {
 		// `/` is the front door, and nginx decides what the front door is — today
-		// a 302 to /hermes/. goto('/') would be answered by this router instead
-		// and land the user in OpenWebUI, so the one place that rule lives has to
-		// be asked, not second-guessed.
+		// the Hermes UI. goto('/') would be answered by this router instead and
+		// land the user in OpenWebUI, so the one place that rule lives has to be
+		// asked, not second-guessed.
 		const external =
 			path === '/' || EXTERNAL_PREFIXES.some((p) => path === p || path.startsWith(`${p}/`));
 		if (external) {
-			window.location.href = path;
+			// A signed-out visit to host/#/<chat> reaches here as /auth?redirect=/#/<chat>:
+			// the browser keeps the fragment across nginx's redirect, but it never
+			// reaches the query. Hand it back so sign-in opens the chat that was asked for.
+			const hermesRoute = path === '/' && window.location.hash.startsWith('#/');
+			window.location.href = hermesRoute ? `/${window.location.hash}` : path;
 			return;
 		}
 		goto(path);

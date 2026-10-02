@@ -116,6 +116,12 @@ class GeneratorTest(unittest.TestCase):
         self.assertEqual(pod(self.items, "backend")["serviceAccountName"], "harvis-backend")
         self.assertFalse(pod(self.items, "nginx")["automountServiceAccountToken"])
 
+    def test_backend_gets_its_host_mount_table(self):
+        table = json.loads(find(self.items, "Secret", "backend-env")["stringData"]["HARVIS_HOST_MOUNTS"])
+        self.assertIn({"Destination": "/data/artifacts",
+                       "Source": "/var/lib/docker/volumes/harvis_artifact_data/_data"}, table)
+        self.assertIn({"Destination": "/var/run/docker.sock", "Source": "/var/run/docker.sock"}, table)
+
     def test_user_groups_and_host_gateway(self):
         spec = pod(self.items, "backend")
         self.assertEqual(spec["securityContext"], {"runAsUser": 1001, "runAsGroup": 1001, "supplementalGroups": [984]})
@@ -190,6 +196,32 @@ class GeneratorTest(unittest.TestCase):
         finally:
             COMPOSE["services"]["pgsql"]["environment"]["POSTGRES_PASSWORD"] = "s3cret"
         self.assertNotEqual(before, after)
+
+    def test_rebuilt_image_rolls_only_the_pods_that_run_it(self):
+        # Images keep their tag when rebuilt, so only a changed content id tells k8s to restart.
+        backend_image = pod(self.items, "backend")["containers"][0]["image"]
+
+        def hashes(ids):
+            with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+                json.dump(ids, fh)
+            try:
+                items = render("--image-ids", fh.name)
+            finally:
+                os.unlink(fh.name)
+            return {n: find(items, "Deployment", n)["spec"]["template"]["metadata"]["annotations"]
+                    for n in ("backend", "pgsql")}
+
+        first = hashes({backend_image: "id-1"})
+        rebuilt = hashes({backend_image: "id-2"})
+        self.assertNotEqual(first["backend"], rebuilt["backend"])
+        self.assertEqual(first["pgsql"], rebuilt["pgsql"])
+        self.assertEqual(hashes({backend_image: "id-1"}), first)
+
+    def test_backend_is_health_checked_and_never_best_effort(self):
+        c = pod(self.items, "backend")["containers"][0]
+        self.assertEqual(c["livenessProbe"]["httpGet"], {"port": 8000, "path": "/health"})
+        self.assertGreaterEqual(c["startupProbe"]["periodSeconds"] * c["startupProbe"]["failureThreshold"], 600)
+        self.assertTrue(c["resources"]["requests"])
 
     def test_net_label_is_a_valid_label_key(self):
         self.assertEqual(k8s_extras.net_label("ollama-n8n-network"), "harvis.net/ollama-n8n-network")

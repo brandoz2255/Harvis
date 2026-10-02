@@ -202,12 +202,44 @@ export interface SpeechStreamSession {
 // the same stopVoicePlayback() sequence bump.
 // ---------------------------------------------------------------------------
 
+/** One synthesized sentence: a playable URL and how to free it. */
+interface SentenceClip {
+  url: string
+  release: () => void
+}
+
+type SentenceSynth = (text: string) => Promise<SentenceClip>
+
+function directSynth(tts: DirectTtsConfig): SentenceSynth {
+  return async text => {
+    const bytes = await synthesizeSpeechClientDirect(tts, text)
+    const url = URL.createObjectURL(new Blob([bytes], { type: 'audio/mpeg' }))
+
+    return { url, release: () => URL.revokeObjectURL(url) }
+  }
+}
+
+// Harvis: the browser UI has no speak-stream socket, so the per-sentence path
+// also runs over the relay's POST /api/audio/speak — speech starts after the
+// first sentence instead of after the whole reply.
+const relaySynth: SentenceSynth = async text => {
+  const response = await speakText(text)
+
+  return { url: response.data_url, release: () => undefined }
+}
+
 function openClientDirectSpeechSession(tts: DirectTtsConfig, options: VoicePlaybackOptions): SpeechStreamSession {
+  return openSentenceSpeechSession(directSynth(tts), options)
+}
+
+function openSentenceSpeechSession(synth: SentenceSynth, options: VoicePlaybackOptions): SpeechStreamSession {
   let buffer = ''
   let finished = false
   let settled = false
   let started = false
-  const queue: string[] = []
+  // Each entry starts synthesizing at most one sentence ahead of playback, so
+  // the next clip is usually ready when the current one ends.
+  const queue: { text: string; clip?: Promise<SentenceClip> }[] = []
   let synthesizing = false
   let playing: HTMLAudioElement | null = null
 
@@ -228,11 +260,26 @@ function openClientDirectSpeechSession(tts: DirectTtsConfig, options: VoicePlayb
         playing = null
       }
 
+      for (const entry of queue) {
+        void entry.clip?.then(clip => clip.release()).catch(() => undefined)
+      }
+
+      queue.length = 0
       resolve(value)
     }
   })
 
   currentStop = () => settle(started ? 'done' : 'fallback')
+
+  const prime = (index: number) => {
+    const entry = queue[index]
+
+    if (entry && !entry.clip) {
+      entry.clip = synth(entry.text)
+      // Rejections are handled where the clip is awaited.
+      entry.clip.catch(() => undefined)
+    }
+  }
 
   const pump = async () => {
     if (synthesizing || settled) {
@@ -243,39 +290,51 @@ function openClientDirectSpeechSession(tts: DirectTtsConfig, options: VoicePlayb
 
     try {
       while (queue.length > 0 && !settled) {
-        const sentence = queue.shift()!
+        prime(0)
+        const entry = queue[0]
 
-        let bytes: ArrayBuffer
+        let clip: SentenceClip
 
         try {
-          bytes = await synthesizeSpeechClientDirect(tts, sentence)
+          clip = await entry.clip!
         } catch {
           // Provider rejected mid-reply. Nothing played yet → let the caller
-          // fall back to the relay with the full text. Mid-playback → treat
-          // what played as the playback (replaying would stutter).
+          // fall back to whole-text playback. Mid-playback → treat what
+          // played as the playback (replaying would stutter).
           settle(started ? 'done' : 'fallback')
 
           return
         }
 
+        queue.shift()
+
         if (settled) {
+          clip.release()
+
           return
         }
+
+        prime(0)
 
         if (!started) {
           started = true
           setVoicePlaybackState(currentState('speaking', options))
         }
 
-        const url = URL.createObjectURL(new Blob([bytes], { type: 'audio/mpeg' }))
-
         try {
           await new Promise<void>((resolve, reject) => {
-            const audio = new Audio(url)
+            const audio = new Audio(clip.url)
             playing = audio
             audio.addEventListener('ended', () => resolve(), { once: true })
             audio.addEventListener('error', () => reject(new Error('Playback failed')), { once: true })
-            void audio.play().catch(reject)
+            void audio.play().catch(async () => {
+              try {
+                await unlockAutoplay()
+                await audio.play()
+              } catch (error) {
+                reject(error)
+              }
+            })
           })
         } catch {
           settle(started ? 'done' : 'fallback')
@@ -283,7 +342,7 @@ function openClientDirectSpeechSession(tts: DirectTtsConfig, options: VoicePlayb
           return
         } finally {
           playing = null
-          URL.revokeObjectURL(url)
+          clip.release()
         }
       }
 
@@ -313,10 +372,12 @@ function openClientDirectSpeechSession(tts: DirectTtsConfig, options: VoicePlayb
         const speakable = sanitizeTextForSpeech(sentence)
 
         if (speakable) {
-          queue.push(speakable)
+          queue.push({ text: speakable })
         }
       }
 
+      // While a clip plays, the head of the queue is the next one: start it now.
+      prime(0)
       void pump()
     } else if (flush && finished && queue.length === 0 && !synthesizing) {
       settle(started ? 'done' : 'fallback')
@@ -518,8 +579,9 @@ function openSpeechStream(wsUrl: string, options: VoicePlaybackOptions): SpeechS
  * `finish` when generation completes. Ladder: client-direct synthesis with
  * the profile's own TTS (lowest hops — reply text is already streaming here,
  * audio goes provider → speaker without touching the gateway link) → the
- * gateway speak-stream WS relay → null (caller falls back to whole-text
- * `playSpeechText`).
+ * gateway speak-stream WS relay → per-sentence POST /api/audio/speak (the
+ * browser UI, which has no speak-stream socket). On a 'fallback' outcome the
+ * caller speaks the whole text with `playSpeechText`.
  */
 export async function startSpeechStream(options: VoicePlaybackOptions): Promise<null | SpeechStreamSession> {
   const direct = await directTtsConfig().catch(() => null)
@@ -541,14 +603,10 @@ export async function startSpeechStream(options: VoicePlaybackOptions): Promise<
 
   const wsUrl = await resolveSpeakStreamUrl()
 
-  if (!wsUrl) {
-    return null
-  }
-
   stopVoicePlayback()
   setVoicePlaybackState(currentState('preparing', options))
 
-  const session = openSpeechStream(wsUrl, options)
+  const session = wsUrl ? openSpeechStream(wsUrl, options) : openSentenceSpeechSession(relaySynth, options)
 
   void session.done.then(outcome => {
     if (outcome === 'done') {

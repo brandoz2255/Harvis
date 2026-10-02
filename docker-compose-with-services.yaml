@@ -59,7 +59,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: pguser
-      POSTGRES_PASSWORD: pgpassword
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pgpassword}
       POSTGRES_DB: database
       POSTGRES_INITDB_ARGS: "-E UTF8 --locale=C"
     volumes:
@@ -86,7 +86,7 @@ services:
       DB_POSTGRES_PORT: "5432"
       DB_POSTGRES_DATABASE: "database"
       DB_POSTGRES_USER: "pguser"
-      DB_POSTGRES_PASSWORD: "pgpassword"
+      DB_POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-pgpassword}"
     networks:
       - ollama-n8n-network
     depends_on:

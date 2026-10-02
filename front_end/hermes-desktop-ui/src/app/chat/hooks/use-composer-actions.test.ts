@@ -2,6 +2,7 @@ import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { $composerAttachments, type ComposerAttachment, updateComposerAttachment } from '@/store/composer'
+import { $notifications } from '@/store/notifications'
 import { $connection } from '@/store/session'
 
 import {
@@ -321,6 +322,152 @@ describe('useComposerActions native image drops', () => {
         path: durablePath
       })
     )
+  })
+})
+
+// Browser build (Harvis): no paths, no gateway staging. Dropped, picked and
+// pasted files go to POST /api/v1/files/ and the chip carries the returned id.
+describe('useComposerActions browser-shell uploads', () => {
+  afterEach(() => {
+    $notifications.set([])
+    Reflect.deleteProperty(window, 'hermesDesktop')
+    vi.unstubAllGlobals()
+    vi.clearAllMocks()
+  })
+
+  function renderBrowserShell() {
+    Object.defineProperty(window, 'hermesDesktop', { configurable: true, value: { webShell: true } })
+
+    const add = vi.fn<(attachment: ComposerAttachment) => void>()
+    const updateIfCurrent = vi.fn<(expected: ComposerAttachment, patch: Partial<ComposerAttachment>) => boolean>(
+      () => true
+    )
+
+    const { result } = renderHook(() =>
+      useComposerActions({
+        activeSessionId: null,
+        currentCwd: '',
+        requestGateway: vi.fn(),
+        scope: { add, remove: vi.fn(() => null), target: 'test-composer', update: vi.fn(() => true), updateIfCurrent }
+      })
+    )
+
+    return { add, result, updateIfCurrent }
+  }
+
+  function uploadResponse(status: number, body: unknown): Response {
+    return new Response(JSON.stringify(body), { status })
+  }
+
+  it('uploads a dropped document to Harvis and marks the chip with the file id', async () => {
+    const fetchMock = vi.fn(async () =>
+      uploadResponse(200, { id: 'f1', filename: 'sales.csv', meta: { content_type: 'text/csv', size: 3 } })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { add, result, updateIfCurrent } = renderBrowserShell()
+    const file = new File(['a,b'], 'sales.csv', { type: 'text/csv' })
+
+    let attached = false
+
+    await act(async () => {
+      attached = await result.current.attachDroppedItems([{ file, path: '' }])
+    })
+
+    expect(attached).toBe(true)
+    expect(add).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'file', label: 'sales.csv', uploadState: 'uploading' })
+    )
+    expect(add.mock.calls[0]![0].path).toBeUndefined()
+
+    await waitFor(() =>
+      expect(updateIfCurrent).toHaveBeenCalledWith(
+        expect.objectContaining({ label: 'sales.csv' }),
+        expect.objectContaining({ fileId: 'f1', uploadState: undefined })
+      )
+    )
+
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+
+    expect(url).toBe('/api/v1/files/')
+    expect(init.method).toBe('POST')
+    expect(init.credentials).toBe('include')
+    expect(((init.body as FormData).get('file') as File).name).toBe('sales.csv')
+  })
+
+  it('routes a pasted image through the same upload and keeps it an image chip', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => uploadResponse(200, { id: 'f2', filename: 'pasted-image.png', meta: {} }))
+    )
+
+    const { add, result, updateIfCurrent } = renderBrowserShell()
+
+    let attached = false
+
+    await act(async () => {
+      attached = await result.current.attachImageBlob(new Blob([new Uint8Array([1, 2])], { type: 'image/png' }))
+    })
+
+    expect(attached).toBe(true)
+    expect(add).toHaveBeenCalledWith(expect.objectContaining({ kind: 'image', label: 'pasted-image.png' }))
+    await waitFor(() =>
+      expect(updateIfCurrent).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ fileId: 'f2' }))
+    )
+  })
+
+  it('puts a refused upload on the chip and in a notification instead of dropping it silently', async () => {
+    const detail = 'File too large: uploads are limited to 50 MB on this server (HARVIS_MAX_UPLOAD_MB).'
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => uploadResponse(413, { detail }))
+    )
+
+    const { result, updateIfCurrent } = renderBrowserShell()
+
+    await act(async () => {
+      await result.current.attachDroppedItems([{ file: new File(['x'], 'big.pdf'), path: '' }])
+    })
+
+    await waitFor(() =>
+      expect(updateIfCurrent).toHaveBeenCalledWith(
+        expect.objectContaining({ label: 'big.pdf' }),
+        expect.objectContaining({ uploadState: 'error', detail })
+      )
+    )
+    expect($notifications.get().some(n => n.message === detail)).toBe(true)
+  })
+
+  it('does not try the browser upload in the Electron app', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const saveImageBuffer = vi.fn(async () => '/tmp/saved.png')
+    Object.defineProperty(window, 'hermesDesktop', {
+      configurable: true,
+      value: { saveImageBuffer, readFileDataUrl: vi.fn(async () => 'data:image/png;base64,AA==') }
+    })
+
+    const { result } = renderHook(() =>
+      useComposerActions({
+        activeSessionId: null,
+        currentCwd: '',
+        requestGateway: vi.fn(),
+        scope: {
+          add: vi.fn(),
+          remove: vi.fn(() => null),
+          target: 'test-composer',
+          update: vi.fn(() => true),
+          updateIfCurrent: vi.fn(() => true)
+        }
+      })
+    )
+
+    await act(async () => {
+      await result.current.attachImageBlob(new Blob([new Uint8Array([1])], { type: 'image/png' }))
+    })
+
+    expect(saveImageBuffer).toHaveBeenCalledOnce()
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })
 

@@ -55,8 +55,10 @@ class RAGChatService:
     Retrieves relevant chunks and generates grounded answers.
     """
 
-    def __init__(self, manager: NotebookManager):
+    def __init__(self, manager: NotebookManager, allowed_models: Optional[List[str]] = None):
         self.manager = manager
+        # The Harvis admin's model list for this person (Settings ▸ People); None = any.
+        self.allowed_models = allowed_models
         self.ingestion_service = IngestionService(manager)
 
     async def chat(
@@ -245,7 +247,7 @@ Remember: You are a research assistant helping the user understand their uploade
         return system_prompt, context_text, citations
 
     @staticmethod
-    def _models_to_try(model: str) -> List[str]:
+    def _models_to_try(model: str, allowed: Optional[List[str]] = None) -> List[str]:
         """
         Requested model first, then the preferred fallbacks, then anything Ollama
         actually reports installed. The preferred names are only a preference — on a
@@ -272,7 +274,7 @@ Remember: You are a research assistant helping the user understand their uploade
         for name in usable:
             if name not in ordered:
                 ordered.append(name)
-        return ordered
+        return ordered if allowed is None else [m for m in ordered if m in allowed]
 
     async def _generate_response(
         self,
@@ -292,7 +294,7 @@ USER QUESTION: {query}
 
 Please provide a helpful answer based on the sources above. Remember to cite sources when using specific information."""
 
-        models_to_try = self._models_to_try(model)
+        models_to_try = self._models_to_try(model, self.allowed_models)
 
         # Try local Ollama with multiple models
         for try_model in models_to_try:
@@ -503,7 +505,7 @@ If they're asking about their sources, suggest they try again or check if their 
         used_model = request.model
         # Same fallback chain as the RAG path — this used to call one hardcoded model
         # with no fallback, so a deploy without it got a bare 404 here.
-        for try_model in self._models_to_try(request.model):
+        for try_model in self._models_to_try(request.model, self.allowed_models):
             try:
                 response = await asyncio.to_thread(
                     requests.post,

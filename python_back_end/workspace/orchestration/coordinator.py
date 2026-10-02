@@ -129,7 +129,8 @@ def _runner_limits(agent: dict) -> tuple[int, int]:
     return steps, minutes * 60
 
 
-async def _suggest_next(goal: str, recap: str, model_name: str) -> list[str]:
+async def _suggest_next(goal: str, recap: str, model_name: str,
+                        allowed: list[str] | None = None) -> list[str]:
     """Ask the local planner model what is worth doing next.
 
     Grounded in what actually happened (``recap`` is built from the steps'
@@ -141,6 +142,8 @@ async def _suggest_next(goal: str, recap: str, model_name: str) -> list[str]:
     candidates = await _installed(_PLANNER_MODELS)
     if model_name and model_name not in candidates:
         candidates = candidates + [model_name]
+    if allowed is not None:  # Settings ▸ People: only the person's models
+        candidates = [m for m in candidates if m in allowed]
     for model in candidates[:3]:
         obj = await generate_json(model, prompt, num_predict=300, temperature=0.4)
         if not obj:
@@ -211,12 +214,14 @@ async def run_agent_coordinated(
     # ── Plan ────────────────────────────────────────────────────────────────
     # Reuses the orchestrator's planner (LLM with a keyword-split fallback) so
     # there is exactly one planner in the codebase.
+    from plugins.people.controls import allowed_for
     from .planner import plan_agents
 
+    allowed = await allowed_for(pool, int(user_id)) if user_id else None
     plan: list = []
     if multi_part(goal_text):
         try:
-            plan = await plan_agents(goal_text, model_name=model_name, uniform_model=True)
+            plan = await plan_agents(goal_text, model_name=model_name, uniform_model=True, allowed=allowed)
         except Exception:
             logger.warning("agent coordinator: planner failed, running the goal as one step",
                            exc_info=True)
@@ -403,7 +408,7 @@ async def run_agent_coordinated(
     })
 
     # ── What's worth doing next ─────────────────────────────────────────────
-    suggestions = await _suggest_next(goal_text, recap, model_name)
+    suggestions = await _suggest_next(goal_text, recap, model_name, allowed)
     if suggestions:
         yield root_ev("propose_next", {
             "suggestions": suggestions,

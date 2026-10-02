@@ -1,9 +1,11 @@
 /**
  * Harvis workspace data layer — thin wrappers over the backend's existing
  * `/api/workspace/*` router (python_back_end/workspace/workspace_router.py).
- * Same-origin cookie auth: the web build is served from `/hermes/` behind the
+ * Same-origin cookie auth: the web build is served from `/harvis/` behind the
  * same nginx that fronts `/api/`, so no token plumbing is needed here.
  */
+
+import { reportUnauthorized } from '@/lib/harvis-session'
 
 export interface WorkspaceRun {
   id: string
@@ -55,6 +57,10 @@ export async function harvisApi<T>(path: string, init?: RequestInit): Promise<T>
   })
 
   if (!res.ok) {
+    if (res.status === 401) {
+      reportUnauthorized()
+    }
+
     let detail = `${res.status} ${res.statusText}`
 
     try {

@@ -62,10 +62,13 @@ async def build_recall_block(
     if provider is None:
         return ""
 
-    # Always-on: most-recent N (no filter)
+    # Always-on: most-recent N (no filter). Over-fetched so memories still waiting
+    # for the user's OK (skipped below; up to 20 per USER.md import) can't crowd
+    # out the real ones.
+    fetch = limit + 40
     try:
         recent: list[MemoryEntry] = await provider.recall(
-            user_id, query=None, limit=limit,
+            user_id, query=None, limit=fetch,
         )
     except Exception:
         logger.exception("memory: recent recall failed for user %s", user_id)
@@ -75,7 +78,7 @@ async def build_recall_block(
     matched: list[MemoryEntry] = []
     if query and query.strip():
         try:
-            matched = await provider.recall(user_id, query=query, limit=limit)
+            matched = await provider.recall(user_id, query=query, limit=fetch)
         except Exception:
             logger.exception("memory: query recall failed for user %s", user_id)
 
@@ -83,7 +86,9 @@ async def build_recall_block(
     seen: set[str] = set()
     combined: list[MemoryEntry] = []
     for entry in (matched + recent):
-        if not entry.content:
+        # Lines imported from a sandbox's USER.md wait for the user's OK: anything
+        # in the sandbox (a cloned repo, a page the agent read) can write that file.
+        if not entry.content or (entry.metadata or {}).get("pending"):
             continue
         key = entry.content.strip()
         if not key or key in seen:

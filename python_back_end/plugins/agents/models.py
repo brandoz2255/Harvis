@@ -224,6 +224,13 @@ async def resolve_run_model(
     how to fail. Never raises.
     """
     own = (agent.get("model") or "").strip()
+    from plugins.people.controls import allowed_for
+    allowed = await allowed_for(pool, int(user_id)) if user_id is not None else None
+    if allowed is not None:  # Settings ▸ People: only the person's models
+        for pick, why in ((own, "teammate setting"), ((last_pick or "").strip(), "last picked in chat")):
+            if pick and pick in allowed:
+                return pick, why
+        return (allowed[0], "the first model the Harvis admin allows you") if allowed else ("", "no allowed models")
     if usable_pick(own):
         return own, "teammate setting"
     if goal and task_models_enabled():

@@ -294,20 +294,25 @@ async def plan_agents(
     uniform_model: bool = False,
     model_pool: list[str] | None = None,
     subagents: list[dict] | None = None,
+    allowed: list[str] | None = None,
 ) -> list[dict]:
     """LLM-decided delegation → spawn-ready plan dicts. Falls back to the keyword
     split on any failure. Always returns at least one agent. `model_pool` (the user's
     Customize pool) is round-robined across the agents when supplied + not uniform.
     `subagents` (Customize → Sub-agents, enabled defs) adds a specialist roster the
-    planner assigns steps to by description; unmatched steps keep the generic profile."""
+    planner assigns steps to by description; unmatched steps keep the generic profile.
+    `allowed` (Settings ▸ People, None = any model) limits the planner and every agent
+    to the person's models; an agent left on another model runs on `model_name`."""
     # Resolve the pool ONCE per plan, against what the provider actually serves, and pass
     # that everywhere below — so the LLM path and the keyword fallback can't disagree about
     # which models the sub-agents get.
     pool = await _effective_pool(model_pool)
+    if allowed is not None:
+        pool = [m for m in pool if m in allowed] or [model_name]
 
     brief = (task_brief or "").strip()
     if not brief:
-        return _fallback_plan(task_brief, model_name, uniform_model, pool)
+        return _held_to(_fallback_plan(task_brief, model_name, uniform_model, pool), allowed, model_name)
 
     # concat (NOT .format — the prompt has literal { } JSON)
     prompt = _PROMPT + _roster_section(subagents) + "Task: " + brief[:1500]
@@ -315,6 +320,8 @@ async def plan_agents(
     # hand the whole plan to the keyword split; the pool is the honest second choice since
     # it is already known-installed.
     planner_models = await _installed(_PLANNER_MODELS) or pool
+    if allowed is not None:
+        planner_models = [m for m in planner_models if m in allowed] or pool
     for model in planner_models:
         try:
             obj = await generate_json(model, prompt)
@@ -334,10 +341,22 @@ async def plan_agents(
                 "orchestrator planner: model=%s produced %d task-delegated agent(s): %s",
                 model, len(agents), ", ".join(a.get("name", "?") for a in agents),
             )
-            return _build_plan(agents, model_name, uniform_model, pool, subagents)
+            return _held_to(_build_plan(agents, model_name, uniform_model, pool, subagents), allowed, model_name)
         except Exception as exc:
             logger.debug("orchestrator planner model %s failed: %s", model, exc)
             continue
 
     logger.info("orchestrator planner: LLM unavailable — falling back to keyword split")
-    return _fallback_plan(task_brief, model_name, uniform_model, pool)
+    return _held_to(_fallback_plan(task_brief, model_name, uniform_model, pool), allowed, model_name)
+
+
+def _held_to(plan: list[dict], allowed: list[str] | None, model_name: str) -> list[dict]:
+    """Move any agent whose model (a custom sub-agent's own, say) is off the person's list."""
+    if allowed is None:
+        return plan
+    for step in plan:
+        if step.get("model") not in allowed:
+            step["model"] = model_name
+            if isinstance(step.get("profile"), dict):
+                step["profile"]["model_name"] = model_name
+    return plan

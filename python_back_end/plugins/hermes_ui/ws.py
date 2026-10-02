@@ -10,15 +10,17 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from typing import Any, Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from auth_optimized import decode_token_fast
+from plugins import people
 
-from . import (bots, chat, learn, profiles, providers, runs, sandbox, sessions, skill_select, store, turn_models,
-               voice_route)
+from . import (attachments, bots, chat, learn, profiles, providers, runs, sandbox, sessions, skill_select, store,
+               turn_models, voice_route)
 from .models import DEFAULT_EFFORT, is_hidden_model, ollama_effort, thinking_models
 from .rest import build_model_options
 from .ws_settings import SettingsMethods
@@ -63,6 +65,25 @@ def _token_from(ws: WebSocket) -> Optional[str]:
     if auth.lower().startswith("bearer "):
         return auth[7:].strip()
     return None
+
+
+# The socket authenticates from the ambient cookie, so any same-site page (a sandbox
+# preview on another localhost port) could open it as the signed-in user. Browsers
+# always send Origin on a WebSocket handshake; accept only this host, the nginx
+# front door, and operator-listed origins. No Origin means a non-browser client.
+_TRUSTED_NETLOCS = {"localhost:9000", "127.0.0.1:9000"} | {
+    o.strip().split("://", 1)[-1]
+    for o in os.getenv("HARVIS_EXTRA_ORIGINS", "").split(",")
+    if o.strip()
+}
+
+
+def _origin_allowed(ws: WebSocket) -> bool:
+    origin = ws.headers.get("origin")
+    if not origin:
+        return True
+    netloc = origin.split("://", 1)[-1].rstrip("/")
+    return netloc == ws.headers.get("host", "") or netloc in _TRUSTED_NETLOCS
 
 
 def _turn_extra(s: sessions.Live, bot: Optional[dict]) -> dict:
@@ -300,11 +321,17 @@ class Connection(SettingsMethods):
         if err:
             return err
         text = str(params.get("text") or "")
-        if not text.strip():
+        # Browser uploads (POST /api/v1/files/) ride along as ids; an id that is
+        # not this user's is refused before anything is stored.
+        try:
+            refs = await attachments.owned(self.pool, self.user_id, attachments.requested_ids(params.get("files")))
+        except attachments.AttachmentError as exc:
+            return _err(rid, ERR_PARAMS, str(exc))
+        if not text.strip() and not refs:
             return _err(rid, ERR_PARAMS, "empty prompt")
         if s.running:
             return _err(rid, ERR_SESSION_BUSY, "session busy", {"session_id": s.id})
-        msgs = await sessions.append(self.pool, s, "user", text)
+        msgs = await sessions.append(self.pool, s, "user", text, files=refs)
         s.running = True
         # Spoken in the hands-free conversation: the voice router may pick the model.
         voice = params.get("surface") == "voice"
@@ -327,6 +354,23 @@ class Connection(SettingsMethods):
             # Sessions saved while Gemini / cloud tags were offered fall back to the default.
             model = "" if is_hidden_model(s.model) else s.model
             endpoint = await providers.resolve_active_endpoint(self.pool, self.user_id)
+            # The admin's limits (Settings ▸ People). A person's own provider key is
+            # their own spending, so the model list only binds this server's models.
+            # An endpoint that points back at this server (or the LAN) is not their key.
+            own_key = bool(endpoint) and not await people.is_server_endpoint(endpoint["base_url"])
+            if own_key:
+                admitted = await people.admit_turn(self.pool, self.user_id, None)
+            else:
+                admitted = await people.admit_turn(self.pool, self.user_id,
+                                                   (endpoint or {}).get("model") or model)
+            if not admitted.ok:
+                raise chat.ChatError(admitted.reason)
+            # The list still binds any fallback that lands on this server.
+            allowed = admitted.allowed
+            if endpoint and not own_key:
+                endpoint = {**endpoint, "model": admitted.model}
+            elif not endpoint:
+                model = admitted.model
             query = next((m["content"] for m in reversed(msgs) if m["role"] == "user"), "")
             # No mode pill: Harvis decides (auto) unless this message asks for a
             # mode outright ("use a team", "just answer"). A chat_mode saved by
@@ -352,7 +396,12 @@ class Connection(SettingsMethods):
                 # The caller's standing instructions for this turn (rest_voice: the voice assistant's).
                 turn = [*turn[:-1], {"role": "system", "content": note}, turn[-1]]
             if plain:
-                extra = {"harvis_research": False, "harvis_plain": True}
+                # Small models can ignore a prose request to be brief. The
+                # voice route also needs a hard output ceiling so speech stays
+                # conversational; rest_voice keeps this a shared constant.
+                from .rest_voice import VOICE_MAX_TOKENS
+                extra = {"harvis_research": False, "harvis_plain": True,
+                         "max_tokens": VOICE_MAX_TOKENS}
             elif chat.is_group_turn(s.title, query):
                 # Room turns are conversation only: no workspace run, no deep research.
                 mode, extra = "chat", {**extra, "harvis_research": False}
@@ -361,16 +410,25 @@ class Connection(SettingsMethods):
                 if route:
                     step = voice_route.plan(route, model, mode)
                     model, mode = step.model, step.mode
+                    if allowed is not None and model not in allowed:
+                        model = admitted.model
                     if step.note:
                         turn = [*turn[:-1], {"role": "system", "content": step.note}, turn[-1]]
                     await self._relay(s, "reasoning", step.label, parts, thoughts)
+            # The chat's uploads, for owui_compat.chat_completion._inject_files.
+            # Harvis-only: chat._stream_completion keeps `extra` off custom endpoints.
+            files = attachments.turn_files(msgs)
+            if files:
+                extra = {**extra, "files": files}
+                if endpoint and attachments.latest_turn_has_files(msgs):
+                    await self._relay(s, "text", attachments.CUSTOM_ENDPOINT_NOTE, parts, thoughts)
             # Only thinking models get a level: Ollama rejects one on any other model.
             effort = (("none" if plain else ollama_effort(s.effort or DEFAULT_EFFORT))
                       if model and not endpoint and model in await thinking_models() else "")
             # Fallback models, mixture of agents and the personality note (Settings ▸ Model / Chat).
             async for kind, delta in turn_models.stream(self.pool, self.user_id, self.token, turn, model, endpoint,
                                                         mode, effort, self.origin, extra=extra,
-                                                        bot=bot is not None):
+                                                        bot=bot is not None, allowed=allowed):
                 if kind != "run":
                     await self._relay(s, kind, delta, parts, thoughts)
                     continue
@@ -390,7 +448,7 @@ class Connection(SettingsMethods):
                 # thinking and stop without an answer; ask again with thinking off.
                 async for kind, delta in turn_models.stream(self.pool, self.user_id, self.token, turn, model,
                                                             endpoint, "chat", "none", self.origin, extra=extra,
-                                                            bot=bot is not None):
+                                                            bot=bot is not None, allowed=allowed):
                     if kind == "text":
                         await self._relay(s, kind, delta, parts, thoughts)
         except asyncio.CancelledError:
@@ -448,6 +506,11 @@ def _short(obj: Any, n: int = 200) -> str:
 
 @router.websocket("/hermes-api/ws")
 async def hermes_ws(ws: WebSocket):
+    if not _origin_allowed(ws):
+        log.warning("hermes ws: refused origin %s (host %s)",
+                    ws.headers.get("origin"), ws.headers.get("host"))
+        await ws.close(code=4403, reason="cross-origin socket refused")
+        return
     token = _token_from(ws)
     payload = decode_token_fast(token) if token else None
     try:
@@ -465,8 +528,14 @@ async def hermes_ws(ws: WebSocket):
                     "replay_epoch": REPLAY_EPOCH, "backend": "harvis"},
     }})
     try:
-        while True:
-            raw = await ws.receive_text()
+        while conn.open:
+            try:
+                raw = await ws.receive_text()
+            except RuntimeError:
+                # A send to a browser that had already gone marks the socket
+                # disconnected on Starlette's side; the next receive then raises
+                # RuntimeError, not WebSocketDisconnect. Same ending: stop.
+                break
             try:
                 req = json.loads(raw)
             except json.JSONDecodeError:

@@ -31,6 +31,7 @@ from urllib.parse import urlencode, urlsplit, urlunsplit
 
 import httpx
 
+from .http_transport import guarded_client
 from .protocol import McpError
 from .token_storage import PgTokenStorage
 from .types import McpServerConfig
@@ -88,7 +89,7 @@ async def discover(resource_url: str) -> dict:
     origin = _origin(resource_url)
     path = parts.path.rstrip("/")
 
-    async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, follow_redirects=True) as client:
+    async with guarded_client(timeout=_HTTP_TIMEOUT) as client:
         prm = None
         # RFC 9728 puts the path after the well-known segment; servers that
         # host one MCP endpoint often also answer the bare form.
@@ -156,7 +157,7 @@ async def _register_client(meta: dict, redirect_uri: str) -> dict:
     }
     if meta.get("scopes"):
         body["scope"] = meta["scopes"]
-    async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, follow_redirects=True) as client:
+    async with guarded_client(timeout=_HTTP_TIMEOUT) as client:
         try:
             resp = await client.post(endpoint, json=body)
         except httpx.HTTPError as exc:
@@ -295,7 +296,7 @@ async def complete_authorization(state: str, code: str, pool) -> dict:
 
 
 async def _token_request(endpoint: str, form: dict) -> dict:
-    async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, follow_redirects=True) as client:
+    async with guarded_client(timeout=_HTTP_TIMEOUT) as client:
         try:
             resp = await client.post(
                 endpoint,

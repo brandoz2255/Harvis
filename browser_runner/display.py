@@ -141,6 +141,8 @@ def _ensure_websockify_locked() -> None:
     if not (_have("websockify") or _have("python3")):
         return
     os.makedirs(TOKEN_DIR, exist_ok=True)
+    if not os.path.exists(os.path.join(TOKEN_DIR, "tokens")):
+        _write_tokens_locked()
     cmd = [
         "websockify",
         "--token-plugin=TokenFile",
@@ -157,6 +159,24 @@ def _ensure_websockify_locked() -> None:
     except FileNotFoundError:
         logger.warning("browser-runner: websockify not installed; no watchable screen")
         _websockify = None
+
+
+def websockify_up() -> bool:
+    return _websockify is not None and _websockify.poll() is None
+
+
+def ensure_websockify() -> bool:
+    """Bring websockify up now rather than on the first headed session.
+
+    The Browser page loads noVNC from ``/agents/vnc/vnc.html`` as soon as it
+    opens, before (and regardless of whether) a session exists. Started lazily,
+    that route was an nginx 502 until the first headed session had come up, so
+    the screen frame loaded broken and had to reconnect. Called at boot and
+    again by the reaper, so a websockify that died is restarted too.
+    """
+    with _lock:
+        _ensure_websockify_locked()
+        return websockify_up()
 
 
 # Where a teammate's Firefox profile lives, so its logins survive between runs.
@@ -284,6 +304,14 @@ def start(session_id: str, *, width: int = 1280, height: int = 800) -> Optional[
 def get(session_id: str) -> Optional[Screen]:
     with _lock:
         return _screens.get(session_id)
+
+
+def is_taken_over(session_id: str) -> bool:
+    """True while the user is driving this screen — the session is in use even
+    though no request reaches the runner, so it must not idle out."""
+    with _lock:
+        screen = _screens.get(session_id)
+        return bool(screen is not None and screen.taken_over)
 
 
 def set_takeover(session_id: str, taken: bool) -> Optional[Screen]:

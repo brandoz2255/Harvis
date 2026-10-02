@@ -248,7 +248,8 @@ async def get_user_api_key(
 # Images storage directory (mounted via PVC in K8s)
 IMAGES_DIR = os.getenv("IMAGES_DIR", "/app/images")
 # OWUI file-attachment storage (uploads via POST /api/v1/files/). Bytes live here,
-# metadata in the owui_files table. Persisted volume in prod; /app survives restart.
+# metadata in the owui_files table. The default is the container's writable layer
+# and does NOT survive a restart; docker-compose.yaml points it under /data/artifacts.
 OWUI_FILES_DIR = os.getenv("OWUI_FILES_DIR", "/app/owui_files")
 os.makedirs(IMAGES_DIR, exist_ok=True)
 print(f"Images directory: {IMAGES_DIR}")
@@ -695,6 +696,7 @@ async def lifespan(app: FastAPI):
                     "017_user_profile_fields.sql",
                     "018_agent_teammates.sql",
                     "019_hermes_bots.sql",
+                    "020_user_controls.sql",
                 ):
                     _mig_path = os.path.join(_mig_dir, _mig_name)
                     try:
@@ -719,7 +721,7 @@ async def lifespan(app: FastAPI):
                             _mig_name,
                             _mig_err,
                         )
-                logger.info("✅ Idempotent migrations 010-019 ensured")
+                logger.info("✅ Idempotent migrations 010-020 ensured")
 
                 # vibecoding_sessions. The /api/vibecode/sessions* routes are
                 # mounted on every boot and every one of them queries this table,
@@ -1689,6 +1691,13 @@ _EXTRA_ORIGINS = [
     o.strip() for o in os.getenv("HARVIS_EXTRA_ORIGINS", "").split(",") if o.strip()
 ]
 
+# Turned-off accounts (Settings ▸ People) are refused here, in front of every
+# route and socket, whichever auth dependency the route uses. Added before CORS
+# so CORS stays the outer layer.
+from plugins.people import BlockedAccountGate  # noqa: E402
+
+app.add_middleware(BlockedAccountGate)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_EXTRA_ORIGINS + [
@@ -1881,7 +1890,7 @@ app.include_router(inference_nodes_router)
 app.include_router(agents_router)
 
 # Hermes desktop-UI facade: REST + JSON-RPC WebSocket under /hermes-api/ so the
-# vendored UI at /hermes/ can boot and chat through Harvis (no Hermes gateway here).
+# vendored UI at /harvis/ can boot and chat through Harvis (no Hermes gateway here).
 from plugins.hermes_ui.router import router as hermes_ui_router
 app.include_router(hermes_ui_router)
 
@@ -3247,6 +3256,10 @@ async def _login_with_connection(request: AuthRequest, conn):
                 detail="Incorrect email or password",
                 headers={"WWW-Authenticate": "Bearer"},
             )
+        from plugins.people import BLOCKED_MESSAGE, is_blocked
+
+        if await is_blocked(app.state.pg_pool if hasattr(app.state, "pg_pool") else None, int(user["id"])):
+            raise HTTPException(status_code=403, detail=BLOCKED_MESSAGE)
 
         access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
         access_token = create_access_token(
@@ -3749,6 +3762,9 @@ async def chat(
 
     Produces: SSE stream with status events, final event contains {history, audio_path, session_id}
     """
+    # The admin's limits (Settings ▸ People): refused, or counted.
+    from plugins.people.controls import require_turn
+    req.model = await require_turn(getattr(app.state, "pg_pool", None), int(current_user.id), req.model)
     import asyncio
 
     async def stream_chat():
@@ -5184,6 +5200,9 @@ async def vision_chat(
     Vision chat endpoint using Ollama VL models (llava, moondream, bakllava, etc.).
     Now uses SSE streaming with heartbeats to prevent browser idle timeouts.
     """
+    # The admin's limits (Settings ▸ People): refused, or counted.
+    from plugins.people.controls import require_turn
+    req.model = await require_turn(getattr(app.state, "pg_pool", None), int(current_user.id), req.model)
     import asyncio
 
     async def stream_vision_chat():
@@ -5948,36 +5967,48 @@ async def owui_files_upload(
     metadata: str = Form(None),
     current_user: UserResponse = Depends(get_current_user),
 ):
-    """Store an uploaded attachment + return its OWUI file object."""
+    """Store an uploaded attachment + return its OWUI file object.
+
+    Streamed to disk in chunks under the backend's own size cap (HARVIS_MAX_UPLOAD_MB,
+    default 50 to match nginx's client_max_body_size) — 413 with a plain message
+    past it, and no partial file left behind.
+    """
+    from owui_compat import upload_store
+
     pool = getattr(request.app.state, "pg_pool", None)
     if pool is None:
         raise HTTPException(503, "Storage unavailable")
+    limit = upload_store.max_upload_bytes()
+    if upload_store.content_length_exceeds(request.headers, limit):
+        raise HTTPException(413, upload_store.UploadTooLarge(limit).message)
     os.makedirs(OWUI_FILES_DIR, exist_ok=True)
     file_id = str(uuid.uuid4())
-    _, ext = os.path.splitext(file.filename or "")
-    disk_path = os.path.join(OWUI_FILES_DIR, f"{file_id}{ext}")
-    contents = await file.read()
-    with open(disk_path, "wb") as f:
-        f.write(contents)
+    filename = upload_store.display_name(file.filename, file_id)
+    disk_path = os.path.join(OWUI_FILES_DIR, f"{file_id}{upload_store.disk_suffix(file.filename)}")
+    try:
+        size = await upload_store.save_upload(file, disk_path, limit)
+    except upload_store.UploadTooLarge as exc:
+        logger.warning("📎 OWUI file upload rejected (> %d MB): %s", limit >> 20, file.filename)
+        raise HTTPException(413, exc.message)
     meta = {}
     if metadata:
         try:
             meta = json.loads(metadata)
         except Exception:
             meta = {}
-    content_type = file.content_type or "application/octet-stream"
+    content_type = upload_store.display_name(file.content_type, "application/octet-stream")
     async with pool.acquire() as conn:
         await conn.execute(
             "INSERT INTO owui_files (id, user_id, filename, path, content_type, size, meta) "
             "VALUES ($1,$2,$3,$4,$5,$6,$7)",
-            file_id, int(current_user.id), file.filename or file_id, disk_path,
-            content_type, len(contents), json.dumps(meta),
+            file_id, int(current_user.id), filename, disk_path,
+            content_type, size, json.dumps(meta),
         )
     logger.info("📎 OWUI file upload: %s (%s, %d bytes) id=%s",
-                file.filename, content_type, len(contents), file_id)
+                filename, content_type, size, file_id)
     return _owui_file_obj({
-        "id": file_id, "user_id": int(current_user.id), "filename": file.filename or file_id,
-        "content_type": content_type, "size": len(contents), "meta": meta, "created_at": None,
+        "id": file_id, "user_id": int(current_user.id), "filename": filename,
+        "content_type": content_type, "size": size, "meta": meta, "created_at": None,
     })
 
 
@@ -6189,7 +6220,9 @@ async def upload_file(
 
 
 @app.post("/api/analyze-screen", tags=["vision"])
-async def analyze_screen(req: ScreenAnalysisRequest):
+async def analyze_screen(req: ScreenAnalysisRequest, current_user: UserResponse = Depends(get_current_user)):
+    from plugins.people.controls import require_turn
+    await require_turn(getattr(app.state, "pg_pool", None), int(current_user.id))
     try:
         # Free VRAM for the vision model Ollama is about to load
         logger.info("🖼️ Starting screen analysis - clearing ALL GPU memory")
@@ -6240,7 +6273,7 @@ _vision_error_count = 0
 
 
 @app.post("/api/analyze-and-respond", tags=["vision"])
-async def analyze_and_respond(req: AnalyzeAndRespondRequest):
+async def analyze_and_respond(req: AnalyzeAndRespondRequest, current_user: UserResponse = Depends(get_current_user)):
     """
     Analyze screen with Qwen vision model and get LLM response using selected model.
     Features intelligent model management to optimize GPU memory usage.
@@ -6250,6 +6283,8 @@ async def analyze_and_respond(req: AnalyzeAndRespondRequest):
         _vision_endpoint_enabled, \
         _vision_request_count, \
         _vision_error_count
+    from plugins.people.controls import require_turn
+    req.model = await require_turn(getattr(app.state, "pg_pool", None), int(current_user.id), req.model)
 
     # Circuit breaker: Check if endpoint is disabled
     if not _vision_endpoint_enabled:
@@ -6498,11 +6533,13 @@ async def vision_control(action: str = "status"):
 
 
 @app.post("/api/analyze-screen-with-tts", tags=["vision"])
-async def analyze_screen_with_tts(req: ScreenAnalysisWithTTSRequest):
+async def analyze_screen_with_tts(req: ScreenAnalysisWithTTSRequest, current_user: UserResponse = Depends(get_current_user)):
     """
     Complete screen analysis with vision model + LLM response + TTS audio output.
     Implements intelligent model management: vision -> LLM -> TTS pipeline.
     """
+    from plugins.people.controls import require_turn
+    req.model = await require_turn(getattr(app.state, "pg_pool", None), int(current_user.id), req.model)
     try:
         # Phase 1: free VRAM for the vision model Ollama is about to load
         logger.info(
@@ -6632,6 +6669,9 @@ async def mic_chat(
     Voice chat endpoint - transcribes audio and generates AI response with TTS.
     Returns JSON response (not SSE streaming) for simpler frontend handling.
     """
+    # The admin's limits (Settings ▸ People): refused, or counted.
+    from plugins.people.controls import require_turn
+    model = await require_turn(getattr(app.state, "pg_pool", None), int(current_user.id), model)
     # The form default is empty, not a guessed tag — resolve it against what this
     # deployment actually serves.
     model = model or resolve_default_model()
@@ -7093,6 +7133,9 @@ async def research_chat(
     Enhanced research chat endpoint with SSE streaming to prevent Nginx 499 timeouts.
     Streams progress updates during web searches and LLM inference.
     """
+    # The admin's limits (Settings ▸ People): refused, or counted.
+    from plugins.people.controls import require_turn
+    req.model = await require_turn(getattr(app.state, "pg_pool", None), int(current_user.id), req.model)
 
     # Resolve the cloud credential for THIS user before streaming research.
     #
@@ -7433,10 +7476,12 @@ class WebSearchRequest(BaseModel):
 
 
 @app.post("/api/fact-check", tags=["research"])
-async def fact_check(req: FactCheckRequest):
+async def fact_check(req: FactCheckRequest, current_user: UserResponse = Depends(get_current_user)):
     """
     Fact-check a claim using web search and analysis
     """
+    from plugins.people.controls import require_turn
+    req.model = await require_turn(getattr(app.state, "pg_pool", None), int(current_user.id), req.model)
     try:
         result = fact_check_agent(req.claim, req.model)
         return result
@@ -7446,10 +7491,12 @@ async def fact_check(req: FactCheckRequest):
 
 
 @app.post("/api/comparative-research", tags=["research"])
-async def comparative_research(req: ComparativeResearchRequest):
+async def comparative_research(req: ComparativeResearchRequest, current_user: UserResponse = Depends(get_current_user)):
     """
     Compare multiple topics using web research
     """
+    from plugins.people.controls import require_turn
+    req.model = await require_turn(getattr(app.state, "pg_pool", None), int(current_user.id), req.model)
     try:
         if len(req.topics) < 2:
             raise HTTPException(400, "At least 2 topics are required for comparison")

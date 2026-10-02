@@ -85,6 +85,15 @@ describe('attachmentDisplayText', () => {
     expect(attachmentDisplayText(attachment({ kind: 'file', refText: '@file:src/a.ts' }))).toBe('@file:src/a.ts')
   })
 
+  it('shows a Harvis upload by name (document) or by its content URL (image)', () => {
+    expect(attachmentDisplayText(attachment({ kind: 'file', label: 'Q3 report.pdf', fileId: 'f1' }))).toBe(
+      '@file:`Q3 report.pdf`'
+    )
+    expect(attachmentDisplayText(attachment({ kind: 'image', label: 'cat.png', fileId: 'f2' }))).toBe(
+      `@image:${window.location.origin}/api/v1/files/f2/content`
+    )
+  })
+
   it('expands a review attachment into an anchored fenced block', () => {
     const detail = JSON.stringify({
       author: 'teknium1',

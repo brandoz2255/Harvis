@@ -3612,6 +3612,8 @@ export const zh: Translations = {
     noClipboardImage: '剪贴板中没有图片',
     clipboardPasteFailed: '粘贴剪贴板失败',
     dropFiles: '拖放文件',
+    attachFiles: '附加文件',
+    attachFailed: '附加失败',
     handoff: {
       pickPlatform: '选择目标平台',
       success: platform => `已移交到 ${platform}。随时可在此处恢复。`,

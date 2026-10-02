@@ -217,6 +217,10 @@ async def agents_run(
         raise HTTPException(status_code=404, detail="Agent not found")
     if not agent.get("enabled"):
         raise HTTPException(status_code=409, detail="That teammate is turned off.")
+    # Settings ▸ People: counts toward the daily limit; the model is held to the
+    # person's list where the run picks it (models.resolve_run_model).
+    from plugins.people.controls import require_turn
+    await require_turn(_pool(request), uid, None)
     return await intake.create_agent_run(
         request=request,
         user_id=uid,

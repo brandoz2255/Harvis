@@ -132,7 +132,6 @@ export const SIDEBAR_SECTION_AREA = 'sidebar.section'
 export const OVERLAY_VIEWS: ReadonlySet<AppView> = new Set([
   'agents',
   'command-center',
-  'cron',
   'profiles',
   'settings',
   'starmap',

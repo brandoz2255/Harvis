@@ -107,7 +107,7 @@ const PLATFORM_INTRO: Record<string, string> = {
   telegram:
     'In Telegram, talk to @BotFather, run /newbot, and copy the token it gives you. Then grab your numeric user ID from @userinfobot.',
   discord:
-    'Open the Discord Developer Portal, create an application, add a Bot, then copy its token. Invite the bot to your server with the right scopes.',
+    'Open the Discord Developer Portal, create an application, add a Bot, enable the Message Content intent and copy the bot token. Invite the bot to your server, then paste the token here: Harvis runs the bot from what you save, no file edit needed.',
   slack:
     'Create a Slack app, enable Socket Mode, install it to your workspace, then copy the bot token and app-level token.',
   mattermost:

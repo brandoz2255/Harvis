@@ -117,13 +117,16 @@ async def create_run(
 ):
     """Launch a run through the existing internal launcher (same background
     task + broadcaster + DB row the /api/workspace/launch path creates)."""
+    from plugins.people.controls import require_turn
+    model_name = await require_turn(getattr(request.app.state, "pg_pool", None), int(current_user["id"]),
+                                    req.model_name or "") or req.model_name
     result = await launch_workspace_internal(
         request=request,
         user_id=int(current_user["id"]),
         task_brief=req.task_brief,
         chat_history=req.chat_history or [],
         agent_id=req.agent_id,
-        model_name=req.model_name,
+        model_name=model_name,
         session_id=req.session_id,
         live_web=req.live_web,
         attachments=req.attachments,

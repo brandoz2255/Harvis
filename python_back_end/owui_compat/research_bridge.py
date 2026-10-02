@@ -129,7 +129,17 @@ async def maybe_handle_research(request: Request, owui_body: dict, user) -> Opti
         owner = str(getattr(user, "id", "") or "")
         model = str(owui_body.get("model") or "").strip()
         if model.lower() in _SKIP_MODELS or model.startswith(_CLOUD_PREFIXES):
-            model = await _resolve_research_model(request, getattr(user, "id", None))
+            # Research runs on this server. A person the admin limits (Settings ▸ People)
+            # gets their first listed local model, not the server default; none = no research.
+            from plugins.people.controls import allowed_for
+            allowed = await allowed_for(getattr(request.app.state, "pg_pool", None), getattr(user, "id", None) or 0)
+            if allowed is None:
+                model = await _resolve_research_model(request, getattr(user, "id", None))
+            else:
+                local = [m for m in allowed if m.lower() not in _SKIP_MODELS and not m.startswith(_CLOUD_PREFIXES)]
+                if not local:
+                    return None
+                model = local[0]
         prior_id = prior_research_id(history)
         prior = _prior_context(_handler, prior_id, owner, query) if prior_id else {}
         research_id = f"rp-{uuid.uuid4().hex[:12]}"

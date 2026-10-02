@@ -711,6 +711,19 @@ def lane_for_tool(name: str) -> int:
     return _EXTRA_TOOL_LANES.get(n, DEFAULT_SAFE_LANE)
 
 
+def _sandbox_path_to_rel(args: dict) -> dict:
+    """The chat sandbox mounts this workspace at /workspace, so exec's pwd and
+    every listing the model sees name files /workspace/x. The file tools resolve
+    paths against the backend's copy, where that absolute path is outside the
+    root, and refused it: a run spent two steps on "outside your workspace"
+    before guessing the relative form. Strip the prefix; validate_agent_path
+    still runs on the result, so /workspace/../x is refused as ../x."""
+    path = args.get("path")
+    if isinstance(path, str) and (path == "/workspace" or path.startswith("/workspace/")):
+        return {**args, "path": path[len("/workspace"):].lstrip("/") or "."}
+    return args
+
+
 async def dispatch_tool(
     workspace_path: str,
     name: str,
@@ -736,6 +749,7 @@ async def dispatch_tool(
     their current in-process path unchanged. ``pool``/``run_id`` are optional
     context for the code_file_changes audit trail (fail-open when absent)."""
     args = args if isinstance(args, dict) else {}
+    args = _sandbox_path_to_rel(args)
     try:
         if name in COMPUTER_TOOLS:
             if computer is None:

@@ -1,13 +1,22 @@
+import logging
+
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 from .registry import registry, invoke_tool
-from .auth import require_scopes
+from .auth import TOKEN_ENV, configured_token, require_scopes
 from .tools.os_ops import register_os_ops  # registers tools at import
 from .tools.openclaw_workspace import register_openclaw_workspace
+
+logger = logging.getLogger("harvis-mcp")
 
 app = FastAPI(title="MCP Harvis Server")
 register_os_ops()
 register_openclaw_workspace()
+
+if not configured_token():
+    # The process stays up so the deployment is observable, but require_scopes
+    # answers 503 to everything until the token is provided.
+    logger.warning("%s is not set: refusing every /mcp/invoke request", TOKEN_ENV)
 
 class RpcRequest(BaseModel):
     jsonrpc: str = "2.0"

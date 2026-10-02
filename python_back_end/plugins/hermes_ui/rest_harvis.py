@@ -131,6 +131,13 @@ async def memory_delete(memory_id: int, request: Request, user=Depends(get_curre
     return {"ok": True}
 
 
+@router.post("/harvis/memory/{memory_id}/keep")
+async def memory_keep(memory_id: int, request: Request, user=Depends(get_current_user_optimized)):
+    if not await learn.keep_memory(request.app.state.pg_pool, _uid(user), memory_id):
+        raise HTTPException(404, "memory not found")
+    return {"ok": True}
+
+
 @router.post("/harvis/learn/settings")
 async def learn_settings(request: Request, user=Depends(get_current_user_optimized)):
     body = await request.json()

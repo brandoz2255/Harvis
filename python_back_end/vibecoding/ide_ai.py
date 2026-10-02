@@ -649,6 +649,7 @@ async def get_providers(
 @router.post("/copilot/suggest", response_model=CopilotSuggestResponse)
 async def copilot_suggest(
     request: CopilotSuggestRequest,
+    http_request: Request,
     user: Dict = Depends(get_current_user_optimized)
 ):
     """
@@ -656,6 +657,9 @@ async def copilot_suggest(
     Uses dedicated Ollama compatibility layer with robust empty response handling
     Decoupled from assistant/propose - this is ONLY for ghost suggestions
     """
+    from plugins.people.controls import require_turn
+    request.model = await require_turn(getattr(http_request.app.state, "pg_pool", None), int(user["id"]),
+                                       request.model or "", count=False) or request.model
     try:
         user_id = str(user.get('id'))
         
@@ -743,12 +747,16 @@ async def copilot_suggest(
 @router.post("/chat/send")
 async def chat_send(
     request: IDEChatSendRequest,
+    http_request: Request,
     user: Dict = Depends(get_current_user_optimized)
 ):
     """
     Send message to IDE Assistant and stream response
     Uses SSE for streaming
     """
+    from plugins.people.controls import require_turn
+    request.model = await require_turn(getattr(http_request.app.state, "pg_pool", None), int(user["id"]),
+                                       request.model) or request.model
     try:
         # Build conversation context
         messages = []
@@ -793,12 +801,16 @@ async def chat_send(
 @router.post("/chat/propose-diff", response_model=ProposeDiffResponse)
 async def propose_diff(
     request: ProposeDiffRequest,
+    http_request: Request,
     user: Dict = Depends(get_current_user_optimized)
 ):
     """
     Propose code changes based on instructions
     Returns draft content and diff
     """
+    from plugins.people.controls import require_turn
+    request.model = await require_turn(getattr(http_request.app.state, "pg_pool", None), int(user["id"]),
+                                       request.model) or request.model
     try:
         # Sanitize filepath
         safe_path = sanitize_path(request.filepath)
@@ -887,6 +899,7 @@ Modified code (complete file):"""
 @router.post("/diff/propose", response_model=ProposeDiffResponse)
 async def propose_diff_new(
     request: ProposeDiffRequest,
+    http_request: Request,
     user: Dict = Depends(get_current_user_optimized)
 ):
     """
@@ -894,6 +907,9 @@ async def propose_diff_new(
     Supports mode parameter: 'draft' (full content) or 'unified_diff' (diff only)
     Returns base_etag for optimistic concurrency
     """
+    from plugins.people.controls import require_turn
+    request.model = await require_turn(getattr(http_request.app.state, "pg_pool", None), int(user["id"]),
+                                       request.model) or request.model
     try:
         # Sanitize filepath
         safe_path = sanitize_path(request.filepath)

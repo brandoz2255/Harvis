@@ -110,6 +110,12 @@ export function loadVoiceSession(): Promise<void> {
   return loaded
 }
 
+/** Ask the server to load the voice model now, so the first spoken turn of a
+ *  call does not wait for Ollama to reload it. Best effort, never throws. */
+export function warmVoiceModel(): void {
+  void fetch(`${API}/warm`, { method: 'POST', credentials: 'include' }).catch(() => undefined)
+}
+
 /** The newest reply the call hasn't spoken yet, in the shape the voice loop reads. */
 export function pendingVoiceReply(): null | { id: string; pending: boolean; text: string } {
   const last = $voiceTurns.get().findLast(t => t.role === 'assistant')

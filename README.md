@@ -1,18 +1,29 @@
 # The Harvis AI Project
 ### Quick Start (Local Development)
 
-The fastest way to get started locally:
+Harvis runs the same Docker Compose stack on Ubuntu and Windows. The host bootstrap is different: Ubuntu uses Bash; native Windows uses PowerShell with Docker Desktop's Linux containers. Kubernetes/k3s deployment remains Linux-only.
 
-Run the following command to uninstall all conflicting packages:
+**Ubuntu 22.04/24.04**
 
-```bash
-sudo apt remove $(dpkg --get-selections docker.io docker-compose docker-compose-v2 docker-doc podman-docker co
+Install Docker Engine and Docker Compose from [Docker's Ubuntu instructions](https://docs.docker.com/engine/install/ubuntu/), then use the Bash installer below.
+
+**Windows 11 (native host)**
+
+Install Docker Desktop, enable its WSL 2 integration, install the current NVIDIA Windows driver for a GPU machine, and install/start Ollama or another OpenAI-compatible local model server. From PowerShell in this repository, run:
+
+```powershell
+.\install.ps1 -CheckOnly
+.\install.ps1 -VerifyGpu
+.\install.ps1 -Yes
 ```
-To install Docker :
 
-```bash
-sudo apt install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+`-VerifyGpu` is optional for a CPU-only host. The PowerShell installer automatically maps a model server listening on Windows `localhost` to Docker Desktop's `host.docker.internal`; do not pass `http://localhost:11434` as the LLM URL. To supply one explicitly, use:
+
+```powershell
+.\install.ps1 -Yes -LlmUrl http://host.docker.internal:11434
 ```
+
+For a dedicated 4090 host, the practical order is: Windows NVIDIA driver → Docker Desktop/WSL 2 → `install.ps1 -VerifyGpu` → Ollama and models → `install.ps1 -Yes`.
 
 ### Installation & Usage
 
@@ -23,19 +34,27 @@ sudo apt install docker-ce docker-ce-cli containerd.io docker-buildx-plugin dock
 ```
 <img width="760" height="163" alt="clone" src="https://github.com/user-attachments/assets/f0ddf838-296e-4ecd-bb91-e34414f0b930" />
     
-## 2.  **Set up environment variables:**
-Copy the example env files, then create a top-level `.env` for the values `docker-compose.yaml` reads:
+## 2.  **Environment variables (only for a manual setup):**
+Both installers create the top-level `.env` and generate missing secrets. To configure it yourself before starting the stack, copy the backend example file with your OS's normal file command, then create the top-level `.env` values `docker-compose.yaml` reads:
 
 ```bash
+    # Ubuntu
     cp python_back_end/.env.example python_back_end/.env
     # top-level .env (docker-compose reads these):
     JWT_SECRET=<a-long-random-secret>       # REQUIRED — compose fails to start without it
     MOONSHOT_API_KEY=<kimi-key>             # optional — cloud planner/writer (Kimi K2.5)
     OPENCLAW_GATEWAY_TOKEN=<token>          # optional — OpenClaw agent runtime
 ```
+
+```powershell
+# Windows equivalent
+Copy-Item python_back_end/.env.example python_back_end/.env
+```
 See `docker-compose.yaml` for the full list of variables.
 
-## 3.  **Run — `./install.sh`:**
+## 3.  **Run the installer:**
+On **Ubuntu**, use `./install.sh`:
+
 There is nothing to choose. Harvis ships the workspace — UI, API, routing, auth, ONNX speech,
 embeddings — and needs **no GPU of its own**, so the old nvidia/amd/cpu question is gone. The
 installer looks for a model server you already run, generates the secrets `.env` needs, creates the
@@ -45,6 +64,8 @@ docker network, and launches the stack:
     ./install.sh          # detects a local model server, then installs
     ./install.sh --yes    # same, non-interactive
 ```
+
+On **native Windows**, use `./install.ps1 -Yes` after the Docker Desktop and GPU preflight shown above. It performs the same `.env`, network, database-password, build, and health checks, while using Docker Desktop's `host.docker.internal` bridge for a Windows-hosted model server.
 
 It probes this machine for an OpenAI-compatible server and uses the first one it finds:
 
@@ -75,9 +96,10 @@ server; every service resolves against it, falling back to `OLLAMA_URL` and then
 </details>
 
 ## 4.  **Access the application:**
-Open **`http://localhost:9000`** — Nginx serves the web UI and proxies all `/api/*` calls to the
-backend. Do **not** call the backend on `:8000` directly from the browser (CORS). The live UI is
-the Svelte app built from `front_end/owui/`.
+Open **`http://localhost:9000/harvis/`** — Nginx serves the web UI and proxies all `/api/*` calls to the
+backend. Do **not** call the backend on `:8000` directly from the browser (CORS). The UI is the
+Hermes desktop app built from `front_end/hermes-desktop-ui/`; the first visit shows its sign-in
+screen, and the first account made on a fresh install is the admin.
 
 
 
@@ -102,9 +124,11 @@ The Harvis AI Project is a sophisticated, voice-activated AI assistant designed 
 <img width="1653" height="1392" alt="image" src="https://github.com/user-attachments/assets/36dd9d2d-9313-41bb-9491-313838ed5e97" />
 
 ### Frontend
-- **Live UI:** `front_end/owui/` — a forked **OpenWebUI (SvelteKit)** app, built to a static
-  bundle and served by Nginx at `/`. This is the current, canonical frontend.
+- **Live UI:** `front_end/hermes-desktop-ui/` — the **Hermes** desktop UI (React + Vite), built to a
+  static bundle and served by Nginx at `/`. Sign-in, sign-up and first-admin setup live inside it.
 - **Language / Styling:** TypeScript · Tailwind CSS
+- *Retired 2026-10-01:* `front_end/owui/` (a forked OpenWebUI) is no longer built or served. Its
+  source stays in the repo for reference.
 - *Legacy:* `front_end/newjfrontend/` (Next.js) is vestigial (see Deployment notes); the old
   `front_end/jfrontend/` was removed.
 
@@ -344,8 +368,10 @@ Harvis AI includes comprehensive web search and research capabilities powered by
 
 ## Project Structure
 
-- `front_end/owui/`: **The live frontend** — a forked OpenWebUI (SvelteKit) app. Built to a static
-  bundle and served by Nginx at `/`. Most UI work happens here (`src/lib/`, `src/routes/`).
+- `front_end/hermes-desktop-ui/`: **The live frontend** — the Hermes desktop UI (React + Vite). Built
+  to a static bundle and served by Nginx at `/`. Harvis-specific code is under `src/plugins/harvis/`,
+  `src/app/sign-in/` and `src/lib/harvis-session.ts`.
+- `front_end/owui/`: Retired OpenWebUI fork, kept for reference only. Not built or served.
 - `front_end/newjfrontend/`: Legacy Next.js frontend — vestigial (Nginx only proxies `/api/ai-chat`
   to it, and the live UI never calls that route). Slated for removal.
 - `front_end/open-notebook/`: Vendored NotebookLM-style Next.js UI, served at `/onb`.
@@ -359,18 +385,17 @@ Harvis AI includes comprehensive web search and research capabilities powered by
 
 ## Development Workflow
 
-### Frontend Development (owui — the live UI)
-> First-time deploy needs none of this — `docker compose up --build` builds the owui
-> bundle inside Docker (the `owui-builder` service) and Nginx waits for it. The steps
-> below are only for a fast **local** edit loop, where a host build beats a container rebuild.
+### Frontend Development (Hermes — the live UI)
+> First-time deploy needs none of this — `docker compose up --build` builds the Hermes
+> bundle inside Docker (the `hermes-ui-builder` service) and Nginx waits for it. To publish a
+> UI change on a running install:
 ```bash
-cd front_end/owui
-npm install
-npm run build        # produce the static bundle Nginx serves at /
+HARVIS_HERMES_UI_NODE_HEAP_MB=6144 docker compose build hermes-ui-builder
+docker compose up hermes-ui-builder
+docker restart nginx-proxy
 ```
-After a build, reload Nginx to serve it: `docker restart nginx-proxy`.
-(The `owui-builder` step is idempotent — it skips when `front_end/owui/build` already
-exists, so your host build is never clobbered. Clear that dir to force a Docker rebuild.)
+For a fast edit loop: `cd front_end/hermes-desktop-ui && npm install`, then
+`npx vitest run --project ui <paths>` and `npx tsc --noEmit -p .`.
 
 ### Docker Operations
 ```bash
@@ -381,7 +406,7 @@ docker restart harvis-backend    # Backend is bind-mounted — restart to pick u
 ```
 
 ### Key Development Commands
-- **Type checking:** `npm run type-check` in `front_end/owui` before committing UI changes.
+- **Type checking:** `npx tsc --noEmit -p .` in `front_end/hermes-desktop-ui` before committing UI changes.
 - **Backend tests:** `docker exec harvis-backend python -m pytest tests/ -q`.
 - **Git strategy:** Feature branches from `main` with conventional commits.
 

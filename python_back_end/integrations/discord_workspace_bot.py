@@ -3605,6 +3605,28 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
             except Exception:
                 _model_is_cloud = False
 
+            # The admin's limits (Settings ▸ People) apply to the account this bot
+            # speaks as: a turned-off or used-up account gets no reply, and every model
+            # it runs stays on its allowed list (as for a workspace run from the app).
+            from plugins.people import admit_turn
+            _admitted = await admit_turn(pool, cfg.default_user_id, None)
+            _allowed_models = _admitted.allowed
+            if _admitted.ok and _allowed_models == []:
+                _admitted = type(_admitted)(False, "The Harvis admin has not allowed any models for your account.")
+            if not _admitted.ok:
+                await message.channel.send(_admitted.reason)
+                return
+
+            def _on_list(model: str) -> str:
+                return model if _allowed_models is None or model in _allowed_models else _allowed_models[0]
+
+            if _allowed_models is not None and _resolved_model not in _allowed_models:
+                _resolved_model = _on_list(_resolved_model)
+                try:
+                    _model_is_cloud = is_cloud_chat_model(_resolved_model)
+                except Exception:
+                    _model_is_cloud = False
+
             # ── Workspace-first mode or standard routing ──
             use_fast_path = False
             if discord_attachments:
@@ -3656,7 +3678,7 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
                             "Discord fast-path: model=%s history_turns=%d msg=%r",
                             fast_model, len(prior_history), content[:80],
                         )
-                        reply = await _fast_llm_reply(content, fast_model, prior_history)
+                        reply = await _fast_llm_reply(content, _on_list(fast_model), prior_history)
                 if reply:
                     # Split into chunks if longer than Discord's 2000-char limit
                     await _send_long_message(message.channel, reply)
@@ -3739,6 +3761,7 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
                         f"ℹ️ `{_cloud_pick}` is a cloud model and can't drive the OpenClaw "
                         f"workspace yet — running this task with {_fb_label} instead."
                     )
+                effective_model_name = _on_list(effective_model_name)
                 if pref_agent_id == "main" and effective_model_name:
                     sync_note = await _apply_model_to_native_openclaw(effective_model_name)
                     logger.info(
@@ -3807,6 +3830,7 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
                 if (
                     _ESCALATE_ON_FAILURE
                     and effective_model_name in _ESCALATION_PAIRS
+                    and _on_list(_ESCALATION_PAIRS[effective_model_name]) == _ESCALATION_PAIRS[effective_model_name]
                 ):
                     should_escalate, escalation_reason = (
                         _looks_like_escalation_worthy_failure(status, summary, err)

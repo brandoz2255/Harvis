@@ -108,6 +108,7 @@ def parse_email(raw: bytes) -> Optional[dict]:
 
 class EmailAdapter(BasePlatformAdapter):
     allowed_users_key = "EMAIL_ALLOWED_USERS"
+    interim_notices = False  # an extra "working on it" mail in the thread is noise, not help
 
     def __init__(self, spec: AdapterSpec):
         super().__init__(Platform.EMAIL, spec)

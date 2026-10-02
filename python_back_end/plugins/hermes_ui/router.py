@@ -1,6 +1,8 @@
 """Assembles the Hermes UI facade: REST stubs + the JSON-RPC WebSocket."""
 from fastapi import APIRouter
 
+from plugins.people import router as people_router
+
 from .audio import router as audio_router
 from .bots import router as bots_router
 from .cron import router as cron_router
@@ -9,6 +11,7 @@ from .profiles import router as profiles_router
 from .rest import router as rest_router
 from .rest_capabilities import router as capabilities_router
 from .rest_harvis import router as harvis_router
+from .rest_mcp import router as mcp_router
 from .rest_providers import router as providers_router
 from .rest_sandbox import router as sandbox_router
 from .rest_sandbox_apps import router as sandbox_apps_router
@@ -20,6 +23,7 @@ from .ws import router as ws_router
 router = APIRouter()
 # Settings/messaging routes go first: rest.py ends with a catch-all.
 router.include_router(settings_router)
+router.include_router(people_router)
 router.include_router(profiles_router)
 router.include_router(messaging_router)
 router.include_router(cron_router)
@@ -28,6 +32,7 @@ router.include_router(skills_router)
 router.include_router(sandbox_router)
 router.include_router(sandbox_apps_router)
 router.include_router(capabilities_router)
+router.include_router(mcp_router)
 router.include_router(harvis_router)
 router.include_router(providers_router)
 router.include_router(bots_router)

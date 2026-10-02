@@ -1,9 +1,11 @@
+import logging
 import os
 import threading
 import time
 import uuid
 import base64
-from typing import Any, Dict, Optional, Tuple
+from contextlib import asynccontextmanager
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -13,22 +15,31 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.firefox.options import Options as FirefoxOptions
 from selenium.webdriver.firefox.service import Service as FirefoxService
 
-app = FastAPI()
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    _boot()
+    yield
+
+
+app = FastAPI(lifespan=_lifespan)
 
 # A watchable, persistent browser for Agent Teammates. Both modules degrade on
 # their own: without Xvfb/x11vnc a headed request falls back to headless with no
 # screen, and the /camofox routes still work (refs need no display).
 import camofox_api  # noqa: E402
 import display  # noqa: E402
+import sessions  # noqa: E402
 
 app.include_router(camofox_api.router)
 
-# In-memory sessions: session_id -> (driver, created_at)
-_sessions: Dict[str, Tuple[webdriver.Firefox, float]] = {}
-_sessions_lock = threading.Lock()
+# Every live driver, with the idle and max clocks that decide when it goes.
+_registry = sessions.Registry()
 
 _MAX_SESSIONS = max(1, int(os.getenv("HARVIS_BROWSER_MAX_SESSIONS", "8")))
-_SESSION_TTL_S = max(30, int(os.getenv("HARVIS_BROWSER_SESSION_TTL_S", "300")))
+_REAP_EVERY_S = max(5, int(os.getenv("HARVIS_BROWSER_REAP_EVERY_S", "30")))
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
@@ -52,18 +63,37 @@ def _env_flag(name: str, default: bool = False) -> bool:
 _SAFE_MODE_DEFAULT = _env_flag("HARVIS_PREVIEW_SAFE_MODE", False)
 _SAFE_MODE_FORCED = _env_flag("HARVIS_PREVIEW_SAFE_MODE_FORCED", False)
 
-# Session metadata alongside the driver (safe-mode flag, so /screenshot knows
-# whether it is allowed to run JS for full-page measurement).
-_session_meta: Dict[str, Dict[str, Any]] = {}
+
+def _boot() -> None:
+    """Runs once when uvicorn starts the app (see ``_lifespan``).
+
+    Two things that used to happen lazily, on the first headed session:
+    websockify (so the noVNC page answers before any session exists) and
+    expiry (a reaper thread, so a forgotten session is closed on time rather
+    than at the next request — which, after a backend restart, never comes).
+    The preview instance never shows a screen, so it starts no websockify.
+    """
+    if not _SAFE_MODE_FORCED:
+        display.ensure_websockify()
+    threading.Thread(target=_reaper, name="session-reaper", daemon=True).start()
+
+
+def _reaper() -> None:
+    while True:
+        time.sleep(_REAP_EVERY_S)
+        try:
+            _expire_stale()
+            if not _SAFE_MODE_FORCED:
+                display.ensure_websockify()
+        except Exception:  # noqa: BLE001 — the reaper must outlive one bad tick
+            logger.exception("browser-runner: reaper tick failed")
 
 
 @app.get("/health")
 def health() -> Dict[str, Any]:
-    with _sessions_lock:
-        n = len(_sessions)
     return {
         "ok": True,
-        "sessions": n,
+        "sessions": len(_registry),
         "max_sessions": _MAX_SESSIONS,
         "safe_mode_default": _SAFE_MODE_DEFAULT,
         "safe_mode_forced": _SAFE_MODE_FORCED,
@@ -73,7 +103,25 @@ def health() -> Dict[str, Any]:
         # caller that trusts this flag must not be told a screen is on offer.
         "headedAvailable": display.available() and not _SAFE_MODE_FORCED,
         "vncPort": display.WEBSOCKIFY_PORT,
+        "vncUp": display.websockify_up(),
+        "sessionIdleS": _registry.idle_s,
+        "sessionMaxS": _registry.max_s,
     }
+
+
+@app.get("/sessions")
+def list_sessions() -> Dict[str, Any]:
+    """Every live session, with its screen. The backend rebuilds its own table
+    from this after a restart instead of starting a second Firefox on a profile
+    that is still open. Only the backend can reach this service, so the screen
+    token (the capability to watch) is included."""
+    _expire_stale()
+    now = _registry.now()
+    items: List[Dict[str, Any]] = []
+    for entry in _registry.entries():
+        screen = display.get(entry.session_id)
+        items.append({**entry.to_dict(now), "screen": screen.to_dict() if screen else None})
+    return {"items": items}
 
 
 class CreateSessionRequest(BaseModel):
@@ -166,26 +214,30 @@ def _apply_safe_mode_prefs(opts: FirefoxOptions) -> None:
     opts.set_preference("browser.contentblocking.category", "strict")
 
 
-def _expire_stale_locked() -> None:
-    now = time.time()
-    stale = [sid for sid, (_d, created) in _sessions.items() if now - created > _SESSION_TTL_S]
-    for sid in stale:
-        driver, _ = _sessions.pop(sid)
-        _session_meta.pop(sid, None)
-        try:
-            driver.quit()
-        except Exception:
-            pass
-        display.stop(sid)
+def _quit(driver: Any) -> None:
+    try:
+        driver.quit()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _expire_stale() -> None:
+    # A screen the user has taken over is in use even though nothing reaches
+    # us; it is exempt from the idle clock, never from the max clock.
+    for entry in _registry.expire(keep_alive=display.is_taken_over):
+        logger.info("browser-runner: session %s expired (idle or max lifetime)", entry.session_id)
+        _quit(entry.driver)
+        display.stop(entry.session_id)
 
 
 def _get_driver(session_id: str) -> webdriver.Firefox:
-    with _sessions_lock:
-        _expire_stale_locked()
-        entry = _sessions.get(session_id)
-        if entry is None:
-            raise HTTPException(status_code=404, detail="Session not found")
-        return entry[0]
+    """The driver for a live session; every call through here is activity and
+    resets the idle clock."""
+    _expire_stale()
+    entry = _registry.touch(session_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Session not found: it was closed or timed out")
+    return entry.driver
 
 
 def _full_page_png(driver: webdriver.Firefox, *, allow_js: bool = True) -> Tuple[bytes, str]:
@@ -244,13 +296,21 @@ def _profile_dir(key: str) -> str:
 
 @app.post("/session")
 def create_session(req: CreateSessionRequest) -> Dict[str, Any]:
-    with _sessions_lock:
-        _expire_stale_locked()
-        if len(_sessions) >= _MAX_SESSIONS:
-            raise HTTPException(
-                status_code=429,
-                detail=f"Too many browser sessions (max {_MAX_SESSIONS})",
-            )
+    _expire_stale()
+    if len(_registry) >= _MAX_SESSIONS:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many browser sessions (max {_MAX_SESSIONS})",
+        )
+    # One Firefox per profile. A second one on the same directory would either
+    # hang on the profile lock or corrupt the logins the first is using; the
+    # caller gets the live session's id and adopts it instead.
+    held = _registry.by_profile(req.profile)
+    if held is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "profile in use", "sessionId": held.session_id},
+        )
 
     session_id = str(uuid.uuid4())
     safe = _SAFE_MODE_DEFAULT if req.safeMode is None else bool(req.safeMode)
@@ -303,9 +363,8 @@ def create_session(req: CreateSessionRequest) -> Dict[str, Any]:
     except Exception:
         pass
 
-    with _sessions_lock:
-        _sessions[session_id] = (driver, time.time())
-        _session_meta[session_id] = {"safe_mode": safe, "profile": req.profile}
+    _registry.add(session_id, driver, safe_mode=safe, profile=req.profile,
+                  headed=screen is not None)
     out: Dict[str, Any] = {
         "sessionId": session_id,
         "width": width,
@@ -380,14 +439,9 @@ def act(req: ActRequest) -> Dict[str, Any]:
 
 @app.post("/close")
 def close(req: CloseRequest) -> Dict[str, Any]:
-    with _sessions_lock:
-        entry = _sessions.pop(req.sessionId, None)
-        _session_meta.pop(req.sessionId, None)
+    entry = _registry.pop(req.sessionId)
     if entry is not None:
-        try:
-            entry[0].quit()
-        except Exception:
-            pass
+        _quit(entry.driver)
     # Take the screen down with the session, so its VNC token stops working the
     # moment the run ends rather than lingering until the container restarts.
     display.stop(req.sessionId)
@@ -397,8 +451,8 @@ def close(req: CloseRequest) -> Dict[str, Any]:
 @app.post("/screenshot")
 def screenshot(req: ScreenshotRequest) -> Dict[str, Any]:
     d = _get_driver(req.sessionId)
-    with _sessions_lock:
-        safe = bool((_session_meta.get(req.sessionId) or {}).get("safe_mode"))
+    entry = _registry.peek(req.sessionId)
+    safe = bool(entry is not None and entry.safe_mode)
     if req.fullPage:
         png, mode = _full_page_png(d, allow_js=not safe)
     else:

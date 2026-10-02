@@ -34,6 +34,10 @@ class GatewayConfig:
     # Stub adapter (dev/test only — never enable in prod)
     stub_enabled: bool
 
+    # Seconds of silence before the sender is told Harvis is still working on it;
+    # 0 turns the notice off.
+    ack_after_s: float = 20.0
+
 
 def _csv_str_tuple(raw: str) -> tuple[str, ...]:
     return tuple(p.strip() for p in (raw or "").split(",") if p.strip())
@@ -49,6 +53,7 @@ def load_config() -> GatewayConfig:
         sync_interval_s=float(os.getenv("SETTINGS_SYNC_INTERVAL_S", "15")),
         control_port=int(os.getenv("CONTROL_PORT", os.getenv("STUB_PORT", "18800"))),
         stub_enabled=os.getenv("STUB_ENABLED", "false").lower() == "true",
+        ack_after_s=float(os.getenv("ACK_AFTER_S", "20")),
     )
 
 

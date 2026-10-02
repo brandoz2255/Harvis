@@ -2989,6 +2989,8 @@ export interface Translations {
     noClipboardImage: string
     clipboardPasteFailed: string
     dropFiles: string
+    attachFiles: string
+    attachFailed: string
     handoff: {
       pickPlatform: string
       success: (platform: string) => string

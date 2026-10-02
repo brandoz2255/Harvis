@@ -2,6 +2,7 @@ import { skillInvocationText } from '@hermes/shared'
 
 import { extractImageRefs } from '@/lib/embedded-images'
 import { dedupeGeneratedImageEchoesInParts } from '@/lib/generated-images'
+import { historyAttachmentRefs } from '@/lib/harvis-uploads'
 import type { MessageReaction, SessionMessage } from '@/types/hermes'
 
 import { assistantTextPart, chatMessageText, dedupeRepeatedTextInParts, reasoningPart, textPart } from './parts'
@@ -216,7 +217,12 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
     // attachments row below the bubble instead.
     const imageRefExtraction = displayRole === 'user' && rawDisplayContent ? extractImageRefs(rawDisplayContent) : null
     const displayContent = imageRefExtraction ? imageRefExtraction.cleanedText : rawDisplayContent
-    const extractedAttachmentRefs = imageRefExtraction?.refs.length ? imageRefExtraction.refs : undefined
+    // Harvis stores browser uploads beside the row (`attachments`), not in the text.
+    const uploadRefs = displayRole === 'user' ? historyAttachmentRefs(message.attachments) : []
+    const extractedAttachmentRefs =
+      imageRefExtraction?.refs.length || uploadRefs.length
+        ? [...(imageRefExtraction?.refs ?? []), ...uploadRefs]
+        : undefined
 
     const parts: ChatMessagePart[] = []
 

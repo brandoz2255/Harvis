@@ -8,6 +8,7 @@ vi.mock('@/lib/desktop-fs', () => ({
   readDesktopFileText: vi.fn()
 }))
 
+import { stubs } from './desktop-shim/stubs'
 import {
   localPreviewTarget,
   normalizeOrLocalPreviewTarget,
@@ -195,5 +196,19 @@ describe('PDF previews', () => {
       previewKind: 'pdf'
     })
     expect(readDesktopFileDataUrl).not.toHaveBeenCalled()
+  })
+})
+
+describe('web build (desktop shim)', () => {
+  it('opens a workspace file as a file preview, not a bare path string', async () => {
+    vi.clearAllMocks()
+    window.hermesDesktop = stubs as never
+
+    await expect(normalizeOrLocalPreviewTarget('/sandbox/s1/workspace/skills/x/SKILL.md')).resolves.toMatchObject({
+      kind: 'file',
+      label: 'SKILL.md',
+      path: '/sandbox/s1/workspace/skills/x/SKILL.md',
+      previewKind: 'text'
+    })
   })
 })

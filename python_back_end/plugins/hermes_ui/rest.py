@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from auth_optimized import get_current_user_optimized
 
-from . import providers, sessions, settings_store, store
+from . import providers, rest_mcp, sessions, settings_store, store
 from .models import is_hidden_model, thinking_models
 
 log = logging.getLogger("hermes_ui.rest")
@@ -112,8 +112,15 @@ async def update_check(force: str | None = None, user=Depends(get_current_user_o
 
 @router.get("/config")
 async def config(request: Request, user=Depends(get_current_user_optimized)):
-    """The reference config with this user's saved overrides merged on top."""
-    return await settings_store.config_for(_pool(request), _uid(user), CONFIG)
+    """The reference config with this user's saved overrides merged on top.
+
+    ``mcp_servers`` is not an override: the MCP tab lists from this key, and the
+    servers live in the ``mcp_servers`` table (what PUT /mcp/servers writes), so
+    the table is projected in here on every read and wins over anything stored.
+    """
+    record = await settings_store.config_for(_pool(request), _uid(user), CONFIG)
+    record["mcp_servers"] = await rest_mcp.config_servers(_pool(request), _uid(user))
+    return record
 
 
 @router.get("/config/defaults")
@@ -130,6 +137,9 @@ async def config_put(request: Request, user=Depends(get_current_user_optimized))
     patch = body.get("config") if isinstance(body, dict) else None
     if not isinstance(patch, dict):
         raise HTTPException(400, "expected {config: {...}}")
+    # The MCP tab saves servers through PUT /mcp/servers (a whole-map replace);
+    # a copy landing in the overrides would only go stale against the table.
+    patch = {k: v for k, v in patch.items() if k != "mcp_servers"}
     await settings_store.apply_config_patch(_pool(request), _uid(user), patch, CONFIG)
     return {"ok": True}
 

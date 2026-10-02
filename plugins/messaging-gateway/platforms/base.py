@@ -74,6 +74,10 @@ class BasePlatformAdapter(abc.ABC):
     #: Catalog key of the comma-separated sender allowlist, if the platform has one.
     allowed_users_key: Optional[str] = None
 
+    #: Whether a "still working on it" notice is welcome while a slow run finishes.
+    #: Chat platforms yes; a platform where every message is a whole item (email) no.
+    interim_notices: bool = True
+
     def __init__(self, platform: Platform, spec: Optional[AdapterSpec] = None):
         self.platform = platform
         self.spec = spec or AdapterSpec(platform=platform.value, owner_user_id=None, source="env")

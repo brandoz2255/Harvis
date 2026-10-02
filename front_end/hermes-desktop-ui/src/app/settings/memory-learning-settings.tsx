@@ -4,17 +4,21 @@ import { useNavigate } from 'react-router'
 
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Brain, Loader2, Trash2, Wrench } from '@/lib/icons'
+import { Brain, Check, Loader2, Trash2, Wrench } from '@/lib/icons'
 import { notifyError } from '@/store/notifications'
 
 import { SKILLS_ROUTE } from '../routes'
 
-import { addMemory, deleteMemory, fetchMemory, type LearnSettings, saveLearnSettings } from './harvis-api'
+import { addMemory, deleteMemory, fetchMemory, keepMemory, type LearnSettings, saveLearnSettings } from './harvis-api'
 import { ListRow, ListRowSkeleton, Pill, SettingsContent, SettingsSection, ToggleRow } from './primitives'
 
 const memoryKey = ['harvis', 'settings', 'memory'] as const
 
-const SOURCE_LABEL: Record<string, string> = { 'hermes-chat': 'from a chat', manual: 'added by you' }
+const SOURCE_LABEL: Record<string, string> = {
+  'hermes-chat': 'from a chat',
+  manual: 'added by you',
+  'workspace-user-md': 'from the workspace'
+}
 
 function when(iso: null | string) {
   return iso ? new Date(iso).toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) : ''
@@ -55,6 +59,19 @@ export function MemoryLearningSettings({ onClose }: { onClose?: () => void }) {
       notifyError(err, 'Could not save the memory')
     } finally {
       setSaving(false)
+    }
+  }
+
+  const keep = async (id: number) => {
+    setRemoving(id)
+
+    try {
+      await keepMemory(id)
+      refresh()
+    } catch (err) {
+      notifyError(err, 'Could not keep that')
+    } finally {
+      setRemoving(null)
     }
   }
 
@@ -150,20 +167,35 @@ export function MemoryLearningSettings({ onClose }: { onClose?: () => void }) {
             {entries.map(entry => (
               <ListRow
                 action={
-                  <Button
-                    aria-label="Forget"
-                    disabled={removing === entry.id}
-                    onClick={() => void remove(entry.id)}
-                    size="sm"
-                    variant="ghost"
-                  >
-                    {removing === entry.id ? <Loader2 className="animate-spin" /> : <Trash2 />}
-                    Forget
-                  </Button>
+                  <span className="flex items-center gap-1">
+                    {entry.pending && (
+                      <Button
+                        aria-label="Keep"
+                        disabled={removing === entry.id}
+                        onClick={() => void keep(entry.id)}
+                        size="sm"
+                        variant="outline"
+                      >
+                        <Check />
+                        Keep
+                      </Button>
+                    )}
+                    <Button
+                      aria-label="Forget"
+                      disabled={removing === entry.id}
+                      onClick={() => void remove(entry.id)}
+                      size="sm"
+                      variant="ghost"
+                    >
+                      {removing === entry.id ? <Loader2 className="animate-spin" /> : <Trash2 />}
+                      Forget
+                    </Button>
+                  </span>
                 }
                 description={
                   <span className="flex items-center gap-2">
                     <Pill>{SOURCE_LABEL[entry.source] ?? entry.source}</Pill>
+                    {entry.pending && <Pill tone="warn">not used until you keep it</Pill>}
                     {when(entry.created_at)}
                   </span>
                 }

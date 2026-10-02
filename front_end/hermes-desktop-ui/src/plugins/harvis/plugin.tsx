@@ -13,7 +13,6 @@ import {
   CHAT_EMPTY_AREA,
   type ChatEmptyContribution,
   COMPOSER_AREAS,
-  type ComposerAttachmentProvider,
   type HermesPlugin,
   type RouteContribution,
   ROUTES_AREA,
@@ -50,19 +49,8 @@ const plugin: HermesPlugin = {
       // The chat's sandbox is automatic: no button, just a watcher that starts it,
       // opens the Files pane once, and toasts "App ready" with an Open button.
       { id: 'sandbox', area: COMPOSER_AREAS.actions, order: 11, render: () => <SandboxWatcher /> },
-      // Deep Research from the chat's "+" menu, so it isn't only on its own page.
-      // The anchored phrase is research_bridge's explicit trigger: the backend
-      // takes everything after "on" as the topic and runs the research inline
-      // (a leading "/deep-research" would be eaten by the composer's slash router).
-      {
-        id: 'deep-research-attach',
-        area: COMPOSER_AREAS.attachments,
-        data: {
-          label: 'Deep research',
-          icon: 'telescope',
-          run: ctx => ctx.insertText('Deep research on ')
-        } satisfies ComposerAttachmentProvider
-      },
+      // No "Deep research" entry here: the composer's "+" menu already has one
+      // (context-menu.tsx, the /research command), and two read as a bug.
       { id: 'run-dock', area: COMPOSER_AREAS.top, order: 10, render: () => <RunDock /> },
       // Bots: a saved assistant (instructions, model, knowledge) you start chats with from the sidebar.
       { id: 'bot-header', area: COMPOSER_AREAS.top, order: 5, render: () => <BotChatHeader /> },

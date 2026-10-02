@@ -123,7 +123,10 @@ export const stubs = {
   getRecentLogs: async () => [],
 
   // ── Preview file watching ────────────────────────────────────────────────
-  normalizePreviewTarget: async (target?: unknown) => target ?? null,
+  // null, not the raw path: callers then classify the file themselves
+  // (local-preview.localPreviewTarget). Echoing the string back handed the
+  // preview pane a bare path, so clicking a workspace file opened nothing.
+  normalizePreviewTarget: async () => null,
   watchPreviewFile: notOk,
   stopPreviewFileWatch: ok,
   onPreviewFileChanged: noopListener,

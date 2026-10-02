@@ -42,6 +42,8 @@ import socket
 import time
 from typing import Optional
 
+from workspace.host_mounts import host_mounts_from_env
+
 from .repo_sandbox import (
     _IDLE_TIMEOUT,
     _INSTALL_TIMEOUT,
@@ -97,14 +99,22 @@ def _resolve_mount_root(client) -> Optional[tuple[str, str]]:
     if override:
         _host_root_cache = ("/data/artifacts", override)
         return _host_root_cache
-    if client is None:
-        return None
+    # Kubernetes mode: a pod has no container to inspect; the generator hands over
+    # the same mount table (workspace.host_mounts).
     try:
-        me = client.containers.get(socket.gethostname())
-        mounts = me.attrs.get("Mounts") or []
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("workspace_sandbox: could not inspect own container: %s", exc)
+        mounts = host_mounts_from_env()
+    except RuntimeError as exc:
+        logger.warning("workspace_sandbox: %s", exc)
         return None
+    if mounts is None:
+        if client is None:
+            return None
+        try:
+            me = client.containers.get(socket.gethostname())
+            mounts = me.attrs.get("Mounts") or []
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("workspace_sandbox: could not inspect own container: %s", exc)
+            return None
     # Longest matching destination wins, so a dedicated mount for the sessions dir
     # would be preferred over the artifact volume that merely contains it.
     best: Optional[tuple[str, str]] = None
