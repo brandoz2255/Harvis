@@ -3,18 +3,16 @@ Ingestion Service for NotebookLM
 Handles text extraction, chunking, and embedding generation
 """
 
+import asyncio
 import logging
 import os
-import io
-import asyncio
-import json
 import re
 from typing import List, Tuple, Dict, Any, Optional
 from uuid import UUID
-import aiohttp
 import requests
 
-from .models import SourceType, SourceStatus
+from .extractors import IngestionError, extract_for
+from .models import SourceStatus
 from .manager import NotebookManager
 
 logger = logging.getLogger(__name__)
@@ -24,13 +22,25 @@ OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
 CHUNK_SIZE = 1000  # Target chunk size in characters
 CHUNK_OVERLAP = 200  # Overlap between chunks
+TARGET_DIM = 4096  # Width of notebook_chunks.embedding
+# Stop trying after this many embeddings in a row fail: the model is missing or the
+# server is down, and every further attempt would just wait out its timeout.
+MAX_CONSECUTIVE_EMBED_FAILURES = 3
+# A source where more than this share of chunks could not be embedded is an error,
+# because the chunks that remain would give answers from a random slice of it.
+MAX_SKIPPED_SHARE = 0.5
+
+NO_EMBEDDER_MESSAGE = (
+    "Notebooks could not index this source because no embedding model answered. "
+    "Install one (ollama pull nomic-embed-text) and press Retry."
+)
 
 
 class IngestionService:
     """
     Service for ingesting sources into the notebook.
     Handles:
-    - Text extraction from PDFs, URLs, plain text
+    - Text extraction from PDFs, URLs, plain text, images, audio (see extractors.py)
     - Text chunking with overlap
     - Embedding generation via Ollama
     - Storing chunks in the database
@@ -43,392 +53,96 @@ class IngestionService:
 
     async def ingest_source(self, source_id: UUID, user_id: int) -> None:
         """
-        Main ingestion pipeline for a source.
-        Runs asynchronously to not block the API.
+        Main ingestion pipeline for a source. Runs in the background.
+
+        A source ends in exactly one of two states: ``ready`` (its chunks are
+        searchable) or ``error`` with a sentence the user can act on. Nothing
+        is left ``ready`` with unsearchable chunks.
         """
         try:
-            # Get source details
             source = await self.manager.get_source(source_id, user_id)
-
-            # Update status to processing
             await self.manager.update_source_status(source_id, SourceStatus.PROCESSING)
-
+            # Retry must not stack a second copy of the chunks on top of the first.
+            await self.manager.clear_chunks(source_id)
             logger.info(f"Starting ingestion for source {source_id} (type: {source.type})")
 
-            # Extract text based on source type
             text = await self._extract_text(source)
-
             if not text or len(text.strip()) < 10:
-                await self.manager.update_source_status(
-                    source_id,
-                    SourceStatus.ERROR,
-                    error_message="No text could be extracted from the source"
-                )
-                return
+                raise IngestionError("No text could be extracted from this source.")
 
-            # Update source with extracted text
             async with self.manager.db_pool.acquire() as conn:
-                await conn.execute("""
-                    UPDATE notebook_sources SET content_text = $1 WHERE id = $2
-                """, text, source_id)
-
-            # Chunk the text
-            chunks = self._chunk_text(text, source)
-
-            if not chunks:
-                await self.manager.update_source_status(
-                    source_id,
-                    SourceStatus.ERROR,
-                    error_message="Failed to create chunks from the text"
+                await conn.execute(
+                    "UPDATE notebook_sources SET content_text = $1 WHERE id = $2", text, source_id
                 )
-                return
 
+            chunks = self._chunk_text(text, source)
+            if not chunks:
+                raise IngestionError("The text could not be split into passages.")
             logger.info(f"Created {len(chunks)} chunks for source {source_id}")
 
-            # Generate embeddings and store chunks
-            chunk_data = []
-            embedding_failures = 0
-            target_dim = 4096  # Target dimension for our database (supports codellama)
-            
-            for i, (chunk_text, metadata) in enumerate(chunks):
-                embedding = await self._get_embedding(chunk_text)
-                if embedding:
-                    # Normalize embedding to target dimension
-                    embedding = self._normalize_embedding_dimension(embedding, target_dim)
-                    chunk_data.append((chunk_text, embedding, metadata, i))
-                else:
-                    embedding_failures += 1
-                    # Still create chunk with zero embedding so the content is searchable
-                    logger.warning(f"Failed to get embedding for chunk {i}, using zero vector")
-                    zero_embedding = [0.0] * target_dim
-                    chunk_data.append((chunk_text, zero_embedding, metadata, i))
+            chunk_data, skipped = await self._embed_chunks(chunks)
+            chunk_count = await self.manager.create_chunks(source_id, source.notebook_id, chunk_data)
 
-            if not chunk_data:
-                await self.manager.update_source_status(
-                    source_id,
-                    SourceStatus.ERROR,
-                    error_message="Failed to create any chunks"
-                )
-                return
-            
-            if embedding_failures > 0:
-                logger.warning(f"Created {len(chunk_data)} chunks but {embedding_failures} had embedding failures")
+            meta: Dict[str, Any] = {"chunk_count": chunk_count, "text_length": len(text), "skipped_chunks": skipped}
+            await self.manager.update_source_status(source_id, SourceStatus.READY, metadata_update=meta)
+            logger.info(f"Successfully ingested source {source_id} with {chunk_count} chunks ({skipped} skipped)")
 
-            # Store chunks in database
-            chunk_count = await self.manager.create_chunks(
-                source_id,
-                source.notebook_id,
-                chunk_data
-            )
-
-            # Update status to ready
-            await self.manager.update_source_status(
-                source_id,
-                SourceStatus.READY,
-                metadata_update={"chunk_count": chunk_count, "text_length": len(text)}
-            )
-
-            logger.info(f"Successfully ingested source {source_id} with {chunk_count} chunks")
-
+        except IngestionError as e:
+            logger.warning(f"Ingestion failed for source {source_id}: {e}")
+            await self.manager.update_source_status(source_id, SourceStatus.ERROR, error_message=str(e))
         except Exception as e:
-            logger.error(f"Ingestion failed for source {source_id}: {e}")
+            logger.error(f"Ingestion failed for source {source_id}: {e}", exc_info=True)
             await self.manager.update_source_status(
-                source_id,
-                SourceStatus.ERROR,
-                error_message=str(e)
+                source_id, SourceStatus.ERROR, error_message=f"Something went wrong reading this source: {str(e)[:200]}"
             )
+
+    async def _embed_chunks(self, chunks) -> Tuple[list, int]:
+        """Embed every chunk. Never stores a placeholder vector.
+
+        Raises IngestionError when nothing could be embedded or too much was lost,
+        so the source shows as failed and Retry has something to do.
+        """
+        chunk_data = []
+        skipped = 0
+        streak = 0
+        for i, (chunk_text, metadata) in enumerate(chunks):
+            if streak >= MAX_CONSECUTIVE_EMBED_FAILURES:
+                skipped += 1
+                continue
+            embedding = await self._get_embedding(chunk_text)
+            if embedding:
+                streak = 0
+                chunk_data.append((chunk_text, self._normalize_embedding_dimension(embedding, TARGET_DIM), metadata, i))
+            else:
+                streak += 1
+                skipped += 1
+        if not chunk_data:
+            raise IngestionError(NO_EMBEDDER_MESSAGE)
+        if skipped / len(chunks) > MAX_SKIPPED_SHARE:
+            raise IngestionError(
+                f"Only {len(chunk_data)} of {len(chunks)} passages could be indexed because the embedding model "
+                "stopped answering. Check that it is running and press Retry."
+            )
+        if skipped:
+            logger.warning(f"{skipped} of {len(chunks)} chunks could not be embedded and were left out")
+        return chunk_data, skipped
 
     async def _extract_text(self, source) -> str:
-        """Extract text from source based on its type"""
+        """Extract text from a source. Raises IngestionError with a user-facing reason."""
         logger.info(f"Extracting text for source type: {source.type}, path: {source.storage_path}")
-
-        if source.type == SourceType.PDF:
-            text = await self._extract_pdf(source.storage_path)
-            logger.info(f"PDF extraction result: {len(text)} chars")
-            return text
-
-        elif source.type == SourceType.URL:
-            text = await self._extract_url(source.storage_path)
-            logger.info(f"URL extraction result: {len(text)} chars")
-            return text
-
-        elif source.type in [SourceType.TEXT, SourceType.MARKDOWN]:
-            # Text is already stored in storage_path or we need to read the file
-            if source.storage_path and os.path.exists(source.storage_path):
-                with open(source.storage_path, 'r', encoding='utf-8') as f:
-                    text = f.read()
-                    logger.info(f"Text file read: {len(text)} chars")
-                    return text
-            # Check if content_text was already set
-            async with self.manager.db_pool.acquire() as conn:
-                text = await conn.fetchval(
-                    "SELECT content_text FROM notebook_sources WHERE id = $1",
-                    source.id
-                )
-                logger.info(f"Text from DB: {len(text) if text else 0} chars")
-                return text or ""
-
-        elif source.type == SourceType.DOC:
-            text = await self._extract_doc(source.storage_path)
-            logger.info(f"DOC extraction result: {len(text)} chars")
-            return text
-
-        elif source.type == SourceType.TRANSCRIPT:
-            # Transcripts are usually plain text
-            if source.storage_path and os.path.exists(source.storage_path):
-                with open(source.storage_path, 'r', encoding='utf-8') as f:
-                    text = f.read()
-                    logger.info(f"Transcript read: {len(text)} chars")
-                    return text
-            return ""
-
-        elif source.type == SourceType.YOUTUBE:
-            text = await self._extract_youtube(source.storage_path)
-            logger.info(f"YouTube extraction result: {len(text)} chars")
-            return text
-
-        elif source.type == SourceType.IMAGE:
-            text = await self._extract_image(source.storage_path)
-            logger.info(f"Image extraction result: {len(text)} chars")
-            return text
-
-        else:
-            logger.warning(f"Unsupported source type: {source.type}")
-            return ""
-
-    async def _extract_image(self, file_path: str) -> str:
-        """Extract searchable text from an image: a vision caption + OCR.
-
-        Caption via whatever vision model is installed in Ollama
-        (vison_models.query_vision); OCR via the tesseract binary. Both
-        best-effort and independent — one failing still yields the other. No
-        hard dep on pytesseract / screen_analyzer (not importable here).
-        """
-        if not file_path or not os.path.exists(file_path):
-            logger.warning(f"Image source path missing: {file_path}")
-            return ""
-        parts: List[str] = []
-
-        # 1) Vision caption (best-effort)
         try:
-            from vison_models.llm_connector import query_vision, VISION_ERROR_PREFIX
-            caption = await asyncio.to_thread(
-                query_vision, file_path,
-                "Describe this image in detail, including any visible text, "
-                "objects, people, charts, and setting.",
-            )
-            cap = (caption or "").strip()
-            # query_vision returns a "[vision error] ..." string on failure (no
-            # vision-capable model installed, Ollama unreachable) — never let
-            # that error text pollute the source content; fall back to OCR-only.
-            if cap and not cap.startswith(VISION_ERROR_PREFIX):
-                parts.append(f"Image description:\n{cap}")
-            elif cap:
-                logger.warning(f"Image caption unavailable (vision model error) for {file_path}")
-        except Exception as e:
-            logger.warning(f"Image caption failed for {file_path}: {e}")
-
-        # 2) OCR via the tesseract binary (best-effort)
-        try:
-            def _ocr() -> str:
-                import subprocess
-                r = subprocess.run(
-                    ["tesseract", file_path, "stdout"],
-                    capture_output=True, text=True, timeout=60,
-                )
-                return (r.stdout or "").strip()
-            ocr = await asyncio.to_thread(_ocr)
-            if ocr:
-                parts.append(f"Text detected in image (OCR):\n{ocr}")
-        except Exception as e:
-            logger.warning(f"Image OCR failed for {file_path}: {e}")
-
-        return "\n\n".join(parts)
-
-    async def _extract_pdf(self, file_path: str) -> str:
-        """Extract text from a PDF file"""
-        try:
-            from pypdf import PdfReader
-        except ImportError:
-            logger.error("pypdf not installed")
-            return ""
-
-        try:
-            reader = PdfReader(file_path)
-            texts = []
-            for page in reader.pages:
-                try:
-                    text = page.extract_text() or ""
-                    texts.append(text)
-                except Exception as e:
-                    logger.warning(f"Failed to extract text from PDF page: {e}")
-                    continue
-
-            return "\n\n".join(texts)
-        except Exception as e:
-            logger.error(f"PDF extraction failed: {e}")
-            return ""
-
-    async def _extract_url(self, url: str) -> str:
-        """Extract text from a URL using trafilatura"""
-        logger.info(f"Extracting URL content from: {url}")
-        
-        try:
-            import trafilatura
-        except ImportError:
-            logger.warning("trafilatura not installed, falling back to basic extraction")
-            return await self._extract_url_basic(url)
-
-        try:
-            # Fetch the page with better settings
-            downloaded = trafilatura.fetch_url(url)
-            if not downloaded:
-                logger.warning(f"trafilatura.fetch_url returned None for {url}")
-                return await self._extract_url_basic(url)
-
-            # Extract main content with settings for better extraction
-            text = trafilatura.extract(
-                downloaded,
-                include_tables=True,
-                include_comments=False,
-                include_formatting=False,
-                no_fallback=False
-            )
-            
-            if text and len(text.strip()) > 50:
-                logger.info(f"trafilatura extracted {len(text)} chars from {url}")
-                return text
-            else:
-                logger.warning(f"trafilatura extracted too little content ({len(text) if text else 0} chars), trying fallback")
-                return await self._extract_url_basic(url)
-                
-        except Exception as e:
-            logger.error(f"URL extraction failed for {url}: {e}")
-            return await self._extract_url_basic(url)
-
-    async def _extract_url_basic(self, url: str) -> str:
-        """Basic URL text extraction without trafilatura"""
-        logger.info(f"Using basic URL extraction for: {url}")
-        
-        try:
-            from bs4 import BeautifulSoup
-        except ImportError:
-            logger.error("beautifulsoup4 not installed")
-            return ""
-
-        try:
-            # Try with aiohttp first
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            }
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=30), headers=headers) as response:
-                    if response.status != 200:
-                        logger.warning(f"URL returned status {response.status}")
-                        return ""
-                    html = await response.text()
-
-            soup = BeautifulSoup(html, 'html.parser')
-
-            # Remove script, style, nav, footer elements
-            for element in soup(["script", "style", "nav", "footer", "header", "aside", "noscript"]):
-                element.decompose()
-
-            # Try to find main content areas first
-            main_content = soup.find('main') or soup.find('article') or soup.find('div', {'class': re.compile(r'content|main|article|post|entry', re.I)})
-            
-            if main_content:
-                text = main_content.get_text(separator='\n')
-            else:
-                # Fall back to body
-                body = soup.find('body')
-                text = body.get_text(separator='\n') if body else soup.get_text(separator='\n')
-
-            # Clean up whitespace
-            lines = (line.strip() for line in text.splitlines())
-            chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-            text = '\n'.join(chunk for chunk in chunks if chunk and len(chunk) > 1)
-
-            logger.info(f"Basic extraction got {len(text)} chars from {url}")
-            return text
-            
-        except asyncio.TimeoutError:
-            logger.error(f"URL extraction timed out for {url}")
-            return ""
-        except Exception as e:
-            logger.error(f"Basic URL extraction failed for {url}: {e}")
-            return ""
-
-    async def _extract_doc(self, file_path: str) -> str:
-        """Extract text from a DOC/DOCX file"""
-        try:
-            from docx import Document
-        except ImportError:
-            logger.error("python-docx not installed")
-            return ""
-
-        try:
-            doc = Document(file_path)
-            paragraphs = [para.text for para in doc.paragraphs]
-            return "\n\n".join(paragraphs)
-        except Exception as e:
-            logger.error(f"DOC extraction failed: {e}")
-            return ""
-
-    async def _extract_youtube(self, url: str) -> str:
-        """Extract transcript from a YouTube video"""
-        try:
-            from youtube_transcript_api import YouTubeTranscriptApi
-        except ImportError:
-            logger.error("youtube_transcript_api not installed")
-            return ""
-
-        try:
-            # Extract video ID from URL
-            video_id = self._extract_youtube_video_id(url)
-            if not video_id:
-                logger.error(f"Could not extract video ID from URL: {url}")
-                return ""
-
-            # Get transcript
-            transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
-            
-            # Combine all transcript entries
-            text_parts = []
-            for entry in transcript_list:
-                text = entry.get('text', '').strip()
-                if text:
-                    text_parts.append(text)
-            
-            full_text = ' '.join(text_parts)
-            logger.info(f"Extracted YouTube transcript with {len(text_parts)} segments, {len(full_text)} chars")
-            return full_text
-
-        except Exception as e:
-            logger.error(f"YouTube transcript extraction failed for {url}: {e}")
-            return ""
-
-    def _extract_youtube_video_id(self, url: str) -> Optional[str]:
-        """Extract video ID from various YouTube URL formats"""
-        import re
-        
-        patterns = [
-            r'(?:v=|/v/|youtu\.be/)([a-zA-Z0-9_-]{11})',
-            r'(?:embed/)([a-zA-Z0-9_-]{11})',
-            r'(?:watch\?v=)([a-zA-Z0-9_-]{11})',
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, url)
-            if match:
-                return match.group(1)
-        
-        # If URL is just the video ID
-        if re.match(r'^[a-zA-Z0-9_-]{11}$', url):
-            return url
-        
-        return None
+            return await extract_for(source)
+        except IngestionError:
+            # Pasted text is stored in the DB as well as on disk; fall back to it
+            # if the file was cleaned up.
+            if getattr(source.type, "value", source.type) in ("text", "markdown") and not (
+                source.storage_path and os.path.exists(source.storage_path)
+            ):
+                async with self.manager.db_pool.acquire() as conn:
+                    stored = await conn.fetchval("SELECT content_text FROM notebook_sources WHERE id = $1", source.id)
+                if stored:
+                    return stored
+            raise
 
     def _chunk_text(self, text: str, source) -> List[Tuple[str, Dict[str, Any]]]:
         """
@@ -509,20 +223,23 @@ class IngestionService:
         return chunks
 
     async def _get_embedding(self, text: str) -> Optional[List[float]]:
-        """Get embedding vector for text using Ollama with cached model selection"""
+        """Get embedding vector for text using Ollama with cached model selection.
+
+        The HTTP calls are blocking ``requests`` calls, so they run in a worker
+        thread; called directly they froze the whole event loop for up to a
+        minute per chunk.
+        """
         # If we already found a working model, use it directly
         if IngestionService._working_model:
-            result = self._try_embedding(OLLAMA_URL, IngestionService._working_model, text)
+            result = await asyncio.to_thread(self._try_embedding, OLLAMA_URL, IngestionService._working_model, text)
             if result is not None:
                 return result
             IngestionService._working_model = None
 
         # nomic-embed-text (the default) is the dedicated embedder; the rest are
         # preferred fallbacks. llama3.1:8b DOES support /api/embeddings (native
-        # 4096-dim = our target_dim). But a hardcoded list only works on a deploy
-        # that happens to have one of these pulled — on any other machine every
-        # candidate 404s, this returns None, retrieval silently finds nothing, and
-        # the chat answers "I couldn't search your sources". So after the preferred
+        # 4096-dim = our target_dim). A hardcoded list only works on a deploy
+        # that happens to have one of these pulled, so after the preferred
         # names we try whatever Ollama actually reports as installed.
         embedding_models = [
             EMBEDDING_MODEL,          # nomic-embed-text (dedicated, default)
@@ -531,20 +248,19 @@ class IngestionService:
             "llama3.1:8b",
             "mistral",
         ]
-        for model in self._installed_models():
+        for model in await asyncio.to_thread(self._installed_models):
             if model not in embedding_models:
                 embedding_models.append(model)
 
         for model in embedding_models:
-            result = self._try_embedding(OLLAMA_URL, model, text)
+            result = await asyncio.to_thread(self._try_embedding, OLLAMA_URL, model, text)
             if result is not None:
                 IngestionService._working_model = model
                 logger.info(f"Locked embedding model to: {model}")
                 return result
 
         logger.error(
-            "All embedding models failed — tried %s. Retrieval will find nothing "
-            "and notebook chat will answer without sources. Pull an embedding model "
+            "All embedding models failed - tried %s. Pull an embedding model "
             "(e.g. `ollama pull nomic-embed-text`) or set EMBEDDING_MODEL.",
             ", ".join(embedding_models) or "<none installed>",
         )
@@ -560,7 +276,10 @@ class IngestionService:
             response = requests.get(f"{OLLAMA_URL}/api/tags", timeout=10)
             if response.status_code != 200:
                 return []
-            names = [m.get("name") for m in response.json().get("models", []) if m.get("name")]
+            # Cloud-hosted models would send the source text off the machine; never fall back to one.
+            from owui_compat.ollama_hosts import drop_cloud
+
+            names = [m.get("name") for m in drop_cloud(response.json().get("models", [])) if m.get("name")]
         except Exception:
             logger.warning("Could not list Ollama models for embedding fallback", exc_info=True)
             return []
@@ -605,7 +324,7 @@ class IngestionService:
         """Get embedding for a search query (public method for RAG)"""
         embedding = await self._get_embedding(query)
         if embedding:
-            return self._normalize_embedding_dimension(embedding, 4096)
+            return self._normalize_embedding_dimension(embedding, TARGET_DIM)
         return None
 
 

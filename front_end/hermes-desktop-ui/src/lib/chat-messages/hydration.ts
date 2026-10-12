@@ -249,7 +249,11 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
       )
     }
 
-    if (!parts.length && !extractedAttachmentRefs?.length) {
+    // A failed turn is stored as an assistant row with no text and a plain `error`; it must survive
+    // hydration so the error card and its Retry stay on screen after a reload.
+    const persistedError = message.role === 'assistant' && typeof message.error === 'string' ? message.error.trim() : ''
+
+    if (!parts.length && !extractedAttachmentRefs?.length && !persistedError) {
       if (message.role !== 'assistant') {
         flushPendingTools(index)
         activeAssistantIndex = null
@@ -311,6 +315,8 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
       parts,
       timestamp: earliestTimestamp(message.timestamp, ...parts.map(part => part.timestamp)),
       ...(rowId !== undefined ? { rowId } : {}),
+      ...(persistedError ? { error: persistedError } : {}),
+      ...(message.role === 'assistant' && message.interrupted === true ? { interrupted: true } : {}),
       ...(reactions.length ? { reactions } : {}),
       ...(extractedAttachmentRefs ? { attachmentRefs: extractedAttachmentRefs } : {})
     })
@@ -327,7 +333,8 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
 
   return withUniqueToolCallIds(
     withoutGeneratedImageEchoes.filter(
-      m => chatMessageText(m).trim() || m.parts.some(part => part.type !== 'text') || m.attachmentRefs?.length
+      m =>
+        chatMessageText(m).trim() || m.parts.some(part => part.type !== 'text') || m.attachmentRefs?.length || m.error
     )
   )
 }

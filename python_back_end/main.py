@@ -697,6 +697,7 @@ async def lifespan(app: FastAPI):
                     "018_agent_teammates.sql",
                     "019_hermes_bots.sql",
                     "020_user_controls.sql",
+                    "021_model_requests.sql",
                 ):
                     _mig_path = os.path.join(_mig_dir, _mig_name)
                     try:
@@ -783,6 +784,11 @@ async def lifespan(app: FastAPI):
                     from owui_compat import translate as _owui_translate
                     _owui_translate.add_persisted_admin_id(int(_admin_id_row))
                     logger.info(f"✅ Persisted admin user id loaded: {_admin_id_row}")
+                try:
+                    from plugins.exposure import first_admin as _first_admin
+                    await _first_admin.on_startup(conn)
+                except Exception as _fa_err:  # users table may not exist yet on a first boot
+                    logger.warning("first-admin code not prepared: %s", _fa_err)
 
                 await conn.execute(
                     """
@@ -1388,7 +1394,7 @@ async def list_models(
 
     formatted_models = []
 
-    # ── Ollama hosts (laptop + RTX 5080 rig), probed live and reported honestly ────
+    # ── Ollama hosts (this machine + any others configured), probed live ────
     # One probe per host through owui_compat.ollama_hosts, which is also what the CAD
     # lane and model routing use — so a model cannot be "installed" for one lane and
     # missing for another. Two things this deliberately does that the old per-host
@@ -1421,7 +1427,7 @@ async def list_models(
                                 if model_name in _st.sizes else ""
                             ),
                             "status": "available",
-                            "provider": "ollama" if _st.name == "laptop" else "ollama-desktop",
+                            "provider": "ollama" if _st.name == _oh.LOCAL else "ollama-desktop",
                             "host": _st.name,
                             # How much conversation this model can actually hold on this
                             # host — trained window capped by what the daemon serves. The
@@ -1430,9 +1436,9 @@ async def list_models(
                             "contextLength": _st.ctx.get(model_name),
                         }
                     )
-                if _st.name == "laptop":
+                if _st.name == _oh.LOCAL:
                     # Chat routing reads this to decide a request goes back to Ollama.
-                    # Only the laptop's tags belong in it — it names what this box can
+                    # Only this machine's tags belong in it — it names what this box can
                     # serve directly, not what exists somewhere on the network.
                     LOCAL_OLLAMA_MODELS_CACHE.add(model_name)
             logger.info("Added %d Ollama models from %s (%s)",
@@ -1446,7 +1452,7 @@ async def list_models(
                         "displayName": f"{_pretty_ollama_name(model_name)} ({_st.label})",
                         "size": "",
                         "status": "unreachable",
-                        "provider": "ollama" if _st.name == "laptop" else "ollama-desktop",
+                        "provider": "ollama" if _st.name == _oh.LOCAL else "ollama-desktop",
                         "host": _st.name,
                         "description": f"{_st.label} is not answering ({_st.error})",
                     }
@@ -1572,7 +1578,9 @@ async def list_models(
 
             if ext_resp.status_code == 200:
                 ext_data = ext_resp.json()
-                for m in ext_data.get("models", []):
+                from owui_compat.ollama_hosts import drop_cloud
+
+                for m in drop_cloud(ext_data.get("models", [])):
                     model_name = m.get("name")
                     if not any(
                         existing["name"] == model_name for existing in formatted_models
@@ -1696,7 +1704,24 @@ _EXTRA_ORIGINS = [
 # so CORS stays the outer layer.
 from plugins.people import BlockedAccountGate  # noqa: E402
 
+# On a shared server (HARVIS_EXPOSURE lan/tunnel) the routes that run code on
+# this computer are for admins. Inside the blocked-account gate, so a turned-off
+# account is refused before anything else looks at it.
+from plugins.exposure import BuildSpaceGate, startup_problems, tunnel_on  # noqa: E402
+
+for _problem in startup_problems():
+    logger.critical("Refusing to start a shared server: %s", _problem)
+if startup_problems():
+    raise SystemExit("Harvis is set up to be shared but is not safe to share yet; see the log above.")
+
+app.add_middleware(BuildSpaceGate)
 app.add_middleware(BlockedAccountGate)
+if tunnel_on():
+    # Experimental, and loaded only in a tunnel mode. Added last, so Cloudflare
+    # traffic without an Access sign-in never reaches an account check.
+    from plugins.tunnel import TunnelOriginGate  # noqa: E402
+
+    app.add_middleware(TunnelOriginGate)
 
 app.add_middleware(
     CORSMiddleware,
@@ -1882,11 +1907,13 @@ from plugins.soul.routes import router as soul_router
 from plugins.memory.routes import router as memory_router
 from plugins.cron.routes import router as cron_router
 from plugins.inference_nodes.routes import router as inference_nodes_router
+from plugins.model_requests.routes import router as model_requests_router
 from plugins.agents.routes import router as agents_router
 app.include_router(soul_router)
 app.include_router(memory_router)
 app.include_router(cron_router)
 app.include_router(inference_nodes_router)
+app.include_router(model_requests_router)
 app.include_router(agents_router)
 
 # Hermes desktop-UI facade: REST + JSON-RPC WebSocket under /hermes-api/ so the
@@ -1933,6 +1960,16 @@ logger.info("Setup flow router registered at /api/setup/*")
 # Hosting mode (compose vs k8s) for the settings page — same auth gate as
 # /api/capabilities/notebooks above, hence the same factory shape.
 app.include_router(create_hosting_router(get_current_user=get_current_user))
+
+# Who can reach this server: the admin's exposure card (plugins/exposure), and
+# the experimental tunnel's per-request check only while a tunnel leads here.
+from plugins.exposure import create_exposure_router  # noqa: E402
+
+app.include_router(create_exposure_router(get_current_user=get_current_user, require_admin=require_admin))
+if tunnel_on():
+    from plugins.tunnel import create_tunnel_router  # noqa: E402
+
+    app.include_router(create_tunnel_router())
 
 # ─── Device & models -----------------------------------------------------------
 device = 0 if torch.cuda.is_available() else -1
@@ -1996,7 +2033,9 @@ def resolve_default_model() -> str:
                 r = client.get(url)
             if r.status_code >= 400:
                 continue
-            names = [n for n in pick(r.json()) if n]
+            from owui_compat.ollama_hosts import drop_cloud
+
+            names = drop_cloud([n for n in pick(r.json()) if n])
             if names:
                 _RESOLVED_DEFAULT_MODEL = names[0]
                 logger.info("default model resolved from %s: %s", url, _RESOLVED_DEFAULT_MODEL)
@@ -3113,11 +3152,13 @@ async def signup(request: SignupRequest, app_request: Request):
 
     if pool:
         async with pool.acquire() as conn:
-            return await _signup_with_connection(request, conn, setup_code=setup_code)
+            return await _signup_with_connection(
+                request, conn, setup_code=setup_code, headers=app_request.headers)
     else:
         conn = await asyncpg.connect(DATABASE_URL, timeout=10)
         try:
-            return await _signup_with_connection(request, conn, setup_code=setup_code)
+            return await _signup_with_connection(
+                request, conn, setup_code=setup_code, headers=app_request.headers)
         finally:
             await conn.close()
 
@@ -3144,8 +3185,23 @@ async def _signup_enabled(conn) -> bool:
     return await signup_enabled(conn)
 
 
-async def _signup_with_connection(request: SignupRequest, conn, setup_code: str | None = None):
+async def _signup_with_connection(request: SignupRequest, conn, setup_code: str | None = None,
+                                  headers=None):
+    from plugins.exposure import first_admin as _first_admin
+    # Through the experimental tunnel, the email must be the Cloudflare Access one.
+    from plugins.exposure import signup as _shared_signup
+
     try:
+        await _shared_signup.before_signup(request.email, headers)
+        # The first-admin code is checked in a transaction of its own so a wrong
+        # guess is counted even though this sign-up then fails. None = not checked.
+        code_ok = None
+        if _first_admin.required():
+            async with conn.transaction():
+                await conn.execute("SELECT pg_advisory_xact_lock($1)", _FIRST_SIGNUP_LOCK_KEY)
+                if await conn.fetchval("SELECT COUNT(*) FROM users") == 0:
+                    code_ok = await _first_admin.check(conn, setup_code)
+                    retired = not code_ok and await _first_admin.retired(conn)
         async with conn.transaction():
             await conn.execute(
                 "SELECT pg_advisory_xact_lock($1)", _FIRST_SIGNUP_LOCK_KEY
@@ -3153,27 +3209,25 @@ async def _signup_with_connection(request: SignupRequest, conn, setup_code: str 
             user_count = await conn.fetchval("SELECT COUNT(*) FROM users")
 
             if user_count == 0:
-                # First signup claims the instance and becomes admin. Open by
-                # default, same as OpenWebUI and Jellyfin: a fresh install
-                # should be usable without digging a code out of .env, and on
-                # a laptop there is nobody to race you to it.
-                #
-                # An operator who leaves an UNCLAIMED instance reachable from
-                # an untrusted network (VPS, shared LAN) closes that window by
-                # setting HARVIS_SETUP_CODE — present and non-empty turns the
-                # claim back into a gated one. build_config() mirrors this as
-                # features.setup_code_required so the signup form knows to ask;
-                # the two must stay in lockstep or the form asks for a code
-                # nothing checks, or omits one the server demands.
-                expected = os.getenv("HARVIS_SETUP_CODE", "").strip()
-                if expected and not (
-                    setup_code
-                    and hmac.compare_digest(expected.encode(), setup_code.encode())
-                ):
-                    raise HTTPException(
-                        status_code=403,
-                        detail="First signup requires a valid setup code (X-Setup-Code header)",
-                    )
+                # First signup claims the instance and becomes admin. On a
+                # laptop (local exposure) that needs no code. On a shared
+                # server it needs the 6-digit code the host was shown
+                # (plugins/exposure/first_admin.py), or the operator's own
+                # HARVIS_SETUP_CODE. build_config() mirrors this as
+                # features.setup_code_required so the form knows to ask.
+                if _first_admin.required() and code_ok is not True:
+                    if code_ok is None:
+                        detail = "Someone else just set this server up. Reload the page and sign in."
+                    elif retired:
+                        detail = ("Too many wrong codes, so that code no longer works. On the server, "
+                                  "run ./install.sh --admin-code to get a new one.")
+                    elif (setup_code or "").strip():
+                        detail = ("That first-admin code is not right. Use the 6-digit code shown "
+                                  "on the server; ./install.sh --admin-code there makes a new one.")
+                    else:
+                        detail = ("Enter the 6-digit first-admin code. It was shown on the "
+                                  "server when Harvis was installed.")
+                    raise HTTPException(status_code=403, detail=detail)
             elif not await _signup_enabled(conn):
                 raise HTTPException(
                     status_code=403,
@@ -3210,6 +3264,7 @@ async def _signup_with_connection(request: SignupRequest, conn, setup_code: str 
                     """,
                     str(user_id),
                 )
+                await _first_admin.claimed(conn)
                 from owui_compat import translate as _owui_translate
                 _owui_translate.add_persisted_admin_id(int(user_id))
                 logger.info(f"🔐 Instance claimed: user {user_id} is the admin")
@@ -3236,17 +3291,21 @@ async def login(request: AuthRequest, app_request: Request):
 
     if pool:
         async with pool.acquire() as conn:
-            return await _login_with_connection(request, conn)
+            return await _login_with_connection(request, conn, app_request.headers)
     else:
         conn = await asyncpg.connect(DATABASE_URL, timeout=10)
         try:
-            return await _login_with_connection(request, conn)
+            return await _login_with_connection(request, conn, app_request.headers)
         finally:
             await conn.close()
 
 
-async def _login_with_connection(request: AuthRequest, conn):
+async def _login_with_connection(request: AuthRequest, conn, headers=None):
     try:
+        # Before the password check: a refusal after it would confirm the password.
+        from plugins.exposure import signup as _shared_signup
+
+        await _shared_signup.before_login(request.email, headers)
         user = await conn.fetchrow(
             "SELECT id, password FROM users WHERE email = $1", request.email
         )
@@ -3274,9 +3333,11 @@ async def _login_with_connection(request: AuthRequest, conn):
             value=access_token,
             httponly=True,
             samesite="lax",
-            # HARVIS_COOKIE_SECURE=true behind HTTPS; leave false on localhost/LAN HTTP.
-            secure=os.getenv("HARVIS_COOKIE_SECURE", "").strip().lower()
-            in {"1", "true", "yes", "on"},
+            # Secure whenever the browser reached us over HTTPS (nginx and the tunnel
+            # set X-Forwarded-Proto); HARVIS_COOKIE_SECURE forces it on. Plain-HTTP
+            # localhost/LAN keeps working because the flag would drop the cookie there.
+            secure=os.getenv("HARVIS_COOKIE_SECURE", "").strip().lower() in {"1", "true", "yes", "on"}
+            or (headers is not None and (headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower() == "https"),
         )
         return response
 
@@ -3763,6 +3824,9 @@ async def chat(
     Produces: SSE stream with status events, final event contains {history, audio_path, session_id}
     """
     # The admin's limits (Settings ▸ People): refused, or counted.
+    from owui_compat.ollama_hosts import cloud_refusal as _cloud_refusal
+    if _cloud_refusal(req.model):
+        raise HTTPException(status_code=400, detail=_cloud_refusal(req.model))
     from plugins.people.controls import require_turn
     req.model = await require_turn(getattr(app.state, "pg_pool", None), int(current_user.id), req.model)
     import asyncio
@@ -5731,15 +5795,25 @@ async def vision_chat(
     )
 
 
+_AUDIO_NAME_RX = re.compile(r"^[A-Za-z0-9_-]{8,128}\.(wav|mp3)$")
+
+
 @app.get("/api/audio/{filename}", tags=["audio"])
 async def serve_audio(filename: str):
     """
     FastAPI static audio fallback (use nginx /audio alias in production for speed).
+
+    Same rule as that alias: only a generated ``<name>.wav|mp3`` straight inside
+    the temp dir. The names carry a uuid4, so the URL is the capability; anything
+    else in /tmp (STT uploads, caches, other services' files) is not served.
     """
+    if not _AUDIO_NAME_RX.match(filename):
+        raise HTTPException(404, "Audio file not found")
     full_path = os.path.join(tempfile.gettempdir(), filename)
-    if not os.path.exists(full_path):
-        raise HTTPException(404, f"Audio file not found: {filename}")
-    return FileResponse(full_path, media_type="audio/wav")
+    if os.path.islink(full_path) or not os.path.isfile(full_path):
+        raise HTTPException(404, "Audio file not found")
+    media = "audio/mpeg" if filename.endswith(".mp3") else "audio/wav"
+    return FileResponse(full_path, media_type=media)
 
 
 @app.get("/api/images/{filename}", tags=["images"])
@@ -6498,9 +6572,10 @@ async def analyze_and_respond(req: AnalyzeAndRespondRequest, current_user: UserR
 
 
 @app.post("/api/vision-control", tags=["vision"])
-async def vision_control(action: str = "status"):
+async def vision_control(action: str = "status", _admin=Depends(require_admin)):
     """
-    Emergency control endpoint for vision processing
+    Emergency control endpoint for vision processing — admin only: it turns
+    vision on or off for everyone.
     Actions: 'disable', 'enable', 'status', 'reset'
     """
     global _vision_endpoint_enabled, _vision_request_count, _vision_error_count
@@ -7509,7 +7584,7 @@ async def comparative_research(req: ComparativeResearchRequest, current_user: Us
 
 
 @app.post("/api/web-search", tags=["research"])
-async def web_search(req: WebSearchRequest):
+async def web_search(req: WebSearchRequest, current_user: UserResponse = Depends(get_current_user)):
     """
     Perform web search using LangChain search agents
     """
@@ -7582,7 +7657,9 @@ async def get_ollama_models():
         logger.info(f"Trying to connect to local Ollama at: {ollama_tags_url}")
         response = requests.get(ollama_tags_url, timeout=10)
         if response.status_code == 200:
-            models = response.json().get("models", [])
+            from owui_compat.ollama_hosts import drop_cloud
+
+            models = drop_cloud(response.json().get("models", []))
             local_ollama = [m["name"] for m in models]
             ollama_model_names.extend(local_ollama)
             # Track for chat routing back to Ollama
@@ -7680,7 +7757,9 @@ async def get_ollama_models():
                     )
                     ext_models = []
 
-                external_model_names = [model["name"] for model in ext_models]
+                from owui_compat.ollama_hosts import drop_cloud
+
+                external_model_names = [model["name"] for model in drop_cloud(ext_models)]
 
                 # Update the global cache for routing
                 global EXTERNAL_MODELS_CACHE
@@ -7821,7 +7900,7 @@ async def get_memory_pressure():
 
 
 @app.post("/api/models/auto-cleanup", tags=["model-management"])
-async def trigger_auto_cleanup():
+async def trigger_auto_cleanup(_admin=Depends(require_admin)):
     """Manually trigger automatic model cleanup"""
     from model_manager import auto_cleanup_if_needed
 
@@ -7914,7 +7993,7 @@ async def unload_model(request: UnloadModelRequest):
 
 
 @app.post("/api/models/reload", tags=["model-management"])
-async def reload_models():
+async def reload_models(_admin=Depends(require_admin)):
     """Reload models if they were unloaded"""
     from model_manager import reload_models_if_needed
 
@@ -8050,7 +8129,7 @@ class SetTTSEngineRequest(BaseModel):
 
 
 @app.post("/api/tts-engine", tags=["tts"])
-async def set_tts_engine(req: SetTTSEngineRequest):
+async def set_tts_engine(req: SetTTSEngineRequest, _admin=Depends(require_admin)):
     """
     Set the active TTS engine.
     """
@@ -8275,7 +8354,7 @@ class EnqueueJobRequest(BaseModel):
 
 
 @app.post("/api/jobs/enqueue", tags=["jobs"])
-async def enqueue_job(request: EnqueueJobRequest):
+async def enqueue_job(request: EnqueueJobRequest, _admin=Depends(require_admin)):
     """
     Enqueue a job for async processing
     This is called by the frontend to create a background job
@@ -8301,7 +8380,7 @@ async def enqueue_job(request: EnqueueJobRequest):
 
 
 @app.get("/api/jobs/{job_id}/status", tags=["jobs"])
-async def get_job_status(job_id: str):
+async def get_queue_job_status(job_id: str, _admin=Depends(require_admin)):
     """
     Get the status of a job
     """

@@ -26,6 +26,7 @@ import {
   AppWindow,
   Archive,
   BarChart3,
+  Box,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -74,6 +75,7 @@ import { $dismissedAutoProjectIds, filterVisibleProjects } from '@/store/layout'
 import { openPetGenerate } from '@/store/pet-generate'
 import { openBrowserTab } from '@/store/preview'
 import { $projectTree, goToProject, openFolderAsProject, requestStartWorkSession } from '@/store/projects'
+import { useCapability } from '@/store/server-capabilities'
 import { $connection } from '@/store/session'
 import { runGatewayRestart } from '@/store/system-actions'
 import {
@@ -421,6 +423,12 @@ const NON_CONFIG_SETTINGS: ReadonlyArray<{
     labelKey: 'providerAccounts',
     tab: 'providers'
   },
+  {
+    icon: Box,
+    keywords: ['models', 'installed', 'download', 'gemma', 'request', 'ollama', 'computers', 'pair'],
+    label: 'Models',
+    tab: 'models'
+  },
   { icon: Archive, keywords: ['history', 'archived'], labelKey: 'archivedChats', tab: 'sessions' },
   {
     icon: Network,
@@ -527,6 +535,10 @@ function CommandPaletteBody({ onExited }: { onExited: () => void }) {
   const projectTree = useStore($projectTree)
   const dismissedAutoProjects = useStore($dismissedAutoProjectIds)
   const navigate = useNavigate()
+  // Rows for things this server does not do are not offered (store/server-capabilities).
+  const canPets = useCapability('pets')
+  const canRestart = useCapability('gateway_restart')
+  const canUpdate = useCapability('hermes_update')
 
   const { availableThemes, clearThemePreview, mode, previewTheme, resolvedMode, setMode, setTheme, themeName } =
     useTheme()
@@ -882,21 +894,29 @@ function CommandPaletteBody({ onExited }: { onExited: () => void }) {
             label: cc.sections.usage,
             run: go(`${COMMAND_CENTER_ROUTE}?section=usage`)
           },
-          {
-            icon: RefreshCw,
-            id: 'cc-restart-gateway',
-            keywords: ['gateway', 'restart', 'messaging', 'reconnect', 'system'],
-            label: cc.restartGateway,
-            run: () => void runGatewayRestart()
-          },
-          {
-            detail: updateVersionLabel,
-            icon: Download,
-            id: 'cc-update-hermes',
-            keywords: ['update', 'upgrade', 'hermes', 'version', 'system', 'restart'],
-            label: cc.updateHermes,
-            run: () => requestActiveUpdate()
-          },
+          ...(canRestart
+            ? [
+                {
+                  icon: RefreshCw,
+                  id: 'cc-restart-gateway',
+                  keywords: ['gateway', 'restart', 'messaging', 'reconnect', 'system'],
+                  label: cc.restartGateway,
+                  run: () => void runGatewayRestart()
+                }
+              ]
+            : []),
+          ...(canUpdate
+            ? [
+                {
+                  detail: updateVersionLabel,
+                  icon: Download,
+                  id: 'cc-update-hermes',
+                  keywords: ['update', 'upgrade', 'hermes', 'version', 'system', 'restart'],
+                  label: cc.updateHermes,
+                  run: () => requestActiveUpdate()
+                }
+              ]
+            : []),
           {
             icon: RefreshCw,
             id: 'cc-reload-window',
@@ -934,20 +954,24 @@ function CommandPaletteBody({ onExited }: { onExited: () => void }) {
             label: cc.changeColorMode,
             to: 'color-mode'
           },
-          {
-            icon: PawPrint,
-            id: 'appearance-pets',
-            keywords: ['pet', 'petdex', 'mascot', 'pets', '/pet', 'paw'],
-            label: cc.pets.title,
-            to: 'pets'
-          },
-          {
-            icon: Egg,
-            id: 'appearance-generate-pet',
-            keywords: ['pet', 'generate', 'create', 'make', 'new pet', 'mascot', 'hatch', 'ai'],
-            label: cc.generatePet.title,
-            run: () => openPetGenerate()
-          }
+          ...(canPets
+            ? [
+                {
+                  icon: PawPrint,
+                  id: 'appearance-pets',
+                  keywords: ['pet', 'petdex', 'mascot', 'pets', '/pet', 'paw'],
+                  label: cc.pets.title,
+                  to: 'pets'
+                },
+                {
+                  icon: Egg,
+                  id: 'appearance-generate-pet',
+                  keywords: ['pet', 'generate', 'create', 'make', 'new pet', 'mascot', 'hatch', 'ai'],
+                  label: cc.generatePet.title,
+                  run: () => openPetGenerate()
+                }
+              ]
+            : [])
         ]
       },
       {
@@ -975,6 +999,9 @@ function CommandPaletteBody({ onExited }: { onExited: () => void }) {
     // that kept the palette open — eslint only sees an unused dep.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
+    canPets,
+    canRestart,
+    canUpdate,
     contributedItems,
     dismissedAutoProjects,
     go,

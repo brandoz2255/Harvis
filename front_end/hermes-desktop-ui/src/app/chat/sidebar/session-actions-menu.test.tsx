@@ -2,9 +2,14 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { atom } from 'nanostores'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { resetServerCapabilities, setServerCapabilities } from '@/store/server-capabilities'
+
 import { SessionActionsMenu, SessionContextMenu } from './session-actions-menu'
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  resetServerCapabilities()
+})
 
 // Exercises the real SessionActionsMenu end-to-end (no DropdownMenu mock) so
 // a broken asChild composition on the kebab trigger fails here — the menu
@@ -140,6 +145,27 @@ describe('SessionActionsMenu', () => {
     expect(await screen.findByRole('menu')).toBeTruthy()
     expect(screen.getByRole('menuitem', { name: /rename/i })).toBeTruthy()
     expect(screen.getByRole('menuitem', { name: /archive/i })).toBeTruthy()
+  })
+
+  it('offers Move to project only when the server has projects', async () => {
+    const open = async () => {
+      const trigger = screen.getByRole('button', { name: 'Session actions' })
+      fireEvent.pointerDown(trigger, { button: 0, pointerType: 'mouse' })
+      fireEvent.pointerUp(trigger, { button: 0, pointerType: 'mouse' })
+      fireEvent.click(trigger)
+      await screen.findByRole('menu')
+    }
+
+    setServerCapabilities({ capabilities: { projects: false } })
+    renderMenu()
+    await open()
+    expect(screen.queryByText('Move to project')).toBeNull()
+
+    cleanup()
+    setServerCapabilities({ capabilities: { projects: true } })
+    renderMenu()
+    await open()
+    expect(screen.getByText('Move to project')).toBeTruthy()
   })
 
   it('opens the rename dialog focused on its input, not the row trigger', async () => {

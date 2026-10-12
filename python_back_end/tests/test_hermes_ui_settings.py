@@ -343,8 +343,9 @@ def test_set_flags_builds_a_minimal_update():
     sid = "12345678-1234-1234-1234-123456789abc"
     assert run(store.set_flags(pool, 7, sid, archived=True, title="New")) is True
     sql, args = pool.log[0]
-    assert sql.startswith("UPDATE owui_chats SET archived = $3, title = $4 WHERE id = $1 AND user_id = $2")
-    assert args[1:] == (7, True, "New") and "updated_at" not in sql
+    assert sql.startswith("UPDATE owui_chats SET archived = $3, title = $4, "
+                          "chat = chat || jsonb_build_object('title_source', $5::text) WHERE id = $1 AND user_id = $2")
+    assert args[1:4] == (7, True, "New") and "updated_at" not in sql
     assert run(store.set_flags(pool, 7, sid)) is True and len(pool.log) == 1  # nothing to change
     assert run(store.set_flags(pool, 7, "not-a-uuid", pinned=True)) is False
     assert run(store.set_flags(FakePool("UPDATE 0"), 7, sid, pinned=True)) is False
@@ -384,8 +385,8 @@ def test_sessions_list_honours_archived_filter(monkeypatch):
 
 class Conn(ws_settings.SettingsMethods):
     def __init__(self):
-        self.pool, self.user_id, self.events = None, 7, []
-        self.live = SimpleNamespace(id="s1", effort="", model="", running=False, title="")
+        self.pool, self.user_id, self.token, self.events = None, 7, "", []
+        self.live = SimpleNamespace(id="s1", effort="", model="", running=False, title="", web_search=False)
 
     async def _open(self, rid, params):
         return self.live, [], None
@@ -436,8 +437,15 @@ def test_rpc_config_set_persists_any_key_and_keeps_reasoning(section, monkeypatc
     monkeypatch.setattr(ws_settings, "apply_model_choice", apply)
     out = run(conn.m_config_set(5, {"key": "model", "value": "qwen3 --provider ollama --global"}))["result"]
     assert out["ok"] and picked == {"provider": "ollama", "model": "qwen3"}
+    async def model_error(pool, uid, token, model):
+        return None if model == "llama" else f"I don't know a model called '{model}'."
+
+    monkeypatch.setattr(ws_settings.session_ops, "model_error", model_error)
     run(conn.m_config_set(6, {"key": "model", "value": "llama --session", "session_id": "s1"}))
     assert conn.live.model == "llama"
+    # A session switch to a name the picker does not offer is refused, not stored.
+    out = run(conn.m_config_set(7, {"key": "model", "value": "typo-model --session", "session_id": "s1"}))
+    assert "error" in out and conn.live.model == "llama"
 
 
 def test_rpc_reload_env_and_profiles(section, soul, default_model):

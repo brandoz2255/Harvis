@@ -7,7 +7,8 @@
 
 import { harvisApi } from './api'
 
-export type ArtifactKind = 'briefing' | 'faq' | 'flashcards' | 'podcast' | 'quiz' | 'study_guide' | 'timeline'
+export type ArtifactKind =
+  'briefing' | 'faq' | 'flashcards' | 'mindmap' | 'podcast' | 'quiz' | 'study_guide' | 'timeline'
 export type GeneratableKind = Exclude<ArtifactKind, 'podcast'>
 
 export interface QuizQuestion {
@@ -22,12 +23,22 @@ export interface Flashcard {
   back: string
 }
 
+export interface MindNode {
+  label: string
+  children?: MindNode[]
+}
+
+export interface MindTree {
+  title: string
+  children: MindNode[]
+}
+
 export interface Artifact {
   id: string
   kind: ArtifactKind
   title: string
   format: 'audio' | 'json' | 'markdown'
-  content: { cards?: Flashcard[]; markdown?: string; questions?: QuizQuestion[] } | null
+  content: { cards?: Flashcard[]; markdown?: string; questions?: QuizQuestion[]; tree?: MindTree } | null
   status: string
   audio_url: null | string
   error_message: null | string
@@ -41,7 +52,8 @@ export const CREATE_KINDS: { icon: string; kind: GeneratableKind; label: string 
   { icon: 'book', kind: 'study_guide', label: 'Study Guide' },
   { icon: 'file', kind: 'briefing', label: 'Briefing Doc' },
   { icon: 'comment-discussion', kind: 'faq', label: 'FAQ' },
-  { icon: 'history', kind: 'timeline', label: 'Timeline' }
+  { icon: 'history', kind: 'timeline', label: 'Timeline' },
+  { icon: 'list-tree', kind: 'mindmap', label: 'Mind map' }
 ]
 
 export const KIND_ICON: Record<ArtifactKind, string> = {

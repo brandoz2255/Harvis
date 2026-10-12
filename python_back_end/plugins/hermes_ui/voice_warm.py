@@ -99,16 +99,23 @@ def _held_long_enough(ps: dict, model: str, window: float) -> bool:
     return False
 
 
-def _bases() -> list[str]:
-    bases = [os.getenv("OLLAMA_URL", "http://ollama:11434"), os.getenv("DESKTOP_OLLAMA_URL", "")]
-    return [b.rstrip("/") for b in bases if b]
+async def _bases(model: str) -> list[str]:
+    """Every Ollama, the one chat would send ``model`` to first — so a model a bigger
+    machine is preferred for is not loaded onto this machine's card instead."""
+    from owui_compat import ollama_hosts
+
+    bases = [h.base_url for h in ollama_hosts.configured_hosts()]
+    if len(bases) > 1:
+        first, _host, _why = await ollama_hosts.route(model)
+        bases.sort(key=lambda b: b != first)
+    return bases
 
 
 async def warm(model: str) -> bool:
     """Load ``model`` and hold it for the keep-alive window. True when an Ollama took it."""
     window = _window_seconds(keep_alive())
     async with httpx.AsyncClient(timeout=180) as client:
-        for base in _bases():
+        for base in await _bases(model):
             try:
                 if window >= 0:
                     ps = await client.get(f"{base}/api/ps", timeout=5)
@@ -120,7 +127,7 @@ async def warm(model: str) -> bool:
                 continue
             if r.status_code == 200:
                 return True
-            # 404: the model lives on the other Ollama (model_proxy routes the same way).
+            # 404: the model lives on another Ollama.
             log.info("voice warm-up: %s answered %s for %s", base, r.status_code, model)
     return False
 

@@ -68,6 +68,8 @@ def _ip_is_public(ip_str: str) -> bool:
         or ip.is_reserved
         or ip.is_multicast
         or ip.is_unspecified
+        # Shared address space (100.64/10: tailnets, carrier NAT) is neither private nor global.
+        or not ip.is_global
     ):
         return False
     # IPv6 transition forms can smuggle a private IPv4 through an IPv6 literal.

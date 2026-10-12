@@ -12,7 +12,7 @@ import {
 import { $gateway } from '@/store/gateway'
 import { setMcpSetupRequest } from '@/store/mcp-setup'
 import { dispatchNativeNotification } from '@/store/native-notifications'
-import { receiveApprovalRequest, setSecretRequest, setSudoRequest } from '@/store/prompts'
+import { clearApprovalRequest, receiveApprovalRequest, setSecretRequest, setSudoRequest } from '@/store/prompts'
 import { requestScrollToBottom } from '@/store/thread-scroll'
 
 import type { GatewayEventContext } from './types'
@@ -263,6 +263,21 @@ export function handleInputRequestEvent(ctx: GatewayEventContext): boolean {
       sessionId,
       title: translateNow('notifications.native.approvalTitle')
     })
+
+    return true
+  }
+
+  if (event.type === 'approval.resolved') {
+    // The backend finished the request without a click in THIS window: it was
+    // answered from another tab or the workspace page, or the wait ran out and
+    // the call was denied (`timed_out`). Drop the prompt so a dead Approve
+    // button is not left on screen. The id match keeps a stale resolve from
+    // wiping a newer prompt in the same session.
+    const requestId = typeof payload?.request_id === 'string' ? payload.request_id : undefined
+
+    if (sessionId) {
+      clearApprovalRequest(sessionId, requestId)
+    }
 
     return true
   }

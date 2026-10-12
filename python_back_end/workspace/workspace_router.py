@@ -176,29 +176,17 @@ async def _installed_hermes_models() -> Optional[list[str]]:
     callers can fail-OPEN on a transient error rather than falsely rejecting a Hermes
     session. Returns ``[]`` when the probe succeeded but no Hermes model is installed.
     Never raises; never logs model contents."""
-    urls = [_LOCAL_OLLAMA_URL]
-    _desk = os.getenv("DESKTOP_OLLAMA_URL", "")
-    if _desk:
-        urls.append(_desk)
-    any_ok = False
-    found: list[str] = []
-    for base in urls:
-        if not base:
-            continue
-        b = base.rstrip("/")
-        tags_url = b.replace("/v1", "") + "/api/tags" if "/v1" in b else f"{b}/api/tags"
-        try:
-            async with _httpx.AsyncClient(timeout=_httpx.Timeout(5.0)) as client:
-                resp = await client.get(tags_url)
-            if resp.status_code == 200:
-                any_ok = True
-                for m in (resp.json() or {}).get("models", []) or []:
-                    name = m.get("name") or m.get("model") or ""
-                    if "hermes" in name.lower():
-                        found.append(name)
-        except Exception as exc:
-            logger.debug("hermes-model probe failed for %s: %s", b, exc)
-    return found if any_ok else None
+    from owui_compat import ollama_hosts
+
+    try:
+        hosts = await ollama_hosts.snapshot()   # every machine at once, cached 10 s
+    except Exception as exc:
+        logger.debug("hermes-model probe failed: %s", type(exc).__name__)
+        return None
+    up = [st for st in hosts.values() if st.reachable]
+    if not up:
+        return None
+    return [t for st in up for t in st.order if "hermes" in t.lower()]
 _NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
 
 
@@ -207,10 +195,10 @@ _NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
 async def _probe_local_ollama() -> dict:
     """Ping local Ollama and list available models.
 
-    Also merges in the desktop Ollama (`DESKTOP_OLLAMA_URL`) so workspace tasks
-    using the "local" provider can see — and select — models that only exist on
-    the GPU host. The actual routing is handled by `stream_local_ollama_workspace`,
-    which transparently sends desktop-only models to the desktop.
+    Also merges in every other configured Ollama machine (owui_compat.ollama_hosts)
+    so workspace tasks using the "local" provider can see — and select — models
+    that only exist on another machine. The actual routing is handled by
+    `stream_local_ollama_workspace`, which sends each model to the machine that has it.
     """
     async def _fetch_tags(base: str) -> list[str]:
         if not base:
@@ -221,39 +209,48 @@ async def _probe_local_ollama() -> dict:
             async with _httpx.AsyncClient(timeout=_httpx.Timeout(5.0)) as client:
                 resp = await client.get(tags_url)
             if resp.status_code == 200:
-                return [m.get("name") for m in resp.json().get("models", []) if m.get("name")]
+                from owui_compat.ollama_hosts import drop_cloud
+
+                return [m.get("name") for m in drop_cloud(resp.json().get("models", [])) if m.get("name")]
         except Exception as exc:
             logger.debug("Ollama probe failed for %s: %s", b, exc)
         return []
 
-    laptop_models = await _fetch_tags(_LOCAL_OLLAMA_URL)
-    desktop_url = os.getenv("DESKTOP_OLLAMA_URL", "")
-    desktop_models = await _fetch_tags(desktop_url) if desktop_url else []
+    from owui_compat import ollama_hosts
 
-    # Dedupe: laptop entries first; desktop-only entries appended.
-    seen: set[str] = set(laptop_models)
-    merged = list(laptop_models)
-    for name in desktop_models:
-        if name not in seen:
-            seen.add(name)
-            merged.append(name)
+    hosts = ollama_hosts.configured_hosts()
+    if not hosts:
+        hosts = [ollama_hosts.HostSpec(ollama_hosts.LOCAL, _LOCAL_OLLAMA_URL, "Ollama")]
+    per_host = await asyncio.gather(*(_fetch_tags(h.base_url) for h in hosts))
+    local_models = per_host[0]
+
+    # Dedupe: this machine's entries first; other machines' extra entries appended.
+    seen: set[str] = set(local_models)
+    merged = list(local_models)
+    others: list[str] = []
+    for h, names in zip(hosts[1:], per_host[1:]):
+        if names:
+            others.append(h.label)
+        for name in names:
+            if name not in seen:
+                seen.add(name)
+                merged.append(name)
 
     if merged:
         return {
             "id": "local",
-            "label": "Local Ollama" + (" + Desktop 5080" if desktop_models else ""),
+            "label": "Local Ollama" + "".join(f" + {lb}" for lb in others),
             "status": "online",
             "models": merged,
             "reason": None,
         }
-    if not laptop_models and not desktop_models:
-        # Both unreachable
+    if len(hosts) > 1:
         return {
             "id": "local",
             "label": "Local Ollama",
             "status": "offline",
             "models": [],
-            "reason": "Cannot reach laptop or desktop Ollama.",
+            "reason": "Cannot reach any configured Ollama machine.",
         }
     return {
         "id": "local",
@@ -338,7 +335,9 @@ async def _probe_cloud_ollama() -> dict:
             )
         if resp.status_code == 200:
             data = resp.json()
-            models = [m["name"] for m in data.get("models", [])]
+            from owui_compat.ollama_hosts import drop_cloud
+
+            models = [m["name"] for m in drop_cloud(data.get("models", []))]
             return {
                 "id": "cloud-ollama",
                 "label": "Cloud Ollama",
@@ -353,7 +352,7 @@ async def _probe_cloud_ollama() -> dict:
         "label": "Cloud Ollama",
         "status": "offline",
         "models": [],
-        "reason": f"Could not reach {_EXTERNAL_OLLAMA_URL}. Check EXTERNAL_OLLAMA_URL and network.",
+        "reason": "Could not reach the cloud Ollama. Check EXTERNAL_OLLAMA_URL and network.",
     }
 
 async def _get_kimi_credentials(pool, user_id: int) -> tuple[str, str]:
@@ -2855,6 +2854,15 @@ async def _start_workspace(
     return client
 
 
+def _require_build_space(user_id) -> None:
+    """Admins only on a shared server. The HTTP gate covers /api/workspace/, but
+    Discord calls the vibecode handlers and launch_workspace_internal directly."""
+    from plugins.exposure import build_space_allowed
+    from plugins.exposure.gate import MESSAGE
+    if not build_space_allowed(user_id):
+        raise HTTPException(status_code=403, detail=MESSAGE)
+
+
 async def launch_workspace_internal(
     *,
     request: Request,
@@ -2875,6 +2883,9 @@ async def launch_workspace_internal(
     Intended for trusted server-side integrations (e.g., Discord bot) that already
     run inside the backend process and can supply an owning user_id.
     """
+    # Messaging and cron reach Build Space here, past the HTTP gate; a shared
+    # server keeps it for admins on this path too (plugins.exposure).
+    _require_build_space(user_id)
     workspace_id = str(uuid.uuid4())[:8]
     session_id = session_id or f"ws-{workspace_id}"
     chat_history = chat_history or []
@@ -4235,6 +4246,7 @@ async def create_vibecode_session(
     clone of a RO attached repo. In-place (opt-in): a session branch ON the real repo
     (RW mount) — requires the RW allowlist, a CLEAN tree, and no other active in-place
     session on that repo. Turns share the one evolving working copy either way."""
+    _require_build_space((current_user or {}).get("id"))
     from .orchestration.isolation import (
         _run_git, create_or_attach_session_workspace, create_inplace_session_workspace,
         create_local_folder_session_workspace,
@@ -4681,6 +4693,7 @@ async def start_vibecode_turn(
     """Send a follow-up message: spawn a turn run bound to the session, operating on
     the session's PERSISTENT working clone. Returns {workspace_id} → the caller
     streams it via /api/workspace/stream/{id}."""
+    _require_build_space((current_user or {}).get("id"))
     pool = getattr(request.app.state, "pg_pool", None)
     uid = current_user["id"]
     sess = await _vibecode_session_row(pool, session_id, uid)
@@ -4911,6 +4924,7 @@ async def start_vibecode_review(
     Sets review_enabled=TRUE + review_status='pending'; the loop lands on 'agreed'
     (reviewer APPROVED) or 'needs_human' (round cap / error). Ownership-scoped.
     Sessions that never call this stay review_enabled=FALSE → zero behavior change."""
+    _require_build_space((current_user or {}).get("id"))
     pool = getattr(request.app.state, "pg_pool", None)
     uid = current_user["id"]
     sess = await _vibecode_session_row(pool, session_id, uid)

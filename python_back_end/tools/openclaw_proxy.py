@@ -54,15 +54,19 @@ _rate_state: Dict[str, Dict[str, List[float]]] = {}  # key -> {"search":[ts], "f
 _ALLOWLIST = [h.strip().lower() for h in os.getenv("OPENCLAW_WEB_ALLOWLIST", "").split(",") if h.strip()]
 _DENYLIST = [h.strip().lower() for h in os.getenv("OPENCLAW_WEB_DENYLIST", "").split(",") if h.strip()]
 
-_PRIVATE_NETWORKS = [
-    ipaddress.ip_network("10.0.0.0/8"),
-    ipaddress.ip_network("172.16.0.0/12"),
-    ipaddress.ip_network("192.168.0.0/16"),
-    ipaddress.ip_network("127.0.0.0/8"),
-    ipaddress.ip_network("169.254.0.0/16"),   # link-local
-    ipaddress.ip_network("::1/128"),
-    ipaddress.ip_network("fc00::/7"),          # ULA IPv6
-]
+def _blocked_reason(ip: str) -> Optional[str]:
+    """Why this address may not be fetched, or None. Anything not globally routable is out:
+    RFC 1918, loopback, link-local (cloud metadata), CGNAT 100.64/10 (the tailnet), ULA, reserved."""
+    try:
+        addr = ipaddress.ip_address(ip.split("%", 1)[0])
+    except ValueError:
+        return None
+    mapped = getattr(addr, "ipv4_mapped", None)
+    if mapped is not None:
+        addr = mapped
+    if addr.is_global and not addr.is_multicast:
+        return None
+    return "a private or internal address"
 
 
 def _ensure_resolved_addresses_public(hostname: str) -> None:
@@ -70,31 +74,40 @@ def _ensure_resolved_addresses_public(hostname: str) -> None:
     Block IP literals or hostnames whose DNS resolves to private/internal addresses
     (SSRF / DNS-rebinding protection).
     """
+    host = (hostname or "").strip("[]")
     try:
-        addr = ipaddress.ip_address(hostname)
-        for net in _PRIVATE_NETWORKS:
-            if addr in net:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Requests to private/internal address {hostname} are not allowed",
-                )
+        ipaddress.ip_address(host.split("%", 1)[0])
+        candidates = [host]
     except ValueError:
         try:
-            infos = socket.getaddrinfo(hostname, None)
-            for info in infos:
-                ip = info[4][0]
-                addr = ipaddress.ip_address(ip)
-                for net in _PRIVATE_NETWORKS:
-                    if addr in net:
-                        raise HTTPException(
-                            status_code=400,
-                            detail=f"DNS for {hostname} resolved to private/internal address {ip}",
-                        )
-        except HTTPException:
-            raise
-        except Exception:
-            # If DNS fails here, let the downstream fetch/browser surface errors.
-            pass
+            candidates = [info[4][0] for info in socket.getaddrinfo(host, None)]
+        except OSError:
+            # Unresolvable: the fetch itself fails with a clear error.
+            return
+    for ip in candidates:
+        reason = _blocked_reason(ip)
+        if reason:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Requests to {hostname} are not allowed: it resolves to {reason}",
+            )
+
+
+class _PublicOnlyTransport(httpx.AsyncBaseTransport):
+    """Re-checks every hop, so a public URL cannot redirect the backend onto pgsql,
+    the tailnet or the metadata address. httpx hands each redirect back here."""
+
+    def __init__(self) -> None:
+        self._inner = httpx.AsyncHTTPTransport()
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        if request.url.scheme not in ("http", "https"):
+            raise HTTPException(status_code=400, detail="Only http and https URLs can be fetched")
+        await asyncio.to_thread(_ensure_resolved_addresses_public, request.url.host)
+        return await self._inner.handle_async_request(request)
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
 
 
 openclaw_proxy_router = APIRouter(prefix="/api/tools", tags=["openclaw-tools"])
@@ -861,6 +874,8 @@ async def web_fetch(
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(20.0),
             follow_redirects=True,
+            max_redirects=5,
+            transport=_PublicOnlyTransport(),
             headers={"User-Agent": _USER_AGENT},
         ) as client:
             resp = await client.get(req.url)

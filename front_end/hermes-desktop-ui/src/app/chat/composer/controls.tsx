@@ -5,10 +5,11 @@ import { Codicon } from '@/components/ui/codicon'
 import { Tip, TipKeybindLabel } from '@/components/ui/tooltip'
 import { useI18n } from '@/i18n'
 import { triggerHaptic } from '@/lib/haptics'
-import { AudioLines, Ear, EarOff, iconSize, Layers3, Loader2, Square, Volume2, VolumeX } from '@/lib/icons'
+import { AudioLines, Ear, EarOff, Globe, iconSize, Layers3, Loader2, Square, Volume2, VolumeX } from '@/lib/icons'
 import { cn } from '@/lib/utils'
 import { $hudMode, closeHud, resetHudLayout } from '@/store/hud'
 import { $wakeWord, toggleWakeWord } from '@/store/wake-word'
+import { $webSearch, toggleWebSearch } from '@/store/web-search'
 
 import { ACTIVE_ICON_BTN, GHOST_ICON_BTN, PRIMARY_ICON_BTN } from './control-classes'
 import type { ConversationStatus } from './hooks/use-voice-conversation'
@@ -108,6 +109,7 @@ export function ComposerControls({
       {minimal ? null : (
         <>
           <ModelPill compact={compactModelPill} disabled={disabled} model={state.model} />
+          <WebSearchButton disabled={disabled} />
           {voiceControls}
         </>
       )}
@@ -318,6 +320,34 @@ function ConversationIndicator({
         return <span className="w-0.5 rounded-full bg-current" key={index} style={{ height: `${height * 100}%` }} />
       })}
     </span>
+  )
+}
+
+// The globe: when on, every message goes out with web_search so the turn
+// searches the web first (the same switch as `/web on|off`). Persisted per browser.
+function WebSearchButton({ disabled }: { disabled: boolean }) {
+  const { t } = useI18n()
+  const active = useStore($webSearch)
+  const label = active ? t.composer.webSearchOn : t.composer.webSearchOff
+
+  return (
+    <Tip label={label}>
+      <Button
+        aria-label={label}
+        aria-pressed={active}
+        className={cn(GHOST_ICON_BTN, 'p-0', active && ACTIVE_ICON_BTN)}
+        disabled={disabled}
+        onClick={() => {
+          triggerHaptic(active ? 'close' : 'open')
+          toggleWebSearch()
+        }}
+        size="icon"
+        type="button"
+        variant="ghost"
+      >
+        <Globe className={iconSize.sm} />
+      </Button>
+    </Tip>
   )
 }
 

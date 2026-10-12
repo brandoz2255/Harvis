@@ -10,6 +10,7 @@ from .messaging import router as messaging_router
 from .profiles import router as profiles_router
 from .rest import router as rest_router
 from .rest_capabilities import router as capabilities_router
+from .rest_git import router as git_router
 from .rest_harvis import router as harvis_router
 from .rest_mcp import router as mcp_router
 from .rest_providers import router as providers_router
@@ -37,5 +38,6 @@ router.include_router(harvis_router)
 router.include_router(providers_router)
 router.include_router(bots_router)
 router.include_router(voice_router)
+router.include_router(git_router)
 router.include_router(rest_router)
 router.include_router(ws_router)

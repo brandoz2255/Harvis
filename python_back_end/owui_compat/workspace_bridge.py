@@ -344,6 +344,11 @@ async def maybe_handle_workspace(
     mode = str(owui_body.get("harvis_mode") or "auto").strip().lower()
     if mode == "chat":
         return None  # user forced fast chat
+    # A shared server keeps Build Space for admins; everyone else gets a plain answer.
+    from owui_compat.authz import user_id_of
+    from plugins.exposure import build_space_allowed
+    if not build_space_allowed(user_id_of(user)):
+        return None
     # Launch-path signal: explicit pill picks (agent/orchestrate) are user-initiated;
     # 'auto'/absent goes through the auto-detector. Auto-detected launches run with
     # heavy tools withheld (no Tier-3 capability token — see below).

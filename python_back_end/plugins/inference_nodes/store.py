@@ -112,6 +112,14 @@ async def upsert_node(pool, spec, *, keep_token: bool, user_id=None) -> None:
         )
 
 
+async def find_base_url(pool, name: str) -> str | None:
+    """Base URL of the DB node called ``name``; None when there is none. Reads no token."""
+    await ensure_schema(pool)
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT base_url FROM inference_nodes WHERE name = $1", name)
+    return row["base_url"] if row else None
+
+
 async def delete_node(pool, name: str) -> bool:
     await ensure_schema(pool)
     async with pool.acquire() as conn:

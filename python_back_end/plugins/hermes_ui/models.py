@@ -50,7 +50,9 @@ async def thinking_models() -> frozenset[str]:
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 tags = (await client.get(f"{base}/api/tags")).json().get("models") or []
-                for tag in tags:
+                from owui_compat.ollama_hosts import drop_cloud
+
+                for tag in drop_cloud(tags):
                     name = str(tag.get("name") or "")
                     show = (await client.post(f"{base}/api/show", json={"model": name})).json()
                     if "thinking" in (show.get("capabilities") or []):

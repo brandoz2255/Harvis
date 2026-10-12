@@ -156,6 +156,8 @@ const COMPARED_FIELDS = [
   // Structured failure layer — drives the error card's title and action row,
   // so a change (e.g. resume replay attaching the descriptor) must repaint.
   'errorSurface',
+  // A stopped reply keeps its partial text; the flag only changes its footer, but it must repaint.
+  'interrupted',
   'hidden',
   'branchGroupId',
   'interim',

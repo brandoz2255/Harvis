@@ -8,6 +8,12 @@ message, and turns a transcript's references into the ``files`` list that
 """
 from __future__ import annotations
 
+import base64
+import binascii
+import json
+import os
+import re
+import uuid
 from typing import Any, Optional
 
 MAX_FILES_PER_MESSAGE = 20
@@ -99,3 +105,59 @@ def turn_files(msgs: list[dict]) -> list[dict]:
 def latest_turn_has_files(msgs: list[dict]) -> bool:
     last_user: Optional[dict] = next((m for m in reversed(msgs) if m.get("role") == "user"), None)
     return bool(last_user and last_user.get("attachments"))
+
+
+_REF_RE = re.compile(r"@file:`?([0-9a-fA-F-]{36})`?|/api/v1/files/([0-9a-fA-F-]{36})/content")
+_DATA_URL_RE = re.compile(r"^data:([^;,]*)(;base64)?,", re.IGNORECASE)
+MAX_STAGED_BYTES = 25 * 1024 * 1024
+
+
+def ids_in_text(text: str) -> list[str]:
+    """Upload ids a prompt names inline (`@file:<id>`, `@image:<origin>/api/v1/files/<id>/content`), which
+    image.attach / file.attach hand back when the composer stages a file through the socket."""
+    found: list[str] = []
+    for m in _REF_RE.finditer(text or ""):
+        fid = (m.group(1) or m.group(2)).lower()
+        if fid not in found:
+            found.append(fid)
+    return found
+
+
+def decode_payload(content_base64: str = "", data_url: str = "") -> tuple[bytes, str]:
+    """(bytes, content type) of a base64 string or a data: URL; AttachmentError when it is neither."""
+    content_type = ""
+    raw = content_base64 or ""
+    if data_url:
+        m = _DATA_URL_RE.match(data_url)
+        if not m or not m.group(2):
+            raise AttachmentError("the attachment is not base64 data")
+        content_type, raw = m.group(1), data_url[m.end():]
+    try:
+        data = base64.b64decode(raw, validate=False)
+    except (binascii.Error, ValueError) as exc:
+        raise AttachmentError("the attachment could not be decoded") from exc
+    if not data:
+        raise AttachmentError("the attachment is empty")
+    if len(data) > MAX_STAGED_BYTES:
+        raise AttachmentError(f"attachments sent through the socket are limited to {MAX_STAGED_BYTES >> 20} MB")
+    return data, content_type
+
+
+async def stage(pool, user_id: int, name: str, data: bytes, content_type: str = "") -> dict:
+    """Store bytes as one of this user's uploads (the same table and folder POST /api/v1/files/ writes)."""
+    from owui_compat import upload_store
+
+    files_dir = os.getenv("OWUI_FILES_DIR", "/app/owui_files")
+    os.makedirs(files_dir, exist_ok=True)
+    fid = str(uuid.uuid4())
+    filename = upload_store.display_name(os.path.basename(name or ""), fid)
+    content_type = content_type or "application/octet-stream"
+    disk_path = os.path.join(files_dir, f"{fid}{upload_store.disk_suffix(filename)}")
+    with open(disk_path, "wb") as f:
+        f.write(data)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO owui_files (id, user_id, filename, path, content_type, size, meta) "
+            "VALUES ($1,$2,$3,$4,$5,$6,$7)",
+            fid, user_id, filename, disk_path, content_type, len(data), json.dumps({}))
+    return {"type": "file", "id": fid, "name": filename, "content_type": content_type, "size": len(data)}

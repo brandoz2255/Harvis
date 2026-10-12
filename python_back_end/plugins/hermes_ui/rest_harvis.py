@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from auth_optimized import get_current_user_optimized
 
-from . import learn, providers, sessions, store, voice_route
+from . import learn, ops, providers, sessions, store, voice_route
 from .rest import _uid
 
 log = logging.getLogger("hermes_ui.harvis")
@@ -173,3 +173,35 @@ async def voice_navigate(request: Request, user=Depends(get_current_user_optimiz
         raise HTTPException(400, "text and pages are required")
     route = await voice_route.pick_page(text, pages)
     return {"page": route.choice if route else None, "confidence": route.confidence if route else None}
+
+
+# ---- admin diagnostics: Logs pane and "Run doctor" -------------------------------
+
+def _require_admin(user) -> None:
+    from owui_compat.authz import is_admin
+    if not is_admin(user):
+        raise HTTPException(403, "Only an administrator can read server diagnostics.")
+
+
+@router.get("/logs")
+async def server_logs(file: str = "agent", lines: int = 200, level: str = "", search: str = "",
+                      component: str = "", user=Depends(get_current_user_optimized)):
+    """Redacted tail of this backend's own log lines. Admin only."""
+    _require_admin(user)
+    ops.install()
+    return {"file": "backend", "lines": ops.tail(lines, level, search, component)}
+
+
+@router.post("/ops/doctor")
+async def ops_doctor(request: Request, user=Depends(get_current_user_optimized)):
+    _require_admin(user)
+    return await ops.run_doctor(request.app.state.pg_pool)
+
+
+@router.get("/actions/{name}/status")
+async def action_status(name: str, lines: int = 200, user=Depends(get_current_user_optimized)):
+    _require_admin(user)
+    row = ops.action_status(name, lines)
+    if row is None:
+        raise HTTPException(404, "no such action")
+    return row

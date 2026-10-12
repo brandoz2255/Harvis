@@ -68,6 +68,14 @@ def _audio_config() -> dict:
     }
 
 
+def _setup_code_required(onboarding) -> bool:
+    if os.getenv("HARVIS_SETUP_CODE", "").strip():
+        return True
+    from plugins.exposure.mode import shared
+
+    return bool(onboarding) and shared()
+
+
 def build_config(
     onboarding: bool = False,
     signup_enabled: bool | None = None,
@@ -119,10 +127,10 @@ def build_config(
                 if signup_enabled is not None
                 else _env_bool("HARVIS_OWUI_ENABLE_SIGNUP", True)
             ),
-            # Mirrors main.py's first-signup gate exactly: the claim asks for a
-            # code only when the operator set one. Off by default, so the
-            # signup form shows no code field on an ordinary install.
-            "setup_code_required": bool(os.getenv("HARVIS_SETUP_CODE", "").strip()),
+            # Mirrors main.py's first-signup gate exactly: an unclaimed shared
+            # server asks for the host's 6-digit code, and so does any server
+            # whose operator set HARVIS_SETUP_CODE. A laptop asks for nothing.
+            "setup_code_required": _setup_code_required(onboarding),
             "enable_login_form": True,
             # OPTION A: HTTP-SSE chat, no Socket.IO. Do not flip without also
             # implementing an OWUI-compatible Socket.IO server (owui_compat).

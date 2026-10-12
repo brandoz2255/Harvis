@@ -185,16 +185,32 @@ else
     say "    docker compose up -d nginx"
 fi
 
+# Ports 9000/9443 leave this machine only when .env binds them to every address
+# (./install.sh --expose lan); compose defaults them to 127.0.0.1.
+PUBLIC_BIND="$( { grep '^HARVIS_BIND_ADDR_PUBLIC=' .env 2>/dev/null || true; } | tail -1 | cut -d= -f2- | tr -d "\"' \r")"
+EXPOSURE="$( { grep '^HARVIS_EXPOSURE=' .env 2>/dev/null || true; } | tail -1 | cut -d= -f2- | tr -d "\"' \r")"
+
 say ""
 say "Reach Harvis at:"
-for i in "${IPS[@]}"; do
-    [ "$i" = "127.0.0.1" ] && continue
-    say "    https://$i:$HTTPS_PORT"
-done
+if [ "$PUBLIC_BIND" = "0.0.0.0" ]; then
+    for i in "${IPS[@]}"; do
+        [ "$i" = "127.0.0.1" ] && continue
+        say "    https://$i:$HTTPS_PORT"
+    done
+fi
 say "    https://localhost:$HTTPS_PORT"
 say ""
 say "The first visit shows a certificate warning because the certificate signed"
-say "itself. Click Advanced, then Proceed. After that the microphone will work"
-say "from other devices, which it cannot over plain http."
+say "itself. Click Advanced, then Proceed."
 say ""
-say "Plain http on port 9000 keeps working. Nothing was taken away."
+if [ "$PUBLIC_BIND" = "0.0.0.0" ]; then
+    say "After that the microphone works from other devices, which it cannot over"
+    say "plain http. Plain http on port 9000 keeps working. Nothing was taken away."
+elif [ "$EXPOSURE" = "tunnel" ]; then
+    say "Visitors from the internet already get HTTPS from Cloudflare; this certificate"
+    say "only matters on this computer."
+else
+    say "Harvis answers on this computer only, so other devices cannot reach it yet."
+    say "Share it on your network with ./install.sh --expose lan; the certificate"
+    say "already covers this machine's network addresses."
+fi

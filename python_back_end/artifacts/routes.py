@@ -277,7 +277,11 @@ async def get_session_artifacts(
 @artifact_router.post("/cleanup")
 async def cleanup_expired_artifacts(request: Request):
     """Clean up expired artifacts (admin endpoint)"""
-    # This should have admin authentication in production
+    from owui_compat.authz import is_admin
+
+    user = await get_current_user_from_request(request)
+    if not is_admin(user):
+        raise HTTPException(status_code=403, detail="Only an administrator can clean up artifacts")
     pool = getattr(request.app.state, "pg_pool", None)
 
     if not pool:

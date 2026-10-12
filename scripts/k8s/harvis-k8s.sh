@@ -19,6 +19,9 @@
 #   HARVIS_K8S_OLLAMA        1 (default) run Ollama in the cluster; 0 = keep HARVIS_LLM_BASE_URL
 #   HARVIS_OLLAMA_IMAGE      default ollama/ollama:0.20.2
 #   HARVIS_LAN_MODELS_PORT   default 11434 (11435 when 11434 is taken); 0 = don't share models
+#   HARVIS_K8S_BUILD_SPACE   1 = give the backend the Docker socket (Build Space). Default off:
+#                            with it, a taken-over backend controls this machine
+#   HARVIS_K8S_REUSE_HOST_OLLAMA  0 = do not offer the Ollama already on this machine to Harvis
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HERE="$REPO/scripts/k8s"
@@ -30,10 +33,21 @@ STATE_DIR=/var/lib/harvis/k8s
 LAN_PORT=0
 SUDO=""
 [ "$(id -u)" -eq 0 ] || SUDO="sudo"
+TUNNEL=0
+BUILD_SPACE=0
 kc() { $SUDO k3s kubectl "$@"; }
+# The last assignment in .env wins, as it does for compose.
+env_get() { grep "^$1=" .env 2>/dev/null | tail -1 | cut -d= -f2- | tr -d "\"' \r" || true; }
 say() { printf '%s\n' "$*"; }
 die() { printf '✗ %s\n' "$*" >&2; exit 1; }
+# Like env_get, but keeps spaces and quotes-inside (a label such as "Mac Studio").
+env_get_raw() { grep "^$1=" .env 2>/dev/null | tail -1 | cut -d= -f2- | sed -e 's/\r$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\\(.*\\)'\$/\\1/" || true; }
 port_busy() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+k8s_mode_on() { [ "$($SUDO cat "$STATE_DIR/mode" 2>/dev/null || true)" = "k8s" ]; }
+# shellcheck source=k8s-firewall.sh
+. "$HERE/k8s-firewall.sh"
+# shellcheck source=k8s-host-ollama.sh
+. "$HERE/k8s-host-ollama.sh"
 
 # ── k3s ─────────────────────────────────────────────────────────────────────
 k3s_installed() { command -v k3s >/dev/null 2>&1 && [ -f /etc/rancher/k3s/k3s.yaml ]; }
@@ -231,17 +245,47 @@ render() { # $1 node  $2 node ip  $3 dns ip
   local llm_env=() gen_args=()
   if [ "${HARVIS_K8S_OLLAMA:-1}" = "1" ]; then
     llm_env=(HARVIS_LLM_BASE_URL=http://ollama:11434)
-    gen_args+=(--ollama-image "$OLLAMA_IMAGE")
+    gen_args+=(--ollama-image "$OLLAMA_IMAGE"
+      --node-memory "$(kc get node "$1" -o jsonpath='{.status.allocatable.memory}')"
+      --node-cpu "$(kc get node "$1" -o jsonpath='{.status.allocatable.cpu}')")
     if [ "$LAN_PORT" != "0" ]; then
       gen_args+=(--lan-models-port "$LAN_PORT" --lan-models-url "http://$2:$LAN_PORT")
     fi
   fi
   [ "$GPU" = "1" ] && gen_args+=(--gpu)
+  [ "$BUILD_SPACE" = "1" ] && gen_args+=(--build-space)
+  if [ -n "$HOST_OLLAMA_ENTRY" ]; then
+    llm_env+=(HARVIS_OLLAMA_HOSTS="$(hosts_with_entry "$(existing_hosts)" "$HOST_OLLAMA_ENTRY")")
+  fi
+  # Comma-separated private ranges the agent browser may still open (e.g. a lab wiki).
+  local cidr
+  for cidr in $(env_get HARVIS_BROWSER_ALLOW_CIDRS | tr ',' ' '); do gen_args+=(--browser-allow-cidr "$cidr"); done
+  if [ "$TUNNEL" = "1" ]; then
+    # cloudflared comes from compose's tunnel profile. --profile would replace
+    # COMPOSE_PROFILES, so the profile is added to it instead. Under the network
+    # lock .env keeps the profile off and the restart policy at "no" (Docker must
+    # not start it); here it is rendered with 0 copies and the guard scales it.
+    local profiles="${COMPOSE_PROFILES-$(env_get COMPOSE_PROFILES)}"
+    case ",$profiles," in *,tunnel,*) ;; *) profiles="${profiles:+$profiles,}tunnel" ;; esac
+    llm_env+=(COMPOSE_PROFILES="$profiles" HARVIS_TUNNEL_RESTART=unless-stopped)
+    if [ -n "$(env_get HARVIS_TUNNEL_NETWORKS)" ]; then gen_args+=(--tunnel-replicas 0); fi
+  fi
   env "${llm_env[@]+"${llm_env[@]}"}" docker compose config --format json \
     | python3 "$HERE/compose_to_k8s.py" --namespace "$NS" --node-name "$1" --node-ip "$2" \
         --dns-ip "$3" --repo "$REPO" \
         --volume-root "$(docker info -f '{{.DockerRootDir}}')/volumes" \
         ${IMAGE_IDS_FILE:+--image-ids "$IMAGE_IDS_FILE"} "${gen_args[@]}"
+}
+
+# The Docker socket is host root for whoever controls the backend, so it is opt-in here.
+choose_build_space() {
+  BUILD_SPACE=0
+  if [ "${HARVIS_K8S_BUILD_SPACE-$(env_get HARVIS_K8S_BUILD_SPACE)}" = "1" ]; then
+    BUILD_SPACE=1
+    say "⚠ Build Space is ON for Kubernetes (HARVIS_K8S_BUILD_SPACE=1): the backend can control this machine through Docker."
+  else
+    say "• Build Space is off on Kubernetes; to turn it on set HARVIS_K8S_BUILD_SPACE=1 in .env and re-run ./install.sh --k8s (on means the backend can control this machine)."
+  fi
 }
 
 pick_lan_port() {
@@ -264,6 +308,7 @@ pick_lan_port() {
 wait_rollout() {
   local d failed=""
   for d in $(kc -n "$NS" get deploy -o jsonpath='{.items[*].metadata.name}'); do
+    [ "$d" = cloudflared ] && continue # report_tunnel: Harvis is up without it
     if kc -n "$NS" rollout status "deploy/$d" --timeout=600s >/dev/null 2>&1; then printf '  ✓ %-16s ready\n' "$d"
     else printf '  ✗ %-16s not ready\n' "$d"; failed="$failed $d"; fi
   done
@@ -290,8 +335,38 @@ sync_db_password() {
   say "⚠ Could not confirm the database password; if sign-in fails, run ./install.sh --k8s again"
 }
 
+report_tunnel() {
+  [ "$TUNNEL" = "1" ] || return 0
+  local verdict
+  if [ -n "$(env_get HARVIS_TUNNEL_NETWORKS)" ] && ! verdict="$(bash scripts/tunnel-guard.sh check 2>&1)"; then
+    say "  • cloudflared      off here — ${verdict}; it starts by itself on $(env_get HARVIS_TUNNEL_NETWORKS)"
+    return 0
+  fi
+  # Ready means a live connection to Cloudflare (its /ready check).
+  # A rollout of 0 copies also "succeeds", so a ready copy is what counts.
+  if kc -n "$NS" rollout status deploy/cloudflared --timeout=120s >/dev/null 2>&1 &&
+    [ "$(kc -n "$NS" get deploy cloudflared -o jsonpath='{.status.readyReplicas}' 2>/dev/null)" -ge 1 ] 2>/dev/null; then
+    say "  ✓ cloudflared      connected to Cloudflare"
+  else
+    say "  ✗ cloudflared      not connected — see: sudo k3s kubectl -n $NS logs deploy/cloudflared"
+  fi
+}
+
 cmd_up() {
   command -v docker >/dev/null || die "Docker is required (Harvis builds its images and runs workspace sandboxes with it)"
+  # "local" binds port 9000 to 127.0.0.1, which Kubernetes never publishes, and
+  # tunnel-only has no LAN listener to put in front of a LoadBalancer.
+  local exposure
+  exposure="$(env_get HARVIS_EXPOSURE | tr "[:upper:]" "[:lower:]")"
+  case "$exposure" in
+    local) die "HARVIS_EXPOSURE=local works with plain Docker only. Run ./install.sh --k8s --expose lan to switch it." ;;
+    tunnel) die "HARVIS_EXPOSURE=tunnel works with plain Docker only. Run ./install.sh --k8s --expose lan+tunnel for the LAN and the tunnel together." ;;
+    lan+tunnel) TUNNEL=1 ;;
+    "") say "⚠ HARVIS_EXPOSURE is not set, so the first sign-up becomes admin. ./install.sh --k8s sets the lan rules." ;;
+  esac
+  # Compose binds port 9000 to 127.0.0.1 unless told otherwise, and Kubernetes
+  # publishes it only when it is bound to every address. The shell wins over .env.
+  export HARVIS_BIND_ADDR_PUBLIC=0.0.0.0
   install_k3s
   wait_node_ready
   setup_gpu
@@ -301,17 +376,37 @@ cmd_up() {
   node="$(server_node)"; ip="$(node_ip "$node")"
   dns="$(kc -n kube-system get svc kube-dns -o jsonpath='{.spec.clusterIP}')"
   pick_lan_port
+  detect_host_ollama "$ip"
+  choose_build_space
+  # A Docker-mode guard would keep restarting a container that no longer exists;
+  # the Kubernetes one is installed fresh below so it runs this checkout's copy.
+  if bash scripts/tunnel-guard.sh installed 2>/dev/null; then bash scripts/tunnel-guard.sh uninstall >/dev/null || true; fi
   docker_hand_over
   $SUDO mkdir -p /var/lib/harvis/ollama
   say "Applying Harvis to the cluster (namespace $NS) ..."
   render "$node" "$ip" "$dns" | kc apply -f - >/dev/null
+  # From here Kubernetes holds the ports, ready or not. Marked now, not after the
+  # rollout: a run that failed on one pod left no mark, and the next ./install.sh
+  # --k8s then found its own ports "taken" by the cluster it had just made.
+  printf 'k8s\n' | $SUDO tee "$STATE_DIR/mode" >/dev/null
+  apply_kubelet_firewall
+  if [ "$TUNNEL" = "1" ]; then
+    if [ -n "$(env_get HARVIS_TUNNEL_NETWORKS)" ] && ! bash scripts/tunnel-guard.sh install; then
+      say "  ⚠ The network lock did not start, so the tunnel stays at 0 copies until it does."
+    fi
+  else
+    # apply never removes objects, so a tunnel from an earlier lan+tunnel run would stay.
+    kc -n "$NS" delete deploy,secret,svc,networkpolicy -l app.kubernetes.io/name=cloudflared \
+      --ignore-not-found >/dev/null
+  fi
   rm -f "${IMAGE_IDS_FILE:-}"
   sync_db_password
   say "Waiting for Harvis to start in Kubernetes:"
   wait_rollout
-  printf 'k8s\n' | $SUDO tee "$STATE_DIR/mode" >/dev/null
+  report_tunnel
   say ""
   say "✓ Harvis runs on Kubernetes → http://$ip:9000  (and http://localhost:9000)"
+  if [ "$TUNNEL" = "1" ]; then say "  From the internet: your Cloudflare hostname, behind Cloudflare Access"; fi
   if [ "${HARVIS_K8S_OLLAMA:-1}" = "1" ] && [ "$LAN_PORT" != "0" ]; then
     say "  Models shared on your network at http://$ip:$LAN_PORT (chat and model listing only)"
     say "  Add a model:  sudo k3s kubectl -n $NS exec deploy/ollama -- ollama pull gemma4:e2b"
@@ -320,12 +415,16 @@ cmd_up() {
 
 cmd_status() {
   k3s_installed || { say "Kubernetes mode is off (k3s is not installed). Harvis runs on Docker."; return 0; }
+  if k8s_mode_on; then apply_kubelet_firewall quiet; fi
   say "Nodes:"; kc get nodes -o wide
   say ""; say "Harvis pods ($NS):"; kc -n "$NS" get pods -o wide 2>/dev/null || say "  none — Kubernetes mode is off"
   say ""; say "Addresses:"; kc -n "$NS" get svc --field-selector spec.type=LoadBalancer 2>/dev/null || true
 }
 
 cmd_off() {
+  remove_kubelet_firewall
+  # Docker mode installs its own guard, a user service, on the way back.
+  if bash scripts/tunnel-guard.sh installed 2>/dev/null; then bash scripts/tunnel-guard.sh uninstall >/dev/null || true; fi
   if k3s_installed && kc get ns "$NS" >/dev/null 2>&1; then
     say "Removing Harvis from Kubernetes (data stays on this machine) ..."
     kc delete ns "$NS" --wait=true --timeout=300s >/dev/null
@@ -349,6 +448,7 @@ cmd_uninstall() {
 
 cmd_join_command() {
   k3s_installed || die "Kubernetes mode is not on here — run ./install.sh --k8s first"
+  if k8s_mode_on; then apply_kubelet_firewall quiet; fi
   local ip token
   ip="$(node_ip "$(server_node)")"
   token="$($SUDO cat /var/lib/rancher/k3s/server/node-token)"
@@ -372,6 +472,8 @@ cmd_join() {
   say "✓ This machine joined. Check from the server with: ./install.sh --k8s-status"
 }
 
+# Sourced (by the tests) only to get the functions.
+[ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 case "${1:-}" in
   up) cmd_up ;;
   status) cmd_status ;;
@@ -379,5 +481,5 @@ case "${1:-}" in
   uninstall) cmd_uninstall ;;
   join-command) cmd_join_command ;;
   join) shift; cmd_join "$@" ;;
-  *) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+  *) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

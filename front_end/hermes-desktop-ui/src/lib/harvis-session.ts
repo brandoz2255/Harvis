@@ -240,6 +240,11 @@ export async function signUp(input: {
       throw new AuthError('That setup code is not right.', res.status, 'setupCode')
     }
 
+    // The 6-digit first-admin code: the server's words already say what to do.
+    if (/first-admin code|wrong codes/i.test(detail)) {
+      throw new AuthError(detail, res.status, 'setupCode')
+    }
+
     if (/disabled/i.test(detail)) {
       throw new AuthError('This Harvis is not taking new accounts. Ask its admin to add you.', res.status)
     }

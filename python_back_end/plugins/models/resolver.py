@@ -79,8 +79,10 @@ async def list_ollama_models(*, ollama_url: Optional[str] = None) -> list[str]:
         logger.warning("model_resolver: list_ollama_models failed against %s", base)
         return []
 
+    from owui_compat.ollama_hosts import drop_cloud
+
     names: list[str] = []
-    for entry in data.get("models") or []:
+    for entry in drop_cloud(data.get("models") or []):
         name = (entry.get("name") or "").strip()
         if name and name not in _NON_MODEL_TAGS:
             names.append(name)

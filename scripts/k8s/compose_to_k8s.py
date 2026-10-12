@@ -22,6 +22,8 @@ Mapping, in short:
                           services without one get the probe k8s_extras.DEFAULT_PROBES names
   deploy.resources     -> resources.limits (limits) and resources.requests (reservations)
   compose networks     -> NetworkPolicies (see k8s_extras.network_policies)
+  docker.sock bind     -> dropped unless --build-space; host /tmp (rw) -> emptyDir
+                          (see k8s_build_space)
 
 Standard library only: this runs on a machine that has nothing but python3.
 """
@@ -32,6 +34,7 @@ import json
 import re
 import sys
 
+import k8s_build_space as build_space
 import k8s_extras as extras
 
 LABEL_APP = "app.kubernetes.io/name"
@@ -110,12 +113,12 @@ def is_one_shot(svc):
 
 class Generator:
     def __init__(self, compose, opts):
-        self.c = compose
+        self.c = build_space.restrict(compose, opts.build_space)
         self.o = opts
         self.project = compose.get("name") or "harvis"
         self.ns = opts.namespace
-        self.services = compose.get("services", {})
-        self.networks = compose.get("networks", {}) or {}
+        self.services = self.c.get("services", {})
+        self.networks = self.c.get("networks", {}) or {}
         self.objects = []
         self.busybox = self._find_busybox()
         self.image_ids = {}
@@ -167,6 +170,11 @@ class Generator:
             elif vtype == "tmpfs":
                 vname = f"tmpfs-{i}"
                 vols.append({"name": vname, "emptyDir": {"medium": "Memory"}})
+                mounts.append({"name": vname, "mountPath": target})
+                continue
+            elif vtype == "emptydir":  # made by build_space.restrict
+                vname = f"scratch-{dns_name(name)}-{i}"[:63].rstrip("-")
+                vols.append({"name": vname, "emptyDir": {}})
                 mounts.append({"name": vname, "mountPath": target})
                 continue
             else:
@@ -443,14 +451,25 @@ def parse_args(argv):
                         "or by handing it /dev/dri directly (privileged)")
     p.add_argument("--ollama-image", default="", help="run Ollama in the cluster with this image")
     p.add_argument("--ollama-dir", default="/var/lib/harvis/ollama")
-    # Defaults sized for a 14 GB / 8 core box; harvis-k8s.sh scales them from the node.
+    # Ceilings sized for a 14 GB / 8 core box. With --node-memory/--node-cpu (the
+    # node's allocatable, passed by harvis-k8s.sh) they shrink to what the rest of
+    # Harvis leaves free, or a 10 GB machine never schedules the model server.
     p.add_argument("--ollama-memory-request", default="6Gi")
     p.add_argument("--ollama-memory-limit", default="10Gi")
     p.add_argument("--ollama-cpu-request", default="2")
+    p.add_argument("--node-memory", default="", help="node allocatable memory, e.g. 10161480Ki")
+    p.add_argument("--node-cpu", default="", help="node allocatable CPU, e.g. 4 or 3500m")
     p.add_argument("--backup-dir", default="/var/lib/harvis/backups", help="where the nightly pg_dump lands")
     p.add_argument("--backup-schedule", default="0 3 * * *", help="cron schedule of the database backup")
     p.add_argument("--lan-models-port", type=int, default=0, help="0 = do not share models on the LAN")
     p.add_argument("--lan-models-url", default="")
+    p.add_argument("--tunnel-replicas", type=int, default=2,
+                   help="cloudflared copies; 0 under the network lock, which scales it itself")
+    p.add_argument("--browser-allow-cidr", action="append", default=[],
+                   help="a private range the agent browser may still open (repeatable)")
+    p.add_argument("--build-space", action="store_true",
+                   help="keep the backend's /var/run/docker.sock mount (Build Space on): "
+                        "a taken-over backend then controls this machine")
     p.add_argument("--image-ids", default="", help="JSON {image: content id}; a changed id restarts its pods")
     return p.parse_args(argv)
 

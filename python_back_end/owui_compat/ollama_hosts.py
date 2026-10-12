@@ -1,11 +1,25 @@
 """Which Ollama host actually has a model, right now — and which host is down.
 
-Harvis runs inference on more than one box. The laptop's own Ollama (``OLLAMA_URL``)
-is always there; the RTX 5080 rig (``DESKTOP_OLLAMA_URL``) is there when its network
-is up, and it holds the models the laptop's 8 GB card cannot run — gemma4:12b lives
-only on the rig. Every lane that asks "is this model installed?" against a single URL
-gets a wrong answer half the time, and the wrong answer is the dangerous one: it says
-*missing* when the truth is *on the other box*.
+Harvis can run inference on more than one machine. This install's own Ollama
+(``OLLAMA_URL``) is always first. Any number of other machines can be added — a
+desktop, a Mac Studio, a lab GPU box, anything that runs Ollama — and they hold the
+models this machine cannot. Every lane that asks "is this model installed?" against a
+single URL gets a wrong answer half the time, and the wrong answer is the dangerous
+one: it says *missing* when the truth is *on the other box*.
+
+Where the other machines come from:
+
+* ``HARVIS_OLLAMA_HOSTS`` — ``name=url|label=…|prefer=…`` entries separated by commas,
+  or a JSON array of objects with the same keys. ``label`` is what users see in the
+  model picker ("Mac Studio"); ``prefer`` lists model-name prefixes, joined with ``+``,
+  that should run on that machine even when this one has them too (a model too big for
+  this machine's card). Without ``prefer``, this machine always wins a model it has.
+* ``DESKTOP_OLLAMA_URL`` — the older single-extra-host setting, still honoured as a
+  host named ``desktop``. ``DESKTOP_OLLAMA_LABEL`` names it, and
+  ``HARVIS_DESKTOP_PREFERRED_MODELS`` (default ``gemma4``) is its ``prefer`` list.
+
+Labels never include the URL: they reach every user's model picker, and a LAN address
+there is a map of the operator's network.
 
 Two things this module refuses to conflate, because collapsing them is what made the
 old behaviour dishonest:
@@ -27,10 +41,13 @@ an OWUI concept. ``main.py`` and the CAD lane both import it.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 import httpx
 
@@ -41,14 +58,77 @@ logger = logging.getLogger(__name__)
 PROBE_TTL_S = float(os.getenv("HARVIS_OLLAMA_PROBE_TTL_S", "10"))
 PROBE_TIMEOUT_S = float(os.getenv("HARVIS_OLLAMA_PROBE_TIMEOUT_S", "4"))
 
-# Same env and same default as workspace/model_proxy.py, so a model does not route to
-# the rig for chat and to the laptop for CAD. gemma4 is on the list because its 9 GiB
-# image spills off the laptop's 8 GB card into CPU and becomes unusably slow.
+# The name of this install's own Ollama. Callers compare against it rather than
+# assuming what kind of machine Harvis runs on.
+LOCAL = "local"
+HOSTS_ENV = "HARVIS_OLLAMA_HOSTS"
+
+# The legacy DESKTOP_OLLAMA_URL host's prefer list. gemma4 was the default because its
+# 9 GiB image spills off an 8 GB card into CPU and becomes unusably slow.
 DESKTOP_PREFERRED_PREFIXES = tuple(
     p.strip().lower()
     for p in os.getenv("HARVIS_DESKTOP_PREFERRED_MODELS", "gemma4").split(",")
     if p.strip()
 )
+
+# ── Ollama cloud models ─────────────────────────────────────────────────────
+# Ollama lists ``kimi-k2.6:cloud`` / ``gpt-oss:120b-cloud`` next to local models, but a
+# chat with one forwards the prompt to ollama.com. Harvis is local-first, so they are
+# left out of every model list and refused as chat targets unless the operator opts in.
+CLOUD_MODELS_ENV = "HARVIS_ALLOW_CLOUD_MODELS"
+
+
+def cloud_models_allowed() -> bool:
+    """True when the operator set ``HARVIS_ALLOW_CLOUD_MODELS=1`` (also true/yes/on)."""
+    return (os.getenv(CLOUD_MODELS_ENV) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def is_cloud_model(name, entry: dict | None = None) -> bool:
+    """Whether an Ollama tag runs on ollama.com rather than on the machine.
+
+    Matches a ``:cloud`` tag and any tag ending ``-cloud`` (``qwen3-coder:480b-cloud``);
+    ``entry`` is the raw ``/api/tags`` item, whose ``remote_host`` is set for the same models.
+    """
+    n = (name or "").strip().lower()
+    if ":" in n.rsplit("/", 1)[-1]:
+        tag = n.rsplit(":", 1)[-1]
+        if tag == "cloud" or tag.endswith("-cloud"):
+            return True
+    return bool(isinstance(entry, dict) and entry.get("remote_host"))
+
+
+def is_hidden_cloud_model(name, entry: dict | None = None) -> bool:
+    """``is_cloud_model`` with the opt-in applied: True means leave it out / refuse it."""
+    return is_cloud_model(name, entry) and not cloud_models_allowed()
+
+
+def cloud_refusal(name) -> str | None:
+    """The plain-English reason a chat naming ``name`` must be refused, or None to allow it."""
+    if not is_hidden_cloud_model(name):
+        return None
+    return (
+        f"Model '{name}' is an Ollama cloud model: it would send your prompt to ollama.com. "
+        f"Harvis only runs models on your own machines. Pick a local model, or set "
+        f"{CLOUD_MODELS_ENV}=1 to allow cloud models."
+    )
+
+
+def drop_cloud(items):
+    """``items`` without hidden cloud models. Items are tag strings or raw ``/api/tags``
+    dicts (``name`` / ``model`` keys); anything else passes through untouched."""
+    out = []
+    for it in items or []:
+        if isinstance(it, str):
+            if is_hidden_cloud_model(it):
+                continue
+        elif isinstance(it, dict):
+            if is_hidden_cloud_model(it.get("name") or it.get("model") or "", it):
+                continue
+        out.append(it)
+    return out
+
+
+_NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 
 # What a model was TRAINED for and what it is SERVED with are different numbers, and
 # only the second one is true of a running request. Every chat model installed here
@@ -74,11 +154,13 @@ SHOW_TIMEOUT_S = float(os.getenv("HARVIS_OLLAMA_SHOW_TIMEOUT_S", "8"))
 class HostState:
     """What is known about one Ollama host as of the last probe."""
 
-    name: str                      # "laptop" | "desktop"
+    name: str                      # LOCAL, or the name an operator gave the machine
     base_url: str
-    label: str                     # what a user should see: "Ollama", "Desktop 5080"
+    label: str                     # what a user should see: "Ollama", "Mac Studio"
+    prefer: tuple[str, ...] = ()   # model-name prefixes this host takes even when LOCAL has them
     reachable: bool = False
     tags: set[str] = field(default_factory=set)       # empty when unreachable
+    order: list[str] = field(default_factory=list)    # tags in the order Ollama listed them
     sizes: dict[str, int] = field(default_factory=dict)   # tag → bytes on disk, when reported
     ctx: dict[str, int] = field(default_factory=dict)     # tag → usable context window, tokens
     last_good_tags: set[str] = field(default_factory=set)   # survives an outage
@@ -86,7 +168,27 @@ class HostState:
     error: str | None = None       # short, safe: an exception class name or an HTTP code
 
     def has(self, model: str) -> bool:
-        return bool(model) and model in self.tags
+        want = _tag(model)
+        return bool(want) and any(_tag(t) == want for t in self.tags)
+
+    def prefers(self, model: str) -> bool:
+        name = (model or "").lower()
+        return bool(name) and any(name.startswith(p) for p in self.prefer)
+
+
+class HostSpec(NamedTuple):
+    name: str
+    base_url: str
+    label: str
+    prefer: tuple[str, ...] = ()
+
+
+def _tag(name: str) -> str:
+    """Ollama serves ``qwen3`` as ``qwen3:latest`` and ignores case; compare names that way."""
+    n = (name or "").strip().lower()
+    if n and ":" not in n.rsplit("/", 1)[-1]:
+        n += ":latest"
+    return n
 
 
 def _clean(url: str) -> str:
@@ -95,18 +197,94 @@ def _clean(url: str) -> str:
     return (url or "").strip().rstrip("/").removesuffix("/v1")
 
 
-def configured_hosts() -> list[tuple[str, str, str]]:
-    """(name, base_url, label) for every host that is configured, laptop first.
+def _prefixes(raw) -> tuple[str, ...]:
+    if isinstance(raw, (list, tuple)):
+        items = raw
+    else:
+        items = re.split(r"[+;]", str(raw or ""))
+    return tuple(p.strip().lower() for p in items if str(p).strip())
 
-    A desktop URL equal to the laptop's is one host, not two — that is the normal
-    single-box deployment, and listing it twice would double every probe.
+
+def _spec(d: dict) -> HostSpec | None:
+    """One extra host from a loosely-typed dict, or None (logged) when it is unusable."""
+    name = str(d.get("name") or "").strip().lower()
+    url = _clean(str(d.get("url") or d.get("base_url") or ""))
+    if not _NAME_RE.fullmatch(name) or name == LOCAL:
+        logger.warning("ollama_hosts: %s entry has a bad name %r — skipped", HOSTS_ENV, name)
+        return None
+    if not url.startswith(("http://", "https://")):
+        logger.warning("ollama_hosts: %s entry %r needs an http(s) URL — skipped", HOSTS_ENV, name)
+        return None
+    label = str(d.get("label") or "").strip() or name
+    return HostSpec(name, url, label, _prefixes(d.get("prefer")))
+
+
+def parse_hosts(raw: str | None) -> list[HostSpec]:
+    """``HARVIS_OLLAMA_HOSTS`` → host specs. A bad entry is skipped, not fatal: one typo
+    must not take the other machines out of the picker."""
+    raw = (raw or "").strip()
+    if not raw:
+        return []
+    items: list[dict] = []
+    if raw.startswith("["):
+        try:
+            loaded = json.loads(raw)
+        except ValueError as e:
+            logger.warning("ollama_hosts: %s is not valid JSON (%s) — ignored", HOSTS_ENV, e)
+            return []
+        items = [i for i in loaded if isinstance(i, dict)] if isinstance(loaded, list) else []
+    else:
+        for entry in raw.split(","):
+            head, *attrs = [p.strip() for p in entry.split("|")]
+            if not head:
+                continue
+            if "=" not in head:
+                logger.warning("ollama_hosts: %s entry %r is not name=url — skipped", HOSTS_ENV, head)
+                continue
+            name, url = head.split("=", 1)
+            d = {"name": name, "url": url}
+            for attr in attrs:
+                if "=" in attr:
+                    k, v = attr.split("=", 1)
+                    d[k.strip().lower()] = v.strip()
+            items.append(d)
+    return [sp for sp in (_spec(d) for d in items) if sp is not None]
+
+
+def configured_hosts() -> list[HostSpec]:
+    """Every configured host, this install's own first, then the others in the order
+    they were listed — which is also the order a model is looked for in.
+
+    A host whose URL equals one already listed is the same daemon, not a second one —
+    that is the normal single-box deployment, and listing it twice would double every
+    probe. The same goes for a repeated name.
     """
-    laptop = _clean(os.getenv("OLLAMA_URL", "http://ollama:11434"))
+    local = _clean(os.getenv("OLLAMA_URL", "http://ollama:11434"))
+    hosts = [HostSpec(LOCAL, local, "Ollama")] if local else []
+    extra = parse_hosts(os.getenv(HOSTS_ENV))
     desktop = _clean(os.getenv("DESKTOP_OLLAMA_URL", ""))
-    hosts = [("laptop", laptop, "Ollama")] if laptop else []
-    if desktop and desktop != laptop:
-        hosts.append(("desktop", desktop, "Desktop 5080"))
+    legacy = None
+    if desktop:
+        legacy = HostSpec(
+            "desktop", desktop,
+            (os.getenv("DESKTOP_OLLAMA_LABEL") or "").strip() or "Second machine",
+            DESKTOP_PREFERRED_PREFIXES,
+        )
+        extra.append(legacy)
+    for sp in extra:
+        if any(sp.base_url == h.base_url or sp.name == h.name for h in hosts):
+            if sp is legacy and not _warned_dupe and any(
+                    h.name != LOCAL and (h.base_url == sp.base_url or h.name == sp.name) for h in hosts):
+                _warned_dupe.append(True)
+                logger.warning(
+                    "ollama_hosts: DESKTOP_OLLAMA_URL repeats a %s entry and is ignored, "
+                    "along with its prefer list; add prefer= to that entry to keep it", HOSTS_ENV)
+            continue
+        hosts.append(sp)
     return hosts
+
+
+_warned_dupe: list[bool] = []   # log the ignored legacy host once, not per call
 
 
 _cache: dict[str, HostState] = {}
@@ -140,9 +318,10 @@ async def _show_context(hc: httpx.AsyncClient, base_url: str, tag: str) -> None:
             return
 
 
-async def _probe(name: str, base_url: str, label: str, timeout: float) -> HostState:
+async def _probe(spec: HostSpec, timeout: float) -> HostState:
+    name, base_url = spec.name, spec.base_url
     prev = _cache.get(name)
-    st = HostState(name=name, base_url=base_url, label=label)
+    st = HostState(name=name, base_url=base_url, label=spec.label, prefer=spec.prefer)
     if prev is not None:
         st.last_good_tags = prev.last_good_tags
         st.last_good_at = prev.last_good_at
@@ -165,9 +344,12 @@ async def _probe(name: str, base_url: str, label: str, timeout: float) -> HostSt
     st.reachable = True
     for m in models:
         tag = str(m.get("model") or m.get("name") or "").strip()
-        if not tag:
+        if not tag or tag in st.tags:
+            continue
+        if is_hidden_cloud_model(tag, m):
             continue
         st.tags.add(tag)
+        st.order.append(tag)
         size = m.get("size")
         if isinstance(size, int) and size > 0:
             st.sizes[tag] = size
@@ -206,10 +388,11 @@ async def snapshot(*, force: bool = False, timeout: float = PROBE_TIMEOUT_S) -> 
             return dict(_cache)
         hosts = configured_hosts()
         states = await asyncio.gather(
-            *(_probe(n, u, lb, timeout) for n, u, lb in hosts), return_exceptions=True
+            *(_probe(sp, timeout) for sp in hosts), return_exceptions=True
         )
         fresh: dict[str, HostState] = {}
-        for (n, u, lb), st in zip(hosts, states):
+        for sp, st in zip(hosts, states):
+            n = sp.name
             if isinstance(st, HostState):
                 fresh[n] = st
             else:
@@ -218,7 +401,8 @@ async def snapshot(*, force: bool = False, timeout: float = PROBE_TIMEOUT_S) -> 
                 # dropping the host, so a host never disappears without a reason.
                 prev = _cache.get(n)
                 fresh[n] = HostState(
-                    name=n, base_url=u, label=lb, error=type(st).__name__,
+                    name=n, base_url=sp.base_url, label=sp.label, prefer=sp.prefer,
+                    error=type(st).__name__,
                     last_good_tags=prev.last_good_tags if prev else set(),
                     last_good_at=prev.last_good_at if prev else 0.0,
                 )
@@ -240,11 +424,6 @@ def invalidate() -> None:
     _cache_at = 0.0
 
 
-def prefers_desktop(model: str) -> bool:
-    name = (model or "").lower()
-    return bool(name) and any(name.startswith(p) for p in DESKTOP_PREFERRED_PREFIXES)
-
-
 async def resolve(model: str, *, force: bool = False) -> tuple[str | None, str]:
     """Where to run ``model``: ``(base_url, reason)``.
 
@@ -255,22 +434,62 @@ async def resolve(model: str, *, force: bool = False) -> tuple[str | None, str]:
     * ``"unknown"``  — a host that could have it did not answer. Not the same as absent,
       and a caller must not substitute a different model on the strength of it.
 
-    Desktop-preferred models go to the rig when the rig has them even if the laptop does
-    too, because the laptop running a 9 GiB model on CPU is a worse outcome than a hop.
+    A host whose ``prefer`` list matches gets the model even when this machine has it
+    too (``"<name>-preferred"``), because running a model too big for the local card on
+    CPU is a worse outcome than a network hop. Otherwise the first host in configured
+    order that has it — this machine first — and the reason is that host's name.
     """
     if not (model or "").strip():
         return None, "absent"
-    hosts = await snapshot(force=force)
-    laptop, desktop = hosts.get("laptop"), hosts.get("desktop")
+    hosts = list((await snapshot(force=force)).values())
 
-    if prefers_desktop(model) and desktop is not None and desktop.has(model):
-        return desktop.base_url, "desktop-preferred"
-    for st in (laptop, desktop):
-        if st is not None and st.has(model):
+    for st in hosts:
+        if st.name != LOCAL and st.prefers(model) and st.has(model):
+            return st.base_url, f"{st.name}-preferred"
+    for st in hosts:
+        if st.has(model):
             return st.base_url, st.name
-    if any(st is not None and not st.reachable for st in (laptop, desktop)):
+    if any(not st.reachable for st in hosts):
         return None, "unknown"
     return None, "absent"
+
+
+def host_label(name: str) -> str:
+    """The user-facing label of a configured host, or the name when it is not configured."""
+    st = _cache.get(name)
+    if st is not None:
+        return st.label
+    for sp in configured_hosts():
+        if sp.name == name:
+            return sp.label
+    return name
+
+
+async def route(model: str, primary: str | None = None) -> tuple[str, str, str]:
+    """``(base_url, host_name, reason)`` for a caller that must send ``model`` somewhere.
+
+    ``primary`` is the Ollama the caller would use on its own (a user's saved provider
+    URL, or ``OLLAMA_URL``), returned unchanged unless another configured machine is the
+    one that should serve the model — so a single-machine install never probes and
+    never changes behaviour. When nothing has the model, ``primary`` is returned and
+    ``reason`` says whether that is because it is ``"absent"`` everywhere or a machine
+    that might hold it is ``"unknown"`` (not answering), so the caller can say so
+    instead of passing on a bare 404.
+    """
+    hosts = configured_hosts()
+    base_primary = (primary or (hosts[0].base_url if hosts else "")).rstrip("/")
+    if len(hosts) < 2 or not (model or "").strip():
+        return base_primary, LOCAL, "single"
+    if primary and _clean(primary) not in {h.base_url for h in hosts}:
+        # A user's own saved Ollama, not one of the operator's machines: stay on it.
+        return base_primary, LOCAL, "custom"
+    base, reason = await resolve(model)
+    if base is None:
+        return base_primary, LOCAL, reason
+    name = reason.removesuffix("-preferred")
+    if name == LOCAL:
+        return base_primary, LOCAL, reason
+    return base, name, reason
 
 
 async def available(*, force: bool = False) -> set[str] | None:
@@ -294,7 +513,7 @@ async def available(*, force: bool = False) -> set[str] | None:
 async def unreachable_models(*, force: bool = False) -> list[tuple[str, HostState]]:
     """(model, host) for tags a host used to serve and cannot right now.
 
-    This is what lets a picker grey out gemma4:12b with "Desktop 5080 unreachable"
+    This is what lets a picker grey out gemma4:12b with "Mac Studio is not answering"
     instead of dropping it, which a user reads as Harvis losing their model.
     """
     hosts = await snapshot(force=force)

@@ -82,7 +82,9 @@ async def _default_chat_model() -> str:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(f"{OLLAMA_URL}/api/tags")
         if resp.status_code == 200:
-            installed = [m.get("name") for m in resp.json().get("models", []) if m.get("name")]
+            from owui_compat.ollama_hosts import drop_cloud
+
+            installed = [m.get("name") for m in drop_cloud(resp.json().get("models", [])) if m.get("name")]
     except Exception:
         logger.warning("onb_compat: could not list Ollama models", exc_info=True)
 
@@ -1145,7 +1147,8 @@ async def _run_transformation_llm(prompt_template: str, content: str, model: str
     async with httpx.AsyncClient(timeout=180.0) as client:
         resp = await client.post(
             f"{_ONB_OLLAMA_URL}/api/generate",
-            json={"model": model, "prompt": prompt, "stream": False},
+            json={"model": model, "prompt": prompt, "stream": False,
+                  "options": {"num_ctx": 8192, "num_predict": 3000}},
         )
         resp.raise_for_status()
         return resp.json().get("response", "") or ""
@@ -1246,102 +1249,9 @@ async def onb_execute_transformation(
     return {"output": output, "transformation_id": str(tid), "model_id": model}
 
 
-# Ollama structured-output schemas — constrain small models to the EXACT shape the
-# interactive renderers need (passed as `format`, not just "json").
-_QUIZ_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "questions": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "q": {"type": "string"},
-                    "options": {"type": "array", "items": {"type": "string"}},
-                    "answer": {"type": "integer"},
-                    "explanation": {"type": "string"},
-                },
-                "required": ["q", "options", "answer"],
-            },
-        }
-    },
-    "required": ["questions"],
-}
-_FLASHCARDS_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "cards": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {"front": {"type": "string"}, "back": {"type": "string"}},
-                "required": ["front", "back"],
-            },
-        }
-    },
-    "required": ["cards"],
-}
-
-
-def _normalize_quiz(data: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Coerce model output to [{q, options[str], answer:int, explanation}] — tolerant of
-    the ways small models wander (A/B/C/D keys, letter answers, stray fields)."""
-    raw = data.get("questions") or data.get("quiz") or data.get("items") if isinstance(data, dict) else []
-    if not isinstance(raw, list):
-        return []
-    out: List[Dict[str, Any]] = []
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        q_text = item.get("q") or item.get("question") or item.get("text") or ""
-        opts = item.get("options")
-        if not isinstance(opts, list):
-            lettered = []
-            for k in ("A", "B", "C", "D", "E", "F"):
-                if k in item:
-                    v = item[k]
-                    if isinstance(v, list):
-                        v = v[0] if v else ""
-                    lettered.append(str(v))
-            opts = lettered
-        opts = [str(o) for o in opts if o not in (None, "")] if isinstance(opts, list) else []
-        if not str(q_text).strip() or len(opts) < 2:
-            continue
-        ans = item.get("answer")
-        if isinstance(ans, str):
-            mm = re.search(r"\d+", ans)
-            if mm:
-                ans = int(mm.group())
-            elif ans.strip().upper() in ("A", "B", "C", "D", "E", "F"):
-                ans = "ABCDEF".index(ans.strip().upper())
-            else:
-                ans = 0
-        if not isinstance(ans, int) or ans < 0 or ans >= len(opts):
-            ans = 0
-        out.append({
-            "q": str(q_text),
-            "options": opts,
-            "answer": ans,
-            "explanation": str(item.get("explanation") or item.get("rationale") or ""),
-        })
-    return out
-
-
-def _normalize_flashcards(data: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Coerce model output to [{front, back}] — tolerant of term/definition aliases."""
-    raw = data.get("cards") or data.get("flashcards") or data.get("items") if isinstance(data, dict) else []
-    if not isinstance(raw, list):
-        return []
-    out: List[Dict[str, Any]] = []
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        front = item.get("front") or item.get("term") or item.get("question") or item.get("q") or ""
-        back = item.get("back") or item.get("definition") or item.get("answer") or item.get("a") or ""
-        if not str(front).strip() or not str(back).strip():
-            continue
-        out.append({"front": str(front), "back": str(back)})
-    return out
+from .studio_generate import (  # noqa: E402  (moved out of this file; names kept for importers)
+    StudioError, _FLASHCARDS_SCHEMA, _QUIZ_SCHEMA, _normalize_flashcards, _normalize_quiz, generate_structured,
+)
 
 
 def _artifact_row_to_log(row) -> Dict[str, Any]:
@@ -1453,7 +1363,7 @@ async def onb_notebook_generate(
     from .podcasts import _resolve_notebook_content
 
     kind = (body or {}).get("kind") or ""
-    if kind not in ("quiz", "flashcards") and kind not in _MARKDOWN_GENERATORS:
+    if kind not in ("quiz", "flashcards", "mindmap") and kind not in _MARKDOWN_GENERATORS:
         raise HTTPException(status_code=400, detail=f"Unknown generator: {kind}")
 
     # Ownership: 404 unless this notebook belongs to the caller (autoname pattern).
@@ -1492,68 +1402,29 @@ async def onb_notebook_generate(
             output = await _run_transformation_llm(gen["prompt"], content, model)
         except httpx.HTTPError as e:
             raise HTTPException(status_code=502, detail=f"Model request failed: {e}")
+        output = re.sub(r"<think>.*?</think>", "", output or "", flags=re.DOTALL | re.IGNORECASE).strip()
+        # Small models open with chatter ("Okay, here's the FAQ..."): keep from the first heading.
+        chatter = re.match(r"(?i)\s*(okay|ok|sure|certainly|here)\b[^\n]*\n+(?=\s*#)", output)
+        if chatter:
+            output = output[chatter.end():].lstrip()
+        if len(output) < 40:
+            raise HTTPException(
+                status_code=502,
+                detail=f"{model} did not write anything usable. Try again, or choose a larger model from the model picker.",
+            )
         return await _persist_and_return_artifact(
             manager, notebook_id, current_user["id"], kind, gen["title"],
             "markdown", {"markdown": output}, model,
         )
 
-    if kind == "quiz":
-        prompt = (
-            "Create 8-10 multiple-choice questions based ONLY on the following content. Return "
-            'ONLY a JSON object exactly like {"questions":[{"q":"question text","options":["A","B",'
-            '"C","D"],"answer":0,"explanation":"why"}]} where "answer" is the 0-based index of the '
-            "correct option. No prose, no Markdown, no code fences. Do not invent facts beyond the "
-            "content.\n\n{content}"
-        )
-    else:  # flashcards
-        prompt = (
-            "Create 12-18 study flashcards based ONLY on the following content. Return ONLY a JSON "
-            'object exactly like {"cards":[{"front":"term or question","back":"answer or '
-            'definition"}]}. No prose, no Markdown, no code fences. Do not invent facts beyond the '
-            "content.\n\n{content}"
-        )
-    # Constrain the model to the EXACT shape via Ollama structured outputs (a JSON
-    # schema as `format`), then normalize defensively — small models still wander.
-    schema = _QUIZ_SCHEMA if kind == "quiz" else _FLASHCARDS_SCHEMA
-    full_prompt = prompt.replace("{content}", content[:8000])
+    # Quiz, flashcards and mind map are structured JSON for the interactive viewers.
     try:
-        async with httpx.AsyncClient(timeout=180.0) as client:
-            resp = await client.post(
-                f"{_ONB_OLLAMA_URL}/api/generate",
-                json={"model": model, "prompt": full_prompt, "stream": False, "format": schema},
-            )
-            resp.raise_for_status()
-            raw = (resp.json().get("response") or "").strip()
-    except httpx.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"Model request failed: {e}")
-    raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL | re.IGNORECASE).strip()
-    data: Dict[str, Any] = {}
-    try:
-        data = json.loads(raw)
-    except Exception:
-        m = re.search(r"\{.*\}", raw, re.DOTALL)
-        if m:
-            try:
-                data = json.loads(m.group(0))
-            except Exception:
-                data = {}
-
-    if kind == "quiz":
-        questions = _normalize_quiz(data)
-        if not questions:
-            raise HTTPException(status_code=502, detail="The model didn't return a usable quiz — try again.")
-        title = f"Quiz · {len(questions)} questions"
-        return await _persist_and_return_artifact(
-            manager, notebook_id, current_user["id"], "quiz", title, "json",
-            {"questions": questions}, model,
-        )
-    cards = _normalize_flashcards(data)
-    if not cards:
-        raise HTTPException(status_code=502, detail="The model didn't return usable flashcards — try again.")
-    title = f"Flashcards · {len(cards)} cards"
+        title, shaped = await generate_structured(kind, content, model, _ONB_OLLAMA_URL)
+    except StudioError as e:
+        raise HTTPException(status_code=502, detail=str(e))
     return await _persist_and_return_artifact(
-        manager, notebook_id, current_user["id"], "flashcards", title, "json",
-        {"cards": cards}, model,
+        manager, notebook_id, current_user["id"], kind, title,
+        "json", shaped, model,
     )
 
 
@@ -2211,7 +2082,9 @@ async def _list_ollama_models() -> List[Dict[str, Any]]:
         async with httpx.AsyncClient(timeout=10.0) as c:
             r = await c.get(f"{OLLAMA_URL.rstrip('/')}/api/tags")
             r.raise_for_status()
-            return r.json().get("models", []) or []
+            from owui_compat.ollama_hosts import drop_cloud
+
+            return drop_cloud(r.json().get("models", []) or [])
     except Exception as e:  # pragma: no cover - network
         logger.warning(f"onb_compat: ollama /api/tags failed: {e}")
         return []

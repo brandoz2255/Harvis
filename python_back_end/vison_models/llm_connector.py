@@ -64,7 +64,9 @@ def _tags(url: Optional[str] = None) -> Optional[List[str]]:
     try:
         res = requests.get(f"{_base_url(url)}/api/tags", headers=_headers(), timeout=10)
         res.raise_for_status()
-        return [m["name"] for m in res.json().get("models", [])]
+        from owui_compat.ollama_hosts import drop_cloud
+
+        return [m["name"] for m in drop_cloud(res.json().get("models", []))]
     except Exception as e:
         logger.warning(f"Could not reach Ollama at {_base_url(url)}: {e}")
         return None

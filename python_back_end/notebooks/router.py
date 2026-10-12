@@ -318,25 +318,26 @@ async def upload_source(
     current_user: Dict = Depends(get_current_user_from_request),
     manager: NotebookManager = Depends(get_notebook_manager)
 ):
-    """Upload a file as a source (PDF, text, markdown, doc)"""
+    """Upload a file as a source (PDF, Word, text, Markdown, HTML, image, or audio)"""
     try:
         # Verify notebook ownership
         await manager.get_notebook(notebook_id, current_user["id"])
 
-        # Determine source type from file extension
+        # Determine source type from the extension (images and audio have their own
+        # readers; an unknown extension is accepted only if the bytes are text).
+        from .source_types import UnsupportedFile, classify_upload
+
         filename = file.filename or "unknown"
-        ext = filename.lower().split(".")[-1] if "." in filename else ""
-
-        type_map = {
-            "pdf": SourceType.PDF,
-            "txt": SourceType.TEXT,
-            "md": SourceType.MARKDOWN,
-            "markdown": SourceType.MARKDOWN,
-            "doc": SourceType.DOC,
-            "docx": SourceType.DOC,
-        }
-
-        source_type = type_map.get(ext, SourceType.TEXT)
+        content = await file.read()
+        max_bytes = int(os.getenv("NOTEBOOK_MAX_UPLOAD_MB", "100")) * 1024 * 1024
+        if len(content) > max_bytes:
+            raise HTTPException(status_code=413, detail=f"That file is larger than {max_bytes // (1024 * 1024)} MB.")
+        if not content:
+            raise HTTPException(status_code=400, detail="That file is empty.")
+        try:
+            source_type, ext = classify_upload(filename, content[:4096])
+        except UnsupportedFile as exc:
+            raise HTTPException(status_code=415, detail=str(exc))
 
         # Create storage directory
         user_dir = os.path.join(NOTEBOOK_STORAGE_PATH, str(current_user["id"]), str(notebook_id))
@@ -347,7 +348,6 @@ async def upload_source(
         storage_path = os.path.join(user_dir, f"{file_id}.{ext}")
 
         with open(storage_path, "wb") as f:
-            content = await file.read()
             f.write(content)
 
         # Create source record
@@ -937,7 +937,9 @@ async def check_embedding_status():
         if response.status_code == 200:
             data = response.json()
             result["local_ollama"]["status"] = "connected"
-            result["local_ollama"]["models"] = [m["name"] for m in data.get("models", [])]
+            from owui_compat.ollama_hosts import drop_cloud
+
+            result["local_ollama"]["models"] = [m["name"] for m in drop_cloud(data.get("models", []))]
         else:
             result["local_ollama"]["status"] = f"error: {response.status_code}"
     except requests.exceptions.ConnectionError:
@@ -951,7 +953,9 @@ async def check_embedding_status():
         if response.status_code == 200:
             data = response.json()
             result["cloud_ollama"]["status"] = "connected"
-            result["cloud_ollama"]["models"] = [m["name"] for m in data.get("models", [])]
+            from owui_compat.ollama_hosts import drop_cloud
+
+            result["cloud_ollama"]["models"] = [m["name"] for m in drop_cloud(data.get("models", []))]
         else:
             result["cloud_ollama"]["status"] = f"error: {response.status_code}"
     except requests.exceptions.ConnectionError:
@@ -1213,11 +1217,11 @@ class StandalonePodcastAudioRequest(BaseModel):
         extra = "allow"
 
 
-async def _fetch_podcast_content(podcast_request: StandalonePodcastRequest, logger, manager=None) -> str:
+async def _fetch_podcast_content(podcast_request: StandalonePodcastRequest, logger, manager=None, user_id=None) -> str:
     """Helper to fetch content from sources/notes for podcast generation using local DB"""
     content = podcast_request.content or ""
     
-    if not manager:
+    if not manager or user_id is None:
         return content
 
     # Fetch source content from our local database
@@ -1227,8 +1231,11 @@ async def _fetch_podcast_content(podcast_request: StandalonePodcastRequest, logg
                 try:
                     from uuid import UUID
                     sid = UUID(source_id) if isinstance(source_id, str) else source_id
+                    # Only the caller's own sources: the id comes from the request body.
                     row = await conn.fetchrow(
-                        "SELECT title, content_text FROM notebook_sources WHERE id = $1", sid
+                        "SELECT s.title, s.content_text FROM notebook_sources s "
+                        "JOIN notebooks n ON n.id = s.notebook_id WHERE s.id = $1 AND n.user_id = $2",
+                        sid, user_id,
                     )
                     if row and row['content_text']:
                         content += f"\n\n=== SOURCE: {row['title'] or 'Untitled'} ===\n{row['content_text']}"
@@ -1243,7 +1250,7 @@ async def _fetch_podcast_content(podcast_request: StandalonePodcastRequest, logg
                     from uuid import UUID
                     nid = UUID(note_id) if isinstance(note_id, str) else note_id
                     row = await conn.fetchrow(
-                        "SELECT title, content FROM notebook_notes WHERE id = $1", nid
+                        "SELECT title, content FROM notebook_notes WHERE id = $1 AND user_id = $2", nid, user_id
                     )
                     if row and row['content']:
                         content += f"\n\n=== NOTE: {row['title'] or 'Untitled'} ===\n{row['content']}"
@@ -1486,7 +1493,9 @@ async def _default_ollama_model(ollama_url: str) -> str:
     import httpx
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            names = [m.get("name", "") for m in (await client.get(f"{ollama_url}/api/tags")).json().get("models", [])]
+            from owui_compat.ollama_hosts import drop_cloud
+
+            names = [m.get("name", "") for m in drop_cloud((await client.get(f"{ollama_url}/api/tags")).json().get("models", []))]
     except Exception:
         names = []
     chat = [n for n in names if n and not any(k in n for k in ("embed", "minilm", "bge", "rerank"))]
@@ -1496,83 +1505,39 @@ async def _default_ollama_model(ollama_url: str) -> str:
 async def _generate_podcast_with_ollama(
     content: str, podcast_request, log
 ) -> dict:
-    """Generate a podcast script using Ollama LLM"""
-    import httpx
-    from datetime import datetime, timezone
+    """Write a podcast script with Ollama.
 
+    Returns the script, or ``{"status": "error", "error": <plain message>}`` when it
+    could not be written. Callers store that as a failed podcast; it is never saved
+    as a finished one.
+    """
+    from datetime import datetime, timezone
+    from .podcast_script import PodcastScriptError, generate_script, ollama_caller, speaker_names
+
+    started = datetime.now(timezone.utc).isoformat()
     ollama_url = os.environ.get("OLLAMA_URL", "http://ollama:11434")
     model = getattr(podcast_request, "model", None) or os.environ.get("NOTEBOOK_PODCAST_MODEL") or await _default_ollama_model(ollama_url)
-    
-    speaker_names = []
-    if podcast_request.custom_speakers:
-        speaker_names = [s.get("name", f"Speaker {i+1}") for i, s in enumerate(podcast_request.custom_speakers)]
-    else:
-        speaker_names = [f"Speaker {i+1}" for i in range(podcast_request.speakers)]
-
-    speakers_desc = ", ".join(speaker_names)
-    style = podcast_request.style or "conversational"
-    duration = podcast_request.duration_minutes or 10
-    
-    # Estimate ~150 words per minute of podcast, ~2 dialogue turns per minute
-    target_turns = max(duration * 2, 6)
-
-    prompt = f"""You are a podcast script writer. Create a {style} podcast script with {len(speaker_names)} speakers: {speakers_desc}.
-
-The podcast should be about {duration} minutes long (approximately {target_turns} dialogue exchanges).
-
-Base the podcast on this content:
----
-{content[:6000]}
----
-
-IMPORTANT: Return ONLY a valid JSON object with this exact structure, no other text:
-{{
-  "outline": "Brief outline of the podcast topics",
-  "transcript": [
-    {{"speaker": "{speaker_names[0]}", "dialogue": "First speaker's line"}},
-    {{"speaker": "{speaker_names[1] if len(speaker_names) > 1 else speaker_names[0]}", "dialogue": "Second speaker's line"}}
-  ]
-}}
-
-Make the dialogue natural, engaging, and informative. Each speaker should have a distinct voice. Include at least {target_turns} exchanges."""
-
-    async with httpx.AsyncClient(timeout=180.0) as client:
-        resp = await client.post(f"{ollama_url}/api/generate", json={
-            "model": model, "prompt": prompt, "stream": False,
-            "options": {"temperature": 0.8, "num_predict": 4096},
-        })
-        resp.raise_for_status()
-        raw = resp.json().get("response", "")
-
-    # Parse JSON from response
-    import re
-    json_match = re.search(r'\{[\s\S]*\}', raw)
-    if not json_match:
-        log.warning("Could not parse JSON from podcast response, using raw text")
-        return {
-            "status": "completed",
-            "outline": f"Podcast about: {podcast_request.title}",
-            "transcript": [{"speaker": speaker_names[0], "dialogue": raw[:500]}],
-            "started_at": datetime.now(timezone.utc).isoformat(),
-            "completed_at": datetime.now(timezone.utc).isoformat(),
-        }
-
+    names = speaker_names(podcast_request.custom_speakers, podcast_request.speakers)
     try:
-        parsed = json.loads(json_match.group())
-    except json.JSONDecodeError:
-        return {
-            "status": "completed",
-            "outline": f"Podcast about: {podcast_request.title}",
-            "transcript": [{"speaker": speaker_names[0], "dialogue": raw[:500]}],
-            "started_at": datetime.now(timezone.utc).isoformat(),
-            "completed_at": datetime.now(timezone.utc).isoformat(),
-        }
-
+        script = await generate_script(
+            content,
+            title=podcast_request.title,
+            style=podcast_request.style or "conversational",
+            minutes=podcast_request.duration_minutes,
+            names=names,
+            call=ollama_caller(model, ollama_url),
+        )
+    except PodcastScriptError as exc:
+        log.warning(f"Podcast script failed: {exc}")
+        return {"status": "error", "error": str(exc), "transcript": [], "started_at": started}
     return {
         "status": "completed",
-        "outline": parsed.get("outline", ""),
-        "transcript": parsed.get("transcript", []),
-        "started_at": datetime.now(timezone.utc).isoformat(),
+        "outline": script["outline"],
+        "transcript": script["transcript"],
+        "words": script["words"],
+        "target_words": script["target_words"],
+        "model": model,
+        "started_at": started,
         "completed_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -1590,7 +1555,7 @@ async def generate_standalone_podcast(
 
     podcast_request.model = await _person_model(request, current_user, getattr(podcast_request, "model", None)) or None
     try:
-        content = await _fetch_podcast_content(podcast_request, logger, manager)
+        content = await _fetch_podcast_content(podcast_request, logger, manager, user_id=current_user["id"])
         
         if not content.strip():
             raise HTTPException(400, "No content available. Provide content, source_ids, or note_ids.")
@@ -1624,7 +1589,7 @@ async def generate_standalone_podcast_stream(
     
     async def generate_sse_events():
         try:
-            content = await _fetch_podcast_content(podcast_request, logger, manager)
+            content = await _fetch_podcast_content(podcast_request, logger, manager, user_id=user_id)
             
             if not content.strip():
                 yield f"event: error\ndata: {json.dumps({'error': 'No content available. Provide content, source_ids, or note_ids.'})}\n\n"
@@ -1637,87 +1602,31 @@ async def generate_standalone_podcast_stream(
                 content, podcast_request, logger
             )
             
+            if result.get("status") == "error":
+                await _save_podcast_to_db(manager, user_id, podcast_request, result)
+                yield f"event: error\ndata: {json.dumps({'error': result['error']})}\n\n"
+                return
+
             # Step 2: Script done
             yield f"event: progress\ndata: {json.dumps({'step': 'script', 'message': 'Podcast script generated'})}\n\n"
 
-            # Step 3: Audio generation via tts-service (SpeechT5 on GPU)
+            # Step 3: audio. A failure keeps the script and says why; it is never silent.
             transcript = result.get("transcript", [])
-
-
-
             if getattr(podcast_request, "generate_audio", True) and transcript:
-                yield f"event: progress\ndata: {json.dumps({'step': 'audio', 'message': 'Generating audio...'})}\n\n"
-                
+                yield f"event: progress\ndata: {json.dumps({'step': 'audio', 'message': f'Speaking {len(transcript)} lines...'})}\n\n"
                 try:
-                    import httpx
-                    tts_url = os.environ.get("TTS_URL", "http://tts-service:8001")
-
-                    # Build script segments for the tts-service /generate/podcast endpoint
-                    script_segments = []
-                    speaker_names = set()
-                    for seg in transcript:
-                        dialogue = (seg.get("dialogue") or seg.get("text") or "").strip()
-                        speaker = (seg.get("speaker") or "Speaker").strip()
-                        if dialogue:
-                            script_segments.append({"speaker": speaker, "text": dialogue})
-                            speaker_names.add(speaker)
-
-                    # Map all speakers to default voice
-                    voice_mapping = {name: "__default__" for name in speaker_names}
-
-
-                    yield f"event: progress\ndata: {json.dumps({'step': 'audio', 'message': f'Synthesizing {len(script_segments)} segments...'})}\n\n"
-
-                    if not os.environ.get("TTS_URL"):
-                        # Default install: no tts-service, speak through the voice sidecar.
-                        audio_name, duration_secs = await podcast_audio.synthesize(script_segments)
-                        result["audio_path"] = f"/api/notebooks/podcasts/tts-audio/{audio_name}"
-                        result["audio_url"] = result["audio_path"]
-                        result["duration_seconds"] = duration_secs
-                        result["status"] = "completed"
-                    else:
-                        import time as _time_mod
-                        _tts_start = _time_mod.time()
-
-                        async with httpx.AsyncClient(timeout=600.0) as client:
-                            resp = await client.post(
-                                f"{tts_url}/generate/podcast",
-                                json={
-                                    "script": script_segments,
-                                    "voice_mapping": voice_mapping,
-                                    "output_format": "wav",
-                                    "normalize_audio": True,
-                                    "add_silence_between_speakers": 0.3,
-                                },
-                            )
-
-                        _tts_elapsed = _time_mod.time() - _tts_start
-
-
-                        if resp.status_code == 200:
-                            tts_data = resp.json()
-                            if tts_data.get("success"):
-                                # Audio URL is relative to tts-service, proxy via our endpoint
-                                tts_audio_url = tts_data.get("audio_url", "")
-                                tts_filename = tts_audio_url.split("/")[-1] if tts_audio_url else ""
-                                duration_secs = tts_data.get("duration", 0)
-
-                                result["audio_path"] = f"/api/notebooks/podcasts/tts-audio/{tts_filename}"
-                                result["audio_url"] = result["audio_path"]
-                                result["duration_seconds"] = duration_secs
-                                result["status"] = "completed"
-                                logger.info(f"Podcast audio generated via tts-service: {tts_filename} ({duration_secs:.1f}s)")
-                            else:
-                                logger.warning(f"TTS returned success=false: {tts_data}")
-                                result["status"] = "script_only"
-                        else:
-                            logger.warning(f"TTS returned {resp.status_code}: {resp.text[:200]}")
-                            result["status"] = "script_only"
-
-                except Exception as tts_err:
-                    logger.warning(f"Audio generation failed: {tts_err}")
+                    segments = [{"speaker": t["speaker"], "text": t["dialogue"]} for t in transcript]
+                    result.update(await podcast_audio.make_audio(segments))
+                    result["status"] = "completed"
+                except podcast_audio.PodcastAudioError as audio_err:
+                    logger.warning(f"Podcast audio failed: {audio_err}")
                     result["status"] = "script_only"
-            
+                    result["audio_error"] = f"The script is saved but the audio could not be made. {audio_err}"
+                except Exception as audio_err:
+                    logger.error(f"Podcast audio failed unexpectedly: {audio_err}", exc_info=True)
+                    result["status"] = "script_only"
+                    result["audio_error"] = f"The script is saved but the audio could not be made ({str(audio_err)[:120]})."
+
             # Save to database
             try:
                 saved_podcast = await _save_podcast_to_db(manager, user_id, podcast_request, result)
@@ -1837,43 +1746,18 @@ async def generate_standalone_podcast_audio_from_script(
         error_msg = None
 
         try:
-            import httpx
-            tts_url = os.environ.get("TTS_URL", "http://tts-service:8001")
-
-            script_segments = [{"speaker": seg["speaker"], "text": seg["dialogue"]} for seg in cleaned_transcript]
-            speaker_names = {seg["speaker"] for seg in cleaned_transcript}
-            voice_mapping = {name: "__default__" for name in speaker_names}
-
-            if not os.environ.get("TTS_URL"):
-                audio_name, duration_seconds = await podcast_audio.synthesize(script_segments)
-                audio_path = f"/api/notebooks/podcasts/tts-audio/{audio_name}"
-                audio_url = audio_path
-            else:
-                async with httpx.AsyncClient(timeout=600.0) as client:
-                    resp = await client.post(f"{tts_url}/generate/podcast", json={
-                        "script": script_segments,
-                        "voice_mapping": voice_mapping,
-                        "output_format": "wav",
-                        "normalize_audio": True,
-                        "add_silence_between_speakers": 0.3,
-                    })
-
-                if resp.status_code == 200:
-                    tts_data = resp.json()
-                    if tts_data.get("success"):
-                        tts_audio_url = tts_data.get("audio_url", "")
-                        tts_filename = tts_audio_url.split("/")[-1] if tts_audio_url else ""
-                        audio_path = f"/api/notebooks/podcasts/tts-audio/{tts_filename}"
-                        audio_url = audio_path
-                        duration_seconds = tts_data.get("duration", 0)
-                    else:
-                        error_msg = "TTS generation returned success=false"
-                else:
-                    error_msg = f"TTS returned {resp.status_code}"
-
+            made = await podcast_audio.make_audio(
+                [{"speaker": seg["speaker"], "text": seg["dialogue"]} for seg in cleaned_transcript]
+            )
+            audio_path, audio_url, duration_seconds = made["audio_path"], made["audio_url"], made["duration_seconds"]
+        except podcast_audio.PodcastAudioError as tts_err:
+            status = "script_only"
+            error_msg = f"The script is saved but the audio could not be made. {tts_err}"
+            logger.warning(f"Podcast audio failed: {tts_err}")
         except Exception as tts_err:
-            error_msg = f"TTS unavailable: {tts_err}"
-            logger.warning(f"TTS service not available: {tts_err}")
+            status = "script_only"
+            error_msg = f"The script is saved but the audio could not be made ({str(tts_err)[:120]})."
+            logger.error(f"Podcast audio failed unexpectedly: {tts_err}", exc_info=True)
 
         result = {
             "title": audio_request.title,
@@ -2319,3 +2203,12 @@ async def search_knowledge_base(
                 )
 
     return SearchResponse(results=results, total_count=len(results), search_type=search_request.type)
+
+
+# ─── Discover (web search / deep research -> sources) and capabilities ─────────
+# Included last so the catch-all `/{notebook_id}` routes above keep their order.
+from .discover import router as _discover_router  # noqa: E402
+from .capabilities import router as _capabilities_router  # noqa: E402
+
+router.include_router(_capabilities_router)
+router.include_router(_discover_router)

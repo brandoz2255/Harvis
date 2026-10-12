@@ -1,9 +1,14 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { resetServerCapabilities, setServerCapabilities } from '@/store/server-capabilities'
+
 import { StartWorkButton, WorkspaceAddButton, WorkspaceMenu, WorkspaceShowMoreButton } from './workspace-header'
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  resetServerCapabilities()
+})
 
 vi.mock('@/i18n', () => ({
   useI18n: () => ({
@@ -72,7 +77,15 @@ describe('WorkspaceMenu', () => {
 })
 
 describe('StartWorkButton', () => {
+  it('is not offered when the server has no worktrees', () => {
+    setServerCapabilities({ capabilities: { git_worktrees: false } })
+    render(<StartWorkButton repoPath="/repo" />)
+
+    expect(screen.queryByRole('button', { name: 'New worktree' })).toBeNull()
+  })
+
   it('wraps the git-branch trigger in a Tip', () => {
+    setServerCapabilities({})
     render(<StartWorkButton repoPath="/repo" />)
 
     const button = screen.getByRole('button', { name: 'New worktree' })

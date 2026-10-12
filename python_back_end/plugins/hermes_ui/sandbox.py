@@ -105,8 +105,13 @@ def ensure_dir(user_id: int, session_id: str) -> str:
     return base
 
 
+# Without a configured secret, links are signed with a per-process random key:
+# they stop working on restart, but nobody can forge one from a known string.
+_EPHEMERAL_SECRET = secrets.token_hex(32)
+
+
 def _key() -> bytes:
-    secret = os.getenv("JWT_SECRET") or os.getenv("HARVIS_SANDBOX_LINK_SECRET") or "harvis-dev"
+    secret = os.getenv("JWT_SECRET") or os.getenv("HARVIS_SANDBOX_LINK_SECRET") or _EPHEMERAL_SECRET
     return hashlib.sha256(("sandbox-app:" + secret).encode()).digest()
 
 

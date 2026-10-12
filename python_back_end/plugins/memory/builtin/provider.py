@@ -20,6 +20,7 @@ from typing import Any, Optional
 
 import asyncpg
 
+from .. import dedupe
 from ..provider import MemoryEntry, MemoryProvider
 
 logger = logging.getLogger(__name__)
@@ -67,26 +68,41 @@ class BuiltinPgMemoryProvider(MemoryProvider):
             return None
         if not content or not content.strip():
             return None
+        text = content.strip()
         try:
             async with self._pool.acquire() as conn:
-                row = await conn.fetchrow(
-                    """
-                    INSERT INTO harvis_user_memory (user_id, content, source, metadata)
-                    VALUES ($1, $2, $3, $4::jsonb)
-                    RETURNING id, created_at
-                    """,
-                    user_id,
-                    content.strip(),
-                    source,
-                    _json_dumps(metadata or {}),
-                )
+                async with conn.transaction():
+                    # One writer per user at a time, so the regex save and the model extractor
+                    # cannot both pass the duplicate check and both insert.
+                    await conn.execute("SELECT pg_advisory_xact_lock($1, 7301)", int(user_id))
+                    known = await conn.fetch(
+                        "SELECT id, content, source, metadata, created_at FROM harvis_user_memory "
+                        "WHERE user_id = $1 ORDER BY created_at DESC LIMIT 300", user_id)
+                    twin = dedupe.find_duplicate(text, [(r["id"], r["content"]) for r in known])
+                    if twin is not None:
+                        kept = next(r for r in known if r["id"] == twin)
+                        logger.info("builtin memory: user %s already has this memory (id %s)", user_id, twin)
+                        return MemoryEntry(user_id=user_id, content=kept["content"], source=kept["source"],
+                                           metadata=_json_loads(kept["metadata"]) or {},
+                                           created_at=kept["created_at"], duplicate=True)
+                    row = await conn.fetchrow(
+                        """
+                        INSERT INTO harvis_user_memory (user_id, content, source, metadata)
+                        VALUES ($1, $2, $3, $4::jsonb)
+                        RETURNING id, created_at
+                        """,
+                        user_id,
+                        text,
+                        source,
+                        _json_dumps(metadata or {}),
+                    )
         except Exception:
             logger.exception("builtin memory: insert failed for user %s", user_id)
             return None
 
         return MemoryEntry(
             user_id=user_id,
-            content=content.strip(),
+            content=text,
             source=source,
             metadata=dict(metadata or {}),
             created_at=row["created_at"],

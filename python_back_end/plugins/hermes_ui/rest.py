@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from auth_optimized import get_current_user_optimized
 
-from . import providers, rest_mcp, sessions, settings_store, store
+from . import ops, providers, rest_mcp, sessions, settings_store, store
 from .models import is_hidden_model, thinking_models
 
 log = logging.getLogger("hermes_ui.rest")
@@ -92,6 +92,7 @@ def _provider_of(m: dict) -> str:
 
 @router.get("/status")
 async def status(user=Depends(get_current_user_optimized)):
+    ops.install()
     return {
         "status": "ok",
         "version": FACADE_VERSION,
@@ -100,6 +101,7 @@ async def status(user=Depends(get_current_user_optimized)):
         "profile": PROFILE_NAME,
         "gateway_running": True,
         "backend": "harvis",
+        "capabilities": ops.capabilities(user),
         "ts": time.time(),
     }
 

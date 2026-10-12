@@ -4,11 +4,12 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 
 import { DropdownMenu, DropdownMenuContent } from '@/components/ui/dropdown-menu'
 import {
+  $hiddenModels,
+  $legacyVisibleModels,
   $modelVisibilityOpen,
-  $visibleModels,
   modelVisibilityKey,
-  setModelVisibilityOpen,
-  setVisibleModels
+  setHiddenModels,
+  setModelVisibilityOpen
 } from '@/store/model-visibility'
 
 import { ModelCatalogMenu, type ModelMenuController } from './model-catalog-menu'
@@ -28,7 +29,8 @@ vi.mock('@/hermes', () => ({
 }))
 
 beforeEach(() => {
-  $visibleModels.set(null)
+  $hiddenModels.set(null)
+  $legacyVisibleModels.set(null)
   setModelVisibilityOpen(false)
   getGlobalModelOptions.mockResolvedValue({
     providers: [{ models: ['gemini-3.1-pro', 'gemini-2.5-flash'], name: 'Google', slug: 'google' }]
@@ -74,7 +76,7 @@ function renderMenu() {
 // which is exactly the drift extracting this component was meant to prevent.
 describe('the catalog owns model curation', () => {
   it('honours the stored Edit Models shortlist', async () => {
-    setVisibleModels(new Set([modelVisibilityKey('google', 'gemini-2.5-flash')]))
+    setHiddenModels(new Set([modelVisibilityKey('google', 'gemini-3.1-pro')]))
 
     renderMenu()
 
@@ -82,8 +84,34 @@ describe('the catalog owns model curation', () => {
     expect(screen.queryByText(/Gemini 3\.1 Pro/i)).toBeNull()
   })
 
+  it('shows a model installed after the user curated the list', async () => {
+    getGlobalModelOptions.mockResolvedValue({
+      providers: [{ models: ['gemini-3.1-pro', 'gemini-2.5-flash', 'gemma4:e2b'], name: 'Local', slug: 'local' }]
+    })
+    setHiddenModels(new Set([modelVisibilityKey('local', 'gemini-3.1-pro')]))
+
+    renderMenu()
+
+    await screen.findByText(/gemma4/i)
+    expect(screen.queryByText(/Gemini 3\.1 Pro/i)).toBeNull()
+  })
+
+  it('converts an old saved show-list without losing the choices in it', async () => {
+    getGlobalModelOptions.mockResolvedValue({
+      providers: [{ models: ['gemini-3.1-pro', 'gemini-2.5-flash'], name: 'Google', slug: 'google' }]
+    })
+    $legacyVisibleModels.set(new Set([modelVisibilityKey('google', 'gemini-2.5-flash')]))
+
+    renderMenu()
+
+    await screen.findByText(/Gemini 2\.5 Flash/i)
+    expect(screen.queryByText(/Gemini 3\.1 Pro/i)).toBeNull()
+    expect($legacyVisibleModels.get()).toBeNull()
+    expect($hiddenModels.get()?.has(modelVisibilityKey('google', 'gemini-3.1-pro'))).toBe(true)
+  })
+
   it('still finds a hidden model by search — curation narrows the default view, not the catalog', async () => {
-    setVisibleModels(new Set([modelVisibilityKey('google', 'gemini-2.5-flash')]))
+    setHiddenModels(new Set([modelVisibilityKey('google', 'gemini-3.1-pro')]))
 
     renderMenu()
     await screen.findByText(/Gemini 2\.5 Flash/i)

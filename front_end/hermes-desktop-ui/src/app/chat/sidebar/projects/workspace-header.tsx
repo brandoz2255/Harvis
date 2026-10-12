@@ -8,6 +8,7 @@ import { useI18n } from '@/i18n'
 import { cn } from '@/lib/utils'
 import { openWorktreeDialog } from '@/store/coding-status'
 import { copyPath, revealPath } from '@/store/projects'
+import { useCapability } from '@/store/server-capabilities'
 
 import { SidebarRowLead } from '../chrome'
 
@@ -161,6 +162,11 @@ export function WorkspaceContextMenu({
 export function StartWorkButton({ repoPath }: { repoPath: string }) {
   const { t } = useI18n()
   const p = t.sidebar.projects
+  const canWorktree = useCapability('git_worktrees')
+
+  if (!canWorktree) {
+    return null
+  }
 
   return (
     <Tip label={p.startWork}>

@@ -295,11 +295,12 @@ export function SignInScreen({
             </Field>
 
             {needsCode && (
-              <Field htmlFor={id('code')} label="Setup code">
+              <Field htmlFor={id('code')} label="Server code">
                 <Input
                   aria-invalid={Boolean(fieldError('setupCode')) || undefined}
                   autoComplete="one-time-code"
                   id={id('code')}
+                  inputMode="numeric"
                   name="setup-code"
                   onChange={e => setSetupCode(e.target.value)}
                   required
@@ -308,7 +309,7 @@ export function SignInScreen({
                 />
                 <FieldHint error={Boolean(fieldError('setupCode'))}>
                   {fieldError('setupCode') ??
-                    'Whoever installed Harvis set one. It is HARVIS_SETUP_CODE in the .env file on that machine.'}
+                    'The 6-digit code shown on the server when Harvis was installed.'}
                 </FieldHint>
               </Field>
             )}

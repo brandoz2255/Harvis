@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type * as HermesApi from '@/hermes'
 import { queryClient } from '@/lib/query-client'
+import { resetServerCapabilities, setServerCapabilities } from '@/store/server-capabilities'
 
 const getSkills = vi.fn()
 const getToolsets = vi.fn()
@@ -82,6 +83,8 @@ async function renderSkills() {
 }
 
 beforeEach(() => {
+  // No capability flags from the backend (stock Hermes) means everything is on.
+  setServerCapabilities({})
   getSkills.mockResolvedValue([])
   getToolsets.mockResolvedValue([toolset()])
   setToolsetEnabled.mockResolvedValue({ ok: true, name: 'web', enabled: false })
@@ -99,6 +102,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  resetServerCapabilities()
   vi.clearAllMocks()
   // Shared singleton client — drop cached skills/toolsets so each test refetches.
   queryClient.clear()
@@ -146,6 +150,14 @@ describe('SkillsView toolset management', { timeout: 60_000 }, () => {
     await screen.findByRole('switch', { name: 'Turn Web Search toolset off' })
     await waitFor(() => expect(getToolsetConfig).toHaveBeenCalled())
     expect(getToolsetConfig.mock.calls[0][0]).toBe('web')
+  })
+
+  it('shows no provider config panel when the server reports toolset_setup off', async () => {
+    setServerCapabilities({ capabilities: { toolset_setup: false } })
+    await renderSkills()
+
+    await screen.findByRole('switch', { name: 'Turn Web Search toolset off' })
+    expect(getToolsetConfig).not.toHaveBeenCalled()
   })
 
   it('scopes Tools config to the profile chosen in the selector', async () => {

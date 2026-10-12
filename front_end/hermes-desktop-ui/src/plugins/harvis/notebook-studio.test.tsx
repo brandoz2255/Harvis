@@ -56,7 +56,7 @@ const podcasts = [
     duration_seconds: null,
     outline: null,
     transcript: [],
-    error_message: null,
+    error_message: 'The script is saved but the audio could not be made. The speech service is not running.',
     created_at: '2026-09-01T00:00:00Z'
   },
   {
@@ -154,7 +154,7 @@ describe('NotebookStudio', () => {
     await screen.findByText('Mars — audio overview')
     const audio = container.querySelector('audio')
     expect(audio?.getAttribute('src')).toBe('/api/notebooks/podcasts/tts-audio/podcast_1.wav')
-    expect(screen.getByText(/speech service was not reachable/)).toBeTruthy()
+    expect(screen.getByText(/Script only\. The script is saved but the audio could not be made/)).toBeTruthy()
     expect(screen.getByText("Client error '404 Not Found'")).toBeTruthy()
   })
 

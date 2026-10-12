@@ -3,6 +3,7 @@ import { useEffect, useRef } from 'react'
 
 import { setFileBrowserOpen } from '@/store/layout'
 import { openPreview } from '@/store/preview'
+import { useCapability } from '@/store/server-capabilities'
 
 import { harvisApi } from './api'
 
@@ -34,6 +35,11 @@ export const sandboxKey = (sessionId: string) => ['harvis', 'sandbox', sessionId
 export const fetchSandbox = (sessionId: string) =>
   harvisApi<SandboxInfo>(`${BASE}/info?session=${encodeURIComponent(sessionId)}`)
 
+// A shared server keeps sandboxes for admins only and answers everyone else 403 with this sentence
+// (plugins/exposure/gate.py). That answer will not change by asking again.
+const isForbidden = (error: unknown) =>
+  error instanceof Error && /\b403\b|server is shared|permission denied/i.test(error.message)
+
 /** Open an app the sandbox is serving in the right panel's browser. */
 export function openApp(app: SandboxApp) {
   const url = new URL(app.url, window.location.origin).toString()
@@ -53,11 +59,16 @@ export function SandboxWatcher() {
   const busy = useValue(host.state.busy)
   const seenPorts = useRef<{ ports: Set<number>; sessionId: string } | null>(null)
 
+  // /api/status says whether this person has a workspace here at all. Without one there is
+  // nothing to watch, so no request is made (a non-admin on a shared server would only collect 403s).
+  const allowed = useCapability('sandbox')
+
   const info = useQuery({
-    enabled: Boolean(sessionId),
+    enabled: allowed && Boolean(sessionId),
     queryFn: () => fetchSandbox(sessionId as string),
     queryKey: sandboxKey(sessionId ?? ''),
-    refetchInterval: query => (query.state.data?.starting ? 3_000 : busy ? 5_000 : 30_000),
+    refetchInterval: query =>
+      isForbidden(query.state.error) ? false : query.state.data?.starting ? 3_000 : busy ? 5_000 : 30_000,
     retry: false
   })
 

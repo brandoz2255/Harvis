@@ -237,7 +237,8 @@ async def save_facts(pool, user_id: int, facts: list[str], *, source: str,
         key = _norm(text)
         if len(key) < 3 or _SECRET_RE.search(text) or key in seen:
             continue
-        if await provider.remember(user_id, text, source=source, metadata=metadata or {}) is not None:
+        entry = await provider.remember(user_id, text, source=source, metadata=metadata or {})
+        if entry is not None and not getattr(entry, "duplicate", False):
             saved.append(text)
             seen.add(key)
     if saved:
@@ -268,7 +269,7 @@ async def extract_memories(pool, user_id: int, session_id: str,
             continue
         entry = await provider.remember(user_id, text, source=MEMORY_SOURCE,
                                         metadata={"session_id": session_id})
-        if entry is not None:
+        if entry is not None and not getattr(entry, "duplicate", False):
             saved.append(text)
             seen.add(key)
     if saved:

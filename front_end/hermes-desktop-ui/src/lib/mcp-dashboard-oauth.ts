@@ -5,9 +5,12 @@ export interface McpOAuthFlow {
   authorization_url: string | null
   error: string | null
   tools?: Array<{ name: string; description: string }>
+  /** Set with `status: 'error'` when the server has no automatic client
+   *  registration: the person has to supply a client id from the vendor. */
+  needs_client_id?: boolean
 }
 
-interface CompleteOptions {
+export interface CompleteOptions {
   serverName: string
   start: (name: string) => Promise<McpOAuthFlow>
   status: (flowId: string) => Promise<McpOAuthFlow>
@@ -32,6 +35,15 @@ export class McpOAuthCancelled extends Error {
   }
 }
 
+/** Thrown when the OAuth server cannot register Harvis automatically. Callers
+ *  branch on this to ask for a client id instead of showing a bare error. */
+export class McpOAuthNeedsClientId extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'McpOAuthNeedsClientId'
+  }
+}
+
 const defaultSleep = (milliseconds: number) => new Promise<void>(resolve => window.setTimeout(resolve, milliseconds))
 
 export async function completeMcpDesktopOAuth({
@@ -47,6 +59,10 @@ export async function completeMcpDesktopOAuth({
   const started = await start(serverName)
 
   if (started.status === 'error') {
+    if (started.needs_client_id) {
+      throw new McpOAuthNeedsClientId(started.error || 'This server needs a client id from its vendor')
+    }
+
     throw new Error(started.error || 'OAuth failed to start')
   }
 

@@ -366,7 +366,7 @@ describe('desktop slash command curation', () => {
   it('explains known commands that desktop owns elsewhere', () => {
     expect(desktopSlashUnavailableMessage('/model sonnet')).toContain('model picker')
     expect(desktopSlashUnavailableMessage('/skills')).toContain('desktop sidebar')
-    expect(desktopSlashUnavailableMessage('/clear')).toContain('terminal interface')
+    expect(desktopSlashUnavailableMessage('/busy')).toContain('terminal interface')
   })
 
   it('flags /model as a picker-owned command so the desktop opens the overlay', () => {
@@ -396,7 +396,10 @@ describe('desktop slash command curation', () => {
     expect(resolveDesktopCommand('/research')?.surface).toEqual({ kind: 'action', action: 'research' })
     expect(resolveDesktopCommand('/deep-research')?.surface).toEqual({ kind: 'action', action: 'research' })
     expect(resolveDesktopCommand('/usage')?.surface).toEqual({ kind: 'exec' })
-    expect(resolveDesktopCommand('/clear')?.surface).toEqual({ kind: 'unavailable', reason: 'terminal' })
+    // /clear starts a fresh chat, the same as /new (the transcript is the chat, there is no screen to wipe).
+    expect(resolveDesktopCommand('/clear')?.surface).toEqual({ kind: 'action', action: 'new' })
+    expect(isDesktopSlashCommand('/clear')).toBe(true)
+    expect(resolveDesktopCommand('/web')?.surface).toEqual({ kind: 'action', action: 'web' })
     // Skill / quick commands aren't in the registry.
     expect(resolveDesktopCommand('/gif-search')).toBeNull()
   })

@@ -896,6 +896,8 @@ finally:
 // Python keeps the descriptor close-on-exec by default and passes it explicitly
 // only to the intended outer shell; each detached child closes it before
 // execing Hermes.
+// `mutexPath` must already be a shell word from expandRemotePath(); quoting it
+// again would hand Python a path with literal quotes, i.e. a cwd-relative file.
 function withRemoteUpdateMutex(command, mutexPath) {
   const script = `
 import fcntl,os,subprocess,sys
@@ -913,7 +915,7 @@ finally:
 sys.exit(result.returncode if result is not None else 1)
 `.trim()
 
-  return `python3 -c ${shq(script)} ${shq(mutexPath)} ${shq(command)}`
+  return `python3 -c ${shq(script)} ${mutexPath} ${shq(command)}`
 }
 
 /**

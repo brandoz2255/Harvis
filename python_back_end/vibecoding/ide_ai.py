@@ -574,7 +574,9 @@ async def get_providers(
                 response = await client.get(f"{OLLAMA_URL}/api/tags")
                 if response.status_code == 200:
                     data = response.json()
-                    models = data.get("models", [])
+                    from owui_compat.ollama_hosts import drop_cloud
+
+                    models = drop_cloud(data.get("models", []))
                     
                     # Filter for code-capable models (heuristic: check name)
                     code_keywords = ["code", "coder", "llama", "mistral", "gpt", "deepseek", "phi", "qwen"]

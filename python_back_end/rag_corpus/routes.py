@@ -633,7 +633,9 @@ async def get_ollama_models():
                     )
 
                 data = await resp.json()
-                models = data.get("models", [])
+                from owui_compat.ollama_hosts import drop_cloud
+
+                models = drop_cloud(data.get("models", []))
 
                 # Format response
                 model_list = []

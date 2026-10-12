@@ -1178,8 +1178,8 @@ async def resolve_host(model: str) -> str:
     from . import ollama_hosts
     base, reason = await ollama_hosts.resolve(model)
     if base:
-        if reason == "desktop-preferred":
-            logger.info("cad_generate: %s is desktop-preferred — designing on the rig", model)
+        if reason.endswith("-preferred"):
+            logger.info("cad_generate: %s is %s — designing on that machine", model, reason)
         return base
     if reason == "unknown":
         raise GenerateError(

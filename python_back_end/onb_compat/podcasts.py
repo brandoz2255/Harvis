@@ -264,18 +264,10 @@ async def _generate_episode_task(
     duration_minutes: int,
     model: Optional[str] = None,
 ):
-    """Background task: run the podcast pipeline, synthesize audio via
-    tts-service, and write the result back onto the existing
-    standalone_podcasts row.
-
-    NOTE: we drive PodcastGenerator with generate_audio=False (script-only) and
-    do the audio synthesis ourselves via the GPU tts-service. The convenience
-    `run_podcast_generation` wrapper forces generate_audio=True, which uses the
-    in-process AudioGenerator (writes to PODCAST_OUTPUT_PATH, a path our
-    tts-audio proxy can't serve) — so we bypass it to keep audio reachable
-    through /onb-api/podcasts/tts-audio/<file>."""
-    from open_notebook.podcast.generator import PodcastGenerator
-
+    """Background task: write the script (notebooks/podcast_script.py), speak it
+    (notebooks/podcast_audio.py) and write the result onto the existing
+    standalone_podcasts row. Audio failure leaves a readable script with the
+    reason in error_message; an unreadable script is an error."""
     audio_path = None
     audio_url = None
     duration_seconds = None
@@ -292,40 +284,41 @@ async def _generate_episode_task(
                 "generating", podcast_id,
             )
 
-        # 1. Generate outline + transcript (no audio inside the generator;
-        #    we synthesize via the GPU tts-service below to match the native
-        #    /generate/stream path).
-        generator = PodcastGenerator()
-        generator.script_generator.model = model
-        result = await generator.generate(
-            content=content,
-            title=title,
-            speakers=speakers,
-            duration_minutes=duration_minutes,
-            style=style,
-            generate_audio=False,
-        )
+        # 1. Write the script in parts sized to the requested length, with the
+        #    asked-for speakers only. A script that cannot be read is an error,
+        #    never a finished podcast. See notebooks/podcast_script.py.
+        from notebooks import podcast_audio
+        from notebooks.podcast_script import PodcastScriptError, generate_script, ollama_caller, speaker_names
+        from notebooks.router import _default_ollama_model
 
-        transcript = result.get("transcript", []) or []
-        outline = result.get("outline")
-        gen_status = result.get("status", "completed")
+        ollama_url = os.environ.get("OLLAMA_URL", "http://ollama:11434")
+        chosen = model or os.environ.get("NOTEBOOK_PODCAST_MODEL") or await _default_ollama_model(ollama_url)
+        try:
+            script = await generate_script(
+                content,
+                title=title,
+                style=style,
+                minutes=duration_minutes,
+                names=speaker_names(None, speakers),
+                call=ollama_caller(chosen, ollama_url),
+            )
+        except PodcastScriptError as exc:
+            script = None
+            error_message = str(exc)
+            final_status = "error"
 
-        if gen_status == "error":
-            error_message = result.get("error") or "Script generation failed"
-            final_status = "error"
-        elif not transcript:
-            error_message = "No transcript produced"
-            final_status = "error"
-        else:
-            # 2. Synthesize audio via tts-service (same contract as the native
-            #    /generate/stream route).
-            audio_path, audio_url, duration_seconds, tts_err = await _synthesize_audio(transcript)
-            if audio_path:
-                final_status = "completed"
-            else:
-                # Audio failed but we still have a usable script.
+        if script:
+            transcript = script["transcript"]
+            outline = script["outline"]
+            # 2. Speak it. Failure keeps the script and says why.
+            try:
+                made = await podcast_audio.make_audio(
+                    [{"speaker": t["speaker"], "text": t["dialogue"]} for t in transcript]
+                )
+                audio_path, audio_url, duration_seconds = made["audio_path"], made["audio_url"], made["duration_seconds"]
+            except podcast_audio.PodcastAudioError as exc:
                 final_status = "script_only"
-                error_message = tts_err
+                error_message = f"The script is saved but the audio could not be made. {exc}"
 
     except Exception as e:
         logger.error("Podcast background generation failed (id=%s): %s", podcast_id, e)
@@ -360,59 +353,6 @@ async def _generate_episode_task(
             )
     except Exception as e:
         logger.error("Failed to persist podcast result (id=%s): %s", podcast_id, e)
-
-
-async def _synthesize_audio(transcript: List[Dict[str, Any]]):
-    """Call tts-service /generate/podcast. Returns
-    (audio_path, audio_url, duration_seconds, error_message)."""
-    script_segments = []
-    speaker_names = set()
-    for seg in transcript:
-        if not isinstance(seg, dict):
-            continue
-        dialogue = (seg.get("dialogue") or seg.get("text") or "").strip()
-        speaker = (seg.get("speaker") or "Speaker").strip()
-        if dialogue:
-            script_segments.append({"speaker": speaker, "text": dialogue})
-            speaker_names.add(speaker)
-
-    if not script_segments:
-        return None, None, None, "No dialogue segments to synthesize"
-
-    voice_mapping = {name: "__default__" for name in speaker_names}
-
-    try:
-        async with httpx.AsyncClient(timeout=600.0) as client:
-            resp = await client.post(
-                f"{TTS_URL}/generate/podcast",
-                json={
-                    "script": script_segments,
-                    "voice_mapping": voice_mapping,
-                    "output_format": "wav",
-                    "normalize_audio": True,
-                    "add_silence_between_speakers": 0.3,
-                },
-            )
-
-        if resp.status_code == 200:
-            tts_data = resp.json()
-            if tts_data.get("success"):
-                tts_audio_url = tts_data.get("audio_url", "")
-                tts_filename = tts_audio_url.split("/")[-1] if tts_audio_url else ""
-                duration_secs = tts_data.get("duration", 0)
-                # Store the facade-proxy path so list responses serve it directly.
-                # /api/... resolves through nginx's /onb/api → /onb-api rewrite.
-                proxy_path = f"/api/podcasts/tts-audio/{tts_filename}"
-                return proxy_path, proxy_path, duration_secs, None
-            return None, None, None, "TTS returned success=false"
-        return None, None, None, f"TTS returned status {resp.status_code}"
-
-    except httpx.RequestError as e:
-        logger.warning("tts-service unreachable: %s", e)
-        return None, None, None, f"tts-service unreachable: {e}"
-    except Exception as e:
-        logger.warning("Audio synthesis failed: %s", e)
-        return None, None, None, str(e)
 
 
 async def _resolve_notebook_content(
@@ -794,6 +734,15 @@ async def proxy_tts_audio(filename: str):
     """Proxy audio bytes from the tts-service container. Mirrors the native
     notebooks router's /podcasts/tts-audio/{filename} proxy."""
     safe_filename = os.path.basename(filename)
+    from notebooks import podcast_audio
+
+    local = podcast_audio.local_file(safe_filename)
+    if local is not None:
+        return Response(
+            content=local.read_bytes(),
+            media_type="audio/wav",
+            headers={"Content-Disposition": f'inline; filename="{safe_filename}"'},
+        )
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(f"{TTS_URL}/audio/{safe_filename}")

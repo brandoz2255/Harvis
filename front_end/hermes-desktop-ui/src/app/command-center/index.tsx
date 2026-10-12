@@ -30,6 +30,7 @@ import { useStoreSelector } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
 import { upsertDesktopActionTask } from '@/store/activity'
 import { $pinnedSessionIds, pinSession, unpinSession } from '@/store/layout'
+import { useCapability } from '@/store/server-capabilities'
 import { $sessions, sessionPinId } from '@/store/session'
 
 import { useRefreshHotkey } from '../hooks/use-refresh-hotkey'
@@ -136,6 +137,9 @@ function EmptyPanel({ action, description, title }: { action?: ReactNode; descri
 export function CommandCenterView({ initialSection, onClose, onDeleteSession, onOpenSession }: CommandCenterViewProps) {
   const { t } = useI18n()
   const cc = t.commandCenter
+  const canLogs = useCapability('logs')
+  const canRestart = useCapability('gateway_restart')
+  const canUpdate = useCapability('hermes_update')
   // $sessions ticks on every streaming token (title updates, new sessions),
   // but we only need the data on the Sessions tab. Subscribe conditionally so
   // the System/Usage/Maintenance tabs don't re-render on every stream delta.
@@ -189,11 +193,7 @@ export function CommandCenterView({ initialSection, onClose, onDeleteSession, on
     try {
       const [nextStatus, nextLogs] = await Promise.all([
         getStatus(),
-        getLogs({
-          file: logFile,
-          level: logLevel,
-          lines: 200
-        })
+        canLogs ? getLogs({ file: logFile, level: logLevel, lines: 200 }) : Promise.resolve({ lines: [] as string[] })
       ])
 
       setStatus(nextStatus)
@@ -203,7 +203,7 @@ export function CommandCenterView({ initialSection, onClose, onDeleteSession, on
     } finally {
       setSystemLoading(false)
     }
-  }, [logFile, logLevel])
+  }, [canLogs, logFile, logLevel])
 
   const refreshUsage = useCallback(async (days: UsagePeriod) => {
     const requestId = usageRequestRef.current + 1
@@ -442,12 +442,16 @@ export function CommandCenterView({ initialSection, onClose, onDeleteSession, on
                         </div>
                       </div>
                       <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 whitespace-nowrap max-[47.5rem]:whitespace-normal">
-                        <Button onClick={() => void runSystemAction('restart')} size="xs" variant="text">
-                          {cc.restartGateway}
-                        </Button>
-                        <Button onClick={() => void runSystemAction('update')} size="xs" variant="textStrong">
-                          {cc.updateHermes}
-                        </Button>
+                        {canRestart && (
+                          <Button onClick={() => void runSystemAction('restart')} size="xs" variant="text">
+                            {cc.restartGateway}
+                          </Button>
+                        )}
+                        {canUpdate && (
+                          <Button onClick={() => void runSystemAction('update')} size="xs" variant="textStrong">
+                            {cc.updateHermes}
+                          </Button>
+                        )}
                       </div>
                     </div>
                     {systemAction && (
@@ -466,47 +470,49 @@ export function CommandCenterView({ initialSection, onClose, onDeleteSession, on
                 )}
               </div>
 
-              <div className="flex min-h-0 flex-col pt-2">
-                <div className="mb-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
-                  <span className="text-[0.625rem] font-medium uppercase tracking-[0.08em] text-(--ui-text-tertiary)">
-                    {cc.recentLogs}
-                  </span>
-                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                    <ResponsiveTabs
-                      align="end"
-                      onChange={id => setLogFile(id as (typeof LOG_FILES)[number])}
-                      tabs={LOG_FILES.map(value => ({ id: value, label: value }))}
-                      value={logFile}
-                    />
-                    <ResponsiveTabs
-                      align="end"
-                      onChange={id => setLogLevel(id as (typeof LOG_LEVELS)[number])}
-                      tabs={LOG_LEVELS.map(value => ({
-                        id: value,
-                        label: value === 'ALL' ? 'all' : value.toLowerCase()
-                      }))}
-                      value={logLevel}
-                    />
-                    <SearchField
-                      containerClassName="w-44"
-                      onChange={next => setLogQuery(next)}
-                      placeholder={cc.logSearchPlaceholder}
-                      value={logQuery}
-                    />
-                  </div>
-                  {systemError && (
-                    <span className="inline-flex items-center gap-1 text-[length:var(--conversation-caption-font-size)] text-destructive">
-                      <AlertCircle className="size-3.5" />
-                      {systemError}
+              {canLogs && (
+                <div className="flex min-h-0 flex-col pt-2">
+                  <div className="mb-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                    <span className="text-[0.625rem] font-medium uppercase tracking-[0.08em] text-(--ui-text-tertiary)">
+                      {cc.recentLogs}
                     </span>
-                  )}
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                      <ResponsiveTabs
+                        align="end"
+                        onChange={id => setLogFile(id as (typeof LOG_FILES)[number])}
+                        tabs={LOG_FILES.map(value => ({ id: value, label: value }))}
+                        value={logFile}
+                      />
+                      <ResponsiveTabs
+                        align="end"
+                        onChange={id => setLogLevel(id as (typeof LOG_LEVELS)[number])}
+                        tabs={LOG_LEVELS.map(value => ({
+                          id: value,
+                          label: value === 'ALL' ? 'all' : value.toLowerCase()
+                        }))}
+                        value={logLevel}
+                      />
+                      <SearchField
+                        containerClassName="w-44"
+                        onChange={next => setLogQuery(next)}
+                        placeholder={cc.logSearchPlaceholder}
+                        value={logQuery}
+                      />
+                    </div>
+                    {systemError && (
+                      <span className="inline-flex items-center gap-1 text-[length:var(--conversation-caption-font-size)] text-destructive">
+                        <AlertCircle className="size-3.5" />
+                        {systemError}
+                      </span>
+                    )}
+                  </div>
+                  <LogTail
+                    className="flex-1 rounded-lg border border-(--ui-stroke-tertiary) bg-(--ui-bg-quinary)"
+                    emptyLabel={cc.noLogs}
+                    lines={systemLoading && logs.length === 0 ? null : visibleLogs}
+                  />
                 </div>
-                <LogTail
-                  className="flex-1 rounded-lg border border-(--ui-stroke-tertiary) bg-(--ui-bg-quinary)"
-                  emptyLabel={cc.noLogs}
-                  lines={systemLoading && logs.length === 0 ? null : visibleLogs}
-                />
-              </div>
+              )}
             </div>
           )}
         </OverlayMain>

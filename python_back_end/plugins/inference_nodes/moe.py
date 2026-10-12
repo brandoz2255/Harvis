@@ -111,7 +111,9 @@ async def installed_models() -> list[str]:
         async with httpx.AsyncClient() as client:
             r = await client.get(f"{OLLAMA_URL}/api/tags", timeout=SHOW_TIMEOUT_S)
             r.raise_for_status()
-            return [m["name"] for m in (r.json().get("models") or []) if m.get("name")]
+            from owui_compat.ollama_hosts import drop_cloud
+
+            return [m["name"] for m in drop_cloud(r.json().get("models") or []) if m.get("name")]
     except Exception as exc:
         logger.info("moe scan: Ollama not answering (%s)", type(exc).__name__)
         return []

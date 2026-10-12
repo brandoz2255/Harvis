@@ -14,6 +14,7 @@ export type SettingsView =
   | 'hosting'
   | 'keybinds'
   | 'keys'
+  | 'models'
   | 'notifications'
   | 'people'
   | 'plugins'

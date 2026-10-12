@@ -41,7 +41,14 @@ except Exception:  # pragma: no cover - keeps the runner importable without it
     def _prov_drop(*_a, **_k): return None
     def _prov_note(*_a, **_k): return None
 from .model_router import ModelRouter
-from .risk import await_action_decision, mark_pending_resolved, persist_pending, register_pending
+from .approval_notify import TIMEOUT_NOTICE, announce as announce_approval, withdraw as withdraw_approval
+from .risk import (
+    approval_timeout_s,
+    await_action_outcome,
+    mark_pending_resolved,
+    persist_pending,
+    register_pending,
+)
 from .tools import (
     COMPUTER_PROMPT,
     COMPUTER_TOOLS,
@@ -776,6 +783,12 @@ class SubAgentRunner:
         # backstop for anything the model emits despite the offer-time withhold.
         if disabled_tools:
             disabled |= {t for t in disabled_tools if t != "finish"}
+        # Toolsets the user switched off in Capabilities. Read per run so a toggle
+        # takes effect on the next turn with no restart; fail-open (see toolsets).
+        if pool is not None and user_id is not None:
+            from .toolsets import disabled_tool_names
+
+            disabled |= await disabled_tool_names(pool, user_id)
         # Phase 4: the tracked session tools exist ONLY inside a VibeCode session —
         # non-session runs never even see them in the offered schema (dispatch_tool
         # also refuses them without a session_id; belt-and-braces). Session runs are
@@ -1271,17 +1284,27 @@ class SubAgentRunner:
                             await persist_pending(
                                 pool, action_id, run_id, session_id, name, args, res.tier, res.reason,
                             )
+                            # Push to the owner's live Hermes window BEFORE the SSE event
+                            # below, so the stream's own "needs approval" note can tell the
+                            # prompt already reached the chat (ws_approvals.delivers_for_run).
+                            await announce_approval(
+                                user_id, (run_id, parent_run_id), action_id, name, args,
+                                res.tier, res.reason, session_scoped=bool(session_id),
+                            )
                             yield ev("approval_request", {
                                 "action_id": action_id, "tool": name, "args": args,
                                 "risk": res.tier, "reason": res.reason,
                             })
-                            approved = await await_action_decision(action_id)
+                            approved, timed_out = await await_action_outcome(action_id)
                             # Covers the timeout-deny path too (the resolve endpoint only
                             # marks rows it actually resolved).
                             await mark_pending_resolved(
                                 pool, action_id, "approved" if approved else "denied",
                             )
-                            yield ev("approval_resolved", {"action_id": action_id, "approved": approved})
+                            await withdraw_approval(user_id, action_id, approved, timed_out=timed_out)
+                            yield ev("approval_resolved", {
+                                "action_id": action_id, "approved": approved, "timed_out": timed_out,
+                            })
                             if computer is not None and name in COMPUTER_TOOLS:
                                 from plugins.agents import computer as _computer
 
@@ -1293,8 +1316,14 @@ class SubAgentRunner:
                                         res.reason, action_id,
                                     )
                             if not approved:
-                                yield ev("tool_result", {"output": "Denied by the user.", "success": False})
-                                results_text.append(f"{name} DENIED by user")
+                                if timed_out:
+                                    notice = TIMEOUT_NOTICE.format(
+                                        minutes=max(1, round(approval_timeout_s() / 60)), tool=name)
+                                    yield ev("tool_result", {"output": notice, "success": False})
+                                    results_text.append(f"{name} DENIED (no answer: approval timed out)")
+                                else:
+                                    yield ev("tool_result", {"output": "Denied by the user.", "success": False})
+                                    results_text.append(f"{name} DENIED by user")
                                 continue
                     if name.startswith("mcp__"):
                         # Connector tools go to the MCP runtime, not dispatch_tool

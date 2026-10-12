@@ -23,6 +23,8 @@ import { useEffect, useRef, useState } from 'react'
 
 import { harvisApi } from './api'
 import { relativeTime } from './format'
+import { blockedReason, useCapabilities } from './notebook-capabilities'
+import { UnderConstruction } from './notebook-badge'
 import {
   createNote,
   errorText,
@@ -259,12 +261,17 @@ function PodcastCard({ notebookId, podcast: p }: { notebookId: string; podcast: 
       {audio && !audioGone ? (
         <audio className="h-8 w-full" controls onError={() => setAudioGone(true)} preload="none" src={audio} />
       ) : (
-        <p className="text-xs text-(--ui-text-tertiary)">
+        <p
+          className={cn(
+            'text-xs',
+            p.status === 'error' || p.status === 'script_only' ? 'text-destructive' : 'text-(--ui-text-tertiary)'
+          )}
+        >
           {p.status === 'error'
             ? p.error_message || 'Generation failed.'
             : audioGone
               ? 'The audio file is no longer available; the script is still here.'
-              : 'Script only: the speech service was not reachable, so no audio was made.'}
+              : `Script only. ${p.error_message || 'No audio was made for this one.'}`}
         </p>
       )}
       {script && (
@@ -298,6 +305,8 @@ export function AudioOverview({
 }) {
   const { chosen } = useChosenModel()
   const queryClient = useQueryClient()
+  const caps = useCapabilities()
+  const speechOff = blockedReason(caps?.podcast_audio)
   const ready = sources.filter(s => s.status === 'ready')
   const [style, setStyle] = useState('conversational')
   const [minutes, setMinutes] = useState<string>('5')
@@ -365,10 +374,15 @@ export function AudioOverview({
 
   return (
     <div className="space-y-2">
-      <h3 className="text-sm font-medium">Audio overview</h3>
+      <div className="flex items-center gap-2">
+        <h3 className="text-sm font-medium">Audio overview</h3>
+        <UnderConstruction note="Podcasts work, but custom voices are coming." />
+      </div>
       <p className="text-xs text-(--ui-text-tertiary)">
-        Two hosts talk through everything in your sources. The script is written first, then voiced.
+        Two hosts talk through everything in your sources. The script is written first, then voiced. Podcasts work today
+        with the built-in voices; custom voices are coming.
       </p>
+      {speechOff && <p className="text-xs text-destructive">{speechOff}</p>}
       {ready.length === 0 ? (
         <p className="text-xs text-(--ui-text-tertiary)">Add a source and wait for it to be read first.</p>
       ) : (

@@ -87,74 +87,12 @@ async def skills_hub_sources(user=Depends(get_current_user_optimized)):
     return {"sources": [], "index_available": False, "featured": [], "installed": {}}
 
 
-# The Capabilities screen's Toolsets tab, built from Harvis's own tool registry
-# rather than a hand-kept list — TOOL_SCHEMA is what the agent is actually
-# handed, so a tool added there shows up here with no second edit. The grouping
-# is presentation only: `lane` still decides what each tool is allowed to do.
-_TOOLSET_GROUPS = (
-    ("harvis-files", "Workspace files",
-     "Read, write and patch files inside the run's workspace, and commit them.",
-     ("read_file", "edit_file", "str_replace", "apply_patch", "git_commit")),
-    ("harvis-terminal", "Sandbox terminal",
-     "Run commands inside the sandboxed project container.",
-     ("exec",)),
-    ("harvis-browser", "Computer use",
-     "Drive a real browser: open a page, snapshot it, click, type and scroll.",
-     None),  # prefix-matched below
-    ("harvis-reach", "Agent Reach",
-     "Read the outside world: web search, page text, YouTube transcripts, "
-     "GitHub views and RSS.",
-     None),
-    ("harvis-media", "Images and previews",
-     "Generate images and screenshot a live preview of what was built.",
-     ("generate_image", "screenshot_preview")),
-    ("harvis-agent", "Agent control",
-     "How a run reports itself: proposing a new skill, and finishing.",
-     ("propose_skill", "finish")),
-)
-
-_TOOLSET_PREFIXES = {"harvis-browser": "computer_", "harvis-reach": "agent_reach_"}
-
-
-def _registry_tools() -> list[tuple[str, int]]:
-    """(tool name, lane) for every tool in Harvis's registry, deduped in order."""
-    try:
-        from workspace.orchestration.tools import TOOL_SCHEMA
-    except Exception:
-        log.exception("hermes_ui: tool registry unavailable")
-        return []
-    seen: dict[str, int] = {}
-    for entry in TOOL_SCHEMA:
-        name = str((entry.get("function") or {}).get("name") or "")
-        if name and name not in seen:
-            seen[name] = int(entry.get("lane") or 0)
-    return list(seen.items())
-
-
+# The Capabilities screen's Toolsets tab. The grouping lives in
+# workspace/orchestration/toolsets.py so the runner reads the same definition
+# when it decides which tools to offer the model.
 def _build_toolsets(disabled: set) -> list[dict]:
-    tools = _registry_tools()
-    claimed: set = set()
-    out: list[dict] = []
-    for name, label, description, members in _TOOLSET_GROUPS:
-        prefix = _TOOLSET_PREFIXES.get(name)
-        if prefix is not None:
-            picked = [t for t, _lane in tools if t.startswith(prefix)]
-        else:
-            picked = [t for t, _lane in tools if t in (members or ())]
-        if not picked:
-            continue
-        claimed.update(picked)
-        out.append({"name": name, "label": label, "description": description,
-                    "tools": picked, "configured": True, "enabled": name not in disabled})
-    # Anything the registry grows that no group claims still has to be visible,
-    # or a new tool would silently vanish from the UI instead of looking wrong.
-    rest = [t for t, _lane in tools if t not in claimed]
-    if rest:
-        out.append({"name": "harvis-other", "label": "Other Harvis tools",
-                    "description": "Registered tools that are not part of a named toolset yet.",
-                    "tools": rest, "configured": True,
-                    "enabled": "harvis-other" not in disabled})
-    return out
+    from workspace.orchestration.toolsets import build_toolsets
+    return build_toolsets(disabled)
 
 
 async def _disabled_toolsets(request: Request, user) -> set:
@@ -244,7 +182,9 @@ async def mcp_servers_replace(request: Request, user=Depends(get_current_user_op
         name = str(raw_name or "").strip()
         if not name or not isinstance(cfg, dict):
             continue
-        transport = str(cfg.get("transport") or "stdio").strip().lower()
+        from .mcp_inputs import infer_transport
+        transport = infer_transport(cfg.get("transport"), str(cfg.get("url") or "").strip() or None,
+                                    str(cfg.get("command") or "").strip() or None)
         if transport not in ("stdio", "sse", "streamable-http"):
             raise HTTPException(400, f"Unsupported transport for {name}: {transport}")
         cleaned.append((name, {**cfg, "transport": transport}))
@@ -260,7 +200,8 @@ async def mcp_servers_replace(request: Request, user=Depends(get_current_user_op
         # re-enables, matching the editor's replace semantics).
         # The editor's mcp.json shape spells it `auth: oauth`; a save must not
         # downgrade a server the user authorized to auth_method none.
-        auth = str(cfg.get("auth_method") or cfg.get("auth") or "none").strip().lower()
+        from .mcp_inputs import normalize_auth
+        auth = normalize_auth(cfg)
         await _upsert_server(
             request, user, name=name, transport=cfg["transport"],
             url=str(cfg.get("url") or "").strip() or None,
@@ -319,6 +260,8 @@ def _catalog_entry(src: dict, installed: dict) -> dict:
         if f.get("key")
     ]
     row = installed.get(name.lower())
+    from .mcp_inputs import needs_setup_note
+    setup_note = needs_setup_note(src)
     return {
         "name": name,
         "description": src.get("blurb") or src.get("description") or "",
@@ -337,6 +280,8 @@ def _catalog_entry(src: dict, installed: dict) -> dict:
         "default_enabled": None,
         "post_install": "",
         "needs_install": bool(src.get("command_template")),
+        "needs_setup": setup_note is not None,
+        "setup_note": setup_note or "",
         "installed": row is not None,
         "enabled": bool(row) and bool(row["enabled"]),
     }
@@ -368,10 +313,16 @@ async def _upsert_server(request: Request, user, *, name: str, transport: str,
                          auth_method: str, env: dict, credentials: dict) -> dict:
     """Write one row into `mcp_servers`, sealing credentials on the way in.
 
+    A stdio server is a command run on this computer, so on a shared server only
+    an admin may add one (plugins.exposure).
+
     Uses the same merge_env the OWUI connections page uses, so a re-save that
     omits a token keeps the stored one instead of wiping it, and no secret is
     ever written to the table in the clear.
     """
+    if transport == "stdio":
+        from plugins.exposure import require_build_space
+        require_build_space(user)
     from plugins.mcp.credentials import merge_env
     if transport != "stdio":
         from plugins.mcp.http_transport import guard_url_async
@@ -417,6 +368,10 @@ async def mcp_catalog_install(request: Request, user=Depends(get_current_user_op
                   if (e.get("name") or e.get("id")) == name or e.get("id") == name), None)
     if entry is None:
         raise HTTPException(404, f"unknown catalog entry: {name}")
+    from .mcp_inputs import needs_setup_note
+    note = needs_setup_note(entry)
+    if note:
+        raise HTTPException(409, f"{entry.get('name') or name} needs setup first. {note}")
 
     secret_keys = {f.get("key") for f in (entry.get("credentials") or []) if f.get("key")}
     plain = {k: v for k, v in supplied.items() if k not in secret_keys}
@@ -434,8 +389,13 @@ async def mcp_catalog_install(request: Request, user=Depends(get_current_user_op
         parts = filled.split()
         command, args = parts[0], parts[1:]
 
-    url = entry.get("mcp_url")
-    transport = entry.get("transport") or ("stdio" if template else "streamable-http")
+    supplied_url = (plain.pop("url", None) or "").strip() or None
+    url = entry.get("mcp_url") or supplied_url
+    from .mcp_inputs import infer_transport
+    # The custom-URL card names "sse" as a placeholder default; the address the
+    # person typed says more than that.
+    transport = infer_transport(None if supplied_url and not entry.get("mcp_url") else entry.get("transport"),
+                                url, command)
     if transport not in ("stdio", "sse", "streamable-http"):
         raise HTTPException(400, f"{name} has no Harvis-installable transport ({transport}).")
     return await _upsert_server(
@@ -447,25 +407,30 @@ async def mcp_catalog_install(request: Request, user=Depends(get_current_user_op
 
 @router.post("/mcp/servers")
 async def mcp_server_add(request: Request, user=Depends(get_current_user_optimized)):
+    """Add one server. A URL alone is enough: the transport is inferred, and the
+    sign-in choice may arrive as `auth` (the UI) or `auth_method` (everything else)."""
+    from .mcp_inputs import TRANSPORTS, infer_transport, normalize_auth
     body = await request.json()
     name = str(body.get("name") or "").strip()
     if not name:
         raise HTTPException(400, "A server name is required.")
-    transport = str(body.get("transport") or "stdio").strip().lower()
-    if transport not in ("stdio", "sse", "streamable-http"):
-        raise HTTPException(400, f"Unsupported transport: {transport}")
     command = str(body.get("command") or "").strip() or None
     url = str(body.get("url") or "").strip() or None
+    transport = infer_transport(body.get("transport"), url, command)
+    if transport not in TRANSPORTS:
+        raise HTTPException(400, f"Unsupported transport: {transport}")
     if transport == "stdio" and not command:
-        raise HTTPException(400, "stdio servers need a command.")
+        raise HTTPException(400, "Give a server URL (https://...) or, for a local server, a command to run.")
     if transport != "stdio" and not url:
         raise HTTPException(400, "Remote servers need a URL.")
+    auth_method = normalize_auth(body)
     await _upsert_server(
         request, user, name=name, transport=transport, url=url, command=command,
-        args=list(body.get("args") or []), auth_method=str(body.get("auth_method") or "none"),
+        args=list(body.get("args") or []), auth_method=auth_method,
         env={}, credentials={str(k): str(v) for k, v in (body.get("env") or {}).items()})
     return {"name": name, "transport": transport, "command": command,
-            "args": list(body.get("args") or []), "url": url, "enabled": True, "tools": None}
+            "args": list(body.get("args") or []), "url": url, "enabled": True, "tools": None,
+            "auth": auth_method}
 
 
 @router.delete("/mcp/servers/{name}")

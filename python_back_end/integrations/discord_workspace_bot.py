@@ -3032,7 +3032,7 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
     tree = app_commands.CommandTree(client)
 
     async def _list_ollama_models() -> list[str]:
-        """Fetch model names from local + desktop Ollama in PARALLEL (deduped).
+        """Fetch model names from every configured Ollama machine in PARALLEL (deduped).
 
         Discord autocomplete has a hard ~3s deadline; this used to call the
         two endpoints sequentially with a 5s timeout each, which made the
@@ -3040,7 +3040,12 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
         desktop was unreachable. Parallel + tight timeout caps the worst case
         at ~1.5s.
         """
-        results_per_host: list[list[str]] = [[], []]
+        from owui_compat import ollama_hosts
+
+        hosts = ollama_hosts.configured_hosts() or [
+            ollama_hosts.HostSpec(ollama_hosts.LOCAL, _LOCAL_OLLAMA_URL, "Ollama")
+        ]
+        results_per_host: list[list[str]] = [[] for _ in hosts]
 
         async def _fetch(base_url: str, label: str, idx: int, timeout_s: float):
             if not base_url:
@@ -3052,17 +3057,17 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
                     resp = await c.get(tags_url)
                 if resp.status_code == 200:
                     results_per_host[idx] = [
-                        m["name"] for m in resp.json().get("models", []) if m.get("name")
+                        m["name"] for m in ollama_hosts.drop_cloud(resp.json().get("models", []))
+                        if m.get("name")
                     ]
             except Exception as e:
                 logger.warning("Failed to list Ollama models from %s: %s", label, e)
 
-        desktop_url = os.getenv("DESKTOP_OLLAMA_URL", "")
-        await asyncio.gather(
-            _fetch(_LOCAL_OLLAMA_URL, "laptop", 0, 2.5),
-            _fetch(desktop_url, "desktop", 1, 1.5),
-        )
-        # Laptop entries first; dedupe across hosts.
+        await asyncio.gather(*(
+            _fetch(h.base_url, h.name, i, 2.5 if i == 0 else 1.5)
+            for i, h in enumerate(hosts)
+        ))
+        # This machine's entries first; dedupe across hosts.
         names: list[str] = []
         seen: set[str] = set()
         for host_models in results_per_host:

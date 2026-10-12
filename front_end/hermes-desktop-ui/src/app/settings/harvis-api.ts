@@ -6,6 +6,8 @@
 
 import { reportUnauthorized } from '@/lib/harvis-session'
 
+import { createSseParser, type PullEvent } from './pull-progress'
+
 export async function harvisFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     credentials: 'include',
@@ -206,6 +208,74 @@ export interface HostingStatus {
 /** Backend route (not the Hermes gateway): nginx fronts `/api/` on the same origin. */
 export const fetchHostingStatus = () => harvisFetch<HostingStatus>('/api/capabilities/hosting')
 
+/** One pod of a Harvis service, as GET /api/capabilities/hosting/workloads reports it. */
+export interface ClusterPod {
+  name: string
+  phase: string
+  reason: null | string
+  ready: boolean
+  restarts: number
+  last_restart: null | number
+  node: string
+  started: null | number
+  containers: string[]
+}
+
+export interface ClusterService {
+  name: string
+  desired: number
+  ready: number
+  updated: number
+  state: 'degraded' | 'down' | 'ready' | 'stopped'
+  images: { name: string; tag: string }[]
+  pods: ClusterPod[]
+  restarts: number
+}
+
+export interface ClusterEvent {
+  reason: string
+  message: string
+  object: string
+  count: number
+  last_seen: null | number
+}
+
+/** Admin-only, read-only view of the Harvis namespace (python_back_end/plugins/hosting/workloads.py). */
+export interface ClusterWorkloads {
+  mode: 'docker' | 'kubernetes'
+  namespace: null | string
+  services: ClusterService[]
+  unmatched_pods: ClusterPod[]
+  events: ClusterEvent[]
+  error: null | string
+  events_error?: string
+}
+
+export interface PodLogs {
+  pod: string
+  container: null | string
+  previous: boolean
+  lines: string[]
+}
+
+export const fetchClusterWorkloads = () => harvisFetch<ClusterWorkloads>('/api/capabilities/hosting/workloads')
+
+export const fetchPodLogs = (pod: string, { container, previous }: { container?: string; previous?: boolean } = {}) => {
+  const q = new URLSearchParams()
+
+  if (container) {
+    q.set('container', container)
+  }
+
+  if (previous) {
+    q.set('previous', 'true')
+  }
+
+  const qs = q.toString()
+
+  return harvisFetch<PodLogs>(`/api/capabilities/hosting/logs/${encodeURIComponent(pod)}${qs ? `?${qs}` : ''}`)
+}
+
 export const fetchMemory = () =>
   harvisFetch<{ entries: MemoryEntry[]; settings: LearnSettings; model: string }>('/hermes-api/api/harvis/memory')
 
@@ -275,3 +345,192 @@ export const fetchInstanceConfig = () => harvisFetch<InstanceConfig>('/api/v1/au
 
 export const saveInstanceConfig = (patch: Partial<InstanceConfig>) =>
   post<InstanceConfig>('/api/v1/auths/admin/config', patch)
+
+/** One model Ollama has pulled, as /api/cookbook/installed lists it (Ollama's /api/tags rows). */
+export interface InstalledModel {
+  name: string
+  size?: number
+  modified_at?: string
+  /** Set by Ollama on models that run on ollama.com instead of this machine. */
+  remote_host?: string
+  details?: { family?: string; parameter_size?: string; quantization_level?: string }
+}
+
+/**
+ * True for an Ollama model that runs on ollama.com: a `:cloud` tag, any tag ending `-cloud`, or a
+ * row with `remote_host`. Same rule as the backend's `is_cloud_model`; Harvis is local-first, so
+ * these never appear in the installed list.
+ */
+export function isCloudModel(m: Pick<InstalledModel, 'name' | 'remote_host'>): boolean {
+  const name = (m.name ?? '').trim().toLowerCase()
+  const tail = name.slice(name.lastIndexOf('/') + 1)
+
+  if (tail.includes(':')) {
+    const tag = name.slice(name.lastIndexOf(':') + 1)
+
+    if (tag === 'cloud' || tag.endsWith('-cloud')) {
+      return true
+    }
+  }
+
+  return Boolean(m.remote_host)
+}
+
+/** One row of the cookbook's fit list (llmfit, ranked by the backend). */
+export interface CookbookModel {
+  name: string
+  best_quant?: string
+  downloadable?: boolean
+  estimated_tps?: number
+  fit_label?: string
+  fit_level?: string
+  memory_required_gb?: number
+  ollama_tag?: string
+  parameter_count?: string
+  reason?: string
+  serving?: string
+}
+
+const COOKBOOK = '/api/cookbook'
+
+/** The machine models are pulled onto: the cookbook node with role "main", else the first one. */
+export const fetchCookbookNode = () =>
+  harvisFetch<{ nodes: { name: string; role?: string }[] }>(`${COOKBOOK}/nodes`).then(
+    r => r.nodes?.find(n => n.role === 'main')?.name ?? r.nodes?.[0]?.name ?? 'main-host'
+  )
+
+export const fetchInstalledModels = (node: string) =>
+  harvisFetch<{ models?: InstalledModel[]; error?: string }>(
+    `${COOKBOOK}/installed?node=${encodeURIComponent(node)}`
+  ).then(r => ({ ...r, models: (r.models ?? []).filter(m => !isCloudModel(m)) }))
+
+/** The fit list: what runs well here first. `limit` keeps it short; the rest is a search away. */
+export const fetchCookbookModels = async (node: string, search = ''): Promise<CookbookModel[]> => {
+  const q = new URLSearchParams({ node, limit: '30' })
+  const path = search.trim() ? `models?${q}&search=${encodeURIComponent(search.trim())}` : `recommend?${q}`
+  const res = await harvisFetch<{ models?: CookbookModel[] } | CookbookModel[]>(`${COOKBOOK}/${path}`)
+
+  return Array.isArray(res) ? res : (res.models ?? [])
+}
+
+export interface DownloadTarget {
+  /** An Ollama tag ("gemma3:4b") or a Hugging Face repo with `quant`. */
+  tag?: string
+  repo?: string
+  quant?: string
+}
+
+const sentence = (text: string) => (/[.!?]$/.test(text) ? text : `${text}.`)
+
+/**
+ * Pulls a model into Ollama and reports each progress event as it arrives. This is
+ * a streaming POST, so it is fetch + ReadableStream rather than EventSource (which
+ * cannot POST). Auth is the same cookie every other call here uses. Resolves when
+ * the stream ends; rejects with a plain sentence on a refused request or an error
+ * event. Aborting `signal` stops the read and the server drops the pull.
+ */
+export async function downloadModel(
+  node: string,
+  target: DownloadTarget,
+  onEvent: (event: PullEvent) => void,
+  signal?: AbortSignal
+): Promise<void> {
+  const res = await fetch(`${COOKBOOK}/download`, {
+    body: JSON.stringify({
+      node,
+      ...(target.tag ? { ollama_tag: target.tag } : { repo: target.repo, quant: target.quant })
+    }),
+    credentials: 'include',
+    headers: { Accept: 'text/event-stream', 'Content-Type': 'application/json' },
+    method: 'POST',
+    signal
+  })
+
+  if (!res.ok || !res.body) {
+    if (res.status === 401) {
+      reportUnauthorized()
+    }
+
+    const body = (await res.json().catch(() => ({}))) as { detail?: unknown }
+
+    throw new Error(typeof body.detail === 'string' ? body.detail : `The server answered ${res.status}.`)
+  }
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  const parser = createSseParser()
+
+  const handle = (events: PullEvent[]) => {
+    for (const event of events) {
+      if (event.error) {
+        throw new Error(sentence(event.error))
+      }
+
+      onEvent(event)
+    }
+  }
+
+  for (;;) {
+    const { done, value } = await reader.read()
+
+    if (done) {
+      break
+    }
+
+    handle(parser.push(decoder.decode(value, { stream: true })))
+  }
+
+  handle(parser.push(decoder.decode()))
+  handle(parser.flush())
+}
+
+export type ModelRequestStatus = 'approved' | 'denied' | 'open'
+
+export interface ModelRequest {
+  id: number
+  model: string
+  note: null | string
+  status: ModelRequestStatus
+  votes: number
+  /** `username` is null when the account is gone, or for a viewer who may not see it. */
+  requested_by: { id: null | number; username: null | string }
+  created_at: string
+  decided_at: null | string
+  reason: null | string
+}
+
+/** 201 → a new request; 200 with `joined` → someone already asked, and this adds a vote. */
+export const requestModel = (model: string, note?: string) =>
+  post<{ request: ModelRequest; joined?: boolean }>('/api/model-requests', { model, ...(note ? { note } : {}) })
+
+export const fetchMyRequests = () => harvisFetch<{ requests: ModelRequest[] }>('/api/model-requests/mine')
+
+export const fetchOpenRequests = () => harvisFetch<{ requests: ModelRequest[] }>('/api/model-requests?status=open')
+
+export const approveRequest = (id: number) => post<{ request: ModelRequest }>(`/api/model-requests/${id}/approve`, {})
+
+export const denyRequest = (id: number, reason?: string) =>
+  post<{ request: ModelRequest }>(`/api/model-requests/${id}/deny`, reason ? { reason } : {})
+
+/** Another computer's Ollama, as /api/inference-nodes lists it. */
+export interface InferenceNode {
+  name: string
+  label: string
+  base_url: string
+  /** "db" nodes were added in the app and can be removed here; the rest come from the server's setup. */
+  source: string
+  enabled: boolean
+  reachable: boolean
+  error: null | string
+  models: string[]
+}
+
+export const fetchInferenceNodes = (force = false) =>
+  harvisFetch<{ nodes: InferenceNode[] }>(`/api/inference-nodes${force ? '?force=true' : ''}`).then(r => r.nodes ?? [])
+
+/** Trades the PIN the other computer is showing for a token; 400/403/409/429/502 come back as `detail`. */
+export const pairInferenceNode = (address: string, pin: string, name?: string) =>
+  post<{ node: InferenceNode }>('/api/inference-nodes/pair', { address, pin, ...(name ? { name } : {}) })
+
+export const removeInferenceNode = (name: string) =>
+  harvisFetch<{ deleted: boolean }>(`/api/inference-nodes/${encodeURIComponent(name)}`, { method: 'DELETE' })

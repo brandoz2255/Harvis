@@ -631,6 +631,10 @@ export interface SessionMessage {
    */
   row_id?: number
   id?: number
+  /** Harvis: a plain-language reason this assistant turn failed; the row's text is any partial output. */
+  error?: string
+  /** Harvis: the user stopped this reply; `content` is the partial text, clean. */
+  interrupted?: boolean
   text?: unknown
   timestamp?: number
   tool_call_id?: null | string
@@ -1242,6 +1246,8 @@ export interface PlatformStatus {
 
 export interface StatusResponse {
   active_sessions: number
+  /** Feature flags for the signed-in person (Harvis only); see store/server-capabilities.ts. */
+  capabilities?: Record<string, boolean>
   config_path: string
   config_version: number
   env_path: string
@@ -1517,6 +1523,12 @@ export interface McpCatalogEntry {
    *  backends that predate the field). */
   suggest?: { keywords: string[]; hosts: string[] } | null
   needs_install: boolean
+  /** True for a connector Harvis has no hosted address or command for: it
+   *  cannot be installed in one click, so the row explains what to do instead.
+   *  Absent on older backends. */
+  needs_setup?: boolean
+  /** What to do next when `needs_setup`; plain sentences, may end with a link. */
+  setup_note?: string
   installed: boolean
   enabled: boolean
 }

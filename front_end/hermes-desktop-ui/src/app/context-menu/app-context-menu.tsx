@@ -24,6 +24,7 @@ import { reachablePreviewUrl } from '@/lib/preview-reach'
 import { openCommandPalette } from '@/store/command-palette'
 import { openPreview } from '@/store/preview'
 import { toggleStatusbarVisible } from '@/store/statusbar-prefs'
+import { hasCapability } from '@/store/server-capabilities'
 import { requestActiveUpdate } from '@/store/updates'
 import { canOpenNewWindow, openNewWindow } from '@/store/windows'
 
@@ -589,15 +590,18 @@ function shellSections({ navigate, t }: ShellVerbs): ReactNode[][] {
         onSelect={() => navigateToWorkspacePage(navigate, SETTINGS_ROUTE)}
       />
     ],
-    [
-      <Item
-        icon="cloud-download"
-        key="shell-update"
-        label={t.commandCenter.updateHermes}
-        onSelect={requestActiveUpdate}
-      />
-    ]
-  ]
+    // Built each time the menu opens, so the capability is read fresh.
+    hasCapability('hermes_update')
+      ? [
+          <Item
+            icon="cloud-download"
+            key="shell-update"
+            label={t.commandCenter.updateHermes}
+            onSelect={requestActiveUpdate}
+          />
+        ]
+      : []
+  ].filter(section => section.length > 0)
 }
 
 /**

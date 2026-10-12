@@ -899,6 +899,13 @@ export interface Translations {
       catalogInstalled: string
       catalogEnabled: string
       catalogNeedsInstall: string
+      catalogNeedsSetup: string
+      catalogSetupSite: string
+      clientIdTitle: string
+      clientIdHelp: (redirect: string) => string
+      clientIdLabel: string
+      clientSecretLabel: string
+      clientIdConnect: string
       catalogInstall: string
       catalogInstalling: string
       catalogInstallStarted: (name: string) => string
@@ -2033,6 +2040,8 @@ export interface Translations {
     voiceControls: string
     voiceDictation: string
     speakReplies: string
+    webSearchOn: string
+    webSearchOff: string
     stopSpeakingReplies: string
     wakeWordListening: (phrase: string) => string
     wakeWordOff: (phrase: string) => string

@@ -106,7 +106,7 @@ def _live():
 def appended(monkeypatch):
     calls = []
 
-    async def append(pool, s, role, content, reasoning="", files=None):
+    async def append(pool, s, role, content, reasoning="", files=None, truncate_at=None, **kw):
         calls.append({"role": role, "content": content, "files": files})
         return [{"role": role, "content": content, "attachments": files or []}]
 
@@ -211,7 +211,7 @@ def _stub_turn(monkeypatch, calls):
     async def thinking():
         return frozenset()
 
-    async def append(pool, s, role, content, reasoning="", files=None):
+    async def append(pool, s, role, content, reasoning="", files=None, truncate_at=None, **kw):
         return []
 
     async def stream_turn(token, turn, model, ep, mode, effort, origin, extra=None):
@@ -235,6 +235,19 @@ class _TurnConn:
         pass
 
     _relay = Connection._relay
+
+
+    def _background(self, coro):
+
+
+        pass
+
+
+
+    def _generate_title(self, *args):
+
+
+        pass
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,7 @@
 """MCP half of the Capabilities screen that rest_capabilities.py does not hold:
 the config-record projection the MCP tab lists from, the real connect-and-list
-probe behind each server's status dot, and the OAuth routes the UI calls.
+probe behind each server's status dot, and the OAuth routes the UI calls
+(logic in mcp_oauth_flows.py).
 
 The desktop MCP tab does not read GET /mcp/servers. It draws its list from the
 ``mcp_servers`` map inside the config record (GET /api/config), the same way
@@ -21,13 +22,6 @@ from auth_optimized import get_current_user_optimized
 log = logging.getLogger("hermes_ui.rest")
 
 router = APIRouter(prefix="/hermes-api/api", tags=["hermes-ui"])
-
-OAUTH_UNSUPPORTED = (
-    "OAuth sign-in for MCP servers is not supported from this screen yet. "
-    "Servers that need no sign-in (or that take a token in `env`) work; "
-    "OAuth-protected servers are a follow-up."
-)
-
 
 def _uid(user) -> int:
     return int(getattr(user, "id", None) or getattr(user, "user_id", None) or user["id"])
@@ -122,21 +116,56 @@ async def mcp_server_test(name: str, request: Request,
         for t in tools if t.get("name")]}
 
 
-# The desktop's Authenticate button expects a flow record it can poll
-# (api/mcp.ts McpOAuthFlow). Harvis has the OAuth client (plugins/mcp/oauth.py)
-# and a callback, but no flow store the poll can read, so until that exists
-# these answer 501 with a plain reason instead of the facade's generic 404.
+# The tab's Connect button: start a flow, open the vendor's page, poll the flow.
+# The logic lives in mcp_oauth_flows.py; these are the routes the UI calls
+# (api/mcp.ts McpOAuthFlow) plus the vendor's redirect target.
 
 @router.post("/mcp/servers/{name}/auth")
-async def mcp_server_auth(name: str, user=Depends(get_current_user_optimized)):
-    raise HTTPException(501, OAUTH_UNSUPPORTED)
+async def mcp_server_auth(name: str, request: Request, user=Depends(get_current_user_optimized)):
+    """Begin signing in. Body (optional): ``{client_id, client_secret}`` for a server
+    that offers no dynamic registration."""
+    from . import mcp_oauth_flows as flows
+
+    try:
+        body = await request.json()
+    except ValueError:
+        body = {}
+    body = body if isinstance(body, dict) else {}
+    return await flows.start(
+        _pool(request), _uid(user), name, request,
+        client_id=str(body.get("client_id") or ""), client_secret=str(body.get("client_secret") or ""))
 
 
 @router.get("/mcp/oauth/flows/{flow_id}")
 async def mcp_oauth_flow(flow_id: str, user=Depends(get_current_user_optimized)):
-    raise HTTPException(501, OAUTH_UNSUPPORTED)
+    from . import mcp_oauth_flows as flows
+
+    flow = flows.get(_uid(user), flow_id)
+    if flow is None:
+        raise HTTPException(404, "That sign-in is no longer in progress. Click Connect to start again.")
+    return flow
 
 
 @router.delete("/mcp/oauth/flows/{flow_id}")
 async def mcp_oauth_flow_cancel(flow_id: str, user=Depends(get_current_user_optimized)):
-    raise HTTPException(501, OAUTH_UNSUPPORTED)
+    from . import mcp_oauth_flows as flows
+
+    result = flows.cancel(_uid(user), flow_id)
+    if result is None:
+        raise HTTPException(404, "That sign-in is no longer in progress.")
+    return result
+
+
+@router.get("/mcp/oauth/callback")
+async def mcp_oauth_callback(request: Request):
+    """Where the vendor returns the person. Deliberately not signed in: see mcp_oauth_flows."""
+    from . import mcp_oauth_flows as flows
+
+    params = request.query_params
+    pool = getattr(request.app.state, "pg_pool", None)
+    if pool is None:
+        return flows.callback_page(False, "the database is not ready")
+    ok, detail = await flows.complete(
+        pool, params.get("state") or "", params.get("code") or "",
+        (params.get("error_description") or params.get("error") or "")[:300])
+    return flows.callback_page(ok, detail)

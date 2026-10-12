@@ -24,6 +24,7 @@ import {
   createOrOpenPr,
   generateCommitMessage
 } from '@/store/review'
+import { useCapability } from '@/store/server-capabilities'
 
 // One size for every glyph in the bar so the row reads as a set of peers.
 const ICON = '0.85rem'
@@ -39,7 +40,10 @@ export function ReviewShipBar() {
   const scopeTarget = useStore($reviewScopeTarget)
   const busy = useStore($reviewShipBusy)
   const generating = useStore($reviewCommitMsgBusy)
-  const commitDefault = useStore($reviewCommitDefault)
+  const storedDefault = useStore($reviewCommitDefault)
+  // Pushing and pull requests need a remote host; the sandbox repo has none.
+  const canPush = useCapability('git_remote')
+  const commitDefault: CommitAction = canPush ? storedDefault : 'commit'
   const [message, setMessage] = useState('')
   const prLabel = ship.pr?.url ? c.openPr : c.createPr
 
@@ -107,55 +111,64 @@ export function ReviewShipBar() {
         />
       </div>
 
-      {/* Commit split (VS Code style). */}
+      {/* Commit split (VS Code style); a plain button when there is nowhere to push. */}
       <div className="flex min-w-0">
-        <SplitButton
-          actions={[
-            { id: 'commit', label: c.commit },
-            { id: 'commitPush', label: c.commitAndPush }
-          ]}
-          className="min-w-0 flex-1"
-          disabled={!canCommit}
-          onTrigger={id => runCommit(id as CommitAction)}
-          onValueChange={id => $reviewCommitDefault.set(id as CommitAction)}
-          primaryIcon={<Codicon name="check" size={ICON} />}
-          value={commitDefault}
-          variant="default"
-        />
+        {canPush ? (
+          <SplitButton
+            actions={[
+              { id: 'commit', label: c.commit },
+              { id: 'commitPush', label: c.commitAndPush }
+            ]}
+            className="min-w-0 flex-1"
+            disabled={!canCommit}
+            onTrigger={id => runCommit(id as CommitAction)}
+            onValueChange={id => $reviewCommitDefault.set(id as CommitAction)}
+            primaryIcon={<Codicon name="check" size={ICON} />}
+            value={commitDefault}
+            variant="default"
+          />
+        ) : (
+          <Button className="min-w-0 flex-1" disabled={!canCommit} onClick={() => runCommit('commit')} size="sm">
+            <Codicon name="check" size={ICON} />
+            <span className="truncate">{c.commit}</span>
+          </Button>
+        )}
       </div>
 
       {/* Hand it to the agent (one click sends a commit+PR task to the composer).
           The PR button floats on the right (out of flow) so the label centers on
           the whole bar; px-7 reserves the icon's width on both sides. */}
-      <div className="relative flex min-w-0 items-center">
-        <Button
-          className="min-w-0 flex-1 justify-center px-7 text-[0.7rem] text-muted-foreground/85 hover:text-foreground"
-          disabled={!hasFiles}
-          onClick={() => {
-            if (!requestComposerSubmit(c.agentShipPrompt, { target: scopeTarget })) {
-              notifyError(new Error(c.agentShipUnavailable), c.agentShip)
-            }
-          }}
-          size="sm"
-          variant="ghost"
-        >
-          <span className="truncate underline underline-offset-2">{c.agentShip}</span>
-        </Button>
-        <Tip label={ship.ghReady ? prLabel : c.ghMissing}>
-          <span className="absolute inset-y-0 right-0 flex items-center">
-            <Button
-              aria-label={prLabel}
-              className="size-7 text-muted-foreground/80 hover:text-foreground"
-              disabled={!ship.ghReady || busy}
-              onClick={() => void createOrOpenPr().catch(err => notifyError(err, prLabel))}
-              size="icon-xs"
-              variant="ghost"
-            >
-              <Codicon name="git-pull-request" size={ICON} />
-            </Button>
-          </span>
-        </Tip>
-      </div>
+      {canPush && (
+        <div className="relative flex min-w-0 items-center">
+          <Button
+            className="min-w-0 flex-1 justify-center px-7 text-[0.7rem] text-muted-foreground/85 hover:text-foreground"
+            disabled={!hasFiles}
+            onClick={() => {
+              if (!requestComposerSubmit(c.agentShipPrompt, { target: scopeTarget })) {
+                notifyError(new Error(c.agentShipUnavailable), c.agentShip)
+              }
+            }}
+            size="sm"
+            variant="ghost"
+          >
+            <span className="truncate underline underline-offset-2">{c.agentShip}</span>
+          </Button>
+          <Tip label={ship.ghReady ? prLabel : c.ghMissing}>
+            <span className="absolute inset-y-0 right-0 flex items-center">
+              <Button
+                aria-label={prLabel}
+                className="size-7 text-muted-foreground/80 hover:text-foreground"
+                disabled={!ship.ghReady || busy}
+                onClick={() => void createOrOpenPr().catch(err => notifyError(err, prLabel))}
+                size="icon-xs"
+                variant="ghost"
+              >
+                <Codicon name="git-pull-request" size={ICON} />
+              </Button>
+            </span>
+          </Tip>
+        </div>
+      )}
     </div>
   )
 }

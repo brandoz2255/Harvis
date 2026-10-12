@@ -10,15 +10,16 @@ from __future__ import annotations
 
 import logging
 from typing import Optional
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 from auth_optimized import get_current_user_optimized
 from owui_compat.authz import is_admin, user_id_of
 
-from . import control, moe, probe, store
+from . import control, moe, pairing, probe, store
 from .policy import thinking_mode
 from .provision import DEFAULT_MODEL_REPO, render_script
 from .types import NodeSpec
@@ -85,16 +86,19 @@ async def provision_script(
     moe_cpu_threads: int | None = Query(None, ge=1, le=256),
     user=Depends(get_current_user_optimized),
 ):
-    return render_script(
-        node_name=name,
-        model_repo=model,
-        port=port,
-        host=host,
-        max_running=max_running,
-        kv_reserve_tokens=kv_reserve_tokens,
-        memory_ratio=memory_ratio,
-        moe_cpu_threads=moe_cpu_threads,
-    )
+    try:
+        return render_script(
+            node_name=name,
+            model_repo=model,
+            port=port,
+            host=host,
+            max_running=max_running,
+            kv_reserve_tokens=kv_reserve_tokens,
+            memory_ratio=memory_ratio,
+            moe_cpu_threads=moe_cpu_threads,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 class PowerIn(BaseModel):
@@ -210,6 +214,86 @@ async def upsert_node(body: NodeIn, request: Request, user=Depends(get_current_u
     states = await probe.snapshot(force=True)
     st = states.get(spec.name)
     return st.public() if st is not None else spec.public()
+
+
+class PairIn(BaseModel):
+    address: str = Field(max_length=512)
+    pin: str = Field(max_length=64)            # shape is checked in the handler, as a 400
+    name: Optional[str] = Field(default=None, max_length=64)
+
+
+@router.post("/pair")
+async def pair_node(body: PairIn, request: Request, user=Depends(get_current_user_optimized)):
+    """Add another computer's Ollama by its address and the PIN its helper is showing.
+
+    The helper (``scripts/inference-node/harvis_node.py``) trades the PIN for a bearer
+    token; the node is stored as dialect ``ollama`` with that token encrypted. The PIN
+    and the token are never logged or returned.
+    """
+    _require_admin(user)
+    pool = _pool(request)
+    try:
+        base = pairing.normalize_address(body.address)
+        pin = pairing.check_pin(body.pin)
+        wanted = pairing.slug_name(body.name) if (body.name or "").strip() else ""
+        if (body.name or "").strip() and not wanted:
+            raise pairing.PairError(400, "The name can only use letters, digits, dots, dashes and underscores.")
+        pairing.reserve_attempt(str(user_id_of(user)))
+
+        def _name_for(helper_name: str) -> str:
+            name = wanted or pairing.slug_name(helper_name) or pairing.slug_name(urlsplit(base).hostname or "")
+            if not name:
+                raise pairing.PairError(400, "Give this node a name.")
+            return name
+
+        async def _check_name(helper_name: str) -> None:
+            name = _name_for(helper_name)
+            existing = await store.find_base_url(pool, name)
+            if existing is not None and existing != base:
+                raise pairing.PairError(
+                    409, f"A node named {name!r} already exists at {existing}. Pick a different name."
+                )
+
+        paired = await pairing.pair(base, pin, check_name=_check_name)
+        name = _name_for(paired.helper_name)
+    except pairing.PairError as e:
+        headers = {"Retry-After": str(e.extra["retry_after"])} if "retry_after" in e.extra else None
+        return JSONResponse(e.body, status_code=e.status, headers=headers)
+
+    display = (body.name or "").strip() or paired.helper_name
+    try:
+        spec = NodeSpec(
+            name=name, base_url=base, dialect="ollama", label=display[:64], token=paired.token,
+            hardware="", source="db", enabled=True, priority=100,
+        )
+        await store.upsert_node(pool, spec, keep_token=False, user_id=user_id_of(user))
+    except Exception as e:
+        # The helper has already spent its PIN and handed over a token we now cannot
+        # keep, so it refuses every later pairing ("already paired") until it is reset.
+        # Say exactly how to reset it. Class name and a token-scrubbed message only: the
+        # token must not reach the log.
+        logger.error(
+            "inference_nodes: node %r at %s paired but could not be saved (%s: %s) — "
+            "the helper must be re-run with --repair before it can be added again",
+            name, base, type(e).__name__, (str(e).replace(paired.token, "***") if paired.token else str(e))[:200],
+        )
+        return JSONResponse(
+            {
+                "detail": (
+                    f"The computer at {base} accepted the PIN, but Harvis could not save it "
+                    f"({type(e).__name__}), so that computer is still paired and will not "
+                    "show a new PIN. On that computer, stop harvis_node.py and run it again "
+                    "with --repair, then add it here again with the new PIN."
+                ),
+                "needs_repair": True,
+            },
+            status_code=500,
+        )
+    logger.info("inference_nodes: paired node %r at %s", spec.name, spec.base_url)
+    probe.invalidate()
+    states = await probe.snapshot(force=True)
+    st = states.get(spec.name)
+    return {"node": st.public() if st is not None else spec.public()}
 
 
 @router.delete("/{name}")

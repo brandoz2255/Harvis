@@ -19,7 +19,14 @@ from typing import Optional
 
 import asyncpg
 
+from . import credentials
+
 logger = logging.getLogger(__name__)
+
+# Both JSONB columns hold ``{"__harvis_enc__": <fernet text>}`` — the same sealed
+# wrapper every other Harvis credential uses — so a database dump or a read-only
+# SQL slip never shows a bearer or refresh token. Rows written before sealing
+# existed are plaintext JSON; they are still read, and re-sealed on first read.
 
 
 class PgTokenStorage:
@@ -72,7 +79,7 @@ class PgTokenStorage:
         if row is None or row["tokens_json"] is None:
             return None
 
-        data = _ensure_dict(row["tokens_json"])
+        data = await self._open_column("tokens_json", row["tokens_json"])
         expires_at: Optional[datetime] = row["expires_at"]
         if expires_at is not None:
             remaining = max(int(expires_at.timestamp() - time.time()), 0)
@@ -103,7 +110,7 @@ class PgTokenStorage:
                     """,
                     self._user_id,
                     self._server_name,
-                    json.dumps(payload, default=str),
+                    json.dumps(_sealed(payload), default=str),
                     expires_at,
                 )
         except Exception:
@@ -128,7 +135,7 @@ class PgTokenStorage:
             return None
         if row is None or row["client_info_json"] is None:
             return None
-        return _ensure_dict(row["client_info_json"])
+        return await self._open_column("client_info_json", row["client_info_json"])
 
     async def set_client_info(self, client_info: dict) -> None:
         try:
@@ -143,10 +150,33 @@ class PgTokenStorage:
                     """,
                     self._user_id,
                     self._server_name,
-                    json.dumps(client_info or {}, default=str),
+                    json.dumps(_sealed(client_info or {}), default=str),
                 )
         except Exception:
             logger.exception("mcp.set_client_info failed for user=%s server=%s", self._user_id, self._server_name)
+
+    async def _open_column(self, column: str, raw) -> dict:
+        """The plain dict in a stored column, re-sealing it when it was stored plain."""
+        value = _ensure_dict(raw)
+        if credentials.is_sealed(value):
+            text = credentials.unseal(value)
+            return _ensure_dict(text) if text else {}
+        if value:
+            await self._reseal(column, value)
+        return value
+
+    async def _reseal(self, column: str, value: dict) -> None:
+        # column is one of two literals chosen above, never caller input.
+        assert column in ("tokens_json", "client_info_json")
+        try:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    f"UPDATE mcp_oauth_tokens SET {column} = $3::jsonb "
+                    "WHERE user_id = $1 AND server_name = $2",
+                    self._user_id, self._server_name, json.dumps(_sealed(value), default=str))
+        except Exception:
+            logger.warning("mcp: could not re-seal %s for user=%s server=%s",
+                           column, self._user_id, self._server_name)
 
     # -- delete ------------------------------------------------------------
 
@@ -161,6 +191,10 @@ class PgTokenStorage:
                 )
         except Exception:
             logger.exception("mcp.clear failed for user=%s server=%s", self._user_id, self._server_name)
+
+
+def _sealed(payload: dict) -> dict:
+    return credentials.seal(json.dumps(payload, default=str))
 
 
 def _ensure_dict(value) -> dict:

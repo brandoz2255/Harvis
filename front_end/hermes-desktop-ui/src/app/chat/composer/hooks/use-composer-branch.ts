@@ -1,6 +1,7 @@
 import { type MutableRefObject, useCallback } from 'react'
 
 import { listRepoBranches, requestStartWorkSession, startWorkInRepo, switchBranchInRepo } from '@/store/projects'
+import { hasCapability } from '@/store/server-capabilities'
 
 import { useComposerScope } from '../scope'
 
@@ -39,6 +40,12 @@ export function useComposerBranch({ clearDraft, cwd, draftRef }: UseComposerBran
   const handleBranchOff = useCallback(
     async (branch: string, base?: string) => {
       const repoPath = cwd?.trim()
+
+      // A server without worktrees cannot make one; the row hides the affordance, this is the backstop.
+      if (!hasCapability('git_worktrees')) {
+        return
+      }
+
       const result = repoPath && (await startWorkInRepo(repoPath, { base, branch, name: branch }))
 
       if (result) {
@@ -53,6 +60,10 @@ export function useComposerBranch({ clearDraft, cwd, draftRef }: UseComposerBran
   // anchored there carrying the draft.
   const handleConvertBranch = useCallback(
     async (branch: string, path?: null | string, isDefault?: boolean) => {
+      if (!hasCapability('git_worktrees')) {
+        return
+      }
+
       if (path?.trim()) {
         openInWorktree(path)
 

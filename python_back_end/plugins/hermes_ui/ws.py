@@ -19,42 +19,21 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from auth_optimized import decode_token_fast
 from plugins import people
 
-from . import (attachments, bots, chat, learn, profiles, providers, runs, sandbox, sessions, skill_select, store,
-               turn_models, voice_route)
+from . import (attachments, bots, chat, errors, learn, providers, rewind, runs, sandbox, sessions, skill_select, store,
+               titles, turn_models, voice_route)
 from .models import DEFAULT_EFFORT, is_hidden_model, ollama_effort, thinking_models
 from .rest import build_model_options
+from .rpc import (ERR_INTERNAL, ERR_INVALID, ERR_METHOD, ERR_PARAMS, ERR_PARSE, ERR_SESSION_BUSY,  # noqa: F401
+                  ERR_SESSION_NOT_FOUND, REPLAY_EPOCH, err as _err, ok as _ok)
+from .ws_approvals import ApprovalMethods, register as register_approvals, unregister as unregister_approvals
+from .ws_extras import ExtraMethods
+from .ws_session import SessionMethods
 from .ws_settings import SettingsMethods
+from .ws_slash import SlashMethods
 
 log = logging.getLogger("hermes_ui.ws")
 
 router = APIRouter(tags=["hermes-ui"])
-
-REPLAY_EPOCH = str(int(time.time()))
-
-ERR_PARSE = -32700
-ERR_INVALID = -32600
-ERR_METHOD = -32601
-ERR_PARAMS = -32602
-ERR_INTERNAL = -32603
-# 4007, not 4001. The desktop Bot Mode treats 4007 as "this id was never a
-# session" and then session.create's one. 4001 means "the runtime was reaped"
-# and it refuses to mint, so every bot in a room reported "hit an error" on
-# the first message (the room resumes by the title "Group: …" before any row
-# exists). Composer polling uses 4001 only for process.list, which this
-# facade answers without a session lookup.
-ERR_SESSION_NOT_FOUND = 4007
-ERR_SESSION_BUSY = 4002
-
-
-def _ok(rid: Any, result: dict) -> dict:
-    return {"jsonrpc": "2.0", "id": rid, "result": result}
-
-
-def _err(rid: Any, code: int, message: str, data: Any = None) -> dict:
-    error: dict[str, Any] = {"code": code, "message": message}
-    if data is not None:
-        error["data"] = data
-    return {"jsonrpc": "2.0", "id": rid, "error": error}
 
 
 def _token_from(ws: WebSocket) -> Optional[str]:
@@ -92,10 +71,13 @@ def _turn_extra(s: sessions.Live, bot: Optional[dict]) -> dict:
     extra = bots.turn_extra(bot)
     if sandbox.enabled():
         extra = {**extra, "harvis_sandbox_session": s.id}
+    if s.web_search:
+        # The composer's globe: owui_compat.chat_reach reads features.web_search the same way for the OWUI path.
+        extra = {**extra, "features": {"web_search": True}}
     return extra
 
 
-class Connection(SettingsMethods):
+class Connection(SettingsMethods, SessionMethods, SlashMethods, ApprovalMethods, ExtraMethods):
     def __init__(self, ws: WebSocket, user_id: int, token: str):
         self.ws = ws
         self.user_id = user_id
@@ -104,6 +86,7 @@ class Connection(SettingsMethods):
         self.send_lock = asyncio.Lock()
         self.turns: dict[str, asyncio.Task] = {}
         self.runs: dict[str, str] = {}
+        self.tasks: set[asyncio.Task] = set()  # background work (titles) the socket must not drop
         self.open = True
         # Artifact links must be absolute for the UI; the page origin is on the WS handshake.
         self.origin = (ws.headers.get("origin") or "").rstrip("/")
@@ -175,19 +158,7 @@ class Connection(SettingsMethods):
 
     # config.get / config.set / reload.env / profiles.* live in ws_settings.py.
 
-    async def m_approval_pending(self, rid, params):
-        return _ok(rid, {"pending": [], "requests": []})
-
-    async def m_approval_respond(self, rid, params):
-        return _ok(rid, {"ok": True})
-
-    async def m_approval_received(self, rid, params):
-        # The desktop acks that it displayed an approval prompt (prompts.ts
-        # receiveApprovalRequest → gateway.request('approval.received', …)).
-        # There is no Harvis-side bookkeeping for it yet, but the UI awaits the
-        # call, so a missing handler rejected it with -32601 and stalled the
-        # approval overlay. Ack in the reference gateway's shape instead.
-        return _ok(rid, {"ok": True})
+    # approval.pending / approval.respond / approval.received live in ws_approvals.py.
 
     # ── Desktop-only extras the shell polls after a session opens. None of
     # these have a Harvis counterpart yet; answer with the reference gateway's
@@ -212,142 +183,61 @@ class Connection(SettingsMethods):
     async def m_process_list(self, rid, params):
         return _ok(rid, {"processes": []})
 
-    async def m_slash_exec(self, rid, params):
-        cmd = str(params.get("command") or "").strip()
-        if not cmd:
-            return _err(rid, 4004, "empty command")
-        return _ok(rid, {"output": "(no output)"})
-
-    async def m_complete_path(self, rid, params):
-        return _ok(rid, {"items": []})
-
-    async def m_commands_catalog(self, rid, params):
-        return _ok(rid, {"pairs": [], "sub": {}, "canon": {}, "commands": {}, "categories": [],
-                         "skills": [], "skill_count": 0, "warning": ""})
-
     async def m_ping(self, rid, params):
         return _ok(rid, {"pong": True})
 
     async def m_pet_info(self, rid, params):
         return _ok(rid, {"enabled": False})
 
-    async def m_session_redirect(self, rid, params):
-        # Same answer the reference gives for agents without mid-turn redirect;
-        # the UI then falls back to a plain prompt.submit.
-        return _err(rid, 4010, "agent does not support active-turn redirect")
-
-    async def m_session_active_list(self, rid, params):
-        # The reference reports in-process live agents; the facade has none to
-        # switch between, so the footer count stays at zero.
-        return _ok(rid, {"sessions": []})
-
-    async def m_session_create(self, rid, params):
-        bot = await bots.get_bot(self.pool, self.user_id, str(params.get("bot_id") or ""))
-        if bot is None and params.get("profile"):
-            # Bot Mode names its bot by profile, not bot_id; without this every
-            # roster bot (and every group member) spoke as plain Harvis.
-            bot = await profiles.resolve_session_bot(self.pool, self.user_id, params.get("profile"))
-        s = await sessions.create(self.pool, self.user_id, model=str(params.get("model") or ""), bot=bot)
-        title = str(params.get("title") or "").strip()
-        if title:
-            s.title = title  # written into the row when the first message creates it
-        info = sessions.runtime_info(s)
-        asyncio.get_running_loop().call_soon(
-            lambda: asyncio.ensure_future(self.emit("session.info", s.id, info)))
-        return _ok(rid, {"session_id": s.id, "stored_session_id": s.id,
-                         "message_count": 0, "messages": [], "info": info})
-
-    async def m_session_resume(self, rid, params):
-        s, msgs, err = await self._open(rid, params)
-        if err:
-            return err
-        info = sessions.runtime_info(s)
-        asyncio.get_running_loop().call_soon(
-            lambda: asyncio.ensure_future(self.emit("session.info", s.id, info)))
-        return _ok(rid, {
-            "session_id": s.id, "stored_session_id": s.id, "resumed": s.id,
-            "message_count": len(msgs), "messages": msgs,
-            "messages_omitted": False, "info": info, "inflight": None,
-            "running": s.running, "hydrating": False,
-        })
-
-    async def m_session_title(self, rid, params):
-        """Rename a session. Bot Mode titles its canonical chat "Bot Chat" right
-        after session.create and finds it again BY that title, so an unanswered
-        rename minted a fresh Bot Chat on every open."""
-        title = str(params.get("title") or "").strip()[:200]
-        if not title:
-            return _err(rid, ERR_PARAMS, "title required")
-        s, _, err = await self._open(rid, params)
-        if err:
-            return err
-        s.title = title
-        if not s.persisted:
-            # No row until the first message; append() writes s.title into it.
-            return _ok(rid, {"title": title, "pending": True, "session_key": s.id})
-        await store.set_flags(self.pool, self.user_id, s.id, title=title)
-        return _ok(rid, {"title": title, "pending": False, "session_key": s.id})
-
-    async def m_session_activate(self, rid, params):
-        s, _, err = await self._open(rid, params)
-        return err or _ok(rid, {"ok": True, "session_id": s.id})
-
-    async def m_session_list(self, rid, params):
-        limit = int(params.get("limit") or 200)
-        rows, _ = await sessions.list_for(self.pool, self.user_id, limit, int(params.get("offset") or 0))
-        return _ok(rid, {"sessions": rows})
-
-    async def m_session_history(self, rid, params):
-        s, msgs, err = await self._open(rid, params)
-        return err or _ok(rid, {"session_id": s.id, "messages": msgs, "message_count": len(msgs)})
-
-    async def m_session_events_since(self, rid, params):
-        return _ok(rid, {"events": [], "epoch": REPLAY_EPOCH})
-
-    async def m_session_interrupt(self, rid, params):
-        s, _, err = await self._open(rid, params)
-        if err:
-            return err
-        task = self.turns.get(s.id)
-        if task and not task.done():
-            task.cancel()
-        run_id = self.runs.pop(s.id, None)
-        if run_id:
-            await runs.cancel_run(self.token, run_id)
-        return _ok(rid, {"ok": True, "interrupted": bool(task)})
-
     async def m_prompt_submit(self, rid, params):
-        s, _, err = await self._open(rid, params)
+        s, msgs, err = await self._open(rid, params)
         if err:
             return err
         text = str(params.get("text") or "")
         # Browser uploads (POST /api/v1/files/) ride along as ids; an id that is
         # not this user's is refused before anything is stored.
         try:
-            refs = await attachments.owned(self.pool, self.user_id, attachments.requested_ids(params.get("files")))
+            ids = attachments.requested_ids(params.get("files"))
+            ids += [i for i in attachments.ids_in_text(text) if i not in ids]
+            refs = await attachments.owned(self.pool, self.user_id, ids)
         except attachments.AttachmentError as exc:
             return _err(rid, ERR_PARAMS, str(exc))
-        if not text.strip() and not refs:
-            return _err(rid, ERR_PARAMS, "empty prompt")
         if s.running:
             return _err(rid, ERR_SESSION_BUSY, "session busy", {"session_id": s.id})
-        msgs = await sessions.append(self.pool, s, "user", text, files=refs)
+        try:
+            plan = rewind.plan(msgs, params, text)
+        except rewind.RewindError as exc:
+            return _err(rid, ERR_PARAMS, str(exc))
+        if plan.cut is not None and params.get("files") is None and not refs:
+            refs = plan.inherit_files  # a regenerate resends the same message, attachments included
+        if not text.strip() and not refs:
+            return _err(rid, ERR_PARAMS, "empty prompt")
+        if "web_search" in params:
+            s.web_search = params.get("web_search") is True
+        msgs = await sessions.append(self.pool, s, "user", text, files=refs, truncate_at=plan.cut)
         s.running = True
         # Spoken in the hands-free conversation: the voice router may pick the model.
         voice = params.get("surface") == "voice"
         self.turns[s.id] = asyncio.create_task(self._run_turn(s, msgs, voice=voice))
         user_turns = sum(1 for m in msgs if m["role"] == "user")
-        return _ok(rid, {"ok": True, "queued": False, "session_id": s.id,
-                         "user_turn_count": user_turns, "ordinal": user_turns - 1})
+        result = {"ok": True, "queued": False, "session_id": s.id,
+                  "user_turn_count": user_turns, "ordinal": user_turns - 1, "user_row_id": len(msgs)}
+        if plan.cut is not None:
+            result["survivor_row_id_map"] = plan.row_id_map
+            result["truncated"] = True
+        return _ok(rid, result)
 
     # ---- the turn --------------------------------------------------------
 
     async def _run_turn(self, s: sessions.Live, msgs: list[dict], voice: bool = False, note: str = "",
                         plain: bool = False) -> None:
-        first_turn = sum(1 for m in msgs if m["role"] == "user") == 1
+        first_turn = not any(m["role"] == "assistant" and m["content"].strip() and not m.get("error") for m in msgs)
+        # A failed or empty (stopped before any text) reply is on screen, not part of what the model is told.
+        msgs = [m for m in msgs if not m.get("error") and not (m["role"] == "assistant" and not m["content"].strip())]
         parts: list[str] = []
         thoughts: list[str] = []
         status: Optional[str] = None
+        failure = ""
         ran_workspace = False
         await self.emit("message.start", s.id, {})
         try:
@@ -452,38 +342,56 @@ class Connection(SettingsMethods):
                     if kind == "text":
                         await self._relay(s, kind, delta, parts, thoughts)
         except asyncio.CancelledError:
-            parts.append("\n\n[interrupted]")
             status = "interrupted"
             run_id = self.runs.pop(s.id, None)
             if run_id:
                 await runs.cancel_run(self.token, run_id)
         except Exception as exc:  # noqa: BLE001
-            log.warning("hermes_ui: turn failed for session %s: %s", s.id, exc)
-            parts = [f"Error: {exc}"]
+            # The cause (HTTP bodies, dict reprs) goes to the log; the chat gets a sentence to act on.
+            log.warning("hermes_ui: turn failed for session %s: %s", s.id, exc, exc_info=True)
+            failure = errors.friendly(exc)
             status = "error"
         text = "".join(parts)
-        if status != "error":
-            try:
-                await sessions.append(self.pool, s, "assistant", text, "".join(thoughts))
-            except Exception:  # noqa: BLE001
-                log.exception("hermes_ui: could not persist assistant turn for %s", s.id)
+        try:
+            await sessions.append(self.pool, s, "assistant", text, "".join(thoughts),
+                                  error=failure if status == "error" else "", interrupted=status == "interrupted")
+        except Exception:  # noqa: BLE001
+            log.exception("hermes_ui: could not persist assistant turn for %s", s.id)
         if status is None and text.strip() and not plain:
             learn.after_turn(self.pool, self.user_id, s.id, msgs, text, ran_workspace,
                              on_skill=lambda drafted, sid=s.id: self.emit("harvis.skill.drafted", sid, drafted))
         s.running = False
         done = {"text": text}
         if status == "error":
-            # The UI appends the error bubble only when the frame carries text
-            # (completeAssistantMessage skips an empty final with no stream row).
-            done = {"text": text, "status": "error", "error": text, "partial": False}
+            # With streamed text the UI keeps it and marks the bubble failed (partial); without any it shows
+            # the sentence on the error card.
+            done = {"text": text if text.strip() else failure, "status": "error", "error": failure,
+                    "partial": bool(text.strip()), "retryable": True}
         elif status:
             done["status"] = status
         await self.emit("message.complete", s.id, done)
         if first_turn and s.title:
             await self.emit("session.title", s.id, {"title": s.title})
+        if status is None and first_turn and text.strip() and not plain and not s.bot_id:
+            self._background(self._generate_title(s, [*msgs, {"role": "assistant", "content": text}]))
         await self.emit("session.info", s.id, sessions.runtime_info(s, running=False))
         self.turns.pop(s.id, None)
         self.runs.pop(s.id, None)
+
+    def _background(self, coro) -> None:
+        task = asyncio.ensure_future(coro)
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+
+    async def _generate_title(self, s: sessions.Live, msgs: list[dict]) -> None:
+        """Name the chat from its first exchange once the reply has been delivered."""
+        try:
+            title = await titles.name_session(self.pool, self.user_id, self.token, s.id, s.model, msgs)
+            if title:
+                s.title = title
+                await self.emit("session.title", s.id, {"title": title})
+        except Exception:  # noqa: BLE001
+            log.exception("hermes_ui: could not title session %s", s.id)
 
     async def _relay(self, s: sessions.Live, kind: str, delta: Any,
                      parts: list[str], thoughts: list[str]) -> None:
@@ -522,6 +430,7 @@ async def hermes_ws(ws: WebSocket):
         return
     await ws.accept()
     conn = Connection(ws, user_id, token)
+    register_approvals(conn)
     await conn.send({"jsonrpc": "2.0", "method": "event", "params": {
         "type": "gateway.ready",
         "payload": {"skin": None, "change_events": False, "heartbeat": True,
@@ -552,5 +461,6 @@ async def hermes_ws(ws: WebSocket):
         pass
     finally:
         conn.open = False
+        unregister_approvals(conn)
         for task in conn.turns.values():
             task.cancel()

@@ -9,6 +9,7 @@ import {
 } from '@/hermes'
 import { translateNow } from '@/i18n'
 import { completeMcpDesktopOAuth, McpOAuthCancelled } from '@/lib/mcp-dashboard-oauth'
+import { prepareOAuthWindow } from '@/lib/mcp-oauth-popup'
 import { MCP_DIRECTORY } from '@/lib/mcp-directory'
 import { prettyName } from '@/lib/text'
 import { type ComposerSuggestion, registerDraftProvider } from '@/store/composer-suggestions'
@@ -189,9 +190,19 @@ export function matchSuggestions(text: string, index: KeywordEntry[]): McpMatch[
   return matches
 }
 
-async function connect(known: SuggestibleServer, sessionId: string | null, cancelled: () => boolean): Promise<void> {
+export async function connect(
+  known: SuggestibleServer,
+  sessionId: string | null,
+  cancelled: () => boolean
+): Promise<void> {
+  // Opened here, inside the click, because the add request below would
+  // otherwise spend the gesture and the browser would block the consent popup.
+  const oauthWindow = prepareOAuthWindow()
+
   try {
-    await addMcpServer({ name: known.server, url: known.url })
+    // A bare URL used to be sent and the server could not tell how to talk to
+    // it; name the transport and that the vendor signs the person in.
+    await addMcpServer({ name: known.server, url: known.url, transport: 'streamable-http', auth: 'oauth' })
 
     try {
       await completeMcpDesktopOAuth({
@@ -200,7 +211,7 @@ async function connect(known: SuggestibleServer, sessionId: string | null, cance
         status: getMcpOAuthFlow,
         cancelled,
         cancel: cancelMcpOAuthFlow,
-        openExternal: url => window.hermesDesktop.openExternal(url)
+        openExternal: url => oauthWindow.open(url)
       })
     } catch (error) {
       // Decline/failure means "no server" — roll back the config write
@@ -224,6 +235,8 @@ async function connect(known: SuggestibleServer, sessionId: string | null, cance
     }
 
     throw error
+  } finally {
+    oauthWindow.close()
   }
 }
 

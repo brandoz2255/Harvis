@@ -20,6 +20,13 @@ export interface McpOAuthFlow {
   authorization_url: string | null
   error: string | null
   tools?: { name: string; description: string }[]
+  needs_client_id?: boolean
+}
+
+/** Credentials for a server whose OAuth provider has no automatic registration. */
+export interface McpOAuthClient {
+  client_id: string
+  client_secret?: string
 }
 
 /** Connect to the server, list its tools, disconnect. Slow (spawns/handshakes
@@ -48,12 +55,14 @@ export function saveMcpServers(
   })
 }
 
-/** Start an MCP OAuth flow and return the authorization URL. */
-export function authMcpServer(name: string, profile?: ProfileScope): Promise<McpOAuthFlow> {
+/** Start an MCP OAuth flow and return the authorization URL. `client` is only
+ *  sent when the vendor requires a pre-registered client id. */
+export function authMcpServer(name: string, profile?: ProfileScope, client?: McpOAuthClient): Promise<McpOAuthFlow> {
   return window.hermesDesktop.api<McpOAuthFlow>({
     ...capabilityScoped(profile),
     path: `/api/mcp/servers/${encodeURIComponent(name)}/auth`,
     method: 'POST',
+    ...(client ? { body: client } : {}),
     timeoutMs: 60_000
   })
 }
@@ -93,9 +102,12 @@ export function listMcpServers(): Promise<{ servers: McpServerSummary[] }> {
 export function addMcpServer(body: {
   name: string
   url?: string
+  /** Optional: the server infers streamable HTTP for a URL (SSE for /sse). */
+  transport?: 'http' | 'sse' | 'stdio' | 'streamable-http'
   command?: string
   args?: string[]
   env?: Record<string, string>
+  /** `oauth` or `none`; the server also accepts the older `auth_method` name. */
   auth?: string
 }): Promise<McpServerSummary> {
   return hermesApi<McpServerSummary>({

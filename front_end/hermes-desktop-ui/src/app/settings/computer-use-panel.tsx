@@ -5,6 +5,7 @@ import { getActionStatus, getComputerUseStatus, grantComputerUsePermissions } fr
 import { AlertTriangle, Check, ExternalLink, Loader2, RefreshCw, X } from '@/lib/icons'
 import { upsertDesktopActionTask } from '@/store/activity'
 import { notify, notifyError } from '@/store/notifications'
+import { useCapability } from '@/store/server-capabilities'
 import type { ComputerUseStatus } from '@/types/hermes'
 
 import { Pill } from './primitives'
@@ -60,7 +61,12 @@ function PermissionRow({ granted, label, hint }: { granted: boolean | null; labe
  * Binary install/upgrade stays in the cua-driver provider's post-setup runner
  * below this card (the generic ToolsetConfigPanel).
  */
-export function ComputerUsePanel({ onConfiguredChange }: ComputerUsePanelProps) {
+export function ComputerUsePanel(props: ComputerUsePanelProps) {
+  // A server that cannot grant desktop permissions has nothing to show here (store/server-capabilities).
+  return useCapability('computer_use_grant') ? <ComputerUsePanelBody {...props} /> : null
+}
+
+function ComputerUsePanelBody({ onConfiguredChange }: ComputerUsePanelProps) {
   const [status, setStatus] = useState<ComputerUseStatus | null>(null)
   const [loading, setLoading] = useState(true)
   const [granting, setGranting] = useState(false)

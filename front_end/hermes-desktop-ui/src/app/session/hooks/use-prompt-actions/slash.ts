@@ -52,6 +52,7 @@ import {
   type WakeStatusResponse,
   type WakeStopResponse
 } from '@/store/wake-word'
+import { $webSearch, setWebSearch } from '@/store/web-search'
 
 import type {
   BrowserManageResponse,
@@ -683,6 +684,24 @@ export function useSlashCommand(deps: SlashCommandDeps) {
           } catch {
             notify({ kind: 'error', title: copy.yoloTitle, message: copy.yoloToggleFailed })
           }
+        },
+        // /web mirrors the composer globe: the client holds the switch and sends it with every prompt.
+        web: async ({ arg }) => {
+          const requested = arg.trim().toLowerCase()
+
+          if (requested && requested !== 'on' && requested !== 'off') {
+            notify({ kind: 'error', message: 'Usage: /web on|off' })
+
+            return
+          }
+
+          const next = requested ? requested === 'on' : !$webSearch.get()
+
+          setWebSearch(next)
+          notify({
+            kind: 'success',
+            message: next ? 'Web search is on: every message searches the web.' : 'Web search is off.'
+          })
         },
         // /wake must stay in the gateway process that owns the Desktop wake
         // lease. Sending it through slash.exec creates a separate HermesCLI in

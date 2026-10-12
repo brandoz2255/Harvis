@@ -17,6 +17,7 @@ import {
   type HermesPlugin,
   host,
   type KeybindContribution,
+  type PluginContribution,
   KEYBINDS_AREA,
   PALETTE_AREA,
   type PaletteContribution,
@@ -29,6 +30,8 @@ import {
   useQuery,
   useValue
 } from '@hermes/plugin-sdk'
+
+import { $serverCapabilities, hasCapability } from '@/store/server-capabilities'
 
 import { $boardSlug, bindApi, boardKey, fetchBoard } from './api'
 import { KanbanBoardPage } from './board'
@@ -103,7 +106,7 @@ const plugin: HermesPlugin = {
       host.navigate('/kanban')
     }
 
-    ctx.registerMany([
+    const contributions: PluginContribution[] = [
       {
         id: 'page',
         area: ROUTES_AREA,
@@ -154,7 +157,26 @@ const plugin: HermesPlugin = {
           run: newTask
         } satisfies KeybindContribution
       }
-    ])
+    ]
+
+    // The board needs a Kanban backend. A server without one (Harvis today) would
+    // answer every board call with a 404, so the page, sidebar row, count and
+    // palette rows exist only while the server says it has one.
+    let remove: (() => void) | null = null
+
+    const sync = () => {
+      const want = hasCapability('kanban')
+
+      if (want && !remove) {
+        remove = ctx.registerMany(contributions)
+      } else if (!want && remove) {
+        remove()
+        remove = null
+      }
+    }
+
+    sync()
+    ctx.onDispose($serverCapabilities.listen(sync))
   }
 }
 

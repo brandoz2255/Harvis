@@ -24,6 +24,7 @@ import { cn } from '@/lib/utils'
 import { upsertDesktopActionTask } from '@/store/activity'
 import { confirm } from '@/store/confirm'
 import { notify, notifyError } from '@/store/notifications'
+import { useCapability } from '@/store/server-capabilities'
 import type {
   ActionStatusResponse,
   ToolEnvVar,
@@ -513,7 +514,13 @@ function ModelCatalogPicker({ toolset, providerName, isActiveBackend, profile }:
   )
 }
 
-export function ToolsetConfigPanel({ toolset, onConfiguredChange, profile }: ToolsetConfigPanelProps) {
+// Provider pickers, key entry and the OAuth sign-ins all write setup this server does not keep, so
+// a server that reports no `toolset_setup` gets no panel at all (store/server-capabilities).
+export function ToolsetConfigPanel(props: ToolsetConfigPanelProps) {
+  return useCapability('toolset_setup') ? <ToolsetConfigPanelBody {...props} /> : null
+}
+
+function ToolsetConfigPanelBody({ toolset, onConfiguredChange, profile }: ToolsetConfigPanelProps) {
   const { t } = useI18n()
   const copy = t.settings.toolsets
   const [cfg, setCfg] = useState<ToolsetConfig | null>(null)

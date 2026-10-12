@@ -9,6 +9,8 @@
 import { Button, host, Input } from '@hermes/plugin-sdk'
 import { useEffect, useRef, useState } from 'react'
 
+import { useCapability } from '@/store/server-capabilities'
+
 import { useBots } from './i18n'
 
 // ── skills hub section: the REAL hub page (docs) embedded as a picker ──────
@@ -32,7 +34,14 @@ interface HubSkillsSectionProps {
   onInstalled?: (name: string) => void
 }
 
-export function HubSkillsSection({ forProfile, onInstalled }: HubSkillsSectionProps) {
+/** Hub search and install are Hermes features; a server without them gets no section. */
+export function HubSkillsSection(props: HubSkillsSectionProps) {
+  const available = useCapability('skills_hub')
+
+  return available ? <HubSkillsPanel {...props} /> : null
+}
+
+function HubSkillsPanel({ forProfile, onInstalled }: HubSkillsSectionProps) {
   const b = useBots()
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<HubSkillResult[] | null>(null)

@@ -20,6 +20,7 @@ import { displayPath } from '@/lib/display-path'
 import { openWorktreeDialog, registerRepoStatusCwd, repoStatusForCwd, repoWorktreesForCwd } from '@/store/coding-status'
 import { notifyError } from '@/store/notifications'
 import { $pullRequestsByBranch, branchPrKey, refreshPullRequests } from '@/store/pull-requests'
+import { useCapability } from '@/store/server-capabilities'
 
 // Tiny uppercase section header, matching the composer "+" menu's labels.
 const MENU_SECTION = 'text-[0.625rem] font-semibold uppercase tracking-wider text-(--ui-text-tertiary)'
@@ -73,6 +74,8 @@ export const CodingStatusRow = memo(function CodingStatusRow({
   // which is blank in exactly the same case) and cost a wrong-tree rail.
   const status = useStore(repoStatusForCwd(resolvedRepoPath))
   const worktrees = useStore(repoWorktreesForCwd(resolvedRepoPath))
+  // New branches and "start work" create git worktrees, which the sandbox repo cannot do.
+  const canBranchOff = useCapability('git_worktrees') && Boolean(onBranchOff)
 
   // While mounted, keep this worktree in the coding-status refresh set so the
   // turn-settle / tool-complete / focus edges re-probe it too (tiles otherwise
@@ -145,10 +148,12 @@ export const CodingStatusRow = memo(function CodingStatusRow({
 
   // Other worktrees to jump into — everything except the one we're already in
   // (matched by its checked-out branch) and the bare/main placeholder entry.
-  const otherWorktrees = onOpenWorktree
-    ? worktrees.filter(w => w.path && !w.detached && w.branch && w.branch !== current)
-    : []
+  const otherWorktrees =
+    canBranchOff && onOpenWorktree
+      ? worktrees.filter(w => w.path && !w.detached && w.branch && w.branch !== current)
+      : []
 
+  const hasMenu = canBranchOff || Boolean(switchTarget)
   const hasLineDelta = status.added > 0 || status.removed > 0
   // Untracked files carry no line delta vs HEAD, so surface them as a count when
   // they're the only change (otherwise +/- tells the story).
@@ -172,37 +177,45 @@ export const CodingStatusRow = memo(function CodingStatusRow({
 
     return (
       <>
-        <kit.Label className={MENU_SECTION}>{s.newBranch}</kit.Label>
-        {branchItems.map(item => renderActionItem(kit, item))}
+        {canBranchOff && (
+          <>
+            <kit.Label className={MENU_SECTION}>{s.newBranch}</kit.Label>
+            {branchItems.map(item => renderActionItem(kit, item))}
+          </>
+        )}
         {switchTarget &&
           renderActionItem(kit, {
             key: '__switch__',
             label: <span className="truncate">{s.switchTo(switchTarget)}</span>,
             onSelect: () => void switchToBranch(switchTarget)
           })}
-        <kit.Separator />
-        <kit.Label className={MENU_SECTION}>{s.worktrees}</kit.Label>
-        {worktreeItems.map(item => renderActionItem(kit, item))}
-        {/* Create a fresh worktree off the current HEAD (the generic "spin up a
-            worktree here", mirroring the sidebar's + button). */}
-        {renderActionItem(kit, {
-          key: '__start__',
-          label: <span className="truncate">{p.startWork}</span>,
-          onSelect: () => startBranch(undefined)
-        })}
-        {onConvertBranch &&
-          renderActionItem(kit, {
-            key: '__convert__',
-            label: <span className="truncate">{p.convertBranch}</span>,
-            onSelect: () => startBranch(undefined)
-          })}
+        {canBranchOff && (
+          <>
+            <kit.Separator />
+            <kit.Label className={MENU_SECTION}>{s.worktrees}</kit.Label>
+            {worktreeItems.map(item => renderActionItem(kit, item))}
+            {/* Create a fresh worktree off the current HEAD (the generic "spin up a
+                worktree here", mirroring the sidebar's + button). */}
+            {renderActionItem(kit, {
+              key: '__start__',
+              label: <span className="truncate">{p.startWork}</span>,
+              onSelect: () => startBranch(undefined)
+            })}
+            {onConvertBranch &&
+              renderActionItem(kit, {
+                key: '__convert__',
+                label: <span className="truncate">{p.convertBranch}</span>,
+                onSelect: () => startBranch(undefined)
+              })}
+          </>
+        )}
       </>
     )
   }
 
   return (
     <>
-      <ActionsContextMenu contentClassName="w-60" disabled={!onBranchOff} items={renderBranchItems}>
+      <ActionsContextMenu contentClassName="w-60" disabled={!hasMenu} items={renderBranchItems}>
         <StatusRow
           // The base "where am I working" strip is part of the composer surface
           // itself, so it inherits the composer's width and clipped top radius.
@@ -267,7 +280,7 @@ export const CodingStatusRow = memo(function CodingStatusRow({
                 ALWAYS laid out; only its opacity flips on hover/focus/open, so
                 revealing it never reflows the row (no layout shift). pointer-events
                 follow opacity so the invisible trigger isn't clickable at rest. */}
-            {onBranchOff && (
+            {hasMenu && (
               <ActionsMenu
                 align="end"
                 contentClassName="w-60"
