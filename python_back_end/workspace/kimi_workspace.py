@@ -266,54 +266,27 @@ async def stream_local_ollama_workspace(
     """
     Run a workspace task using a local Ollama instance.
 
-    Routing: prefers laptop Ollama (`OLLAMA_URL`). If `model` is set and the
-    laptop doesn't have it, falls back to the desktop Ollama
-    (`DESKTOP_OLLAMA_URL`) so models that only exist on the GPU host (e.g.
-    gemma4-26b on the 5080) work transparently when picked from the dropdown.
+    Routing: this install's Ollama (`OLLAMA_URL`) first. A model that is only on
+    another configured machine (`HARVIS_OLLAMA_HOSTS` / `DESKTOP_OLLAMA_URL`, see
+    owui_compat.ollama_hosts) goes there, so a model picked from the dropdown works
+    wherever it lives.
     """
-    laptop_base = _LOCAL_OLLAMA_URL.rstrip("/")
-    if "/v1" in laptop_base:
-        laptop_base = laptop_base.replace("/v1", "")
-    desktop_base = (os.getenv("DESKTOP_OLLAMA_URL", "") or "").rstrip("/")
-    if "/v1" in desktop_base:
-        desktop_base = desktop_base.replace("/v1", "")
+    from owui_compat import ollama_hosts
 
-    async def _has_model(base: str, name: str) -> bool:
-        try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as c:
-                r = await c.get(f"{base}/api/tags")
-            if r.status_code == 200:
-                return any(m.get("name") == name for m in r.json().get("models", []))
-        except Exception:
-            pass
-        return False
-
-    base_url = laptop_base
-    chosen_host = "laptop"
-
-    # If caller named a model that isn't on the laptop, route to the
-    # desktop (when configured). We deliberately do NOT probe the
-    # desktop via /api/tags first — a transient timeout there used to
-    # silently keep us on the laptop and surface a confusing 404 for
-    # a model the user explicitly picked. If the model truly isn't on
-    # the desktop either, the chat call below returns a clean error
-    # from the desktop instead of a misleading laptop 404.
-    if model and desktop_base:
-        try:
-            on_laptop = await _has_model(laptop_base, model)
-        except Exception as exc:
-            logger.warning(
-                "laptop /api/tags check failed: %s — assuming model not on laptop",
-                exc,
-            )
-            on_laptop = False
-        if not on_laptop:
-            base_url = desktop_base
-            chosen_host = "desktop"
-            logger.info(
-                "stream_local_ollama_workspace: model %r not on laptop; routing to desktop %s",
-                model, desktop_base,
-            )
+    local_base = _LOCAL_OLLAMA_URL.rstrip("/")
+    if "/v1" in local_base:
+        local_base = local_base.replace("/v1", "")
+    base_url, chosen_host, why = await ollama_hosts.route(model, local_base)
+    if model and why == "unknown":
+        # The model is on no machine that answered, and at least one machine did
+        # not answer. Saying so beats passing on this machine's bare 404.
+        down = [st.label for st in (await ollama_hosts.snapshot()).values() if not st.reachable]
+        yield OpenClawEvent("error", {
+            "message": f"Model {model} is not on any machine that is answering"
+                       + (f" ({', '.join(down)} is not answering)." if down else "."),
+            "fix_hint": "Start that machine's Ollama or pick a model that is installed here.",
+        })
+        return
 
     # Auto-pick a model when caller didn't supply one.
     if not model:
@@ -321,7 +294,9 @@ async def stream_local_ollama_workspace(
             async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
                 resp = await client.get(f"{base_url}/api/tags")
             if resp.status_code == 200:
-                models = resp.json().get("models", [])
+                from owui_compat.ollama_hosts import drop_cloud
+
+                models = drop_cloud(resp.json().get("models", []))
                 if models:
                     model = models[0]["name"]
                     yield OpenClawEvent("log", {
@@ -344,9 +319,9 @@ async def stream_local_ollama_workspace(
             })
             return
 
-    if chosen_host == "desktop":
+    if chosen_host != ollama_hosts.LOCAL:
         yield OpenClawEvent("log", {
-            "message": f"Routing to desktop Ollama (5080) — model {model} not on laptop",
+            "message": f"Running {model} on {ollama_hosts.host_label(chosen_host)}",
         })
 
     user_msg, skipped = await _user_message(task_message, chat_history, attachments, user_id)
@@ -510,31 +485,13 @@ async def _plan_subtasks(
             raw = "".join(parts).strip()
         else:
             # Local or cloud Ollama — route to whichever host has the model.
-            laptop_base = _LOCAL_OLLAMA_URL.rstrip("/")
-            if "/v1" in laptop_base:
-                laptop_base = laptop_base.replace("/v1", "")
-            desktop_base = (os.getenv("DESKTOP_OLLAMA_URL", "") or "").rstrip("/")
-            if "/v1" in desktop_base:
-                desktop_base = desktop_base.replace("/v1", "")
-            base_url = laptop_base
+            from owui_compat import ollama_hosts
+
+            local_base = _LOCAL_OLLAMA_URL.rstrip("/")
+            if "/v1" in local_base:
+                local_base = local_base.replace("/v1", "")
             target_model = model or "qwen2.5:7b"
-            if model and desktop_base:
-                # Prefer desktop when laptop doesn't have the requested model.
-                try:
-                    async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as hc_chk:
-                        r = await hc_chk.get(f"{laptop_base}/api/tags")
-                    on_laptop = r.status_code == 200 and any(
-                        m.get("name") == model for m in r.json().get("models", [])
-                    )
-                    if not on_laptop:
-                        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as hc_chk:
-                            r2 = await hc_chk.get(f"{desktop_base}/api/tags")
-                        if r2.status_code == 200 and any(
-                            m.get("name") == model for m in r2.json().get("models", [])
-                        ):
-                            base_url = desktop_base
-                except Exception:
-                    pass
+            base_url, _host, _why = await ollama_hosts.route(model, local_base)
             payload = {
                 "model": target_model,
                 "messages": messages,

@@ -27,6 +27,7 @@ import { triggerHaptic } from '@/lib/haptics'
 import { AlertCircle, CheckCircle2, Loader2 } from '@/lib/icons'
 import { brandFor, brandGlyphStyle } from '@/lib/mcp-brands'
 import { completeMcpDesktopOAuth, McpOAuthCancelled } from '@/lib/mcp-dashboard-oauth'
+import { type OAuthWindow, prepareOAuthWindow } from '@/lib/mcp-oauth-popup'
 import { directoryEntry } from '@/lib/mcp-directory'
 import { prettyName } from '@/lib/text'
 import { cn } from '@/lib/utils'
@@ -252,6 +253,13 @@ function McpSetupPending({ args }: ToolCallMessagePartProps) {
     cancelRef.current = false
     setWorking(true)
 
+    // The consent popup has to open inside this click, before any await; it is
+    // pointed at the vendor's page once the flow starts. Only the actions that
+    // can reach OAuth open one.
+    const oauthWindow: OAuthWindow | null =
+      action === 'authorize' || (action === 'install' && !entry && directoryEntry(server)) ? prepareOAuthWindow() : null
+    const openConsent = (url: string) => (oauthWindow ? oauthWindow.open(url) : window.hermesDesktop.openExternal(url))
+
     // Poll-boundary abort for the background-install loop; the OAuth flows
     // carry their own cancel via completeMcpDesktopOAuth's `cancelled`.
     const throwIfCancelled = <T,>(value: T): T => {
@@ -278,7 +286,7 @@ function McpSetupPending({ args }: ToolCallMessagePartProps) {
           status: getMcpOAuthFlow,
           cancelled: () => cancelRef.current,
           cancel: cancelMcpOAuthFlow,
-          openExternal: url => window.hermesDesktop.openExternal(url)
+          openExternal: openConsent
         })
 
         triggerHaptic('submit')
@@ -314,7 +322,7 @@ function McpSetupPending({ args }: ToolCallMessagePartProps) {
         // flow dies after the config write (cancel, closed OAuth tab), roll
         // the write back — decline means "no server", not an unauthorized
         // entry squatting in mcp_servers (authoritative-write rule).
-        await addMcpServer({ name: known.name, url: known.url })
+        await addMcpServer({ name: known.name, url: known.url, transport: 'streamable-http', auth: 'oauth' })
 
         let flow
 
@@ -325,7 +333,7 @@ function McpSetupPending({ args }: ToolCallMessagePartProps) {
             status: getMcpOAuthFlow,
             cancelled: () => cancelRef.current,
             cancel: cancelMcpOAuthFlow,
-            openExternal: url => window.hermesDesktop.openExternal(url)
+            openExternal: openConsent
           })
         } catch (error) {
           await removeMcpServer(known.name).catch(() => {
@@ -385,6 +393,7 @@ function McpSetupPending({ args }: ToolCallMessagePartProps) {
         status: 'error'
       })
     } finally {
+      oauthWindow?.close()
       setWorking(false)
     }
   }, [action, copy, entry, envDraft, respond, server])

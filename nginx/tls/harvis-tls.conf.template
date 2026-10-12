@@ -32,6 +32,10 @@ server {
     # past it afterwards — on a LAN address that is a trap, not a hardening step.
     # Add HSTS only alongside a certificate a browser actually trusts.
 
+    # Tunnel traffic belongs on 8081, behind the Access check. See the
+    # listen 80 block in nginx.conf.
+    if ($http_cf_ray) { return 403; }
+
     # Same routes as the HTTP listener, from the same file, so the two can
     # never drift apart.
     include /etc/nginx/harvis.conf;

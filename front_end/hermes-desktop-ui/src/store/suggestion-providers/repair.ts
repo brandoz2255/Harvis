@@ -1,6 +1,7 @@
 import { authMcpServer, cancelMcpOAuthFlow, getMcpOAuthFlow, listMcpServers } from '@/hermes'
 import { translateNow } from '@/i18n'
 import { completeMcpDesktopOAuth, McpOAuthCancelled } from '@/lib/mcp-dashboard-oauth'
+import { prepareOAuthWindow } from '@/lib/mcp-oauth-popup'
 import { prettyName } from '@/lib/text'
 import { type ComposerSuggestion, offerSuggestions } from '@/store/composer-suggestions'
 import { $gateway } from '@/store/gateway'
@@ -37,6 +38,8 @@ const failed = new Map<string, Set<string>>()
 const keyFor = (sessionId: string | null | undefined): string => sessionId ?? ''
 
 async function reconnect(server: string, sessionId: string | null, cancelled: () => boolean): Promise<void> {
+  const oauthWindow = prepareOAuthWindow()
+
   try {
     await completeMcpDesktopOAuth({
       serverName: server,
@@ -44,7 +47,7 @@ async function reconnect(server: string, sessionId: string | null, cancelled: ()
       status: getMcpOAuthFlow,
       cancelled,
       cancel: cancelMcpOAuthFlow,
-      openExternal: url => window.hermesDesktop.openExternal(url)
+      openExternal: url => oauthWindow.open(url)
     })
 
     // Fresh tokens reach the live session before the pill claims success.
@@ -60,6 +63,8 @@ async function reconnect(server: string, sessionId: string | null, cancelled: ()
     }
 
     throw error
+  } finally {
+    oauthWindow.close()
   }
 }
 

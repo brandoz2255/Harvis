@@ -626,27 +626,35 @@ export function useVoiceConversation({
     }
   }, [handleTurn])
 
+  // Mute is input-only: it silences the user, never Harvis. Muting mid-sentence
+  // counts as the user going quiet — what they said is transcribed and answered
+  // aloud. Cancelling the recording there dropped the turn, so Harvis went
+  // silent too. The barge monitor closes as well: a muted user talking (to
+  // someone else in the room) must not cut Harvis's reply off.
   const toggleMute = useCallback(() => {
-    setMuted(value => {
-      const next = !value
+    const next = !mutedRef.current
 
-      if (next) {
-        clearTurnTimeout()
-        // Mute is input-only. It may stop an active recording, but an audio
-        // chunk already handed to STT must still be transcribed and its reply
-        // must still play. Cancelling/changing state during transcription or
-        // speech used to mute Harvis as well as the user.
-        if (statusRef.current === 'listening') {
-          handle.cancel()
-          setStatus('idle')
-        }
-      } else if (enabledRef.current && !busyRef.current && statusRef.current === 'idle') {
-        pendingStartRef.current = true
+    mutedRef.current = next
+    setMuted(next)
+
+    if (next) {
+      clearTurnTimeout()
+
+      if (stopBargeMonitorRef.current && !bargeCapturePendingRef.current) {
+        stopBargeMonitorRef.current()
+        stopBargeMonitorRef.current = null
       }
 
-      return next
-    })
-  }, [handle])
+      if (statusRef.current === 'listening' && !bargeCapturePendingRef.current) {
+        void handleTurn()
+      }
+    } else if (enabledRef.current && !busyRef.current && statusRef.current === 'idle') {
+      pendingStartRef.current = true
+    } else if (enabledRef.current && awaitingSpokenResponseRef.current) {
+      // Unmuted mid-turn: the user can talk over Harvis again.
+      ensureBargeMonitor()
+    }
+  }, [ensureBargeMonitor, handleTurn])
 
   useEffect(() => {
     if (!enabled) {

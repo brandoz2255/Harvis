@@ -117,3 +117,10 @@ async def test_an_allowlisted_host_still_goes_through_the_hardened_fetcher(monke
     assert out == "hello from discord"
     assert seen["url"].startswith("https://cdn.discordapp.com/")
     assert "cdn.discordapp.com" in seen["allowlist"]
+
+
+@pytest.mark.parametrize("ip,public", [("100.100.12.34", False), ("100.64.0.1", False), ("10.0.0.1", False),
+                                       ("8.8.8.8", True), ("2606:4700:4700::1111", True)])
+def test_shared_address_space_is_not_public(ip, public):
+    from agent_reach.tools import _ip_is_public
+    assert _ip_is_public(ip) is public

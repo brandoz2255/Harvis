@@ -19,6 +19,7 @@ import {
 import { type ReactNode, useState } from 'react'
 
 import { harvisApi } from './api'
+import { normalizeCitationMarkers } from './notebook-citations'
 import {
   type ChatMessage,
   chatKey,
@@ -157,7 +158,7 @@ export function NotebookChat({
             ) : (
               <>
                 <div className="prose prose-sm max-w-none dark:prose-invert">
-                  <Streamdown mode="static">{m.content.replace(/【\s*SOURCE\s*(\d+)\s*】/gi, ' [$1]')}</Streamdown>
+                  <Streamdown mode="static">{normalizeCitationMarkers(m.content)}</Streamdown>
                 </div>
                 {m.citations?.length > 0 && (
                   <ol className="mt-1.5 space-y-1 text-xs text-(--ui-text-tertiary)">

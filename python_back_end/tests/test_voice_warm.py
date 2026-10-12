@@ -18,6 +18,10 @@ from plugins.people.controls import Admission  # noqa: E402
 def _env(monkeypatch):
     monkeypatch.setenv("OLLAMA_URL", "http://local-ollama:11434")
     monkeypatch.delenv("DESKTOP_OLLAMA_URL", raising=False)
+    monkeypatch.delenv("HARVIS_OLLAMA_HOSTS", raising=False)
+    from owui_compat import ollama_hosts
+    monkeypatch.setattr(ollama_hosts, "_cache", {})
+    monkeypatch.setattr(ollama_hosts, "_cache_at", 0.0)
     monkeypatch.delenv("HARVIS_VOICE_KEEP_ALIVE", raising=False)
     monkeypatch.setattr(voice_warm, "_last", {})
 
@@ -95,12 +99,18 @@ async def test_a_blocked_person_gets_no_warm_up(monkeypatch):
     assert await voice_warm.voice_model(None, 1, "gemma4:e2b") == ""
 
 
-def _client(monkeypatch, answers, seen):
+def _client(monkeypatch, answers, seen, tags=None):
     real = httpx.AsyncClient
+    tags = tags or {}
 
     def handler(request):
         if request.url.path == "/api/ps":
             return httpx.Response(200, json={"models": []})
+        if request.url.path == "/api/tags":   # the routing probe, not a warm-up
+            return httpx.Response(200, json={"models": [
+                {"name": t} for t in tags.get(request.url.host, [])]})
+        if request.url.path == "/api/show":
+            return httpx.Response(404, json={})
         seen.append((str(request.url), request.content))
         return httpx.Response(answers.get(request.url.host, 200), json={})
 
@@ -127,6 +137,18 @@ async def test_a_model_missing_locally_is_tried_on_the_desktop_ollama(monkeypatc
     assert await voice_warm.warm("big:70b") is True
     assert [u for u, _ in seen] == ["http://local-ollama:11434/api/generate",
                                     "http://desktop-ollama:11434/api/generate"]
+
+
+@pytest.mark.asyncio
+async def test_a_preferred_model_is_warmed_on_the_machine_chat_will_use(monkeypatch):
+    from owui_compat import ollama_hosts
+
+    monkeypatch.setenv("HARVIS_OLLAMA_HOSTS", "studio=http://studio:11434|prefer=gemma4")
+    seen = []
+    _client(monkeypatch, {}, seen,
+            tags={"local-ollama": ["gemma4:31b"], "studio": ["gemma4:31b"]})
+    assert await voice_warm.warm("gemma4:31b") is True
+    assert [u for u, _ in seen] == ["http://studio:11434/api/generate"]
 
 
 @pytest.mark.asyncio

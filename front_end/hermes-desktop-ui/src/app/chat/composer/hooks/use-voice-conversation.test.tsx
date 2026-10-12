@@ -264,3 +264,79 @@ describe('useVoiceConversation full-duplex barge-in', () => {
     expect(monitorCalls.length).toBe(armed)
   })
 })
+
+// Mute silences the user, never Harvis: muting mid-sentence is "I'm done
+// talking" (transcribe and answer aloud), not "throw away what I said".
+describe('useVoiceConversation mute', () => {
+  beforeEach(() => {
+    monitorCalls.length = 0
+    vi.clearAllMocks()
+    micHandle.start.mockResolvedValue(undefined)
+    micHandle.stop.mockResolvedValue(null)
+  })
+
+  afterEach(cleanup)
+
+  it('muting while listening transcribes and submits what was said', async () => {
+    const { hook, onSubmit } = renderConversation()
+
+    await act(async () => {
+      await hook.result.current.start()
+    })
+    await waitFor(() => expect(hook.result.current.status).toBe('listening'))
+
+    micHandle.stop.mockResolvedValueOnce({
+      audio: new Blob(['q'], { type: 'audio/webm' }),
+      durationMs: 900,
+      heardSpeech: true
+    })
+
+    await act(async () => {
+      hook.result.current.toggleMute()
+    })
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledWith('kick off the task'))
+    expect(micHandle.cancel).not.toHaveBeenCalled()
+    expect(hook.result.current.muted).toBe(true)
+    await waitFor(() => expect(hook.result.current.status).toBe('thinking'))
+  })
+
+  it('muting with nothing said goes idle and does not reopen the mic', async () => {
+    const { hook, onSubmit } = renderConversation()
+
+    await act(async () => {
+      await hook.result.current.start()
+    })
+    await waitFor(() => expect(hook.result.current.status).toBe('listening'))
+    micHandle.start.mockClear()
+
+    await act(async () => {
+      hook.result.current.toggleMute()
+    })
+
+    await waitFor(() => expect(hook.result.current.status).toBe('idle'))
+    expect(onSubmit).not.toHaveBeenCalled()
+    expect(micHandle.start).not.toHaveBeenCalled()
+  })
+
+  it('muting mid-turn closes the barge monitor so the reply is not cut off', async () => {
+    const { hook } = renderConversation()
+
+    await enterThinking(hook)
+    await waitFor(() => expect(monitorCalls.length).toBe(1))
+
+    await act(async () => {
+      hook.result.current.toggleMute()
+    })
+
+    expect(stopMonitor).toHaveBeenCalledTimes(1)
+    expect(stopVoicePlayback).not.toHaveBeenCalled()
+    expect(hook.result.current.status).toBe('thinking')
+
+    // Unmuting mid-turn re-arms it.
+    await act(async () => {
+      hook.result.current.toggleMute()
+    })
+    expect(monitorCalls.length).toBe(2)
+  })
+})

@@ -33,7 +33,8 @@ def new_chat_blob(model: str) -> dict:
 
 
 def make_message(role: str, content: str, parent_id: Optional[str], model: str,
-                 reasoning: str = "", files: Optional[list[dict]] = None) -> dict:
+                 reasoning: str = "", files: Optional[list[dict]] = None,
+                 error: str = "", interrupted: bool = False) -> dict:
     now = int(time.time())
     msg = {
         "id": str(uuid.uuid4()), "parentId": parent_id, "childrenIds": [],
@@ -51,6 +52,11 @@ def make_message(role: str, content: str, parent_id: Optional[str], model: str,
             # Beside the answer, never inside it: the Hermes UI reads it as a
             # `reasoning` part and OWUI ignores keys it does not know.
             msg["reasoning"] = reasoning
+        if error:
+            # OWUI's own shape for a failed reply, so `/` renders it too.
+            msg["error"] = {"content": error}
+        if interrupted:
+            msg["interrupted"] = True
     return msg
 
 
@@ -66,8 +72,9 @@ def append_to_blob(blob: dict, msg: dict) -> dict:
     return blob
 
 
-def linear_messages(blob: dict) -> list[dict]:
-    """Walk history.currentId → parents (the branch OWUI shows); fall back to `messages`."""
+def chain_of(blob: dict) -> list[dict]:
+    """The user/assistant messages of the branch OWUI shows: history.currentId →
+    parents; falls back to the linear `messages` array."""
     history = blob.get("history") or {}
     hmsgs = history.get("messages") or {}
     chain: list[dict] = []
@@ -80,22 +87,60 @@ def linear_messages(blob: dict) -> list[dict]:
     chain.reverse()
     if not chain:
         chain = [m for m in (blob.get("messages") or []) if isinstance(m, dict)]
+    return [m for m in chain if str(m.get("role") or "") in ("user", "assistant")]
+
+
+_STOPPED_RE = re.compile(r"\s*\[interrupted\]\s*$")
+
+
+def error_text(m: dict) -> str:
+    err = m.get("error")
+    if isinstance(err, dict):
+        err = err.get("content")
+    return str(err).strip() if err else ""
+
+
+def linear_messages(blob: dict) -> list[dict]:
+    """The transcript the UI shows. ``row_id`` is the 1-based position in it, a
+    durable address for rewind (prompt.submit truncate_before_row_id)."""
     out = []
-    for m in chain:
+    for i, m in enumerate(chain_of(blob), start=1):
         role = str(m.get("role") or "")
-        if role not in ("user", "assistant"):
-            continue
         content, reasoning = _text_of(m.get("content")), str(m.get("reasoning") or "")
         if role == "assistant" and not reasoning:
             content, reasoning = split_think_tags(content)
-        row = {"role": role, "content": content, "timestamp": float(m.get("timestamp") or 0)}
+        row = {"role": role, "content": content, "timestamp": float(m.get("timestamp") or 0), "row_id": i}
         if reasoning:
             row["reasoning"] = reasoning
         files = [f for f in (m.get("files") or []) if isinstance(f, dict) and f.get("id")]
         if role == "user" and files:
             row["attachments"] = files
+        if role == "assistant":
+            if error_text(m):
+                row["error"] = error_text(m)
+            stopped = bool(m.get("interrupted"))
+            if _STOPPED_RE.search(content):  # replies saved before the flag existed
+                row["content"], stopped = _STOPPED_RE.sub("", content), True
+            if stopped:
+                row["interrupted"] = True
         out.append(row)
     return out
+
+
+def truncate_blob(blob: dict, keep: int) -> dict:
+    """Drop every message after the first ``keep`` of the shown branch."""
+    chain = chain_of(blob)
+    dropped = {m["id"] for m in chain[max(keep, 0):] if m.get("id")}
+    history = blob.setdefault("history", {"messages": {}, "currentId": None})
+    hmsgs = history.setdefault("messages", {})
+    for mid in dropped:
+        hmsgs.pop(mid, None)
+    tail = chain[keep - 1] if 0 < keep <= len(chain) else None
+    if tail is not None and tail.get("id") in hmsgs:
+        hmsgs[tail["id"]]["childrenIds"] = [c for c in hmsgs[tail["id"]].get("childrenIds") or [] if c not in dropped]
+    history["currentId"] = tail.get("id") if tail else None
+    blob["messages"] = [m for m in blob.get("messages") or [] if isinstance(m, dict) and m.get("id") not in dropped]
+    return blob
 
 
 _THINK_RE = re.compile(r"<think(?:ing)?>(.*?)</think(?:ing)?>\s*", re.DOTALL | re.IGNORECASE)
@@ -167,8 +212,12 @@ async def list_summaries(pool, user_id: int, limit: int, offset: int,
 
 
 async def set_flags(pool, user_id: int, sid: str, archived: Optional[bool] = None,
-                    pinned: Optional[bool] = None, title: Optional[str] = None) -> bool:
-    """The sidebar's PATCH: archive/unarchive, pin, rename. False when the row is not the user's."""
+                    pinned: Optional[bool] = None, title: Optional[str] = None,
+                    title_source: str = "user") -> bool:
+    """The sidebar's PATCH: archive/unarchive, pin, rename. False when the row is not the user's.
+
+    A title set here is the user's own (``title_source`` "user") unless the caller
+    says otherwise, so a generated title never overwrites it."""
     cid = persistence._as_uuid(sid)
     if cid is None:
         return False
@@ -179,10 +228,36 @@ async def set_flags(pool, user_id: int, sid: str, archived: Optional[bool] = Non
             sets.append(f"{column} = ${len(args)}")
     if not sets:
         return True
+    if title is not None:
+        args.append(title_source)
+        sets.append(f"chat = chat || jsonb_build_object('title_source', ${len(args)}::text)")
     async with pool.acquire() as conn:
         result = await conn.execute(
             f"UPDATE owui_chats SET {', '.join(sets)} WHERE id = $1 AND user_id = $2", *args)
     return result.upper().startswith("UPDATE") and not result.endswith(" 0")
+
+
+async def set_generated_title(pool, user_id: int, sid: str, title: str) -> bool:
+    """Name a chat from its first exchange. Refuses when the user renamed it (or
+    named it at creation), and when the row carries a title nobody generated
+    (a bot or room name); the first-message stand-in and "New Chat" may go."""
+    cid = persistence._as_uuid(sid)
+    if cid is None:
+        return False
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT title, chat FROM owui_chats WHERE id = $1 AND user_id = $2", cid, user_id)
+        if not row:
+            return False
+        blob = row["chat"] if isinstance(row["chat"], dict) else json.loads(row["chat"] or "{}")
+        source = str(blob.get("title_source") or "")
+        current = row["title"] or ""
+        if source == "user" or (source != "ai" and current not in ("", "New Chat", persistence._derive_title(blob))):
+            return False
+        result = await conn.execute(
+            "UPDATE owui_chats SET title = $3, chat = chat || jsonb_build_object('title_source', 'ai'::text), "
+            "updated_at = NOW() WHERE id = $1 AND user_id = $2 AND title = $4 "
+            "AND coalesce(chat->>'title_source', '') <> 'user'", cid, user_id, title, current)
+    return not result.endswith(" 0")
 
 
 async def delete_chat(pool, user_id: int, sid: str) -> bool:

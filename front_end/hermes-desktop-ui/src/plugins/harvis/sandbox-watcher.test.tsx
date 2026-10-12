@@ -30,6 +30,7 @@ vi.mock('@hermes/plugin-sdk', async importOriginal => {
   }
 })
 
+const { setServerCapabilities, resetServerCapabilities } = await import('@/store/server-capabilities')
 const { SandboxWatcher } = await import('./sandbox-watcher')
 
 const info = (over = {}) => ({
@@ -64,9 +65,13 @@ beforeEach(() => {
   setFileBrowserOpen.mockReset()
   window.localStorage.clear()
   busy.current?.set(false)
+  setServerCapabilities({ capabilities: { sandbox: true } })
 })
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  resetServerCapabilities()
+})
 
 describe('SandboxWatcher', () => {
   it('starts the sandbox by asking for it, shows nothing, and opens the Files pane once', async () => {
@@ -110,5 +115,39 @@ describe('SandboxWatcher', () => {
     renderWatcher()
     await waitFor(() => expect(harvisApi).toHaveBeenCalled())
     expect(setFileBrowserOpen).not.toHaveBeenCalled()
+  })
+
+  it('never asks for the sandbox on a server where this person has none', async () => {
+    setServerCapabilities({ capabilities: { sandbox: false } })
+    renderWatcher()
+
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(harvisApi).not.toHaveBeenCalled()
+  })
+
+  it('waits for the status answer before asking', async () => {
+    resetServerCapabilities()
+    renderWatcher()
+
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(harvisApi).not.toHaveBeenCalled()
+
+    act(() => setServerCapabilities({ capabilities: { sandbox: true } }))
+    harvisApi.mockResolvedValue(info())
+    await waitFor(() => expect(harvisApi).toHaveBeenCalledTimes(1))
+  })
+
+  it('stops asking after the server says the sandbox is for admins', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    harvisApi.mockRejectedValue(new Error('This server is shared, so running code on it is for admins.'))
+    renderWatcher()
+
+    await waitFor(() => expect(harvisApi).toHaveBeenCalledTimes(1))
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(120_000)
+    })
+
+    expect(harvisApi).toHaveBeenCalledTimes(1)
+    vi.useRealTimers()
   })
 })

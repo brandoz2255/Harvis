@@ -64,6 +64,7 @@ from urllib.parse import urlsplit
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from . import reach_gate
+from .reach_budget import clip_query, read_many
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +90,20 @@ _MAX_TOTAL_CHARS = 16_000
 # which is a fine budget for an agent run and far too long in front of a chat
 # reply — one slow host would make the whole conversation feel broken.
 _READ_TIMEOUT_S = 12.0
-_TOTAL_BUDGET_S = 30.0
+# Search and fetch have their own clocks inside the overall budget. They used to
+# share one 30s total, so a slow search engine starved the reads and a slow page
+# starved the next search — and the user got "timed out" with nothing. Now a slow
+# search is cut at _SEARCH_TIMEOUT_S, the reads of one round share
+# _FETCH_BUDGET_S and keep whatever finished, and the overall budget is a ceiling
+# that returns the partial set rather than nothing.
+_SEARCH_TIMEOUT_S = 12.0
+_FETCH_BUDGET_S = 15.0
+_TOTAL_BUDGET_S = 40.0
+# How long gather() may run past its soft deadline to finish the round in
+# flight before it is cancelled and the partial state is used.
+_GRACE_S = 3.0
+# A model tool round-trip cannot finish in less than this; below it, skip.
+_MODEL_MIN_REMAINING_S = 8.0
 # The hedge rescue runs AFTER the user already has an answer on screen, so it is
 # not blocking anything — but it does hold the SSE connection open, and it pays
 # for a second full completion. A wider budget than the pre-answer path, still
@@ -103,7 +117,7 @@ _MAX_RAG_ROUNDS = 2
 # The user pressed the button, so waiting is expected — that buys one more
 # round and a wider clock than the automatic path gets.
 _FORCED_ROUNDS = 3
-_FORCED_BUDGET_S = 45.0
+_FORCED_BUDGET_S = 60.0
 # Below this share of the question's words present in the fetched text, the
 # pages are treated as not actually answering it. Deliberately low: this is the
 # "these pages are about something else" line, not a quality bar.
@@ -164,15 +178,27 @@ _SYSTEM = (
 )
 
 
-async def _search(query: str) -> list[dict]:
-    """Deduped web results as ``[{title, url, snippet}]``; ``[]`` on any failure."""
+async def _search(query: str, timeout: float = _SEARCH_TIMEOUT_S) -> list[dict]:
+    """Deduped web results as ``[{title, url, snippet}]``; ``[]`` on any failure.
+
+    Bounded by ``timeout`` on its own clock: the engine call is a blocking thread
+    that nothing can interrupt, so without this a hung engine held the whole turn
+    until the outer backstop fired and discarded everything.
+    """
+    query = clip_query(query)
     try:
         from research.web_search import WebSearchAgent
 
         agent = WebSearchAgent(max_results=_MAX_SEARCH_RESULTS)
         # search_web is synchronous and does network I/O — off-thread it so one
         # search doesn't stall every other request on the event loop.
-        raw = await asyncio.to_thread(agent.search_web, query, _MAX_SEARCH_RESULTS)
+        raw = await asyncio.wait_for(
+            asyncio.to_thread(agent.search_web, query, _MAX_SEARCH_RESULTS),
+            timeout=max(timeout, 1.0),
+        )
+    except asyncio.TimeoutError:
+        logger.warning("chat_reach: web search timed out after %.0fs for %r", timeout, query[:80])
+        return []
     except Exception:
         logger.warning("chat_reach: web search failed for %r", query[:80], exc_info=True)
         return []
@@ -241,6 +267,7 @@ async def _model_rounds(
     user_id: int | None = None,
     reason: str = "unreadable",
     query: str | None = None,
+    deadline: float | None = None,
 ) -> None:
     """Let the model spend up to ``_MAX_MODEL_ROUNDS`` turns with the two tools.
 
@@ -271,9 +298,13 @@ async def _model_rounds(
         },
     ]
     for _round in range(_MAX_MODEL_ROUNDS):
+        left = None if deadline is None else deadline - time.monotonic()
+        if left is not None and left < _MODEL_MIN_REMAINING_S:
+            return
         msg = await router.complete(
             model_name=model_name, messages=messages, tools=_TOOL_SPECS,
-            temperature=0.1, max_tokens=512, timeout=60.0,
+            temperature=0.1, max_tokens=512,
+            timeout=60.0 if left is None else min(60.0, left),
             pool=pool, user_id=user_id,
         )
         calls = parse_tool_calls(msg, known={
@@ -392,6 +423,113 @@ async def _next_query(
     ))
 
 
+class _State:
+    """Everything the loop has gathered so far.
+
+    Held in one object, mutated in place as each result lands, so that when the
+    deadline cancels the loop mid-round the caller can still compose an answer
+    from whatever arrived. Before this the same lists were locals of ``gather``
+    and a timeout above it discarded all of them.
+    """
+
+    def __init__(self, search_query: str) -> None:
+        self.search_query = search_query
+        self.tried: list[str] = []
+        self.results: list[dict] = []     # accumulated, deduped, in the order shown
+        self.sources: list[str] = []
+        self.read_pages: list[dict] = []
+        self.seen_urls: set[str] = set()
+        self.verdict = "empty"
+        self.missing: list[str] = []
+        self.timed_out = False
+
+
+async def _loop(
+    st: _State, message: str, model_name: str, *, pool, user_id, forced: bool, deadline: float,
+) -> None:
+    """search -> read -> grade -> repair, mutating ``st`` as it goes."""
+    max_rounds = _FORCED_ROUNDS if forced else _MAX_RAG_ROUNDS
+
+    for round_no in range(1, max_rounds + 1):
+        left = deadline - time.monotonic()
+        if left <= 0:
+            st.timed_out = True
+            break
+        st.tried.append(st.search_query)
+        found = await _search(st.search_query, timeout=min(_SEARCH_TIMEOUT_S, left))
+        fresh = [r for r in found if r["url"] not in st.seen_urls]
+        for r in fresh:
+            st.seen_urls.add(r["url"])
+            st.results.append(r)
+            st.sources.append(r["url"])
+
+        # ── Deterministic path: read the top hits concurrently ──────────────
+        # Measured on the reference question: search 2.9s + two parallel reads
+        # 1.7s, against 10.3s for a single model round that returned no tool
+        # calls at all on qwen3:4b. So the model does NOT go first. Search
+        # engines already rank for the question, and reading the top few answers
+        # it most of the time — for a third of the latency, with no model call,
+        # which also means this path behaves identically on every lane including
+        # ones with no tool support.
+        #
+        # Read several, not one: a live test answered "latest PostgreSQL" with
+        # 17.4 off a random blog while the official "PostgreSQL 18 Released!"
+        # announcement sat un-read two results below. One page is one opinion;
+        # several let the model see that the blog is the outlier. The reads are
+        # concurrent, so the extra coverage costs no wall-clock.
+        #
+        # The reads share one fetch budget and keep what finished: five pages
+        # where the sixth hangs is five pages, not zero.
+        room = _MAX_SOURCES - len(st.read_pages)
+        if room > 0 and fresh:
+            fetch_left = min(_FETCH_BUDGET_S, deadline - time.monotonic())
+            abandoned = await read_many(
+                [r["url"] for r in fresh[:room]], _read, fetch_left, st.read_pages,
+            )
+            if abandoned:
+                logger.info("chat_reach: %d page read(s) still pending at the fetch budget; skipped", abandoned)
+
+        st.verdict, st.missing = _grade(st.search_query, st.results, st.read_pages)
+        logger.info(
+            "chat_reach: round %d/%d query=%r -> %s (%d result(s), %d page(s))%s",
+            round_no, max_rounds, st.search_query[:70], st.verdict,
+            len(st.results), len(st.read_pages),
+            f" missing={st.missing}" if st.missing else "",
+        )
+        if st.verdict == "ok" or round_no == max_rounds:
+            break
+        if time.monotonic() >= deadline:
+            logger.info("chat_reach: out of budget after round %d; using what we have", round_no)
+            st.timed_out = True
+            break
+        nxt = await _next_query(
+            st.verdict, st.search_query, message, st.tried, st.results, model_name,
+            missing=st.missing, pool=pool, user_id=user_id, deadline=deadline,
+        )
+        if not nxt:
+            logger.info("chat_reach: no better query to try; stopping at %s", st.verdict)
+            break
+        st.search_query = nxt
+
+    # ── Model rounds: only when the loop ran out and still has nothing ──────
+    # The tool loop can do one thing the query repair above cannot — pick a
+    # specific result out of the list and read it. That is worth a round-trip
+    # only after the cheap repairs have failed, and only if the clock allows.
+    if st.verdict != "ok" and deadline - time.monotonic() >= _MODEL_MIN_REMAINING_S:
+        try:
+            await _model_rounds(
+                message, model_name, st.results, st.read_pages, st.sources,
+                pool=pool, user_id=user_id,
+                reason="unreadable" if not st.read_pages else "irrelevant",
+                query=st.search_query, deadline=deadline,
+            )
+        except Exception:
+            logger.info(
+                "chat_reach: model rounds unavailable; using search results only",
+                exc_info=True,
+            )
+
+
 async def gather(
     message: str,
     model_name: str,
@@ -422,87 +560,38 @@ async def gather(
     runs in front of an answer the user is waiting on, so a loop that could come
     back with less than one search would be a downgrade, not an improvement.
 
-    ``deadline`` is a ``time.monotonic()`` stamp. It is checked between rounds,
-    never inside one, because abandoning a round in flight throws away reads
-    that are already paid for.
+    ``deadline`` is a ``time.monotonic()`` stamp; the default is the pre-answer
+    budget so no caller (the hedge rescue passed none) can run unbounded. It is
+    a soft limit — the loop checks it between rounds and hands each step only
+    the time left — plus a hard stop ``_GRACE_S`` later that cancels the round
+    in flight. Neither throws anything away: results and pages are written into
+    shared state as they arrive, and a cancelled loop is composed from that
+    state with a note that the search ran out of time.
     """
-    search_query = (query or message).strip() or message
-    max_rounds = _FORCED_ROUNDS if forced else _MAX_RAG_ROUNDS
-
-    tried: list[str] = []
-    results: list[dict] = []      # accumulated, deduped, in the order shown
-    sources: list[str] = []
-    read_pages: list[dict] = []
-    seen_urls: set[str] = set()
-    verdict, missing = "empty", []
-
-    for round_no in range(1, max_rounds + 1):
-        tried.append(search_query)
-        found = await _search(search_query)
-        fresh = [r for r in found if r["url"] not in seen_urls]
-        for r in fresh:
-            seen_urls.add(r["url"])
-            results.append(r)
-            sources.append(r["url"])
-
-        # ── Deterministic path: read the top hits concurrently ──────────────
-        # Measured on the reference question: search 2.9s + two parallel reads
-        # 1.7s, against 10.3s for a single model round that returned no tool
-        # calls at all on qwen3:4b. So the model does NOT go first. Search
-        # engines already rank for the question, and reading the top few answers
-        # it most of the time — for a third of the latency, with no model call,
-        # which also means this path behaves identically on every lane including
-        # ones with no tool support.
-        #
-        # Read several, not one: a live test answered "latest PostgreSQL" with
-        # 17.4 off a random blog while the official "PostgreSQL 18 Released!"
-        # announcement sat un-read two results below. One page is one opinion;
-        # several let the model see that the blog is the outlier. The reads are
-        # concurrent, so the extra coverage costs no wall-clock.
-        room = _MAX_SOURCES - len(read_pages)
-        if room > 0 and fresh:
-            pages = await asyncio.gather(*[_read(r["url"]) for r in fresh[:room]])
-            read_pages.extend(p for p in pages if p["ok"] and p["text"])
-
-        verdict, missing = _grade(search_query, results, read_pages)
-        logger.info(
-            "chat_reach: round %d/%d query=%r -> %s (%d result(s), %d page(s))%s",
-            round_no, max_rounds, search_query[:70], verdict,
-            len(results), len(read_pages),
-            f" missing={missing}" if missing else "",
+    search_query = clip_query((query or message).strip() or message)
+    st = _State(search_query)
+    if deadline is None:
+        deadline = time.monotonic() + (_FORCED_BUDGET_S if forced else _TOTAL_BUDGET_S)
+    hard = max(deadline - time.monotonic(), 0.0) + _GRACE_S
+    try:
+        await asyncio.wait_for(
+            _loop(st, message, model_name, pool=pool, user_id=user_id,
+                  forced=forced, deadline=deadline),
+            timeout=hard,
         )
-        if verdict == "ok" or round_no == max_rounds:
-            break
-        if deadline is not None and time.monotonic() >= deadline:
-            logger.info("chat_reach: out of budget after round %d; using what we have", round_no)
-            break
-        nxt = await _next_query(
-            verdict, search_query, message, tried, results, model_name,
-            missing=missing, pool=pool, user_id=user_id, deadline=deadline,
+    except asyncio.TimeoutError:
+        st.timed_out = True
+        logger.warning(
+            "chat_reach: hard stop with %d result(s), %d page(s) in hand; using them",
+            len(st.results), len(st.read_pages),
         )
-        if not nxt:
-            logger.info("chat_reach: no better query to try; stopping at %s", verdict)
-            break
-        search_query = nxt
+        st.verdict, st.missing = _grade(st.search_query, st.results, st.read_pages)
+    return _compose(st)
 
-    # ── Model rounds: only when the loop ran out and still has nothing ──────
-    # The tool loop can do one thing the query repair above cannot — pick a
-    # specific result out of the list and read it. That is worth a round-trip
-    # only after the cheap repairs have failed, and only if the clock allows.
-    if verdict != "ok" and (deadline is None or time.monotonic() < deadline):
-        try:
-            await _model_rounds(
-                message, model_name, results, read_pages, sources,
-                pool=pool, user_id=user_id,
-                reason="unreadable" if not read_pages else "irrelevant",
-                query=search_query,
-            )
-        except Exception:
-            logger.info(
-                "chat_reach: model rounds unavailable; using search results only",
-                exc_info=True,
-            )
 
+def _compose(st: _State) -> dict:
+    """The context block and source list for whatever ``st`` holds."""
+    results, read_pages, sources, verdict = st.results, st.read_pages, st.sources, st.verdict
     if not results and not read_pages:
         return {"context": "", "sources": []}
 
@@ -539,6 +628,12 @@ async def gather(
             "The search did not find a clear answer — these are the best pages "
             "it could reach. Say plainly what they do and do not establish "
             "rather than filling the gap.",
+        ]
+    if st.timed_out:
+        parts += [
+            "",
+            "The search ran out of time, so this is a partial set: some pages "
+            "were not read. Say that it is partial where it matters.",
         ]
     parts += ["", "Search results:", _fmt_results(results)]
     for page in read_pages:
@@ -590,6 +685,14 @@ async def maybe_inject_reach(request, owui_body: dict, user_id: int | None = Non
         decision = "yes" if forced else reach_gate.verdict(message)
         query = ""
 
+        # The Toolsets tab's "Agent Reach" switch. Automatic lookups are the
+        # agent reaching out on its own, so they stop when it is off; the Force
+        # Web Search button is the user asking outright and still works.
+        if not forced and decision in ("yes", "maybe") and not await _reach_toolset_on(pool, user_id):
+            _remember_turn(request, message, previous, model_name, user_id)
+            logger.info("chat_reach: Agent Reach toolset is off; answering ungrounded")
+            return
+
         if forced:
             pass
         elif decision == "maybe":
@@ -625,11 +728,10 @@ async def maybe_inject_reach(request, owui_body: dict, user_id: int | None = Non
                     message, model_name, pool=pool, user_id=user_id, query=query,
                     forced=forced, deadline=time.monotonic() + budget,
                 ),
-                # A backstop, not the budget. gather() watches the deadline
-                # between rounds and returns what it has; this only fires if a
-                # single round hangs past everything below it, and unlike the
-                # deadline it costs us every source already gathered.
-                timeout=budget + 15.0,
+                # A backstop, not the budget. gather() carries its own hard stop
+                # (deadline + _GRACE_S) and returns partial results; this only
+                # fires if gather() itself wedges, which costs every source.
+                timeout=budget + _GRACE_S + 12.0,
             )
         except asyncio.TimeoutError:
             # Answer ungrounded rather than leave the user watching a dead composer.
@@ -657,6 +759,22 @@ async def maybe_inject_reach(request, owui_body: dict, user_id: int | None = Non
         )
     except Exception:
         logger.warning("chat_reach: injection failed; answering ungrounded", exc_info=True)
+
+
+async def _reach_toolset_on(pool, user_id: int | None) -> bool:
+    """Is the ``harvis-reach`` toolset enabled for this user? Fail-open."""
+    if pool is None or user_id is None:
+        return True
+    try:
+        from plugins.hermes_ui import store
+        from workspace.orchestration.toolsets import toolset_enabled
+
+        section = await store.get_section(pool, int(user_id))
+        raw = section.get("disabled_toolsets")
+        return toolset_enabled(raw if isinstance(raw, list) else [], "harvis-reach")
+    except Exception:
+        logger.warning("chat_reach: could not read toolset choices; treating reach as on", exc_info=True)
+        return True
 
 
 def _forced_search(owui_body: dict) -> bool:

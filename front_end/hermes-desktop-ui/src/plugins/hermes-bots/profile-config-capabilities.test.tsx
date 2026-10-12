@@ -151,6 +151,11 @@ async function renderEditor(
   sdk.exports = exports
   vi.resetModules()
 
+  // The hub section only renders on a server that has a skills hub. Set it on
+  // the freshly reset store: the editor below reads that module instance.
+  const { setServerCapabilities } = await import('@/store/server-capabilities')
+  setServerCapabilities({ capabilities: { skills_hub: true } })
+
   const { AdvancedProfileConfig } = await import('./profile-config')
 
   return render(

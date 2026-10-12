@@ -2,6 +2,7 @@ import { atom, computed, type ReadableAtom } from 'nanostores'
 
 import type { HermesGitWorktree, HermesRepoStatus } from '@/global'
 import { desktopGit } from '@/lib/desktop-git'
+import { isDesktopFsRemoteMode } from '@/lib/desktop-fs'
 
 import {
   $projectScope,
@@ -18,6 +19,7 @@ import {
   $workspaceCwdOwner,
   workspaceCwdBelongsToSelectedSession
 } from './session'
+import { hasCapability } from './server-capabilities'
 import { $focusedRuntimeId, $sessionStates } from './session-states'
 import { $workspaceChangeTick } from './workspace-events'
 
@@ -518,6 +520,11 @@ export async function resolveWorktreeRepoPath(): Promise<string> {
 }
 
 export async function openWorktreeDialog(options?: { base?: string; repoPath?: string }): Promise<void> {
+  // The sandbox repo has no worktrees to add; do not open a dialog that cannot succeed.
+  if (isDesktopFsRemoteMode() && !hasCapability('git_worktrees')) {
+    return
+  }
+
   const repoPath = options?.repoPath?.trim() || (await resolveWorktreeRepoPath())
 
   if (repoPath) {

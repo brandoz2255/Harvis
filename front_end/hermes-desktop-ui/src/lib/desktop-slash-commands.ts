@@ -67,6 +67,7 @@ export type DesktopActionId =
   | 'skin'
   | 'title'
   | 'wake'
+  | 'web'
   | 'yolo'
 
 /** A command fulfilled by opening a desktop overlay picker. */
@@ -172,12 +173,18 @@ const rpc = (
  */
 const DESKTOP_COMMAND_SPECS: readonly DesktopCommandSpec[] = [
   // Local client actions
-  { name: '/new', description: 'Start a new desktop chat', aliases: ['/reset'], surface: action('new') },
+  { name: '/new', description: 'Start a new desktop chat', aliases: ['/reset', '/clear'], surface: action('new') },
   {
     name: '/branch',
     description: 'Branch the latest message into a new chat',
     aliases: ['/fork'],
     surface: action('branch')
+  },
+  {
+    name: '/web',
+    description: 'Turn live web search on or off for every message [on|off]',
+    surface: action('web'),
+    argumentMode: 'options'
   },
   { name: '/yolo', description: 'Toggle YOLO — auto-approve dangerous commands', surface: action('yolo') },
   {
@@ -277,7 +284,6 @@ const DESKTOP_COMMAND_SPECS: readonly DesktopCommandSpec[] = [
 const NO_DESKTOP_SURFACE: Record<DesktopUnavailableReason, readonly string[]> = {
   terminal: [
     '/busy',
-    '/clear',
     '/config',
     '/copy',
     '/cron',

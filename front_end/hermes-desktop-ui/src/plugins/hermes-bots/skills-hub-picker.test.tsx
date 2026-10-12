@@ -31,6 +31,7 @@ vi.mock('@hermes/plugin-sdk', async importOriginal => {
 })
 
 const { HubSkillsSection } = await import('./skills-hub')
+const { setServerCapabilities } = await import('@/store/server-capabilities')
 
 interface PickMessage {
   identifier?: string
@@ -67,6 +68,7 @@ function installCalls() {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  setServerCapabilities({ capabilities: { skills_hub: true } })
 })
 
 afterEach(() => {
@@ -148,5 +150,15 @@ describe('hub pick messages', () => {
     )
 
     expect(installCalls()).toEqual([])
+  })
+})
+
+describe('hub availability', () => {
+  it('renders nothing on a server without a skills hub', () => {
+    setServerCapabilities({ capabilities: { skills_hub: false } })
+
+    const { container } = render(<HubSkillsSection forProfile={null} />)
+
+    expect(container.innerHTML).toBe('')
   })
 })

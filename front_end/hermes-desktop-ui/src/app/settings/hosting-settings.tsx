@@ -1,12 +1,15 @@
+import { useStore } from '@nanostores/react'
 import { useQuery } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { CopyButton } from '@/components/ui/copy-button'
+import { $session } from '@/lib/harvis-session'
 import { AlertTriangle, CheckCircle2, Cpu, Globe, Info, Layers3, Network, Power, RefreshCw } from '@/lib/icons'
 import { cn } from '@/lib/utils'
 
 import { fetchHostingStatus, type HostingNode, type HostingStatus } from './harvis-api'
+import { ClusterPanel } from './hosting-cluster'
 import { ListRow, ListRowSkeleton, Pill, SettingsContent, SettingsSection } from './primitives'
 
 export const hostingKey = ['harvis', 'settings', 'hosting'] as const
@@ -160,6 +163,8 @@ export function HostingSettings() {
   const hosting = useQuery({ queryFn: fetchHostingStatus, queryKey: hostingKey, refetchInterval: 30_000 })
   const status = hosting.data
   const commands = status?.commands
+  const session = useStore($session)
+  const isAdmin = session.status === 'signed-in' && session.user.role === 'admin'
 
   return (
     <SettingsContent>
@@ -191,6 +196,12 @@ export function HostingSettings() {
       ) : status ? (
         <StatusCard status={status} />
       ) : null}
+
+      {status?.mode === 'kubernetes' && isAdmin && (
+        <div className="mt-6">
+          <ClusterPanel />
+        </div>
+      )}
 
       <div className="mt-6">
         <SettingsSection icon={Info} title="What Kubernetes hosting mode is">

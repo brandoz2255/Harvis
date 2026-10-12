@@ -276,7 +276,7 @@ async def test_run_turn_binds_the_bot_every_turn(monkeypatch):
     async def thinking():
         return frozenset()
 
-    async def append(pool, s, role, content, reasoning=""):
+    async def append(pool, s, role, content, reasoning="", **kw):
         calls["assistant"] = content
         return []
 
@@ -304,6 +304,19 @@ async def test_run_turn_binds_the_bot_every_turn(monkeypatch):
             emitted.append(kind)
 
         _relay = Connection._relay
+
+
+        def _background(self, coro):
+
+
+            pass
+
+
+
+        def _generate_title(self, *args):
+
+
+            pass
 
     live = sessions.Live(id="s1", user_id=1, model="gemma4:e2b", bot_id="b1", running=True)
     msgs = [{"role": "user", "content": "what does the paper say?"}]
@@ -339,7 +352,7 @@ async def test_run_turn_without_a_bot_is_unchanged(monkeypatch):
     async def thinking():
         return frozenset()
 
-    async def append(pool, s, role, content, reasoning=""):
+    async def append(pool, s, role, content, reasoning="", **kw):
         return []
 
     async def stream_turn(token, turn, model, ep, mode, effort, origin, extra=None):
@@ -363,6 +376,19 @@ async def test_run_turn_without_a_bot_is_unchanged(monkeypatch):
             pass
 
         _relay = Connection._relay
+
+
+        def _background(self, coro):
+
+
+            pass
+
+
+
+        def _generate_title(self, *args):
+
+
+            pass
 
     msgs = [{"role": "user", "content": "hi"}]
     await Connection._run_turn(Conn(), sessions.Live(id="s2", user_id=1, model="m"), msgs)
@@ -390,7 +416,7 @@ async def test_group_room_turn_never_starts_a_workspace_or_research_run(monkeypa
     async def thinking():
         return frozenset()
 
-    async def append(pool, s, role, content, reasoning=""):
+    async def append(pool, s, role, content, reasoning="", **kw):
         return []
 
     async def stream_turn(token, turn, model, ep, mode, effort, origin, extra=None):
@@ -416,6 +442,19 @@ async def test_group_room_turn_never_starts_a_workspace_or_research_run(monkeypa
             pass
 
         _relay = Connection._relay
+
+
+        def _background(self, coro):
+
+
+            pass
+
+
+
+        def _generate_title(self, *args):
+
+
+            pass
 
     prompt = ('[Group chat: "Pirate Tutor, Harvis"] You are @hermes. New messages: You (user): hi '
               "Rules for this room: claim or hand off work, or report a real result.")

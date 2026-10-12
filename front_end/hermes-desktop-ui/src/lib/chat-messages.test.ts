@@ -1439,3 +1439,39 @@ describe('sealOpenToolParts', () => {
     expect(sealOpenToolParts(messages)).toBe(messages)
   })
 })
+
+describe('persisted failed and stopped replies', () => {
+  const rows = (assistant: Partial<SessionMessage>): SessionMessage[] => [
+    { role: 'user', content: 'hello', timestamp: 1, row_id: 1 },
+    { role: 'assistant', content: '', timestamp: 2, row_id: 2, ...assistant }
+  ]
+
+  it('keeps a failed turn as an assistant message that carries the plain error', () => {
+    const messages = toChatMessages(
+      rows({ error: 'The model server is not responding. Check that it is running, then retry.' })
+    )
+
+    expect(messages.map(m => m.role)).toEqual(['user', 'assistant'])
+    expect(messages[1].error).toBe('The model server is not responding. Check that it is running, then retry.')
+    expect(messages[1].rowId).toBe(2)
+  })
+
+  it('keeps partial text on a failed turn', () => {
+    const messages = toChatMessages(rows({ content: 'Paris is', error: 'The model took too long to respond.' }))
+
+    expect(chatMessageText(messages[1])).toBe('Paris is')
+    expect(messages[1].error).toBeTruthy()
+  })
+
+  it('flags a stopped reply and leaves its text clean', () => {
+    const messages = toChatMessages(rows({ content: 'Half an answ', interrupted: true }))
+
+    expect(messages[1].interrupted).toBe(true)
+    expect(chatMessageText(messages[1])).toBe('Half an answ')
+    expect(messages[1].error).toBeUndefined()
+  })
+
+  it('still drops an empty assistant row that did not fail', () => {
+    expect(toChatMessages(rows({})).map(m => m.role)).toEqual(['user'])
+  })
+})

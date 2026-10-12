@@ -286,9 +286,18 @@ async def kubectl_health(request: Request, authorization: Optional[str] = Header
 
 # ─── User-facing approval endpoints (JWT auth) ────────────────────────────────
 
+async def _require_cluster_admin(current_user=Depends(get_current_user_optimized)):
+    """Cluster writes are approved by an administrator, never by any signed-in user."""
+    from owui_compat.authz import is_admin
+
+    if not is_admin(current_user):
+        raise HTTPException(status_code=403, detail="Only an administrator can review cluster commands")
+    return current_user
+
+
 @kubectl_proxy_router.get("/pending")
 async def list_pending_commands(
-    current_user=Depends(get_current_user_optimized),
+    current_user=Depends(_require_cluster_admin),
 ):
     """
     Return all kubectl write commands currently awaiting human approval.
@@ -300,7 +309,7 @@ async def list_pending_commands(
 @kubectl_proxy_router.post("/approve/{approval_id}")
 async def approve_command(
     approval_id: str,
-    current_user=Depends(get_current_user_optimized),
+    current_user=Depends(_require_cluster_admin),
 ):
     """Approve a pending kubectl write command. Unblocks the OpenClaw tool call."""
     if approval_id not in _approval_events:
@@ -319,7 +328,7 @@ async def approve_command(
 @kubectl_proxy_router.post("/reject/{approval_id}")
 async def reject_command(
     approval_id: str,
-    current_user=Depends(get_current_user_optimized),
+    current_user=Depends(_require_cluster_admin),
 ):
     """Reject a pending kubectl write command. Returns 403 to the OpenClaw tool call."""
     if approval_id not in _approval_events:

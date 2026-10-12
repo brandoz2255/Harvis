@@ -68,7 +68,9 @@ async def _installed_ollama_models() -> list[str]:
     try:
         async with httpx.AsyncClient(timeout=4.0) as client:
             r = await client.get(f"{url}/api/tags")
-            return [m.get("name") for m in ((r.json() or {}).get("models") or []) if m.get("name")]
+            from .ollama_hosts import drop_cloud
+
+            return [m.get("name") for m in drop_cloud((r.json() or {}).get("models") or []) if m.get("name")]
     except Exception:
         return []
 

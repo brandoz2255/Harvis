@@ -47,14 +47,22 @@ def _read_secret(path: str, what: str) -> str:
     return value
 
 
-def list_nodes_uncached(
+def api_get(
+    path: str,
+    what: str,
     environ: Optional[dict[str, str]] = None,
     *,
     token_path: str = TOKEN_PATH,
     ca_path: str = CA_PATH,
     transport: Optional[httpx.BaseTransport] = None,
-) -> list[dict[str, Any]]:
-    """GET /api/v1/nodes as the pod's service account. Raises NodeListError only."""
+    params: Optional[dict[str, Any]] = None,
+    as_text: bool = False,
+) -> Any:
+    """GET ``path`` from the API server as the pod's service account.
+
+    ``what`` names the request in errors ("list nodes", "read pod logs"). Raises
+    NodeListError only, with text composed here and never lifted from a response.
+    """
     env = os.environ if environ is None else environ
     host = (env.get("KUBERNETES_SERVICE_HOST") or "").strip()
     port = (env.get("KUBERNETES_SERVICE_PORT") or "443").strip()
@@ -63,12 +71,12 @@ def list_nodes_uncached(
 
     token = _read_secret(token_path, "token")
     verify: Any = ca_path if os.path.exists(ca_path) else True
-    url = f"https://{host}:{port}/api/v1/nodes"
+    url = f"https://{host}:{port}{path}"
     api = f"{host}:{port}"
 
     try:
         with httpx.Client(timeout=_TIMEOUT_S, verify=verify, transport=transport) as hc:
-            r = hc.get(url, headers={"Authorization": f"Bearer {token}"})
+            r = hc.get(url, headers={"Authorization": f"Bearer {token}"}, params=params)
     except httpx.TimeoutException:
         raise NodeListError(f"the Kubernetes API at {api} did not answer within {_TIMEOUT_S:g}s") from None
     except httpx.HTTPError as exc:
@@ -81,19 +89,41 @@ def list_nodes_uncached(
     if r.status_code in (401, 403):
         raise NodeListError(
             f"the Kubernetes API answered HTTP {r.status_code}: the backend's service "
-            "account is not allowed to list nodes (re-run ./install.sh --k8s to "
+            f"account is not allowed to {what} (re-run ./install.sh --k8s to "
             "restore its RBAC binding)"
         )
+    if r.status_code == 404:
+        raise NodeListError(f"the Kubernetes API has no such object ({what})")
     if r.status_code != 200:
-        raise NodeListError(f"the Kubernetes API answered HTTP {r.status_code} for /api/v1/nodes")
-
+        raise NodeListError(f"the Kubernetes API answered HTTP {r.status_code} for {path}")
+    if as_text:
+        return r.text
     try:
-        items = (r.json() or {}).get("items")
+        return r.json() or {}
     except ValueError:
-        raise NodeListError("the Kubernetes API returned a non-JSON node list") from None
+        raise NodeListError(f"the Kubernetes API returned non-JSON for {path}") from None
+
+
+def api_list(path: str, what: str, environ: Optional[dict[str, str]] = None, **kw: Any) -> list[dict[str, Any]]:
+    """``api_get`` for a list endpoint: the ``items`` array, or NodeListError."""
+    items = api_get(path, what, environ, **kw).get("items")
     if not isinstance(items, list):
-        raise NodeListError("the Kubernetes API returned a node list without 'items'")
+        raise NodeListError(f"the Kubernetes API returned a list without 'items' for {path}")
     return items
+
+
+def list_nodes_uncached(
+    environ: Optional[dict[str, str]] = None,
+    *,
+    token_path: str = TOKEN_PATH,
+    ca_path: str = CA_PATH,
+    transport: Optional[httpx.BaseTransport] = None,
+) -> list[dict[str, Any]]:
+    """GET /api/v1/nodes as the pod's service account. Raises NodeListError only."""
+    return api_list(
+        "/api/v1/nodes", "list nodes", environ,
+        token_path=token_path, ca_path=ca_path, transport=transport,
+    )
 
 
 def fetch_cluster_nodes() -> list[dict[str, Any]]:

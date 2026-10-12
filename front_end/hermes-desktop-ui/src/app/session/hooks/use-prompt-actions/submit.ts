@@ -34,6 +34,7 @@ import {
   touchSessionActivity
 } from '@/store/session'
 import { $sessionStates } from '@/store/session-states'
+import { webSearchParam } from '@/store/web-search'
 
 import type { ClientSessionState } from '../../../types'
 import { sessionContextDrift } from '../session-context-drift'
@@ -763,6 +764,8 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
           session_id: targetId,
           text,
           ...(files.length > 0 && { files }),
+          // The composer's globe; the backend turns it into a forced web search for this turn.
+          ...webSearchParam(),
           ...(interrupted && { interrupted }),
           // Off-screen widget intent: the gateway types the persisted user
           // row display_kind=hidden so no client renders it as a bubble.

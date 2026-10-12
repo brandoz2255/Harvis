@@ -28,6 +28,7 @@ class MemoryEntry:
     source: str = "unspecified"            # e.g. "session-extract", "manual", "imported"
     metadata: dict = field(default_factory=dict)
     created_at: Optional[datetime] = None  # populated by the provider on insert
+    duplicate: bool = False                # True when an equivalent memory already existed and was kept instead
 
 
 class MemoryProvider(abc.ABC):

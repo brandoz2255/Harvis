@@ -32,6 +32,7 @@ import { exportSession } from '@/lib/session-export'
 import { activeGateway } from '@/store/gateway'
 import { notify, notifyError } from '@/store/notifications'
 import { $projectTree, moveSessionToProject, projectIdForCwd, projectRootCwd } from '@/store/projects'
+import { useCapability } from '@/store/server-capabilities'
 import {
   $activeSessionId,
   $connection,
@@ -212,6 +213,7 @@ function useSessionActions({
   const tiles = useStore($sessionTiles)
   const selectedStoredSessionId = useStore($selectedStoredSessionId)
   const isRemote = useStore($connection)?.mode === 'remote'
+  const canProjects = useCapability('projects')
   // The row's finished-unread dot is cleared by opening the session (main or
   // tile) — this menu item is the explicit escape hatch for the rest.
   const isUnread = useStore($unreadFinishedSessionIds).includes(sessionId)
@@ -485,15 +487,17 @@ function useSessionActions({
       />
       <kit.Separator />
       {workItems.map(item => renderActionItem(kit, item))}
-      <kit.Sub>
-        <kit.SubTrigger disabled={!sessionId}>
-          <Codicon name="folder" size="0.875rem" />
-          <span>{t.sidebar.projects.moveToProject}</span>
-        </kit.SubTrigger>
-        <kit.SubContent>
-          <MoveToProjectItems kit={kit} profile={profile} sessionId={sessionId} />
-        </kit.SubContent>
-      </kit.Sub>
+      {canProjects && (
+        <kit.Sub>
+          <kit.SubTrigger disabled={!sessionId}>
+            <Codicon name="folder" size="0.875rem" />
+            <span>{t.sidebar.projects.moveToProject}</span>
+          </kit.SubTrigger>
+          <kit.SubContent>
+            <MoveToProjectItems kit={kit} profile={profile} sessionId={sessionId} />
+          </kit.SubContent>
+        </kit.Sub>
+      )}
       {tabItems.length > 0 && (
         <>
           <kit.Separator />

@@ -3,6 +3,7 @@ import { atom } from 'nanostores'
 import { getActionStatus, restartGateway } from '@/hermes'
 import { translateNow } from '@/i18n'
 import { notifyError } from '@/store/notifications'
+import { hasCapability } from '@/store/server-capabilities'
 import type { ActionResponse } from '@/types/hermes'
 
 const POLL_ATTEMPTS = 18
@@ -36,6 +37,11 @@ async function awaitAction(started: ActionResponse): Promise<void> {
 // messaging save/toggle toasts — gets identical feedback from a plain
 // `void runGatewayRestart()`, and a failure is the only thing that toasts.
 export async function runGatewayRestart(): Promise<void> {
+  // A server that has no gateway to restart (Harvis) has nothing to do here.
+  if (!hasCapability('gateway_restart')) {
+    return
+  }
+
   $gatewayRestarting.set(true)
 
   try {

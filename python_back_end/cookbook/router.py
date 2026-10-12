@@ -254,7 +254,9 @@ async def list_installed(node: str, current_user: Dict = Depends(get_current_use
         data = await client.get_json(ollama, "/api/tags")
     except HTTPException as e:  # ollama unreachable → empty, not a hard error
         return {"models": [], "ollama_url": ollama, "error": str(e.detail)[:200]}
-    models = data.get("models", []) if isinstance(data, dict) else []
+    from owui_compat.ollama_hosts import drop_cloud
+
+    models = drop_cloud(data.get("models", [])) if isinstance(data, dict) else []
     models.sort(key=lambda m: (m.get("size", 0) if isinstance(m, dict) else 0), reverse=True)
     return {"models": models, "ollama_url": ollama}
 
@@ -324,6 +326,12 @@ async def download(req: DownloadRequest, current_user: Dict = Depends(get_curren
     404s on Ollama, so pass `ollama_tag` (the frontend should surface it from the
     recommend list). HF→Ollama auto-mapping is intentionally NOT done here.
     """
+    # Tens of gigabytes onto the server's disk, and it can replace a model
+    # everyone else is using: on a shared server that is the admin's call.
+    from plugins.exposure import require_build_space
+    require_build_space(current_user, detail=(
+        "This server is shared, so downloading models onto it is for admins. "
+        "Ask the admin for the model you need."))
     cfg = config.node_or_400(req.node)
     if not cfg.get("ollama"):
         raise HTTPException(status_code=400, detail=f"Node '{req.node}' has no ollama url configured")

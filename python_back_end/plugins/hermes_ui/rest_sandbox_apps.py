@@ -43,7 +43,9 @@ CSP = ("sandbox allow-scripts allow-forms allow-popups allow-popups-to-escape-sa
        "allow-modals allow-downloads allow-pointer-lock")
 _HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers",
         "transfer-encoding", "upgrade", "host", "content-length"}
-_DROP_REQ = _HOP | {"cookie", "authorization", "x-forwarded-for", "x-real-ip", "origin", "referer"}
+# The Access token would let the app's code pass Cloudflare Access as the visitor.
+_DROP_REQ = _HOP | {"cookie", "authorization", "x-forwarded-for", "x-real-ip", "origin", "referer",
+                    "cf-access-jwt-assertion"}
 _DROP_RESP = _HOP | {"set-cookie", "x-frame-options", "content-security-policy-report-only",
                      "strict-transport-security", "content-encoding"}
 _BLOCKED_PORTS = {22}

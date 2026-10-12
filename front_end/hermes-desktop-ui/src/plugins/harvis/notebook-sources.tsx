@@ -8,6 +8,8 @@ import { Button, cn, Codicon, Input, StatusDot, Textarea, useQueryClient } from 
 import { useEffect, useRef, useState } from 'react'
 
 import { harvisApi } from './api'
+import { fileBlockedReason, useCapabilities } from './notebook-capabilities'
+import { NotebookDiscover } from './notebook-discover'
 import { NotebookSourceViewer } from './notebook-source-viewer'
 import { errorText, listKey, type Source, sourceLabel, sourcesKey, statsKey } from './notebook-shared'
 
@@ -121,13 +123,14 @@ export function useSourceWatchers(notebookId: string, sources: Source[]) {
 }
 
 function AddSource({ notebookId, onAdded }: { notebookId: string; onAdded: () => void }) {
-  const [kind, setKind] = useState<'file' | 'text' | 'url'>('url')
+  const [kind, setKind] = useState<'discover' | 'file' | 'text' | 'url'>('url')
   const [url, setUrl] = useState('')
   const [title, setTitle] = useState('')
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const fileRef = useRef<HTMLInputElement>(null)
+  const caps = useCapabilities()
 
   const submit = async (init: RequestInit, path: string) => {
     setBusy(true)
@@ -147,6 +150,14 @@ function AddSource({ notebookId, onAdded }: { notebookId: string; onAdded: () =>
   }
 
   const upload = (file: File) => {
+    const why = fileBlockedReason(file.name, caps)
+
+    if (why) {
+      setError(why)
+
+      return
+    }
+
     const form = new FormData()
     form.append('file', file)
     void submit({ body: form }, 'upload')
@@ -161,8 +172,9 @@ function AddSource({ notebookId, onAdded }: { notebookId: string; onAdded: () =>
 
   return (
     <div className="space-y-2 rounded-lg border p-3">
+      {caps?.embedder.reason && <p className="text-xs text-destructive">{caps.embedder.reason}</p>}
       <div className="flex gap-1 text-xs">
-        {(['url', 'file', 'text'] as const).map(k => (
+        {(['url', 'file', 'text', 'discover'] as const).map(k => (
           <button
             className={cn(
               'rounded px-2 py-0.5',
@@ -172,7 +184,7 @@ function AddSource({ notebookId, onAdded }: { notebookId: string; onAdded: () =>
             onClick={() => setKind(k)}
             type="button"
           >
-            {{ file: 'Upload a file', text: 'Paste text', url: 'Web page or YouTube' }[k]}
+            {{ discover: 'Discover', file: 'Upload a file', text: 'Paste text', url: 'Web page or YouTube' }[k]}
           </button>
         ))}
       </div>
@@ -200,7 +212,7 @@ function AddSource({ notebookId, onAdded }: { notebookId: string; onAdded: () =>
       {kind === 'file' && (
         <div className="flex items-center gap-2">
           <input
-            accept=".pdf,.txt,.md,.docx,.doc,.html,.csv,.mp3,.wav,.m4a"
+            accept=".pdf,.txt,.md,.docx,.doc,.html,.htm,.csv,.png,.jpg,.jpeg,.webp,.gif,.mp3,.wav,.m4a,.ogg,.webm"
             className="hidden"
             onChange={e => {
               const file = e.target.files?.[0]
@@ -217,9 +229,18 @@ function AddSource({ notebookId, onAdded }: { notebookId: string; onAdded: () =>
           <Button disabled={busy} onClick={() => fileRef.current?.click()} size="sm" variant="outline">
             <Codicon name="cloud-upload" size="0.8rem" /> Choose a file
           </Button>
-          <span className="text-xs text-(--ui-text-tertiary)">PDF, Word, text, Markdown, or audio.</span>
+          <span className="text-xs text-(--ui-text-tertiary)">
+            PDF, Word, text, Markdown, web pages, images, or audio.
+          </span>
         </div>
       )}
+      {kind === 'file' && (caps?.audio_sources.reason || caps?.image_sources.reason) && (
+        <ul className="space-y-0.5 text-xs text-(--ui-text-tertiary)">
+          {caps?.audio_sources.reason && <li>Audio: {caps.audio_sources.reason}</li>}
+          {caps?.image_sources.reason && <li>Images: {caps.image_sources.reason}</li>}
+        </ul>
+      )}
+      {kind === 'discover' && <NotebookDiscover notebookId={notebookId} onAdded={onAdded} />}
       {kind === 'text' && (
         <div className="space-y-1.5">
           <Input onChange={e => setTitle(e.target.value)} placeholder="Title (optional)" value={title} />

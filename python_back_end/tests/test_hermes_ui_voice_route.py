@@ -92,7 +92,7 @@ def _stub_turn(monkeypatch, calls, route):
     async def thinking():
         return frozenset()
 
-    async def append(pool, s, role, content, reasoning=""):
+    async def append(pool, s, role, content, reasoning="", **kw):
         return []
 
     async def stream_turn(token, turn, model, ep, mode, effort, origin, extra=None):
@@ -126,6 +126,19 @@ class _Conn:
         self.events.append((kind, payload))
 
     _relay = Connection._relay
+
+
+    def _background(self, coro):
+
+
+        pass
+
+
+
+    def _generate_title(self, *args):
+
+
+        pass
 
 
 @pytest.mark.asyncio

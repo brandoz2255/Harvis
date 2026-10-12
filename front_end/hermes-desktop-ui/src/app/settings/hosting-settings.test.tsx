@@ -1,8 +1,10 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { HostingStatus } from './harvis-api'
+import { $session } from '@/lib/harvis-session'
+
+import type { ClusterWorkloads, HostingStatus } from './harvis-api'
 import { HostingSettings } from './hosting-settings'
 
 const commands = {
@@ -65,6 +67,7 @@ function renderPage() {
 }
 
 beforeEach(() => {
+  $session.set({ status: 'checking' })
   fetchMock.mockReset()
   vi.stubGlobal('fetch', fetchMock)
 })
@@ -133,5 +136,157 @@ describe('HostingSettings', () => {
 
     expect(await screen.findByText('Could not read the hosting status')).toBeTruthy()
     expect(screen.getByText('Not authenticated')).toBeTruthy()
+  })
+})
+
+const signedIn = (role: string) => ({
+  status: 'signed-in' as const,
+  user: { email: 'a@b.test', id: '1', name: 'A', role }
+})
+
+const now = Math.round(Date.now() / 1000)
+
+const workloads: ClusterWorkloads = {
+  mode: 'kubernetes',
+  namespace: 'harvis',
+  services: [
+    {
+      name: 'backend',
+      desired: 1,
+      ready: 1,
+      updated: 1,
+      state: 'ready',
+      images: [{ name: 'backend', tag: '1.5' }],
+      restarts: 0,
+      pods: [
+        {
+          name: 'backend-abc',
+          phase: 'Running',
+          reason: null,
+          ready: true,
+          restarts: 0,
+          last_restart: null,
+          node: 'pve-lab',
+          started: now - 7200,
+          containers: ['backend']
+        }
+      ]
+    },
+    {
+      name: 'ollama',
+      desired: 1,
+      ready: 0,
+      updated: 1,
+      state: 'down',
+      images: [{ name: 'ollama', tag: '0.12' }],
+      restarts: 7,
+      pods: [
+        {
+          name: 'ollama-xyz',
+          phase: 'Running',
+          reason: 'CrashLoopBackOff',
+          ready: false,
+          restarts: 7,
+          last_restart: now - 60,
+          node: 'pve-lab',
+          started: now - 3600,
+          containers: ['ollama']
+        }
+      ]
+    }
+  ],
+  unmatched_pods: [],
+  events: [
+    {
+      reason: 'BackOff',
+      message: 'Back-off restarting failed container',
+      object: 'pod/ollama-xyz',
+      count: 12,
+      last_seen: now - 30
+    }
+  ],
+  error: null
+}
+
+function route(map: Record<string, unknown>) {
+  fetchMock.mockImplementation(async (path: string) => {
+    const key = Object.keys(map).find(k => path.startsWith(k))
+    const body = key ? map[key] : { detail: 'nope' }
+
+    return new Response(JSON.stringify(body), {
+      status: key ? 200 : 404,
+      headers: { 'Content-Type': 'application/json' }
+    })
+  })
+}
+
+describe('HostingSettings cluster panel', () => {
+  it('is hidden from people who are not administrators', async () => {
+    $session.set(signedIn('user'))
+    route({ '/api/capabilities/hosting/workloads': workloads, '/api/capabilities/hosting': kubernetes })
+    renderPage()
+
+    await screen.findByText('This Harvis runs on Kubernetes (k3s)')
+
+    expect(screen.queryByText('Services in the cluster')).toBeNull()
+    expect(fetchMock.mock.calls.some(([p]) => String(p).includes('/workloads'))).toBe(false)
+  })
+
+  it('is hidden on Docker even for an administrator', async () => {
+    $session.set(signedIn('admin'))
+    route({ '/api/capabilities/hosting': docker })
+    renderPage()
+
+    await screen.findByText('This Harvis runs on Docker')
+
+    expect(screen.queryByText('Services in the cluster')).toBeNull()
+  })
+
+  it('shows each service, flags the broken one, and lists warnings for an administrator', async () => {
+    $session.set(signedIn('admin'))
+    route({ '/api/capabilities/hosting/workloads': workloads, '/api/capabilities/hosting': kubernetes })
+    renderPage()
+
+    expect(await screen.findByText('Services in the cluster')).toBeTruthy()
+    expect(await screen.findByText(/1 service needs attention: ollama/)).toBeTruthy()
+    expect(screen.getByText('Running')).toBeTruthy()
+    expect(screen.getByText('Down')).toBeTruthy()
+    // The broken service opens by itself so its pod and reason are visible.
+    expect(screen.getByText('ollama-xyz')).toBeTruthy()
+    expect(screen.getAllByText('CrashLoopBackOff').length).toBeGreaterThan(0)
+    expect(screen.queryByText('backend-abc')).toBeNull()
+    expect(screen.getByText('BackOff')).toBeTruthy()
+    expect(screen.getByText('Back-off restarting failed container')).toBeTruthy()
+  })
+
+  it("loads a pod's log lines on demand", async () => {
+    $session.set(signedIn('admin'))
+    route({
+      '/api/capabilities/hosting/logs/ollama-xyz': {
+        pod: 'ollama-xyz',
+        container: null,
+        previous: false,
+        lines: ['starting ollama', 'error: out of memory']
+      },
+      '/api/capabilities/hosting/workloads': workloads,
+      '/api/capabilities/hosting': kubernetes
+    })
+    renderPage()
+
+    fireEvent.click(await screen.findByRole('button', { name: /Logs/ }))
+
+    expect(await screen.findByText(/error: out of memory/)).toBeTruthy()
+    expect(fetchMock.mock.calls.some(([p]) => String(p) === '/api/capabilities/hosting/logs/ollama-xyz')).toBe(true)
+  })
+
+  it('says why when the cluster cannot be read', async () => {
+    $session.set(signedIn('admin'))
+    route({
+      '/api/capabilities/hosting/workloads': { ...workloads, services: [], error: 'not allowed to list pods' },
+      '/api/capabilities/hosting': kubernetes
+    })
+    renderPage()
+
+    expect(await screen.findByText('Could not read the cluster: not allowed to list pods')).toBeTruthy()
   })
 })

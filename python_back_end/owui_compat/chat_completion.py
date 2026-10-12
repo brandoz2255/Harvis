@@ -618,22 +618,25 @@ def _inject_default_persona(owui_body: dict) -> None:
 # could name components or describe layout could reshape the chat, and an
 # unknown type falls back to a plain titled card rather than failing.
 _BLOCK_VOCABULARY = (
-    "\n\n## Structured content blocks\n"
-    "When a span of your answer would be easier to use with its own formatting, "
-    "wrap it in a colon fence and Harvis renders it as the right component:\n"
-    "  :::terminal status=running title=\"npm run dev\"  — a shell session; the body is "
-    "raw terminal output, kept monospaced, ANSI colours preserved.\n"
-    "  :::search status=complete  — what you looked up; one result per line.\n"
+    "\n\n## Code and structured content blocks\n"
+    "Code, scripts, config files, commands for the user to run, and file contents "
+    "ALWAYS go in an ordinary markdown fenced block with a language tag "
+    "(```python, ```bash, ```json), written out in full. Never replace code with a "
+    "description, a summary, or a colon fence, and never trim it to fit a block.\n"
+    "A few other spans render better in their own component, via a colon fence:\n"
+    "  :::terminal status=complete title=\"npm test\"  — ONLY output that a tool "
+    "actually produced when you ran a command this turn; the body is that raw "
+    "output. It is never for code you are showing, commands you suggest, or "
+    "examples.\n"
     "  :::file name=report.md size=12KB href=/api/...  — a file you produced. `href` "
     "must be a path on this server; anything else is dropped.\n"
     "  :::writing title=\"Cover letter\"  — prose meant to be kept or reused, not "
     "your explanation of it.\n"
-    "Close every fence with a line containing only `:::`. Set status=running while "
-    "something is still going and status=complete when it finishes.\n"
+    "Close every colon fence with a line containing only `:::`.\n"
     "Use these ONLY when the content genuinely benefits from different handling. "
-    "Ordinary explanation, short answers, and single code snippets are already "
-    "rendered well — a fence around them just adds a box. Never invent a type "
-    "that is not on this list, and never describe how a block should look."
+    "Ordinary explanation, short answers, and code snippets are already rendered "
+    "well. Never invent a type that is not on this list, and never describe how a "
+    "block should look."
 )
 
 

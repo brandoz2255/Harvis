@@ -260,3 +260,6 @@ database-backup/backups/
 # Hermes desktop UI: vite output (served by nginx via compose volume) and electron-builder output
 front_end/hermes-desktop-ui/dist/
 front_end/hermes-desktop-ui/release/
+
+# Site presets for ./install.sh --preset NAME: network names and people stay local.
+config/presets/

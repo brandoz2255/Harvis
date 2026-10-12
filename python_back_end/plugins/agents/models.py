@@ -117,6 +117,7 @@ async def _ollama_sizes() -> dict[str, int]:
     try:
         import httpx
 
+        from owui_compat.ollama_hosts import drop_cloud
         from plugins.models.resolver import _normalize_ollama_base
 
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -124,7 +125,7 @@ async def _ollama_sizes() -> dict[str, int]:
             r.raise_for_status()
         return {
             (e.get("name") or "").strip(): int(e.get("size") or 0)
-            for e in (r.json() or {}).get("models") or []
+            for e in drop_cloud((r.json() or {}).get("models") or [])
         }
     except Exception:
         logger.debug("agents: ollama size listing failed", exc_info=True)

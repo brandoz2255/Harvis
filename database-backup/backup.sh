@@ -3,6 +3,7 @@
 # Creates timestamped backups of the PostgreSQL database
 
 set -e  # Exit on any error
+umask 077  # a dump holds every account's password hash: owner-only
 
 # Configuration
 CONTAINER_NAME="pgsql-db"
@@ -22,6 +23,7 @@ echo -e "${YELLOW}Starting database backup...${NC}"
 
 # Create backup directory if it doesn't exist
 mkdir -p "$BACKUP_DIR"
+chmod 700 "$BACKUP_DIR"
 
 # Check if container is running
 if ! docker ps | grep -q "$CONTAINER_NAME"; then

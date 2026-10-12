@@ -30,6 +30,8 @@ class Live:
     seq: int = 0
     persisted: bool = False  # False until the first message creates the owui_chats row
     bot_id: str = ""  # the bot this chat speaks as (bots.py); "" for a plain chat
+    web_search: bool = False  # the composer's globe: force a live web search on each turn
+    usage: Optional[dict] = None  # token counts of the latest turn (context meter); None until one ran
 
     def next_seq(self) -> int:
         self.seq += 1
@@ -105,20 +107,26 @@ async def open(pool, user_id: int, sid: str) -> tuple[Optional[Live], list[dict]
     if blob is None:
         return None, []
     if s is None:
-        s = _remember(Live(id=sid, user_id=user_id))
+        s = _remember(Live(id=sid, user_id=user_id, model=store.model_of(blob)))
+    # A model switched on this live session (config.set --session, /model) outlives the
+    # row's first model until the next message writes it back.
     s.persisted = True
-    s.model = store.model_of(blob)
+    s.model = s.model or store.model_of(blob)
     s.title = blob.get("_title") or ""
     s.bot_id = str(blob.get("bot_id") or "")
     return s, store.linear_messages(blob)
 
 
 async def append(pool, s: Live, role: str, content: str, reasoning: str = "",
-                 files: Optional[list[dict]] = None) -> list[dict]:
+                 files: Optional[list[dict]] = None, truncate_at: Optional[int] = None,
+                 error: str = "", interrupted: bool = False) -> list[dict]:
     """Persist one message in OWUI's shape; returns the transcript after it.
 
     ``files`` are the user's upload references (attachments.reference) for a
-    user message; they come back on the row as ``attachments``."""
+    user message; they come back on the row as ``attachments``. ``truncate_at``
+    first drops every row from that 0-based position on, in the same save, so a
+    rewind and the message that replaces it land together. ``error`` /
+    ``interrupted`` mark an assistant reply that failed or was stopped."""
     blob = await store.get_blob(pool, s.user_id, s.id) if s.persisted else None
     if blob is None:
         blob, s.persisted = store.new_chat_blob(s.model), False
@@ -129,14 +137,59 @@ async def append(pool, s: Live, role: str, content: str, reasoning: str = "",
             # session.title while pending) — _title_for honors it over the
             # first-message derivation. Bot Mode relies on "Bot Chat" sticking.
             blob["title"] = s.title
+            blob["title_source"] = "user"
+    if truncate_at is not None:
+        store.truncate_blob(blob, truncate_at)
+    if s.model and (blob.get("models") or []) != [s.model]:
+        blob["models"] = [s.model]
     parent = (blob.get("history") or {}).get("currentId")
-    store.append_to_blob(blob, store.make_message(role, content, parent, s.model, reasoning, files))
+    store.append_to_blob(blob, store.make_message(role, content, parent, s.model, reasoning, files,
+                                                  error=error, interrupted=interrupted))
     if s.persisted:
         s.title = await store.save_messages(pool, s.user_id, s.id, blob)
     else:
         blob.pop("_title", None)
         s.title = await store.insert_chat(pool, s.user_id, s.id, blob)
         s.persisted = True
+    return store.linear_messages(blob)
+
+
+async def seed(pool, s: Live, rows: list[dict]) -> list[dict]:
+    """Persist ``rows`` ({role, content, reasoning?, attachments?}) as the start of a draft: a fork's
+    shared history, or the messages a client passes to session.create."""
+    blob = store.new_chat_blob(s.model)
+    if s.bot_id:
+        blob["bot_id"] = s.bot_id
+    if s.title:
+        blob["title"], blob["title_source"] = s.title, "user"
+    for row in rows:
+        parent = (blob.get("history") or {}).get("currentId")
+        store.append_to_blob(blob, store.make_message(row["role"], row["content"], parent, s.model,
+                                                      row.get("reasoning") or "", row.get("attachments") or None))
+    blob.pop("_title", None)
+    s.title = await store.insert_chat(pool, s.user_id, s.id, blob)
+    s.persisted = True
+    return store.linear_messages(blob)
+
+
+def fork(parent: Live, title: str) -> Live:
+    """A draft that continues ``parent``'s model and bot; seed() writes its shared history."""
+    return _remember(Live(id=str(uuid.uuid4()), user_id=parent.user_id, model=parent.model, title=title,
+                          bot_id=parent.bot_id, effort=parent.effort, web_search=parent.web_search))
+
+
+async def replace_transcript(pool, s: Live, rows: list[dict]) -> list[dict]:
+    """Swap the whole transcript for ``rows`` (session.compress), keeping the row and its settings."""
+    blob = await store.get_blob(pool, s.user_id, s.id)
+    if blob is None:
+        return rows
+    store.truncate_blob(blob, 0)
+    for row in rows:
+        parent = (blob.get("history") or {}).get("currentId")
+        store.append_to_blob(blob, store.make_message(row["role"], row["content"], parent, s.model,
+                                                      row.get("reasoning") or "", row.get("attachments") or None,
+                                                      interrupted=bool(row.get("interrupted"))))
+    await store.save_messages(pool, s.user_id, s.id, blob)
     return store.linear_messages(blob)
 
 
@@ -205,4 +258,5 @@ def runtime_info(s: Live, running: Optional[bool] = None) -> dict:
         "yolo": False,
         "fast": False,
         "usage": {"calls": 0, "input": 0, "output": 0, "total": 0},
+        "web_search": s.web_search,
     }

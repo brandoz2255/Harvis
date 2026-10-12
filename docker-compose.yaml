@@ -207,9 +207,18 @@ services:
       # Set it in .env on a box where you know the tag is pulled and want it pinned;
       # the detector now verifies a pin against /api/tags and falls back if it's absent.
       WORKSPACE_DETECTOR_OLLAMA_MODEL: "${WORKSPACE_DETECTOR_OLLAMA_MODEL:-}"
-      # Optional desktop-GPU Ollama for the model picker. Surfaces models that
-      # only exist on the desktop (e.g. gemma4-26b on the 5080) in /api/models.
+      # Other machines running Ollama (a desktop, a Mac Studio, a lab GPU box …).
+      # Their models show up in the picker under the label and run there; this
+      # machine still serves any model it has, unless prefer= names it.
+      #   HARVIS_OLLAMA_HOSTS=studio=http://192.168.1.20:11434|label=Mac Studio|prefer=llama3.3+gemma4
+      # Comma-separate several. Format: python_back_end/owui_compat/ollama_hosts.py
+      HARVIS_OLLAMA_HOSTS: "${HARVIS_OLLAMA_HOSTS:-}"
+      # Ollama ":cloud" models send prompts to ollama.com; Harvis hides and refuses them.
+      # 1 lets them through (python_back_end/owui_compat/ollama_hosts.py is_cloud_model).
+      HARVIS_ALLOW_CLOUD_MODELS: "${HARVIS_ALLOW_CLOUD_MODELS:-}"
+      # Older single-machine form, still honoured (shown as DESKTOP_OLLAMA_LABEL).
       DESKTOP_OLLAMA_URL: "${DESKTOP_OLLAMA_URL:-}"
+      DESKTOP_OLLAMA_LABEL: "${DESKTOP_OLLAMA_LABEL:-}"
       # Inference nodes — OpenAI-dialect servers (FreeToken, vLLM, llama-server) on this
       # box or another, checked before Ollama for the models they report. Empty = inert.
       # Format and the thinking policy: docs/inference-nodes.md
@@ -416,6 +425,24 @@ services:
       # reachable from a network you don't trust — then the first signup must
       # send it in the X-Setup-Code header. Never hard-code it here.
       HARVIS_SETUP_CODE: "${HARVIS_SETUP_CODE:-}"
+      # Who can reach this server: local (default), lan or tunnel. lan and
+      # tunnel turn on the shared-server rules in plugins/exposure: code-running
+      # features for admins only, a strong JWT_SECRET, sign-up closed once the
+      # admin exists. Set by ./install.sh --expose; see SECURITY.md.
+      HARVIS_EXPOSURE: "${HARVIS_EXPOSURE:-local}"
+      # Where nginx publishes port 9000. A non-loopback address makes the server
+      # shared even when HARVIS_EXPOSURE still says local (plugins/exposure/mode.py).
+      HARVIS_BIND_ADDR_PUBLIC: "${HARVIS_BIND_ADDR_PUBLIC:-127.0.0.1}"
+      # Cloudflare Access app for tunnel mode: the team domain
+      # (<team>.cloudflareaccess.com) and the app's Audience (AUD) tag.
+      HARVIS_CF_ACCESS_TEAM_DOMAIN: "${HARVIS_CF_ACCESS_TEAM_DOMAIN:-}"
+      HARVIS_CF_ACCESS_AUD: "${HARVIS_CF_ACCESS_AUD:-}"
+      # Optional: only these people (comma-separated emails, or @domain) get in,
+      # even if the Access policy in the dashboard is wider. Set by
+      # ./install.sh --allow-emails.
+      HARVIS_CF_ACCESS_ALLOWED_EMAILS: "${HARVIS_CF_ACCESS_ALLOWED_EMAILS:-}"
+      # "everyone" lets non-admins use Build Space on a shared server too.
+      HARVIS_BUILD_SPACE_ACCESS: "${HARVIS_BUILD_SPACE_ACCESS:-}"
       # Server-enforced (main.py signup gate) AND read by the frontend config.
       # Default ON so a fresh deploy has a working "Don't have an account?
       # Sign up" front door. Set false for a closed, invite-only instance —
@@ -668,6 +695,9 @@ services:
       # Reaches preview-runner, which renders untrusted model-authored HTML.
       # preview-net is internal:true, so nothing on it can reach the internet.
       - preview-net
+      # Drives browser-runner (automation API on :8765). browser-ctl is
+      # internal:true and holds only backend, nginx and browser-runner.
+      - browser-ctl
     extra_hosts:
       # Allow backend container to reach host-installed openclaw gateway on :18790
       - "host.docker.internal:host-gateway"
@@ -693,7 +723,7 @@ services:
       # boot blockers and prevented profile-gating them. Availability is
       # reported by the health probe, not enforced by the boot order.
 
-  # Tier 3 Browser Runner (Firefox sandbox) - internal only
+  # Tier 3 Browser Runner (Firefox sandbox) - internet only, no LAN (see networks below)
   browser-runner:
     # Shared image name with preview-runner: same context, same Dockerfile, so
     # they must not land on disk twice (the fresh-install size budget counts
@@ -709,9 +739,20 @@ services:
         VCS_REF: ${HARVIS_VCS_REF:-unknown}
     container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-browser-runner
     restart: unless-stopped
+    # Two networks, each with one job:
+    #   browser-ctl     internal:true. How backend (API) and nginx (the :6080
+    #                   watch-the-browser stream) reach this container. Shares
+    #                   nothing with pgsql, ollama or openclaw.
+    #   browser-egress  The way out to the internet, on a pinned subnet so that
+    #                   scripts/browser-egress-lock.sh can refuse LAN and private
+    #                   destinations. Docker has no "internet but not the LAN"
+    #                   network setting: without that script this container
+    #                   can still reach the host's LAN.
+    # It was on openclaw-internal and ollama-n8n-network; nothing here needs
+    # either, and ollama-n8n-network put it next to every other service.
     networks:
-      - openclaw-internal
-      - ollama-n8n-network
+      - browser-ctl
+      - browser-egress
     volumes:
       # Each teammate's Firefox profile — its cookies, its logins, its history.
       # A named volume, never a host path, because the same compose file has to
@@ -743,12 +784,11 @@ services:
   #   - no ports: — not reachable from the host.
   # browser-runner stays as-is for the trusted browsing lane, which needs both.
   preview-runner:
+    # Built by browser-runner only. Two services building one tag race on a
+    # fresh host (compose 2.40: 'image ... already exists'); "never" makes
+    # compose wait for that build instead of pulling a name no registry has.
     image: harvis-browser-runner:latest
-    build:
-      context: ./browser_runner
-      dockerfile: Dockerfile
-      args:
-        VCS_REF: ${HARVIS_VCS_REF:-unknown}
+    pull_policy: never
     container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-preview-runner
     restart: unless-stopped
     environment:
@@ -883,7 +923,8 @@ services:
     ports:
       # The front door, and the only port meant to leave this machine. It is
       # the one surface behind a login. Everything else is loopback-only.
-      - "${HARVIS_BIND_ADDR_PUBLIC:-0.0.0.0}:${HARVIS_PORT_NGINX:-9000}:80"
+      # This computer only unless ./install.sh --expose lan (or --k8s) opens it.
+      - "${HARVIS_BIND_ADDR_PUBLIC:-127.0.0.1}:${HARVIS_PORT_NGINX:-9000}:80"
       # Untrusted repo-preview origin (Adaptive Workspace Repo Runner live app
       # preview). Bound to localhost only so preview dev servers are reachable
       # from the local user's browser but never exposed on the LAN.
@@ -897,7 +938,7 @@ services:
       # Worth turning on: browsers only grant the microphone to a "secure
       # context". http://localhost is one, so voice works on this machine and
       # fails on every other device reaching Harvis at http://<ip>:9000.
-      - "${HARVIS_BIND_ADDR_PUBLIC:-0.0.0.0}:${HARVIS_HTTPS_PORT:-9443}:443"
+      - "${HARVIS_BIND_ADDR_PUBLIC:-127.0.0.1}:${HARVIS_HTTPS_PORT:-9443}:443"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
       # Vendored Hermes desktop UI, served at /harvis/ (see nginx-harvis.conf).
@@ -923,6 +964,42 @@ services:
           memory: 64M
     networks:
       - ollama-n8n-network
+      # The only thing cloudflared can reach. See tunnel-edge below.
+      - tunnel-edge
+      # Proxies /agents/vnc/ to browser-runner:6080. Internal, so this adds no route out.
+      - browser-ctl
+
+  # Cloudflare Tunnel (opt-in: COMPOSE_PROFILES=tunnel, which
+  # ./install.sh --expose tunnel sets). It dials out to Cloudflare, so no port
+  # is opened on this machine or the router. In the Cloudflare dashboard, route
+  # the public hostname to http://nginx:8081, nginx's tunnel entrance, which
+  # turns away any request without a valid Cloudflare Access token.
+  #
+  # It sits on tunnel-edge, a network it shares with nginx and nothing else,
+  # so a public hostname routed anywhere but http://nginx:8081 finds nothing:
+  # the backend, Ollama and the database are not reachable from it, and nginx's
+  # port 80 refuses anything Cloudflare forwarded.
+  cloudflared:
+    image: cloudflare/cloudflared:2026.9.3@sha256:072c067d25ccbe61d46e18f0d0723255f2bb5304f7317caa95b27031520ff92c
+    container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-cloudflared
+    profiles: ["tunnel"]
+    # "no" under the network lock (HARVIS_TUNNEL_NETWORKS): scripts/tunnel-guard.sh
+    # starts and stops it, so it never comes back by itself on another network.
+    restart: ${HARVIS_TUNNEL_RESTART:-unless-stopped}
+    command: ["tunnel", "--no-autoupdate", "run"]
+    environment:
+      # Read from the environment, not the command line, so it stays out of
+      # `ps` and `docker inspect`'s Args. Empty fails loudly at start.
+      TUNNEL_TOKEN: "${HARVIS_TUNNEL_TOKEN:-}"
+    depends_on:
+      nginx:
+        condition: service_started
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    networks:
+      - tunnel-edge
 
   # Vendored open-notebook Next.js frontend, served at /onb (nginx proxies here).
   # Talks to the Harvis backend's onb_compat facade (/onb-api) via Next rewrites.
@@ -1848,6 +1925,16 @@ services:
 networks:
   ollama-n8n-network:
     external: true
+  # cloudflared and nginx only. Not internal: cloudflared has to reach
+  # Cloudflare. The subnet is fixed and small on purpose: left to Docker it
+  # would take the next free /16 or /20, and on a machine with many networks
+  # that has been a home router's 192.168.0.x. Change HARVIS_TUNNEL_SUBNET if
+  # this range is in use where you are.
+  tunnel-edge:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${HARVIS_TUNNEL_SUBNET:-10.213.82.0/29}
   openclaw-internal:
     driver: bridge
     internal: true
@@ -1860,6 +1947,22 @@ networks:
   # probe. The live preview is a docker-published 127.0.0.1 host port hit directly.
   repo-sandbox:
     driver: bridge
+  # Control path to browser-runner: backend, nginx and browser-runner, nothing
+  # else. internal:true so the path itself carries no traffic off the host.
+  browser-ctl:
+    driver: bridge
+    internal: true
+  # browser-runner's way to the internet (see its comment). Not internal, so
+  # the subnet is pinned: scripts/browser-egress-lock.sh keys its firewall rules
+  # on it, and left to Docker it would take the next free /16 or /20, which on
+  # this machine has already been 192.168.16.0/20. Change HARVIS_BROWSER_SUBNET
+  # if 10.213.83.0/28 is in use (a second stack on one host needs its own), and
+  # give the script the same value.
+  browser-egress:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${HARVIS_BROWSER_SUBNET:-10.213.83.0/28}
   # Preview rendering network. internal:true is load-bearing, not decoration:
   # preview-runner opens untrusted HTML, and this is the outer fence behind the
   # browser's own no-JS/no-network profile. Only the backend is attached.

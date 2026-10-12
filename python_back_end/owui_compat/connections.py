@@ -148,6 +148,10 @@ def register_connection_routes(router: APIRouter, get_current_user: Callable) ->
         transport = (form.transport or "stdio").strip().lower()
         if transport not in _TRANSPORTS:
             raise HTTPException(status_code=400, detail=f"Unsupported transport: {transport}")
+        if transport == "stdio":
+            # A stdio server is a command run on this computer: admins only when shared.
+            from plugins.exposure import require_build_space
+            require_build_space(user)
         if transport == "stdio" and not (form.command or "").strip():
             raise HTTPException(status_code=400, detail="stdio connections need a command.")
         if transport != "stdio" and not (form.url or "").strip():

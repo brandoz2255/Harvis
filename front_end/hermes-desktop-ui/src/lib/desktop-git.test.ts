@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { setApiRequestConnection } from '@/hermes'
+import { resetServerCapabilities, setServerCapabilities } from '@/store/server-capabilities'
 import { $connection } from '@/store/session'
 
 import { desktopGit } from './desktop-git'
@@ -35,6 +36,7 @@ describe('desktop git facade', () => {
   beforeEach(() => {
     vi.stubGlobal('window', { hermesDesktop: { api, git: localGit } })
     $connection.set(null)
+    setServerCapabilities({}) // a stock gateway: everything on
   })
 
   afterEach(() => {
@@ -42,6 +44,7 @@ describe('desktop git facade', () => {
     vi.unstubAllGlobals()
     vi.clearAllMocks()
     $connection.set(null)
+    resetServerCapabilities()
   })
 
   it('returns undefined after the renderer global is torn down', () => {
@@ -144,6 +147,60 @@ describe('desktop git facade', () => {
       body: { existingBranch: 'origin/feature', path: '/srv/work' },
       method: 'POST',
       path: '/api/git/worktree/add'
+    })
+  })
+
+  describe('against a Harvis sandbox backend', () => {
+    const harvis = (flags: Record<string, boolean>) => setServerCapabilities({ capabilities: flags })
+
+    beforeEach(() => $connection.set({ mode: 'remote' } as never))
+
+    it('offers no git at all until the backend says it can run git for this person', () => {
+      harvis({ git: false })
+
+      expect(desktopGit()).toBeUndefined()
+
+      resetServerCapabilities()
+
+      expect(desktopGit()).toBeUndefined()
+    })
+
+    it('still reads status and commits when git is on', async () => {
+      harvis({ git: true })
+
+      await expect(desktopGit()?.repoStatus('/sandbox/s/workspace')).resolves.toEqual({ branch: 'remote-main' })
+      await desktopGit()?.review.commit('/sandbox/s/workspace', 'msg', true)
+
+      // push is stripped while the backend has no remote
+      expect(api).toHaveBeenCalledWith({
+        body: { message: 'msg', path: '/sandbox/s/workspace', push: false },
+        method: 'POST',
+        path: '/api/git/review/commit'
+      })
+    })
+
+    it('drops pull requests and refuses push, PR and worktree calls without touching the network', async () => {
+      harvis({ git: true, git_remote: false, git_worktrees: false })
+      const git = desktopGit()
+
+      expect(git?.review.prList).toBeUndefined()
+      await expect(git?.review.push('/w')).rejects.toThrow(/not available/)
+      await expect(git?.review.createPr('/w')).rejects.toThrow(/not available/)
+      await expect(git?.worktreeAdd('/w', { branch: 'b' })).rejects.toThrow(/not available/)
+      await expect(git?.worktreeRemove('/w', '/w2')).rejects.toThrow(/not available/)
+      expect(api).not.toHaveBeenCalled()
+    })
+
+    it('uses the push and worktree routes once the backend provides them', async () => {
+      harvis({ git: true, git_remote: true, git_worktrees: true })
+      const git = desktopGit()
+
+      expect(git?.review.prList).toBeDefined()
+      await git?.review.push('/w')
+      await git?.worktreeAdd('/w', { branch: 'b' })
+
+      expect(api).toHaveBeenCalledWith({ body: { path: '/w' }, method: 'POST', path: '/api/git/review/push' })
+      expect(api).toHaveBeenCalledWith(expect.objectContaining({ path: '/api/git/worktree/add' }))
     })
   })
 })

@@ -8,6 +8,7 @@ import type {
   HermesReviewShipInfo
 } from '@/global'
 import { hermesApi } from '@/hermes'
+import { hasCapability } from '@/store/server-capabilities'
 
 import { desktopFsProfile, isDesktopFsRemoteMode } from './desktop-fs'
 
@@ -109,10 +110,48 @@ const remoteGit: GitBridge = {
   scanRepos: async () => []
 }
 
+const refuse = (what: string) => async (): Promise<never> => {
+  throw new Error(`${what} is not available in Harvis yet.`)
+}
+
+// The backend serves the local half of git (status, diff, branches, stage,
+// commit, revert) inside the person's sandbox. Anything that talks to a remote
+// host or creates a second work tree is not offered: PR lookups are dropped
+// (callers already treat a missing `prList` as "no PRs") and the rest fail
+// fast with a plain sentence instead of calling a route that does not exist.
+function sandboxGit(): GitBridge {
+  const worktrees = hasCapability('git_worktrees')
+  const remote = hasCapability('git_remote')
+
+  const review: GitBridge['review'] = {
+    ...remoteGit.review,
+    commit: (repoPath, message, push) => remoteGit.review.commit(repoPath, message, remote ? push : false)
+  }
+
+  if (!remote) {
+    review.push = refuse('Pushing')
+    review.createPr = refuse('Creating a pull request')
+    delete (review as Partial<typeof review>).prList
+  }
+
+  return {
+    ...remoteGit,
+    review,
+    worktreeAdd: worktrees ? remoteGit.worktreeAdd : refuse('Starting work in a separate worktree'),
+    worktreeRemove: worktrees ? remoteGit.worktreeRemove : refuse('Removing a worktree')
+  }
+}
+
 export function desktopGit(): GitBridge | undefined {
   if (typeof window === 'undefined') {
     return undefined
   }
 
-  return isDesktopFsRemoteMode() ? remoteGit : window.hermesDesktop?.git
+  if (!isDesktopFsRemoteMode()) {
+    return window.hermesDesktop?.git
+  }
+
+  // A backend that cannot run git for this person (sandbox off, or a shared
+  // server where only the admin has a workspace) gets no git surface at all.
+  return hasCapability('git') ? sandboxGit() : undefined
 }

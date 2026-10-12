@@ -47,6 +47,8 @@ import re
 
 logger = logging.getLogger(__name__)
 
+from .reach_budget import clip_query  # noqa: E402
+
 # Reuse the two patterns that already earned their place, rather than forking
 # them — workspace_bridge still routes on the narrow definition and the two must
 # not drift apart.
@@ -206,15 +208,15 @@ def fallback_query(message: str, previous: str = "") -> str:
     """
     m = (message or "").strip()
     if not m:
-        return (previous or "").strip()[:300]
+        return clip_query(previous or "", 300)
     stripped = _REACH_IMPERATIVE_RE.sub(" ", m).strip()
     if len(_content_words(stripped)) < 2:
         prev = (previous or "").strip()
         if len(_content_words(prev)) >= 2:
-            return prev[:300]
-        return m[:300]
+            return clip_query(prev, 300)
+        return clip_query(m, 300)
     stripped = re.sub(r"^\s*(?:for|about|on|of|regarding|re)\b\s*", "", stripped, flags=re.IGNORECASE)
-    return re.sub(r"\s+", " ", stripped).strip()[:300]
+    return clip_query(stripped, 300)
 
 
 _CLASSIFIER_SYSTEM = (
@@ -253,7 +255,7 @@ def _parse_classifier(raw: str) -> dict | None:
         return None
     return {
         "search": bool(data.get("search")),
-        "query": str(data.get("query") or "").strip()[:300],
+        "query": clip_query(str(data.get("query") or ""), 300),
     }
 
 
@@ -443,7 +445,7 @@ def narrower_query(query: str, message: str = "", focus: str = "") -> str | None
     if not entity or len(entity) < 3:
         return None
     rest = [w for w in _content_words(query) if w not in entity.lower()]
-    return f'"{entity}" {" ".join(rest[:6])}'.strip()[:300]
+    return clip_query(f'"{entity}" {" ".join(rest[:6])}', 300)
 
 
 def broader_query(query: str) -> str | None:
@@ -484,7 +486,7 @@ def _parse_refine(raw: str) -> str:
         return ""
     if not isinstance(data, dict):
         return ""
-    return str(data.get("query") or "").strip()[:300]
+    return clip_query(str(data.get("query") or ""), 300)
 
 
 async def refine_query(

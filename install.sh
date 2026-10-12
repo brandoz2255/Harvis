@@ -13,11 +13,15 @@
 #   ./install.sh --check-only           # preflight only: changes NOTHING
 #   ./install.sh --no-launch            # configure but don't start the stack
 #   ./install.sh --llm-url URL          # skip detection, use this server
+#   ./install.sh --expose local|lan|tunnel|lan+tunnel  # who can reach it (new install: local; --k8s: lan)
+#   ./install.sh --k8s --preset NAME   # a site's own defaults from config/presets/NAME.env (not in git)
 #   ./install.sh --k8s                  # run Harvis on Kubernetes (k3s) instead of plain Docker
 #   ./install.sh --k8s-off              # back to plain Docker; all data kept
 #   ./install.sh --k8s-status | --k8s-join-command | --k8s-join URL TOKEN | --k8s-uninstall
 set -euo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# --expose local|lan|tunnel|lan+tunnel: preflight rows, .env keys, tunnel report.
+. scripts/exposure.sh
 
 ASSUME_YES=0
 CHECK_ONLY=0
@@ -43,7 +47,12 @@ DOCKER_GID=""
 GPU_RUNTIME=""
 # Kubernetes hosting mode (scripts/k8s/harvis-k8s.sh). Empty = plain Docker.
 K8S_ACTION=""
+ADMIN_CODE=0
+NODE_ACTION=""
 K8S_JOIN_ARGS=()
+# Set when this run just moved Harvis out of Kubernetes (--k8s-off / --k8s-uninstall).
+LEFT_K8S=0
+HARVIS_LAUNCHED=0  # set by launch once compose up succeeded
 K8S_MODE_FILE=/var/lib/harvis/k8s/mode
 
 # Servers we know how to recognise, probed in this order. Each entry is
@@ -63,6 +72,37 @@ SETUP_URL="http://localhost:9000/api/setup/status"
 # stack — it being absent or down is information, never install failure.
 PROVIDER_HEALTH_KEY="model_provider"
 
+PRESET_NAME=""
+# --preset NAME reads config/presets/NAME.env, which git ignores: a site's network
+# names and people stay on that site's machines. It fills in only what the command
+# line left out, and is read as KEY=VALUE lines, never run.
+load_preset() {
+  [ -n "$PRESET_NAME" ] || return 0
+  if ! [[ "$PRESET_NAME" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+    echo "✗ --preset takes a name such as mylab (lower-case letters, digits, - and _)"; exit 1
+  fi
+  local file="config/presets/${PRESET_NAME}.env" line key value expose="" networks="" emails=""
+  [ -f "$file" ] || { echo "✗ No preset '${PRESET_NAME}': ${file} does not exist on this machine"; exit 1; }
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
+    case "$line" in ''|'#'*) continue ;; esac
+    key="${line%%=*}"; value="${line#*=}"
+    value="$(printf '%s' "$value" | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/")"
+    case "$key" in
+      EXPOSE) expose="$value" ;;
+      TUNNEL_NETWORKS) networks="$value" ;;
+      ALLOW_EMAILS) emails="$value" ;;
+      *) echo "✗ ${file}: unknown key '${key}' (EXPOSE, TUNNEL_NETWORKS, ALLOW_EMAILS)"; exit 1 ;;
+    esac
+  done < "$file"
+  EXPOSE_MODE="${EXPOSE_MODE:-$expose}"
+  case "$EXPOSE_MODE" in
+    tunnel|lan+tunnel)
+      TUNNEL_NETWORKS_ARG="${TUNNEL_NETWORKS_ARG:-$networks}"
+      ALLOW_EMAILS_ARG="${ALLOW_EMAILS_ARG:-$emails}" ;;
+  esac
+}
+
 parse_args() {
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -72,9 +112,24 @@ parse_args() {
       --k8s) K8S_ACTION=up; shift ;;
       --k8s-off) K8S_ACTION=off; shift ;;
       --k8s-status) K8S_ACTION=status; shift ;;
+      --admin-code) ADMIN_CODE=1; shift ;;
+      --inference-node) NODE_ACTION=run; shift ;;
+      --inference-node-service) NODE_ACTION=service; shift ;;
       --k8s-uninstall) K8S_ACTION=uninstall; shift ;;
       --k8s-join-command) K8S_ACTION=join-command; shift ;;
       --k8s-join) K8S_ACTION=join; K8S_JOIN_ARGS=("${2:-}" "${3:-}"); shift $(( $# >= 3 ? 3 : $# )) ;;
+      --expose) EXPOSE_MODE="${2:-}"; shift $(( $# >= 2 ? 2 : 1 ))
+        [ -n "$EXPOSE_MODE" ] || { echo "✗ --expose needs local, lan, tunnel or lan+tunnel"; exit 1; } ;;
+      --expose=*) EXPOSE_MODE="${1#*=}"; shift
+        [ -n "$EXPOSE_MODE" ] || { echo "✗ --expose needs local, lan, tunnel or lan+tunnel"; exit 1; } ;;
+      --tunnel-networks) TUNNEL_NETWORKS_ARG="${2:-}"; shift $(( $# >= 2 ? 2 : 1 )) ;;
+      --tunnel-networks=*) TUNNEL_NETWORKS_ARG="${1#*=}"; shift ;;
+      --allow-emails) ALLOW_EMAILS_ARG="${2:-}"; shift $(( $# >= 2 ? 2 : 1 )) ;;
+      --allow-emails=*) ALLOW_EMAILS_ARG="${1#*=}"; shift ;;
+      --preset) PRESET_NAME="${2:-}"; shift $(( $# >= 2 ? 2 : 1 ))
+        [ -n "$PRESET_NAME" ] || { echo "✗ --preset needs a name"; exit 1; } ;;
+      --preset=*) PRESET_NAME="${1#*=}"; shift
+        [ -n "$PRESET_NAME" ] || { echo "✗ --preset needs a name"; exit 1; } ;;
       --llm-url|--ollama-url) LLM_ENDPOINT="${2:-}"; LLM_MODE="manual"; shift 2 ;;
       --llm-url=*|--ollama-url=*) LLM_ENDPOINT="${1#*=}"; LLM_MODE="manual"; shift ;;
       # Accepted and ignored: the stack no longer needs a GPU, so there is no
@@ -83,7 +138,7 @@ parse_args() {
       --backend) echo "⚠ --backend is no longer used (the stack needs no GPU) — ignoring '${2:-}'"; shift 2 ;;
       --backend=*) echo "⚠ --backend is no longer used (the stack needs no GPU) — ignoring '${1#*=}'"; shift ;;
       -h|--help)
-        echo "Usage: ./install.sh [--llm-url URL] [--yes] [--check-only] [--no-launch]"
+        echo "Usage: ./install.sh [--llm-url URL] [--expose MODE] [--yes] [--check-only] [--no-launch]"
         echo ""
         echo "  With no arguments, this looks for a model server already running on"
         echo "  this machine (Ollama, LM Studio, llama.cpp, vLLM), uses it, and then"
@@ -94,6 +149,31 @@ parse_args() {
         echo "                  not your machine — use host.docker.internal or a LAN IP:"
         echo "                    ./install.sh --llm-url http://host.docker.internal:11434"
         echo ""
+        echo "  --expose MODE   Who can reach Harvis. Left out: a new install is local, --k8s is"
+        echo "                  lan, and an existing install keeps what it had."
+        echo "                  local   this computer only"
+        echo "                  lan     your network; the first sign-up becomes admin, then"
+        echo "                          sign-up is closed until you open it in Settings"
+        echo "                  tunnel  experimental: the internet through a Cloudflare"
+        echo "                          Tunnel behind Cloudflare Access (asks for the tunnel"
+        echo "                          token, team domain and AUD tag; plain Docker only)"
+        echo "                  lan+tunnel  experimental: your network, and the internet"
+        echo "                          through the tunnel (Docker or --k8s)"
+        echo ""
+        echo "  With --expose tunnel or lan+tunnel (each takes 'off' to remove it):"
+        echo "  --allow-emails LIST     Only these people get in, even if the Cloudflare"
+        echo "                          Access policy is wider: a@x.edu,b@x.edu or @x.edu"
+        echo "  --tunnel-networks LIST  Run the tunnel only on these networks (Wi-Fi name"
+        echo "                          or NetworkManager connection), e.g. lab-wifi,lab-wired;"
+        echo "                          anywhere else it is stopped. Linux with NetworkManager"
+        echo ""
+        echo "  --preset NAME   Read this site's defaults from config/presets/NAME.env, a"
+        echo "                  file you make on the machine (git ignores it). Lines:"
+        echo "                    EXPOSE=lan+tunnel"
+        echo "                    TUNNEL_NETWORKS=lab-wifi,lab-wired"
+        echo "                    ALLOW_EMAILS=a@x.edu,b@x.edu   (or off: no list)"
+        echo "                  Flags on the command line win over the file."
+        echo ""
         echo "  Kubernetes hosting mode (optional; Linux, needs sudo):"
         echo "  --k8s               Install k3s here and run Harvis in it, same address"
         echo "                      and data. Ollama runs in the cluster (on the GPU when"
@@ -103,6 +183,15 @@ parse_args() {
         echo "  --k8s-off           Back to plain Docker. Nothing is deleted."
         echo "  --k8s-status        Nodes, pods and addresses."
         echo "  --k8s-join-command  Print the command another machine runs to join."
+        echo ""
+        echo "  --admin-code    A new 6-digit first-admin code for a shared server that"
+        echo "                  has no admin yet (printed to this terminal only)."
+        echo ""
+        echo "  Lend this computer's models to a Harvis server elsewhere on your network:"
+        echo "  --inference-node          Run the node here. It shows a 6-digit PIN; type it"
+        echo "                            into that Harvis under Settings > Models."
+        echo "  --inference-node-service  After pairing: keep the node running in the"
+        echo "                            background (Linux, a systemd user service)."
         echo "  --k8s-join URL TOKEN  Join this machine to another Harvis as a worker."
         echo "  --k8s-uninstall     --k8s-off, then remove k3s from this machine."
         exit 0 ;;
@@ -126,6 +215,8 @@ parse_args() {
     esac
     LLM_PROVIDER="the server you specified"
   fi
+  load_preset
+  validate_expose_arg
 }
 
 # ── Check table ─────────────────────────────────────────────────────────────
@@ -227,8 +318,10 @@ port_listening() { # /dev/tcp probe: succeeds iff something accepts on $1:$2
 # Which compose project, if any, publishes host port $1. Empty when the holder
 # is not a compose container — then "another process" really is the truth.
 port_owner() {
+  # `|| true`: a port held by anything but Docker (k3s, a local service) makes
+  # grep exit 1, and pipefail + `set -e` ended the installer silently.
   docker ps --format '{{.Ports}}\t{{.Label "com.docker.compose.project"}}' 2>/dev/null \
-    | grep -E ":$1->" | awk -F'\t' 'NF>1 && $2!="" {print $2; exit}'
+    | grep -E ":$1->" | awk -F'\t' 'NF>1 && $2!="" {print $2; exit}' || true
 }
 
 # Where to look for a model server, most likely first.
@@ -312,7 +405,9 @@ detect_provider() {
   # another machine used to print "none found" and "chat has nothing to talk to"
   # while chat worked, and a local server that appeared later silently replaced
   # the saved one. host.docker.internal values were auto-detected, so re-probe.
-  saved="$(sed -n 's/^HARVIS_LLM_BASE_URL=//p' .env 2>/dev/null | tail -n 1)"
+  # `|| true`: on a fresh clone there is no .env yet; sed's failure under
+  # pipefail + `set -e` ended the installer silently right after its banner.
+  saved="$(sed -n 's/^HARVIS_LLM_BASE_URL=//p' .env 2>/dev/null | tail -n 1)" || true
   case "$saved" in
     ""|*host.docker.internal*) : ;;
     *)
@@ -602,6 +697,21 @@ drop_env_key() { # $1 = key — remove every assignment of it from .env
 
 write_env() {
   touch .env
+  # It holds the JWT secret, the database password and the tunnel token; with a
+  # 022 umask it would be readable by every account on this machine.
+  chmod 600 .env
+  # A hand-edited .env often lacks a final newline; every append below would
+  # then glue its key onto the last value.
+  if [ -s .env ] && [ -n "$(tail -c1 .env)" ]; then printf '\n' >> .env; fi
+  # Not compose_project_name: the merged config it reads is gone by now.
+  local stack="${HARVIS_STACK_NAME:-$(env_value HARVIS_STACK_NAME)}"
+  choose_tunnel_subnet "${stack:-harvis}"
+  # enable-https.sh copies the listener once; an install that already has one
+  # keeps the copy, so bring it up to date with the template on every run.
+  if [ -f nginx/tls/harvis-tls.conf ] && ! cmp -s nginx/tls/harvis-tls.conf.template nginx/tls/harvis-tls.conf; then
+    cp nginx/tls/harvis-tls.conf.template nginx/tls/harvis-tls.conf
+    echo "✓ Updated the HTTPS listener from its template"
+  fi
   # COMPOSE_FILE is only needed to re-add a local override, since setting it is
   # what suppresses compose's own auto-load. Otherwise strip it: an .env from
   # before the overlays were deleted still pins docker-compose.cpu.yml, and a
@@ -668,11 +778,11 @@ write_env() {
     printf 'FERNET_KEY=%s\n' "$fkey" >> .env
     echo "✓ Generated a FERNET_KEY (GitHub OAuth token encryption)"
   fi
-  # No HARVIS_SETUP_CODE is generated. The first signup claims admin outright,
-  # the way OpenWebUI and Jellyfin do it — making every fresh install pay a
-  # code-hunt to protect a race that only exists on an exposed, unclaimed box
-  # was a bad trade. An operator who IS exposing one adds HARVIS_SETUP_CODE to
-  # .env by hand; the backend and the signup form both pick it up from there.
+  # No HARVIS_SETUP_CODE is written. On a local install the first signup claims
+  # admin outright; nobody else can reach it. On a shared one (lan, k8s) the
+  # backend makes a 6-digit first-admin code, keeps only its hash, and this
+  # installer prints it to the host's terminal (print_first_admin). An operator
+  # who wants a fixed code still adds HARVIS_SETUP_CODE to .env by hand.
   # POSTGRES_PASSWORD — the database ships with a well-known default that is
   # published in this repo, so every install used to share one credential.
   # Postgres only reads this variable at initdb, so an existing database keeps
@@ -703,28 +813,120 @@ ensure_network() {
 }
 
 # ── Startup poll — report what was OBSERVED, not what was hoped ─────────────
+# The backend's own CLI makes the code (see plugins/exposure/first_admin.py);
+# a fresh one replaces any older code, so the one printed here is the one that works.
+first_admin_cli() {
+  local cli=(python -m plugins.exposure.first_admin)
+  if [ "$K8S_ACTION" = "up" ] || [ -f "$K8S_MODE_FILE" ]; then
+    local sudo=""; [ "$(id -u)" -eq 0 ] || sudo="sudo"
+    $sudo k3s kubectl -n harvis exec deploy/backend -- "${cli[@]}"
+  else
+    docker compose exec -T backend "${cli[@]}"
+  fi
+}
+
 print_first_admin() {
-  # Normally there is nothing to hunt for: sign up and you are the admin. The
-  # only exception is an operator who set HARVIS_SETUP_CODE by hand, and that
-  # code must never land in captured output (tee'd logs, CI transcripts) — so
-  # it is written to the terminal directly, and .env is the fallback pointer.
-  local code=""
+  # A manual HARVIS_SETUP_CODE or a host-made first-admin code must never land
+  # in captured output (tee'd logs, CI transcripts), so either one is written to
+  # the terminal directly.
+  local code="" tty=0 reach out
+  # `-w /dev/tty` only checks permission bits; actually opening it is the real
+  # "do we have a controlling terminal" probe.
+  ( : > /dev/tty ) 2>/dev/null && tty=1
   # `|| true`: no such key in .env means grep exits 1, and under `set -e` that
   # would end the installer on its very last useful line.
   code="$(grep '^HARVIS_SETUP_CODE=' .env | head -1 | cut -d= -f2- || true)"
-  if [ -z "$code" ]; then
-    echo "  No admin yet — the first account you sign up with becomes the admin."
-  # `-w /dev/tty` only checks permission bits; actually opening it is the real
-  # "do we have a controlling terminal" probe.
-  elif ( : > /dev/tty ) 2>/dev/null; then
+  if [ -n "$code" ]; then
     echo "  No admin yet. This instance sets HARVIS_SETUP_CODE, so the first"
-    echo "  signup will ask for it:"
-    printf '    setup code: %s\n' "$code" > /dev/tty
-    echo "  (printed to your terminal only — it is also in .env)"
-  else
-    echo "  No admin yet. This instance sets HARVIS_SETUP_CODE, so the first"
-    echo "  signup will ask for it — view it with:  grep '^HARVIS_SETUP_CODE=' .env"
+    if [ "$tty" -eq 1 ]; then
+      echo "  signup will ask for it:"
+      printf '    setup code: %s\n' "$code" > /dev/tty
+      echo "  (printed to your terminal only — it is also in .env)"
+    else
+      echo "  signup will ask for it — view it with:  grep '^HARVIS_SETUP_CODE=' .env"
+    fi
+    return 0
   fi
+  reach="$(current_exposure)"
+  if [ "$reach" = local ] && [ "$K8S_ACTION" != "up" ] && [ ! -f "$K8S_MODE_FILE" ]; then
+    echo "  No admin yet — the first account you sign up with becomes the admin."
+    return 0
+  fi
+  if [ "$tty" -eq 0 ]; then
+    echo "  No admin yet. The first sign-up needs a 6-digit code; get one on this"
+    echo "  machine with:  ./install.sh --admin-code"
+    return 0
+  fi
+  if out="$(first_admin_cli 2>/dev/null)" && code="$(printf '%s' "$out" | grep -o '[0-9]\{6\}' | head -1)" && [ -n "$code" ]; then
+    echo "  No admin yet. Anyone on your network can open the sign-up page, so the"
+    echo "  first account needs this code:"
+    printf '    first-admin code: %s\n' "$code" > /dev/tty
+    echo "  (printed to your terminal only; five wrong tries retire it — get a new"
+    echo "  one with ./install.sh --admin-code)"
+  else
+    echo "  No admin yet. The first sign-up needs a 6-digit code, and making one"
+    echo "  failed just now. Try again in a minute:  ./install.sh --admin-code"
+  fi
+}
+
+# --admin-code: a fresh first-admin code, for a shared server with no admin yet.
+cmd_admin_code() {
+  local out code
+  if ! out="$(first_admin_cli 2>&1)"; then
+    printf '%s\n' "$out" | tail -3
+    echo "✗ No code was made. Is Harvis running? (./install.sh --k8s-status or docker compose ps)"
+    return 1
+  fi
+  code="$(printf '%s' "$out" | grep -o '[0-9]\{6\}' | head -1 || true)"
+  if [ -z "$code" ]; then printf '%s\n' "$out"; return 1; fi
+  if ( : > /dev/tty ) 2>/dev/null; then
+    printf 'First-admin code: %s\n' "$code" > /dev/tty
+    echo "(printed to your terminal only; the old code no longer works)"
+  else
+    echo "✗ No terminal to print the code to; run this from a terminal on the server."
+    return 1
+  fi
+}
+
+# --inference-node: this computer serves its Ollama to a Harvis server elsewhere.
+# The node is one stdlib Python file, so it also runs on a machine without Harvis.
+NODE_SCRIPT="scripts/inference-node/harvis_node.py"
+cmd_inference_node() { # $1 = run | service
+  command -v python3 >/dev/null || { echo "✗ python3 is needed for the inference node."; return 1; }
+  if ! curl -s -m 3 http://127.0.0.1:11434/api/version >/dev/null 2>&1; then
+    echo "⚠ Ollama is not answering on this computer (127.0.0.1:11434). Start it first,"
+    echo "  or pass the node --ollama URL."
+  fi
+  local ip
+  ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+  if [ "$1" = run ]; then
+    echo "In Harvis, Settings > Models > Add a computer, enter ${ip:-the address of this computer} and the PIN below."
+    echo "Ctrl-C stops the node; ./install.sh --inference-node-service keeps it running after pairing."
+    exec python3 "$NODE_SCRIPT"
+  fi
+  command -v systemctl >/dev/null || { echo "✗ The background service needs systemd. Run ./install.sh --inference-node in a terminal instead."; return 1; }
+  if ! python3 "$NODE_SCRIPT" --print-state | grep -q '"paired": *true'; then
+    echo "✗ Pair first: run ./install.sh --inference-node, enter the PIN in Harvis, then run this again."
+    return 1
+  fi
+  local unit_dir="$HOME/.config/systemd/user"
+  mkdir -p "$unit_dir"
+  cat > "$unit_dir/harvis-node.service" <<UNIT
+[Unit]
+Description=Harvis inference node (lends this computer's Ollama to a paired Harvis)
+After=network-online.target
+
+[Service]
+ExecStart=$(command -v python3) $PWD/$NODE_SCRIPT
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+UNIT
+  systemctl --user daemon-reload
+  systemctl --user enable --now harvis-node.service
+  echo "✓ The node runs in the background (systemctl --user status harvis-node)."
+  echo "  It stops when you log out unless lingering is on:  loginctl enable-linger $USER"
 }
 
 report_models() {
@@ -879,20 +1081,52 @@ poll_health() {
              echo "  fresh install, the first account you sign up with becomes the admin."
            fi ;;
   esac
-  echo ""
-  echo "  Using Harvis from a phone, tablet or another computer? Turn on HTTPS:"
-  echo ""
-  echo "      ./scripts/enable-https.sh"
-  echo ""
-  echo "  Browsers hand out the microphone only over https (or on this machine at"
-  echo "  localhost), so voice will not work from other devices until you do. The"
-  echo "  script makes its own certificate, so the first visit shows a warning you"
-  echo "  click past once. Plain http on :9000 keeps working either way."
-  echo ""
-  echo "  Auth cookie: HARVIS_COOKIE_SECURE defaults to false, which is what lets"
-  echo "  the http lane log in. Set it to true in .env only if you have switched to"
-  echo "  https for everyone — a Secure cookie is not sent over http at all, so"
-  echo "  turning it on while anyone still uses :9000 locks them out."
+  # tunnel visitors already arrive over Cloudflare's HTTPS, and enable-https.sh
+  # drives the Docker nginx, not Kubernetes. Port 9000 counts as shared when it is
+  # bound to every address, recorded mode or not (an upgrade can keep it open).
+  local reach
+  reach="$(current_exposure)"
+  if [ "$reach" != tunnel ] && [ "$reach" != lan+tunnel ] && [ "$(env_value HARVIS_BIND_ADDR_PUBLIC)" = "0.0.0.0" ]; then
+    [ "$reach" = lan ] || echo "  ⚠ Port 9000 is open to your network and the first sign-up becomes admin."
+    reach=lan
+  fi
+  [ "$K8S_ACTION" = "up" ] && reach=k8s
+  case "$reach" in
+    local)
+      echo ""
+      echo "  Harvis answers on this computer only. To use it from a phone, tablet or"
+      echo "  another computer, share it on your network, then turn on HTTPS:"
+      echo ""
+      echo "      ./install.sh --expose lan"
+      echo "      ./scripts/enable-https.sh"
+      echo ""
+      echo "  Browsers hand out the microphone only over https (or at localhost), so"
+      echo "  voice will not work from other devices without the second step." ;;
+    lan)
+      echo ""
+      echo "  Using Harvis from a phone, tablet or another computer? Turn on HTTPS:"
+      echo ""
+      echo "      ./scripts/enable-https.sh"
+      echo ""
+      echo "  Browsers hand out the microphone only over https (or on this machine at"
+      echo "  localhost), so voice will not work from other devices until you do. The"
+      echo "  script makes its own certificate, so the first visit shows a warning you"
+      echo "  click past once. Plain http on :9000 keeps working either way."
+      echo ""
+      echo "  Auth cookie: HARVIS_COOKIE_SECURE defaults to false, which is what lets"
+      echo "  the http lane log in. Set it to true in .env only if you have switched to"
+      echo "  https for everyone — a Secure cookie is not sent over http at all, so"
+      echo "  turning it on while anyone still uses :9000 locks them out." ;;
+    lan+tunnel)
+      echo ""
+      echo "  Your network reaches Harvis on port 9000; sign-up is closed, so add people"
+      echo "  in Settings. For the microphone from other devices here, turn on HTTPS:"
+      echo ""
+      echo "      ./scripts/enable-https.sh"
+      echo ""
+      echo "  Leave HARVIS_COOKIE_SECURE unset: the tunnel port marks the cookie Secure"
+      echo "  itself, and the http lane on :9000 needs it plain." ;;
+  esac
   # Provider status is informational, never pass/fail: with none configured,
   # report_models below says what to do. Configured-but-unreachable gets its own
   # pointer, because chat will fail until that server answers — but the install
@@ -961,7 +1195,9 @@ launch() {
     # the user chases the wrong problem. Tear this project's own containers down
     # — only ever ours, selected by the compose project label — and say so.
     sync_db_password || true
-    if ! docker compose up --build -d; then
+    if docker compose up --build -d; then
+      HARVIS_LAUNCHED=1
+    else
       echo ""
       echo "✗ Startup failed. Removing the containers this attempt created so a"
       echo "  retry reports the real error instead of a name conflict..."
@@ -1010,13 +1246,27 @@ main() {
   parse_args "$@"
   echo "Harvis installer"
   echo "================"
+  if [ -n "$PRESET_NAME" ]; then echo "Preset: config/presets/${PRESET_NAME}.env"; fi
+  if [ "$ADMIN_CODE" -eq 1 ]; then cmd_admin_code; exit $?; fi
+  if [ -n "$NODE_ACTION" ]; then cmd_inference_node "$NODE_ACTION"; exit $?; fi
   case "$K8S_ACTION" in
     status|join-command) run_k8s "$K8S_ACTION"; exit $? ;;
     join) run_k8s join "${K8S_JOIN_ARGS[@]}"; exit $? ;;
     # Leaving Kubernetes runs the full Docker launch below rather than a bare
     # `compose up`: that skipped the new .env secrets, the database password sync
     # and the image builds, so a switch back could start a backend that cannot sign in.
-    off|uninstall) HARVIS_K8S_OFF_SKIP_START=1 run_k8s "$K8S_ACTION" || exit $?; K8S_ACTION=""; ASSUME_YES=1 ;;
+    # Tunnel values are asked first: after teardown the run is non-interactive.
+    # The exposure checks run before Kubernetes stops: failing them afterwards
+    # left Harvis running in neither Kubernetes nor Docker.
+    off|uninstall) collect_exposure_inputs
+      check_exposure
+      if [ "$CHECK_FAILED" -eq 1 ]; then
+        print_check_table
+        echo "✗ Preflight failed — nothing was changed; Harvis still runs in Kubernetes."
+        exit 1
+      fi
+      CHECK_ROWS=(); CHECK_HINTS=()
+      HARVIS_K8S_OFF_SKIP_START=1 run_k8s "$K8S_ACTION" || exit $?; K8S_ACTION=""; ASSUME_YES=1; LEFT_K8S=1 ;;
   esac
   if [ -z "$K8S_ACTION" ] && [ -f "$K8S_MODE_FILE" ] && [ "$CHECK_ONLY" -eq 0 ]; then
     echo "✗ Harvis is running in Kubernetes mode on this machine."
@@ -1036,6 +1286,8 @@ main() {
   check_ports
   check_container_names
   check_resources
+  choose_default_exposure
+  check_exposure
   print_check_table
   [ -n "${MERGED_JSON:-}" ] && rm -f "$MERGED_JSON"
   if [ "$CHECK_FAILED" -eq 1 ]; then
@@ -1046,9 +1298,16 @@ main() {
     echo "✓ All preflight checks passed — nothing was changed (--check-only)."
     exit 0
   fi
+  collect_exposure_inputs
   write_env
+  write_exposure_env
   ensure_network
-  if [ "$K8S_ACTION" = "up" ]; then launch_k8s; else launch; fi
+  if [ "$K8S_ACTION" = "up" ]; then launch_k8s; else
+    # Docker mode: the agent browser reaches the internet, not this machine or the LAN.
+    # Kubernetes does the same with a NetworkPolicy (scripts/k8s/k8s_harden.py).
+    bash scripts/browser-egress-lock.sh apply || true
+    launch; report_exposure
+  fi
 }
 
 main "$@"

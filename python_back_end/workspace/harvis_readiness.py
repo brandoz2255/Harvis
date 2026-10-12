@@ -63,7 +63,12 @@ async def lane_readiness(request: Request, user=Depends(get_current_user_optimiz
             term["ready"] = bool(d.get("ready"))
             if not term["ready"]:
                 reasons = list(d.get("reasons") or [])
-                if not d.get("docker_ok"):
+                if not d.get("docker_ok") and os.getenv("HARVIS_BUILD_SPACE_DOCKER") == "0":
+                    reasons.append(
+                        "Build Space is off on Kubernetes; set HARVIS_K8S_BUILD_SPACE=1 in .env and "
+                        "re-run ./install.sh --k8s to turn it on (the backend can then control this machine)"
+                    )
+                elif not d.get("docker_ok"):
                     reasons.append(
                         "docker socket unreachable — on Kubernetes there is no "
                         "/var/run/docker.sock (containerd); needs a k8s-Jobs runtime or a DinD sidecar"

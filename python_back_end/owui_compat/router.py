@@ -19,7 +19,7 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Callable
+from typing import Callable, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -84,7 +84,7 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
             raise HTTPException(status_code=500, detail="Database unavailable")
         return pool
 
-    def _login_cookie(resp: JSONResponse, token: str) -> JSONResponse:
+    def _login_cookie(resp: JSONResponse, token: str, request: Optional[Request] = None) -> JSONResponse:
         # HARVIS_COOKIE_SECURE=true behind HTTPS; leave false on localhost/LAN HTTP.
         # Must stay in sync with main.py's /api/auth/login cookie flags.
         secure = os.getenv("HARVIS_COOKIE_SECURE", "").strip().lower() in {
@@ -92,7 +92,7 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
             "true",
             "yes",
             "on",
-        }
+        } or (request is not None and (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower() == "https")
         resp.set_cookie(
             "access_token", token, httponly=True, samesite="lax", secure=secure
         )
@@ -136,6 +136,10 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
     @router.post("/api/v1/auths/signin")
     async def owui_signin(payload: OwuiSigninBody, request: Request):
         pool = _require_pool(request)
+        # Before the password check: a refusal after it would confirm the password.
+        from plugins.exposure import signup as shared_signup
+
+        await shared_signup.before_login(payload.email, request.headers)
         async with pool.acquire() as conn:
             user = await conn.fetchrow(
                 "SELECT id, username, email, avatar, password FROM users WHERE email = $1",
@@ -154,7 +158,7 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
         owui_user = harvis_user_to_owui(
             dict(user), expires_at=_now() + deps.access_token_expire_minutes * 60
         )
-        return _login_cookie(JSONResponse(content=owui_user), token)
+        return _login_cookie(JSONResponse(content=owui_user), token, request)
 
     @router.post("/api/v1/auths/signup")
     async def owui_signup(payload: OwuiSignupBody, request: Request):
@@ -164,7 +168,8 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
         )
         async with pool.acquire() as conn:
             token_resp = await deps.signup_with_connection(
-                signup_req, conn, setup_code=request.headers.get("x-setup-code")
+                signup_req, conn, setup_code=request.headers.get("x-setup-code"),
+                headers=request.headers,
             )
             user = await conn.fetchrow(
                 "SELECT id, username, email, avatar FROM users WHERE email = $1",
@@ -174,7 +179,7 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
         owui_user = harvis_user_to_owui(
             dict(user), expires_at=_now() + deps.access_token_expire_minutes * 60
         )
-        return _login_cookie(JSONResponse(content=owui_user), token)
+        return _login_cookie(JSONResponse(content=owui_user), token, request)
 
     @router.get("/api/v1/auths/")
     async def owui_session(request: Request, user=Depends(get_current_user)):

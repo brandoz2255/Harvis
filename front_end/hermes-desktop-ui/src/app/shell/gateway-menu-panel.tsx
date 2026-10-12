@@ -11,6 +11,7 @@ import type { RuntimeReadinessResult } from '@/lib/runtime-readiness'
 import { cn } from '@/lib/utils'
 import { reconnectGateway } from '@/store/gateway-reconnect'
 import { notifyError } from '@/store/notifications'
+import { useCapability } from '@/store/server-capabilities'
 import { runGatewayRestart } from '@/store/system-actions'
 import type { StatusResponse } from '@/types/hermes'
 
@@ -34,8 +35,13 @@ const LOG_NOISE_RE = /\bws (?:accepted|closed|response sent|ping|pong)\b/i
 // and stop on unmount, instead of a global always-on status poll.
 function useGatewayLogTail(): string[] {
   const [lines, setLines] = useState<string[]>([])
+  const allowed = useCapability('logs')
 
   useEffect(() => {
+    if (!allowed) {
+      return
+    }
+
     let cancelled = false
 
     // async: getLogs THROWS (not rejects) when the desktop bridge is missing
@@ -67,7 +73,7 @@ function useGatewayLogTail(): string[] {
       cancelled = true
       window.clearInterval(timer)
     }
-  }, [])
+  }, [allowed])
 
   return lines
 }
@@ -99,6 +105,7 @@ export function GatewayMenuPanel({
   const { t } = useI18n()
   const copy = t.shell.gatewayMenu
   const [reconnecting, setReconnecting] = useState(false)
+  const canRestart = useCapability('gateway_restart')
 
   // Both jumps open the system panel, which owns the full view — so dismiss the
   // little status popover on the way out.
@@ -199,18 +206,22 @@ export function GatewayMenuPanel({
           {/* Restart is the heavy, disruptive action: keep it visually distinct
               (power icon, destructive hover) and separated from the benign
               reconnect/system buttons so it can't be hit by mistake. */}
-          <span aria-hidden className="mx-1 h-4 w-px bg-border/70" />
-          <Tip label={t.commandCenter.restartGateway}>
-            <Button
-              aria-label={t.commandCenter.restartGateway}
-              className="text-muted-foreground hover:text-destructive"
-              onClick={restart}
-              size="icon-xs"
-              variant="ghost"
-            >
-              <Power />
-            </Button>
-          </Tip>
+          {canRestart && (
+            <>
+              <span aria-hidden className="mx-1 h-4 w-px bg-border/70" />
+              <Tip label={t.commandCenter.restartGateway}>
+                <Button
+                  aria-label={t.commandCenter.restartGateway}
+                  className="text-muted-foreground hover:text-destructive"
+                  onClick={restart}
+                  size="icon-xs"
+                  variant="ghost"
+                >
+                  <Power />
+                </Button>
+              </Tip>
+            </>
+          )}
         </div>
       </div>
 

@@ -19,6 +19,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from plugins.inference_nodes import control, moe, policy, probe, provision, registry  # noqa: E402
 from plugins.inference_nodes.types import NodeSpec, NodeState  # noqa: E402
 
+_REAL_LOCAL_HAS = probe._local_has
+
 
 @pytest.fixture(scope="module")
 def loop():
@@ -34,6 +36,10 @@ def _clean_probe(monkeypatch):
     probe._lock = asyncio.Lock()
     monkeypatch.delenv(registry.ENV_VAR, raising=False)
     monkeypatch.delenv("HARVIS_NODE_THINKING", raising=False)
+
+    async def _no_local(model):
+        return False
+    monkeypatch.setattr(probe, "_local_has", _no_local)
     yield
     probe._cache.clear()
     probe._cache_at = 0.0
@@ -145,6 +151,40 @@ def test_resolve_prefers_lower_priority(loop):
     _seed(NodeState(spec=a, reachable=True, models={"m"}), NodeState(spec=b, reachable=True, models={"m"}))
     st, why = loop.run_until_complete(probe.resolve("m"))
     assert why == "b"
+
+
+def test_local_ollama_keeps_its_own_models(loop, monkeypatch):
+    # A linked box that also carries gemma4:e4b must not take the user's own copy,
+    # whether the box is up or out of reach.
+    async def _local(model):
+        return model == "gemma4:e4b"
+    monkeypatch.setattr(probe, "_local_has", _local)
+    up = NodeSpec(name="lab4090", base_url="http://lab:11434", dialect="ollama")
+    down = NodeSpec(name="old", base_url="http://old:11434", dialect="ollama")
+    _seed(
+        NodeState(spec=up, reachable=True, models={"gemma4:e4b", "gemma4:31b"}),
+        NodeState(spec=down, reachable=False, last_good_models={"gemma4:e4b", "qwen3:32b"}),
+    )
+    assert loop.run_until_complete(probe.resolve("gemma4:e4b")) == (None, "local")
+    st, why = loop.run_until_complete(probe.resolve("gemma4:31b"))
+    assert st is not None and why == "lab4090"
+    assert loop.run_until_complete(probe.resolve("qwen3:32b")) == (None, "unknown:old")
+
+
+def test_local_has_reads_the_ollama_hosts_cache(loop):
+    from owui_compat import ollama_hosts as oh
+    saved = (dict(oh._cache), oh._cache_at)
+    try:
+        oh._cache.clear()
+        oh._cache[oh.LOCAL] = oh.HostState(name=oh.LOCAL, base_url="http://l:11434",
+                                         label="Ollama", reachable=True, tags={"qwen3:4b"})
+        oh._cache_at = time.time()
+        assert loop.run_until_complete(_REAL_LOCAL_HAS("qwen3:4b")) is True
+        assert loop.run_until_complete(_REAL_LOCAL_HAS("gemma4:31b")) is False
+    finally:
+        oh._cache.clear()
+        oh._cache.update(saved[0])
+        oh._cache_at = saved[1]
 
 
 def test_resolve_with_no_nodes(loop):
@@ -472,3 +512,12 @@ def test_verdict_separates_worth_a_node_from_dense_and_already_served():
     kind, _ = moe.verdict("tiny-moe", moe.expert_info(small), moe.param_count(small),
                           set(), True)
     assert kind == "fits_anyway"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("node_name", "rig1; rm -rf /"), ("node_name", "$(id)"), ("model_repo", "org/repo`id`"),
+    ("model_repo", "not-a-repo"), ("host", "0.0.0.0 && curl x"),
+])
+def test_render_refuses_shell_in_substituted_values(field, value):
+    with pytest.raises(ValueError):
+        provision.render_script(**{field: value})

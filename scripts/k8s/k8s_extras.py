@@ -2,8 +2,8 @@
 
 compose_to_k8s.py maps what compose says; this module adds what Kubernetes
 needs on top: nginx's resolver, the public LoadBalancer ports, NetworkPolicies
-standing in for compose networks, the backend's read-only view of the nodes,
-the in-cluster Ollama, and the LAN models endpoint.
+standing in for compose networks, the backend's read-only view of the nodes, and the database backup. The
+in-cluster Ollama and the LAN models endpoint live in k8s_models.py.
 """
 
 import hashlib
@@ -12,15 +12,19 @@ import os
 import re
 import stat
 
-NET_PREFIX = "harvis.net/"
+import k8s_build_space as build_space
+import k8s_harden as harden
+import k8s_models as models
+import k8s_tunnel as tunnel
+from k8s_common import LB_LOCAL, net_label, policy, probes_from_check
+
 NGINX_CONF_TARGETS = {"/etc/nginx/nginx.conf": "nginx.conf", "/etc/nginx/harvis.conf": "harvis.conf"}
 BACKEND_SA = "harvis-backend"
-LAN_PROXY = "lan-models"
 DB = "pgsql"
 DB_BACKUP = "pgsql-backup"
 # Services that never join the shared compose networks in Kubernetes: each gets
 # its own ingress allowlist instead (see network_policies).
-ISOLATED = {DB}
+ISOLATED = {DB, tunnel.NAME}
 
 # Probes for services whose compose file has no healthcheck. Keyed by service;
 # a port means tcpSocket, a (port, path) pair means httpGet. Each is read with
@@ -31,10 +35,8 @@ DEFAULT_PROBES = {
     # (port, path, startup seconds): the backend runs migrations and loads models
     # before /health answers, so a startup probe holds liveness off until it does.
     "backend": (8000, "/health", 600),
-    "nginx": 80,
-    "harvis-mcp": 8010,
+    "nginx": 80, "harvis-mcp": 8010, "llmfit": 8787,
     "harvis-messaging-gateway": (18800, "/health"),
-    "llmfit": 8787,
 }
 
 # Requests for services whose compose file sets no deploy.resources, so no Harvis
@@ -56,15 +58,6 @@ PG_DUMP_EXCLUDES = ("langchain_pg_embedding", "langchain_pg_collection")
 BACKUPS_KEPT = 14
 
 
-def probes_from_check(check, start=0):
-    """readiness / liveness / startup from one probe body (exec, tcpSocket or httpGet)."""
-    out = {"readinessProbe": {**check, "periodSeconds": 10, "failureThreshold": 3},
-           "livenessProbe": {**check, "periodSeconds": 30, "failureThreshold": 6}}
-    if start:
-        out["startupProbe"] = {**check, "periodSeconds": 5, "failureThreshold": max(12, (2 * start + 4) // 5)}
-    return out
-
-
 def default_probes(name, svc):
     spec = DEFAULT_PROBES.get(name)
     if spec is None:
@@ -81,19 +74,6 @@ def default_probes(name, svc):
 def default_resources(name):
     req = DEFAULT_REQUESTS.get(name)
     return {"requests": dict(req)} if req else {}
-
-# The only model-server routes the LAN endpoint forwards. Everything else —
-# pulling, deleting, copying, pushing or creating models — is refused, so a
-# neighbour can use this machine's models but cannot change them.
-LAN_ALLOWED = (
-    "/v1/chat/completions", "/v1/completions", "/v1/models", "/v1/embeddings",
-    "/api/chat", "/api/generate", "/api/tags", "/api/show", "/api/embed",
-    "/api/embeddings", "/api/version",
-)
-
-
-def net_label(net):
-    return NET_PREFIX + re.sub(r"[^A-Za-z0-9_.-]", "-", net)[:63].strip("-.")
 
 
 def bind_host_path_type(path, target):
@@ -128,9 +108,11 @@ def nginx_conf_data(gen):
         raise SystemExit("nginx.conf: expected exactly one `resolver 127.0.0.11` line to patch")
 
     def to_fqdn(m):
-        return f"{m.group(1)}http://{gen.fqdn(m.group(2))}:{m.group(3)};"
+        return f"{m.group(1)}http://{gen.fqdn(m.group(2))}:{m.group(3)}{m.group(4) or ''};"
 
-    harvis, n = re.subn(r"(set\s+\$\w+\s+)http://([a-z0-9-]+):(\d+);", to_fqdn, harvis)
+    upstream = r"(set\s+\$\w+\s+)http://([a-z0-9-]+):(\d+)(/[^;\s]*)?;"
+    main = re.sub(upstream, to_fqdn, main)  # the tunnel entrance's Access check
+    harvis, n = re.subn(upstream, to_fqdn, harvis)
     if n == 0:
         raise SystemExit("nginx-harvis.conf: no `set $x_upstream http://name:port;` lines found")
     gen._nginx_conf = {"nginx.conf": main, "harvis.conf": harvis}
@@ -151,6 +133,8 @@ def extra_env(gen, name):
     if name != "backend":
         return {}
     env = {"HARVIS_HOSTING_MODE": "kubernetes", "HARVIS_K8S_NAMESPACE": gen.ns}
+    if not gen.o.build_space:
+        env[build_space.ENV] = "0"  # the backend reports Build Space as off, not as a broken socket
     # Sandboxes are sibling Docker containers, bound to a session folder by its HOST
     # path. In Docker mode the backend reads that from its own container's mounts; a
     # pod has no container to inspect, so it gets the same table from here.
@@ -195,6 +179,7 @@ def pod_tweaks(gen, name, spec):
 
 
 # ── objects added on top of compose ─────────────────────────────────────────
+
 def public_services(gen):
     """Ports compose publishes on every interface become ServiceLB ports."""
     for name, svc in gen.services.items():
@@ -205,7 +190,7 @@ def public_services(gen):
         gen.objects.append({
             "apiVersion": "v1", "kind": "Service",
             "metadata": gen.meta(f"{name}-public"),
-            "spec": {"type": "LoadBalancer",
+            "spec": {"type": "LoadBalancer", **LB_LOCAL,
                      "selector": {"app.kubernetes.io/name": name},
                      "ports": [{"name": f"p{p['published']}", "port": int(p["published"]),
                                 "targetPort": int(p["target"])} for p in ports]},
@@ -220,12 +205,14 @@ def network_policies(gen):
     except to those same pods and DNS, which is what internal meant in Docker.
     """
     pol = []
+    # nginx is left to public-nginx alone, so sharing a network with it does not open 8081.
+    not_nginx = [{"key": "app.kubernetes.io/name", "operator": "NotIn", "values": ["nginx"]}]
     for net in gen.networks:
         lab = net_label(net)
-        pol.append(policy(gen, f"net-{net}", {"matchLabels": {lab: "1"}},
+        pol.append(policy(gen, f"net-{net}", {"matchLabels": {lab: "1"}, "matchExpressions": not_nginx},
                           ingress=[{"from": [{"podSelector": {"matchLabels": {lab: "1"}}}]}]))
     pol.append(policy(gen, "public-nginx", {"matchLabels": {"app.kubernetes.io/name": "nginx"}},
-                      ingress=[{}]))
+                      ingress=tunnel.nginx_ingress()))
     clients = db_clients(gen)
     if DB in gen.services:
         # The database sits on the shared network in Docker, so every container
@@ -278,21 +265,15 @@ def db_clients(gen):
     return sorted(out)
 
 
-def policy(gen, name, selector, ingress=None, egress=None):
-    spec = {"podSelector": selector, "policyTypes": []}
-    if ingress is not None:
-        spec["policyTypes"].append("Ingress")
-        spec["ingress"] = ingress
-    if egress is not None:
-        spec["policyTypes"].append("Egress")
-        spec["egress"] = egress
-    return {"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
-            "metadata": gen.meta(name[:63]), "spec": spec}
-
-
 def backend_rbac(gen):
-    """Read-only node listing for Settings → Hosting. Nothing else."""
+    """Read-only access for Settings → Hosting. Nothing else.
+
+    Cluster-wide: list nodes. In the Harvis namespace only: list deployments, pods
+    and events and read pod logs, for the admin cluster panel. No write verb, no
+    secrets, no exec — the panel shows state, changes stay in the installer.
+    """
     role = f"harvis-{gen.ns}-node-reader"
+    viewer = "harvis-backend-viewer"
     gen.objects += [
         {"apiVersion": "v1", "kind": "ServiceAccount", "metadata": gen.meta(BACKEND_SA)},
         {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRole",
@@ -302,100 +283,12 @@ def backend_rbac(gen):
          "metadata": {"name": role, "labels": {"app.kubernetes.io/part-of": "harvis"}},
          "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": role},
          "subjects": [{"kind": "ServiceAccount", "name": BACKEND_SA, "namespace": gen.ns}]},
-    ]
-
-
-def ollama(gen):
-    if not gen.o.ollama_image:
-        return
-    c = {"name": "ollama", "image": gen.o.ollama_image, "imagePullPolicy": "IfNotPresent",
-         "env": [{"name": "OLLAMA_HOST", "value": "0.0.0.0"}],
-         "ports": [{"containerPort": 11434}],
-         "volumeMounts": [{"name": "models", "mountPath": "/root/.ollama"}],
-         # Memory request so the pod is Burstable (evicted after BestEffort ones),
-         # a limit so one oversized model fails visibly instead of taking the
-         # node down, and no CPU limit: inference should keep every core it gets.
-         "resources": {"requests": {"memory": gen.o.ollama_memory_request, "cpu": gen.o.ollama_cpu_request},
-                       "limits": {"memory": gen.o.ollama_memory_limit}},
-         **probes_from_check({"httpGet": {"port": 11434, "path": "/"}, "timeoutSeconds": 5}, start=30)}
-    c["readinessProbe"] = {"exec": {"command": ["ollama", "list"]}, "periodSeconds": 10, "timeoutSeconds": 5}
-    spec = {"containers": [c], "automountServiceAccountToken": False,
-            "nodeSelector": {"kubernetes.io/hostname": gen.o.node_name},
-            "volumes": [{"name": "models", "hostPath": {"path": gen.o.ollama_dir, "type": "DirectoryOrCreate"}}]}
-    if gen.o.gpu:
-        spec["runtimeClassName"] = "nvidia"
-        c["resources"]["limits"]["nvidia.com/gpu"] = "1"
-    elif gen.o.amd_gpu:
-        # Vulkan (Mesa RADV) is already inside the ollama image; it only needs
-        # /dev/dri. ROCm is not: this is the path for RDNA1 cards like the RX 5500 XT.
-        c["env"].append({"name": "OLLAMA_VULKAN", "value": "1"})
-        if gen.o.amd_gpu == "plugin":
-            c["resources"]["limits"]["amd.com/gpu"] = "1"
-        else:
-            # runc's device cgroup refuses a hostPath-mounted /dev/dri without privileged.
-            c["securityContext"] = {"privileged": True}
-            for dev, kind in (("/dev/dri", "Directory"), ("/dev/kfd", "CharDevice")):
-                if os.path.exists(dev):
-                    spec["volumes"].append({"name": dev[5:], "hostPath": {"path": dev, "type": kind}})
-                    c["volumeMounts"].append({"name": dev[5:], "mountPath": dev})
-    labels = {"app.kubernetes.io/name": "ollama", "app.kubernetes.io/part-of": "harvis",
-              net_label("ollama-n8n-network"): "1"}
-    gen.objects += [
-        {"apiVersion": "apps/v1", "kind": "Deployment", "metadata": gen.meta("ollama", {"app.kubernetes.io/name": "ollama"}),
-         "spec": {"replicas": 1, "strategy": {"type": "Recreate"},
-                  "selector": {"matchLabels": {"app.kubernetes.io/name": "ollama"}},
-                  "template": {"metadata": {"labels": labels}, "spec": spec}}},
-        {"apiVersion": "v1", "kind": "Service", "metadata": gen.meta("ollama", {"app.kubernetes.io/name": "ollama"}),
-         "spec": {"clusterIP": "None", "selector": {"app.kubernetes.io/name": "ollama"},
-                  "ports": [{"name": "http", "port": 11434, "targetPort": 11434}]}},
-    ]
-
-
-def lan_models(gen):
-    if not (gen.o.lan_models_port and gen.o.ollama_image):
-        return
-    nginx_img = (gen.services.get("nginx") or {}).get("image") or "nginx:alpine"
-    allowed = "|".join(re.escape(p) for p in LAN_ALLOWED)
-    conf = f"""# Harvis LAN models endpoint: chat and model listing only.
-server {{
-    listen 8080;
-    resolver {gen.o.dns_ip} valid=10s ipv6=off;
-    set $ollama http://{gen.fqdn('ollama')}:11434;
-    client_max_body_size 64m;
-    proxy_read_timeout 3600s;
-    proxy_buffering off;
-    location = / {{ default_type text/plain; return 200 "Harvis models endpoint: /v1/chat/completions, /v1/models, /api/chat, /api/tags\\n"; }}
-    location ~ ^({allowed})$ {{
-        proxy_http_version 1.1;
-        proxy_set_header Host localhost;
-        proxy_set_header Connection "";
-        proxy_pass $ollama;
-    }}
-    location / {{ default_type text/plain; return 403 "Not shared on the network: only chat and model listing are.\\n"; }}
-}}
-"""
-    labels = {"app.kubernetes.io/name": LAN_PROXY, "app.kubernetes.io/part-of": "harvis"}
-    spec = {"automountServiceAccountToken": False,
-            "nodeSelector": {"kubernetes.io/hostname": gen.o.node_name},
-            "containers": [{"name": "nginx", "image": nginx_img, "imagePullPolicy": "IfNotPresent",
-                            "ports": [{"containerPort": 8080}],
-                            "resources": {"limits": {"memory": "64Mi"}},
-                            "volumeMounts": [{"name": "conf", "mountPath": "/etc/nginx/conf.d"}],
-                            **probes_from_check({"httpGet": {"port": 8080, "path": "/"}, "timeoutSeconds": 3})}],
-            "volumes": [{"name": "conf", "configMap": {"name": LAN_PROXY}}]}
-    gen.objects += [
-        {"apiVersion": "v1", "kind": "ConfigMap", "metadata": gen.meta(LAN_PROXY), "data": {"default.conf": conf}},
-        {"apiVersion": "apps/v1", "kind": "Deployment", "metadata": gen.meta(LAN_PROXY, {"app.kubernetes.io/name": LAN_PROXY}),
-         "spec": {"replicas": 1, "selector": {"matchLabels": {"app.kubernetes.io/name": LAN_PROXY}},
-                  "template": {"metadata": {"labels": labels,
-                                            "annotations": {"harvis.dev/config-hash": hashlib.sha256(conf.encode()).hexdigest()[:16]}},
-                               "spec": spec}}},
-        {"apiVersion": "v1", "kind": "Service", "metadata": gen.meta(LAN_PROXY),
-         "spec": {"type": "LoadBalancer", "selector": {"app.kubernetes.io/name": LAN_PROXY},
-                  "ports": [{"name": "http", "port": gen.o.lan_models_port, "targetPort": 8080}]}},
-        policy(gen, "public-lan-models", {"matchLabels": {"app.kubernetes.io/name": LAN_PROXY}}, ingress=[{}]),
-        policy(gen, "ollama-from-lan-models", {"matchLabels": {"app.kubernetes.io/name": "ollama"}},
-               ingress=[{"from": [{"podSelector": {"matchLabels": {"app.kubernetes.io/name": LAN_PROXY}}}]}]),
+        {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role", "metadata": gen.meta(viewer),
+         "rules": [{"apiGroups": [""], "resources": ["pods", "pods/log", "events"], "verbs": ["get", "list"]},
+                   {"apiGroups": ["apps"], "resources": ["deployments"], "verbs": ["get", "list"]}]},
+        {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding", "metadata": gen.meta(viewer),
+         "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": viewer},
+         "subjects": [{"kind": "ServiceAccount", "name": BACKEND_SA, "namespace": gen.ns}]},
     ]
 
 
@@ -413,7 +306,7 @@ def db_backup(gen):
         return
     excludes = " ".join(f"--exclude-table={t}" for t in PG_DUMP_EXCLUDES)
     script = (
-        'set -eu; f="/backups/harvis_backup_$(date +%Y%m%d_%H%M%S).sql.gz"; '
+        'set -eu; umask 077; f="/backups/harvis_backup_$(date +%Y%m%d_%H%M%S).sql.gz"; '
         f'PGPASSWORD="$POSTGRES_PASSWORD" pg_dump -h {gen.fqdn(DB)} -U "$POSTGRES_USER" "$POSTGRES_DB" {excludes} '
         '| gzip > "$f"; [ "$(gzip -dc "$f" | head -c 1 | wc -c)" = 1 ] || { rm -f "$f"; echo "empty dump" >&2; exit 1; }; '
         f'ls -t /backups/harvis_backup_*.sql.gz | tail -n +{BACKUPS_KEPT + 1} | xargs -r rm -f; '
@@ -444,6 +337,9 @@ def add_all(gen):
     public_services(gen)
     network_policies(gen)
     backend_rbac(gen)
-    ollama(gen)
-    lan_models(gen)
+    models.ollama(gen)
+    models.lan_models(gen)
     db_backup(gen)
+    tunnel.add(gen)
+    harden.browser_egress(gen)
+    harden.apply(gen)

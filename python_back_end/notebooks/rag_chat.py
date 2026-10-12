@@ -111,7 +111,7 @@ class RAGChatService:
         )
 
         # Process citations in the answer
-        final_citations = self._extract_citations(answer, chunks)
+        answer, final_citations = self._resolve_answer(answer, chunks)
 
         # Save user message to history
         await self.manager.add_chat_message(
@@ -260,8 +260,10 @@ Remember: You are a research assistant helping the user understand their uploade
 
         try:
             response = requests.get(f"{OLLAMA_URL}/api/tags", timeout=10)
+            from owui_compat.ollama_hosts import drop_cloud
+
             installed = (
-                [m.get("name") for m in response.json().get("models", []) if m.get("name")]
+                [m.get("name") for m in drop_cloud(response.json().get("models", [])) if m.get("name")]
                 if response.status_code == 200 else []
             )
         except Exception:
@@ -436,58 +438,39 @@ Please provide a helpful answer based on the sources above. Remember to cite sou
         answer: str,
         chunks: List[ChunkWithScore]
     ) -> List[Citation]:
-        """Extract and validate citations from the answer"""
+        """Citations for the chunks the answer cites, in order of first mention."""
+        return self._resolve_answer(answer, chunks)[1]
+
+    def _resolve_answer(
+        self,
+        answer: str,
+        chunks: List[ChunkWithScore]
+    ) -> Tuple[str, List[Citation]]:
+        """The answer with its markers renumbered ``[1] [2]...`` and the matching citations.
+
+        Every citation carries ``quote``, the snippet of the passage it points at.
+        If the model cited nothing, the top few reasonably similar passages are
+        listed instead so the answer is never unsourced.
+        """
+        from .citations import resolve_citations, snippet
+
+        text, cited, explicit = resolve_citations(answer, chunks)
+        if not cited and chunks and not explicit:
+            cited = [c for c in chunks[:3] if c.score > 0.5]
+
         citations = []
-
-        # Look for citation patterns like [S1], [Source: ...], etc.
-        citation_patterns = [
-            r'\[S(\d+)\]',
-            r'\[Source:\s*([^\]]+)\]',
-            r'\[(\d+)\]'
-        ]
-
-        mentioned_indices = set()
-
-        for pattern in citation_patterns:
-            matches = re.findall(pattern, answer)
-            for match in matches:
-                if match.isdigit():
-                    idx = int(match) - 1
-                    if 0 <= idx < len(chunks):
-                        mentioned_indices.add(idx)
-
-        # Build citations from mentioned chunks
-        for idx in mentioned_indices:
-            chunk_with_score = chunks[idx]
-            chunk = chunk_with_score.chunk
+        for cws in cited:
+            chunk = cws.chunk
             metadata = chunk.metadata or {}
-
             citations.append(Citation(
                 source_id=chunk.source_id,
-                source_title=chunk_with_score.source_title,
+                source_title=cws.source_title,
                 chunk_id=chunk.id,
                 page=metadata.get("page"),
                 section=metadata.get("section"),
-                quote=chunk.content[:200] + "..." if len(chunk.content) > 200 else chunk.content
+                quote=snippet(chunk.content)
             ))
-
-        # If no explicit citations found but answer uses sources, include top chunks
-        if not citations and chunks:
-            # Include top 3 most relevant chunks as implicit citations
-            for chunk_with_score in chunks[:3]:
-                if chunk_with_score.score > 0.5:  # Only if reasonably similar
-                    chunk = chunk_with_score.chunk
-                    metadata = chunk.metadata or {}
-
-                    citations.append(Citation(
-                        source_id=chunk.source_id,
-                        source_title=chunk_with_score.source_title,
-                        chunk_id=chunk.id,
-                        page=metadata.get("page"),
-                        section=metadata.get("section")
-                    ))
-
-        return citations
+        return text, citations
 
     async def _chat_without_rag(
         self,

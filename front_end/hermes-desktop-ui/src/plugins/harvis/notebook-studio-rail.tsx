@@ -21,33 +21,40 @@ import {
   KIND_ICON,
   listArtifacts
 } from './notebook-artifacts'
+import { UnderConstruction } from './notebook-badge'
 import { errorText, podcastAudioUrl, type Source, useChosenModel } from './notebook-shared'
 import { AudioOverview, Transformations } from './notebook-studio'
 
 type View = 'audio' | 'home' | 'transform' | { artifact: Artifact }
 
 function CreateButton({
+  badge,
   busy,
   disabled,
   icon,
   label,
-  onClick
+  onClick,
+  title
 }: {
+  badge?: string
   busy?: boolean
   disabled?: boolean
   icon: string
   label: string
   onClick: () => void
+  title?: string
 }) {
   return (
     <button
       className="flex flex-col items-center justify-center gap-1 rounded-lg border bg-(--ui-bg-secondary) py-2.5 text-xs font-medium transition hover:border-(--ui-stroke-secondary) hover:bg-(--ui-bg-tertiary) disabled:opacity-50"
       disabled={disabled}
       onClick={onClick}
+      title={title}
       type="button"
     >
       <Codicon className="text-(--ui-text-tertiary)" name={busy ? 'loading' : icon} size="1rem" spinning={busy} />
       <span>{label}</span>
+      {badge && <UnderConstruction note={badge} />}
     </button>
   )
 }
@@ -58,6 +65,7 @@ function LogRow({ item, onDelete, onOpen }: { item: Artifact; onDelete: () => vo
   const podcast = item.kind === 'podcast'
   const active = isPodcastActive(item)
   const failed = podcast && (item.status === 'error' || item.status === 'failed')
+  const scriptOnly = podcast && item.status === 'script_only'
   const audio = podcast ? podcastAudioUrl({ audio_path: null, audio_url: item.audio_url }) : null
 
   useEffect(() => {
@@ -75,7 +83,7 @@ function LogRow({ item, onDelete, onOpen }: { item: Artifact; onDelete: () => vo
       <div className="flex items-center gap-2 px-2.5 py-2">
         <button
           className="flex min-w-0 flex-1 items-center gap-2 text-left disabled:cursor-default"
-          disabled={active || failed || (podcast && !audio)}
+          disabled={active || failed || scriptOnly || (podcast && !audio)}
           onClick={() => (podcast ? setPlaying(p => !p) : onOpen())}
           type="button"
         >
@@ -84,8 +92,19 @@ function LogRow({ item, onDelete, onOpen }: { item: Artifact; onDelete: () => vo
           </span>
           <span className="min-w-0 flex-1">
             <span className="block truncate text-xs font-medium">{item.title}</span>
-            <span className={cn('block text-[0.65rem]', failed ? 'text-destructive' : 'text-(--ui-text-tertiary)')}>
-              {active ? 'Generating…' : failed ? item.error_message || 'Failed' : relativeTime(item.created_at)}
+            <span
+              className={cn(
+                'block text-[0.65rem]',
+                failed || scriptOnly ? 'text-destructive' : 'text-(--ui-text-tertiary)'
+              )}
+            >
+              {active
+                ? 'Generating…'
+                : failed
+                  ? item.error_message || 'Failed'
+                  : scriptOnly
+                    ? `Script only. ${item.error_message || 'The audio could not be made.'}`
+                    : relativeTime(item.created_at)}
             </span>
           </span>
         </button>
@@ -190,7 +209,14 @@ export function NotebookStudioRail({
             onClick={() => void create(c.kind)}
           />
         ))}
-        <CreateButton disabled={!ready} icon="mic" label="Audio Overview" onClick={() => setView('audio')} />
+        <CreateButton
+          badge="Podcasts work, but custom voices are coming."
+          disabled={!ready}
+          icon="mic"
+          label="Audio Overview"
+          onClick={() => setView('audio')}
+          title="Under construction: podcasts work, but custom voices are coming."
+        />
         <CreateButton disabled={!ready} icon="wand" label="Transform a source" onClick={() => setView('transform')} />
       </div>
       {!ready && <p className="mt-2 text-xs text-(--ui-text-tertiary)">Add a source to start making things.</p>}

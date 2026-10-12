@@ -5,6 +5,7 @@ import { MemoryRouter } from 'react-router'
 import type * as ReactRouterDom from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { resetServerCapabilities, setServerCapabilities } from '@/store/server-capabilities'
 import type { ToolsetConfig } from '@/types/hermes'
 
 // EnvVarField navigates to Settings → Keys via useNavigate, so every render
@@ -111,6 +112,8 @@ function config(overrides: Partial<ToolsetConfig> = {}): ToolsetConfig {
 }
 
 beforeEach(() => {
+  // A backend that sends no capability flags (stock Hermes) can do everything.
+  setServerCapabilities({})
   // Radix menus/selects call these on open; jsdom implements neither, so the
   // dropdown never opens without the stubs (mirrors model-settings.test.tsx).
   Element.prototype.scrollIntoView = vi.fn()
@@ -154,10 +157,21 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  resetServerCapabilities()
   vi.clearAllMocks()
 })
 
 describe('ToolsetConfigPanel', () => {
+  it('renders nothing and reads no setup when the server reports toolset_setup off', async () => {
+    setServerCapabilities({ capabilities: { toolset_setup: false } })
+
+    const { ToolsetConfigPanel } = await import('./toolset-config-panel')
+    const { container } = render(<ToolsetConfigPanel toolset="tts" />)
+
+    expect(container.textContent).toBe('')
+    expect(getToolsetConfig).not.toHaveBeenCalled()
+  })
+
   it('renders inline voice/model fields for a TTS provider row carrying tts_provider', async () => {
     // The Capabilities gap: provider rows only showed API keys — voice/model
     // settings lived exclusively in Settings → Voice. Rows now carry the

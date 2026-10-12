@@ -26,6 +26,7 @@ import {
   type HermesGateway,
   installMcpCatalogEntry,
   type McpCatalogEntry,
+  type McpOAuthClient,
   type McpTestResult,
   type ProfileScope,
   profileScopeKey,
@@ -36,8 +37,9 @@ import { type Translations, useI18n } from '@/i18n'
 import { compactNumber } from '@/lib/format'
 import { brandFor } from '@/lib/mcp-brands'
 import { estimateServerTokens, serverUsageCount } from '@/lib/mcp-cost'
-import { completeMcpDesktopOAuth } from '@/lib/mcp-dashboard-oauth'
+import { McpOAuthNeedsClientId } from '@/lib/mcp-dashboard-oauth'
 import { type McpImportEntry, parseMcpImport } from '@/lib/mcp-import'
+import { connectMcpWithPopup } from '@/lib/mcp-oauth-popup'
 import { NEEDS_AUTH_RE, PROBE_TTL_MS, probeCache, probeKey, serverFingerprint } from '@/lib/mcp-probe-cache'
 import { getServers, isServerShape, type McpServers, normalizeEntry } from '@/lib/mcp-servers'
 import { countEnabledTools, isToolEnabled, toggleToolInServer } from '@/lib/mcp-tool-filter'
@@ -52,6 +54,8 @@ import { DetailPane, ICON_BUTTON, MASTER_DETAIL_WIDE_COLS } from '../master-deta
 import { PanelAddButton, PanelEmpty } from '../overlays/panel'
 import { prettyName } from '../settings/helpers'
 import { useDeepLinkHighlight } from '../settings/use-deep-link-highlight'
+
+import { McpOAuthClientForm } from './mcp-oauth-client-form'
 
 // The editor always speaks the ecosystem's mcp.json document format — names
 // are the JSON keys, transport is inferred from `command` vs `url` — so any
@@ -395,6 +399,9 @@ export function McpTab({ gateway, profile }: { gateway: HermesGateway | null; pr
   // Blocks the browser until an OAuth flow lands a token; also reset on profile
   // switch, so declared up here alongside the other per-profile view state.
   const [authing, setAuthing] = useState<null | string>(null)
+  // The server whose OAuth provider cannot register Harvis on its own and so
+  // needs a client id typed in. Cleared on a successful connect.
+  const [needsClientId, setNeedsClientId] = useState<null | string>(null)
 
   // Master document draft. `docVersion` remounts the editor when the draft is
   // regenerated programmatically (list-side mutations); `dirty` guards user
@@ -603,18 +610,19 @@ export function McpTab({ gateway, profile }: { gateway: HermesGateway | null; pr
   // First-class OAuth: opens the system browser, blocks until the flow lands a
   // token (verified on disk — a friendly tools/list is not proof), then the
   // auth result doubles as the probe (it carries the tool list).
-  const authenticate = async (serverName: string) => {
+  const authenticate = async (serverName: string, client?: McpOAuthClient) => {
     const epoch = profileEpoch.current
     setAuthing(serverName)
     setProbes(current => ({ ...current, [serverName]: 'probing' }))
 
     try {
-      const flow = await completeMcpDesktopOAuth({
+      // Opens the consent popup synchronously (inside the click), then polls.
+      const flow = await connectMcpWithPopup({
         serverName,
-        start: name => authMcpServer(name, profile ?? undefined),
-        status: flowId => getMcpOAuthFlow(flowId, profile ?? undefined),
-        openExternal: url => window.hermesDesktop.openExternal(url)
+        start: name => authMcpServer(name, profile ?? undefined, client),
+        status: flowId => getMcpOAuthFlow(flowId, profile ?? undefined)
       })
+      setNeedsClientId(null)
 
       const result: McpTestResult = { ok: true, tools: flow.tools ?? [] }
 
@@ -655,6 +663,18 @@ export function McpTab({ gateway, profile }: { gateway: HermesGateway | null; pr
       }
     } catch (err) {
       if (profileEpoch.current !== epoch) {
+        return
+      }
+
+      // No automatic registration: not a failure, a question. Keep the row in
+      // its needs-authentication state and show the client id form.
+      if (err instanceof McpOAuthNeedsClientId) {
+        setNeedsClientId(serverName)
+        setProbes(current => ({
+          ...current,
+          [serverName]: { ok: false, error: `authentication required: ${err.message}`, tools: [] }
+        }))
+
         return
       }
 
@@ -1049,7 +1069,9 @@ export function McpTab({ gateway, profile }: { gateway: HermesGateway | null; pr
             description={descriptionFor(selected, activeEntry)}
             entry={activeEntry}
             name={selected}
+            needsClientId={needsClientId === selected}
             onAuthenticate={() => void authenticate(selected)}
+            onSubmitClient={client => void authenticate(selected, client)}
             onBack={() => setCursor(0)}
             onProbe={() => void runProbe(selected)}
             onRemove={() => void removeServer(selected)}
@@ -1204,10 +1226,12 @@ function ServerConfig({
   description,
   entry,
   name,
+  needsClientId,
   onAuthenticate,
   onBack,
   onProbe,
   onRemove,
+  onSubmitClient,
   onToggle,
   onToggleTool,
   probe,
@@ -1219,10 +1243,12 @@ function ServerConfig({
   description: null | string
   entry: Record<string, unknown>
   name: string
+  needsClientId: boolean
   onAuthenticate: () => void
   onBack: () => void
   onProbe: () => void
   onRemove: () => void
+  onSubmitClient: (client: McpOAuthClient) => void
   onToggle: (checked: boolean) => void
   onToggleTool: (toolName: string) => void
   probe: Probe | undefined
@@ -1311,6 +1337,7 @@ function ServerConfig({
           </Button>
         </div>
       )}
+      {canAuth && saved && needsClientId && <McpOAuthClientForm busy={authing} onSubmit={onSubmitClient} />}
       {!saved && <p className="mt-3 text-[0.68rem] text-muted-foreground/60">{m.unsavedConnect}</p>}
 
       {status === 'probing' && <PageLoader className="min-h-24" label={t.skills.loading} />}
@@ -1522,7 +1549,7 @@ function CatalogTag({ children }: { children: string }) {
 // The Nous-approved MCP catalog: one-click installs of curated servers, with an
 // inline prompt for any required credentials (never shows stored values). On
 // install the parent refetches config + catalog and reloads live sessions.
-function McpCatalog({
+export function McpCatalog({
   entries,
   loading,
   onInstalled,
@@ -1623,6 +1650,7 @@ function McpCatalog({
                   {entry.auth_type === 'oauth' && <CatalogTag>OAuth</CatalogTag>}
                   {entry.auth_type === 'api_key' && <CatalogTag>API key</CatalogTag>}
                   {entry.needs_install && !entry.installed && <CatalogTag>{m.catalogNeedsInstall}</CatalogTag>}
+                  {entry.needs_setup && !entry.installed && <CatalogTag>{m.catalogNeedsSetup}</CatalogTag>}
                   {entry.installed && (
                     <span className="text-[0.6rem] text-emerald-400">
                       {entry.enabled ? m.catalogEnabled : m.catalogInstalled}
@@ -1630,6 +1658,9 @@ function McpCatalog({
                   )}
                 </div>
                 <p className="mt-0.5 line-clamp-2 text-[0.68rem] text-muted-foreground/70">{entry.description}</p>
+                {entry.needs_setup && !entry.installed && entry.setup_note && (
+                  <p className="mt-1 text-[0.66rem] text-amber-500/90">{entry.setup_note}</p>
+                )}
                 {envOpenFor === entry.name && entry.required_env.length > 0 && (
                   <div className="mt-2 grid gap-2">
                     {entry.required_env.map(env => (
@@ -1654,19 +1685,34 @@ function McpCatalog({
                   </div>
                 )}
               </div>
-              <Button
-                className="mt-0.5 shrink-0"
-                disabled={entry.installed || installing !== null}
-                onClick={() => void install(entry)}
-                size="xs"
-                variant="text"
-              >
-                {installing === entry.name
-                  ? m.catalogInstalling
-                  : entry.installed
-                    ? m.catalogInstalled
-                    : m.catalogInstall}
-              </Button>
+              {entry.needs_setup && !entry.installed ? (
+                // Nothing for Harvis to install: point at the vendor instead of
+                // offering a button that fails after the click.
+                entry.install_url ? (
+                  <Button
+                    className="mt-0.5 shrink-0"
+                    onClick={() => void window.hermesDesktop.openExternal(entry.install_url!)}
+                    size="xs"
+                    variant="text"
+                  >
+                    {m.catalogSetupSite}
+                  </Button>
+                ) : null
+              ) : (
+                <Button
+                  className="mt-0.5 shrink-0"
+                  disabled={entry.installed || installing !== null}
+                  onClick={() => void install(entry)}
+                  size="xs"
+                  variant="text"
+                >
+                  {installing === entry.name
+                    ? m.catalogInstalling
+                    : entry.installed
+                      ? m.catalogInstalled
+                      : m.catalogInstall}
+                </Button>
+              )}
             </div>
           </div>
         )

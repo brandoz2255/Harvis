@@ -1,5 +1,5 @@
 """Hermes MCP tab routes: the server list the tab reads from the config record,
-the connect-and-list probe, the honest OAuth 501s, and the reload after save."""
+the connect-and-list probe, the OAuth flow routes, and the reload after save."""
 import asyncio
 import copy
 import os
@@ -217,18 +217,14 @@ def test_probe_names_the_flag_when_the_transport_is_off(probe, monkeypatch):
     assert fake.disconnected == []  # nothing was attempted
 
 
-# ─── OAuth: honest 501, not the catch-all 404 ────────────────────────────────
+# ─── OAuth: real flows now (the full suite is test_mcp_oauth_hermes.py) ──────
 
-@pytest.mark.parametrize("call", [
-    lambda: rest_mcp.mcp_server_auth("linear", USER),
-    lambda: rest_mcp.mcp_oauth_flow("flow-1", USER),
-    lambda: rest_mcp.mcp_oauth_flow_cancel("flow-1", USER),
-])
-def test_oauth_routes_say_not_supported_yet(call):
-    with pytest.raises(HTTPException) as exc:
-        run(call())
-    assert exc.value.status_code == 501
-    assert "not supported" in exc.value.detail and "not available in Harvis yet" not in exc.value.detail
+def test_an_unknown_oauth_flow_is_a_404_not_a_501():
+    for call in (lambda: rest_mcp.mcp_oauth_flow("flow-1", USER),
+                 lambda: rest_mcp.mcp_oauth_flow_cancel("flow-1", USER)):
+        with pytest.raises(HTTPException) as exc:
+            run(call())
+        assert exc.value.status_code == 404
 
 
 # ─── reload.mcp after a save ─────────────────────────────────────────────────

@@ -32,9 +32,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_APPROVAL_TIMEOUT_S = 300.0
 
 # Exec commands that are IRREVERSIBLE or destroy real work → high. Gated even under
 # auto-accept (the acknowledge-popup names the consequence); only full-auto lets them
@@ -184,18 +187,44 @@ def get_pending_for_run(run_id: str) -> dict | None:
     return None
 
 
-async def await_action_decision(action_id: str, timeout: float = 1800.0) -> bool:
-    """Block until the action is approved/denied (or timeout → treated as deny)."""
+def approval_timeout_s() -> float:
+    """How long a gated action waits for a human. ``HARVIS_APPROVAL_TIMEOUT_S`` overrides.
+
+    Five minutes, not the half hour this used to be: a run that sits blocked on
+    an approval nobody is looking at holds a sandbox, a model slot and the
+    user's chat turn open for the whole wait. Past five minutes the person has
+    walked away, and a clear "denied, nobody answered" lets them re-ask.
+    """
+    try:
+        value = float(os.getenv("HARVIS_APPROVAL_TIMEOUT_S", "") or DEFAULT_APPROVAL_TIMEOUT_S)
+    except ValueError:
+        value = DEFAULT_APPROVAL_TIMEOUT_S
+    return value if value > 0 else DEFAULT_APPROVAL_TIMEOUT_S
+
+
+async def await_action_outcome(action_id: str, timeout: float | None = None) -> tuple[bool, bool]:
+    """Block until the action is resolved. Returns ``(approved, timed_out)``.
+
+    A timeout is a deny, but callers need to tell it apart from a person
+    clicking Reject so the chat can say that nobody answered.
+    """
     entry = _PENDING_ACTIONS.get(action_id)
     if not entry:
-        return False
+        return False, False
+    wait = approval_timeout_s() if timeout is None else timeout
     try:
-        await asyncio.wait_for(entry["event"].wait(), timeout=timeout)
-        return bool(entry.get("approved"))
+        await asyncio.wait_for(entry["event"].wait(), timeout=wait)
+        return bool(entry.get("approved")), False
     except asyncio.TimeoutError:
-        return False
+        return False, True
     finally:
         _PENDING_ACTIONS.pop(action_id, None)
+
+
+async def await_action_decision(action_id: str, timeout: float | None = None) -> bool:
+    """Block until the action is approved/denied (or timeout → treated as deny)."""
+    approved, _timed_out = await await_action_outcome(action_id, timeout)
+    return approved
 
 
 def resolve_action(action_id: str, approved: bool) -> bool:

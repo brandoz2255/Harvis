@@ -18,6 +18,7 @@ Security:
 """
 
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -41,26 +42,6 @@ EXTERNAL_OLLAMA_URL = os.getenv("EXTERNAL_OLLAMA_URL", "")
 EXTERNAL_OLLAMA_API_KEY = os.getenv("EXTERNAL_OLLAMA_API_KEY", "")
 
 LOCAL_OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
-
-# Models that should prefer the desktop/rig Ollama when present, even if the
-# laptop also has them. Reason: gemma4:e4b's 9 GiB image exceeds the laptop's
-# 8GB VRAM → CPU offload → unusably slow. The rig's RTX 5080 (16GB) runs it
-# at native speed. Add other GPU-heavy model families to this list via the
-# HARVIS_DESKTOP_PREFERRED_MODELS env (comma-separated prefixes).
-_DESKTOP_PREFERRED_PREFIXES = tuple(
-    p.strip().lower()
-    for p in os.getenv("HARVIS_DESKTOP_PREFERRED_MODELS", "gemma4").split(",")
-    if p.strip()
-)
-
-
-def _prefers_desktop(model_name: str) -> bool:
-    """Return True if the model is in the desktop-preferred list."""
-    if not model_name:
-        return False
-    name = model_name.lower()
-    return any(name.startswith(p) for p in _DESKTOP_PREFERRED_PREFIXES)
-
 
 OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
@@ -119,12 +100,14 @@ model_proxy_router = APIRouter(prefix="/v1", tags=["model-proxy"])
 
 def _verify_token(authorization: str | None) -> None:
     """Verify the request carries the shared internal token."""
+    # Both installers generate the token; without one this proxy would be an
+    # open, unauthenticated model endpoint, so it refuses instead.
     if not OPENCLAW_GATEWAY_TOKEN:
-        return  # dev mode — no token configured
+        raise HTTPException(status_code=503, detail="Model proxy is not configured (OPENCLAW_GATEWAY_TOKEN is unset)")
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing Authorization header")
     token = authorization[len("Bearer ") :]
-    if token != OPENCLAW_GATEWAY_TOKEN:
+    if not hmac.compare_digest(token.encode(), OPENCLAW_GATEWAY_TOKEN.encode()):
         raise HTTPException(status_code=401, detail="Invalid proxy token")
 
 
@@ -283,55 +266,14 @@ async def _resolve_route(model_name: str) -> tuple[str, dict, bool, bool, str | 
         is_ollama = provider_type == "ollama" or "ollama" in provider_url or "localhost" in provider_url
         
         # For Ollama, smart-route by model availability — the DB-saved
-        # provider_url is "http://ollama:11434" (laptop) by default, but the
-        # user might pick a model that only exists on the desktop. Probe both.
+        # provider_url is this install's Ollama by default, but the user might pick
+        # a model that only exists on another configured machine (ollama_hosts).
         if is_ollama:
-            laptop_base = provider_url
-            desktop_base = (os.getenv("DESKTOP_OLLAMA_URL", "") or "").rstrip("/")
-            chosen_base = laptop_base
-            chosen_host = "laptop"
+            from owui_compat import ollama_hosts
 
-            # Desktop-preferred path: GPU-heavy models (e.g. gemma4) route to
-            # the rig if available there, even when the laptop also has them.
-            # Avoids CPU offload on the laptop's 8GB VRAM.
-            if _prefers_desktop(model_name) and desktop_base and desktop_base != laptop_base:
-                try:
-                    dt = desktop_base.replace("/v1", "") + "/api/tags"
-                    async with httpx.AsyncClient(timeout=httpx.Timeout(4.0)) as hc:
-                        r = await hc.get(dt)
-                    if r.status_code == 200 and any(
-                        m.get("name") == model_name for m in r.json().get("models", [])
-                    ):
-                        chosen_base = desktop_base
-                        chosen_host = "desktop"
-                        logger.info(
-                            "model_proxy: %s is desktop-preferred — routing to rig",
-                            model_name,
-                        )
-                except Exception as exc:
-                    logger.warning("model_proxy: desktop-preference probe failed: %s", exc)
-
-            # Original laptop-first probe (only runs if desktop-preference
-            # didn't already route to desktop).
-            if chosen_host == "laptop" and model_name and desktop_base and desktop_base != laptop_base:
-                try:
-                    lt = laptop_base.replace("/v1", "") + "/api/tags"
-                    async with httpx.AsyncClient(timeout=httpx.Timeout(4.0)) as hc:
-                        r = await hc.get(lt)
-                    on_laptop = r.status_code == 200 and any(
-                        m.get("name") == model_name for m in r.json().get("models", [])
-                    )
-                    if not on_laptop:
-                        dt = desktop_base.replace("/v1", "") + "/api/tags"
-                        async with httpx.AsyncClient(timeout=httpx.Timeout(4.0)) as hc:
-                            r2 = await hc.get(dt)
-                        if r2.status_code == 200 and any(
-                            m.get("name") == model_name for m in r2.json().get("models", [])
-                        ):
-                            chosen_base = desktop_base
-                            chosen_host = "desktop"
-                except Exception as exc:
-                    logger.warning("model_proxy DB-path probe failed: %s", exc)
+            chosen_base, chosen_host, _why = await ollama_hosts.route(model_name, provider_url)
+            if chosen_host != ollama_hosts.LOCAL:
+                headers.pop("Authorization", None)   # the saved key belongs to provider_url only
             if "/v1" in chosen_base:
                 target_url = chosen_base + "/chat/completions"
             else:
@@ -385,54 +327,11 @@ async def _resolve_route(model_name: str) -> tuple[str, dict, bool, bool, str | 
         return target_url, headers, False, False, None
 
     # Fallback: route to local Ollama (handles any model installed locally).
-    # When a model isn't on the laptop, transparently fall through to the
-    # desktop's Ollama (DESKTOP_OLLAMA_URL) so models pulled there work too.
-    laptop_url = LOCAL_OLLAMA_URL.rstrip("/")
-    desktop_url = (os.getenv("DESKTOP_OLLAMA_URL", "") or "").rstrip("/")
-    target_base = laptop_url
-    chosen = "laptop"
+    # A model that is not here goes to whichever other configured machine has it,
+    # and a machine's prefer list can claim a model even when this one has it too.
+    from owui_compat import ollama_hosts
 
-    # Desktop-preferred path: GPU-heavy models (e.g. gemma4) route to the rig
-    # if available there, even when the laptop also has them. Avoids CPU
-    # offload on the laptop's 8GB VRAM.
-    if _prefers_desktop(model_name) and desktop_url:
-        try:
-            desktop_tags = desktop_url.replace("/v1", "") + "/api/tags"
-            async with httpx.AsyncClient(timeout=httpx.Timeout(4.0)) as hc:
-                r = await hc.get(desktop_tags)
-            if r.status_code == 200 and any(
-                m.get("name") == model_name for m in r.json().get("models", [])
-            ):
-                target_base = desktop_url
-                chosen = "desktop"
-                logger.info(
-                    "model_proxy: %s is desktop-preferred — routing to rig",
-                    model_name,
-                )
-        except Exception as exc:
-            logger.warning("model_proxy: desktop-preference probe failed: %s", exc)
-
-    # Original laptop-first probe (only runs if desktop-preference didn't
-    # already route to desktop).
-    if chosen == "laptop" and model_name and desktop_url:
-        try:
-            laptop_tags = laptop_url.replace("/v1", "") + "/api/tags"
-            async with httpx.AsyncClient(timeout=httpx.Timeout(4.0)) as hc:
-                r = await hc.get(laptop_tags)
-            on_laptop = r.status_code == 200 and any(
-                m.get("name") == model_name for m in r.json().get("models", [])
-            )
-            if not on_laptop:
-                desktop_tags = desktop_url.replace("/v1", "") + "/api/tags"
-                async with httpx.AsyncClient(timeout=httpx.Timeout(4.0)) as hc:
-                    r2 = await hc.get(desktop_tags)
-                if r2.status_code == 200 and any(
-                    m.get("name") == model_name for m in r2.json().get("models", [])
-                ):
-                    target_base = desktop_url
-                    chosen = "desktop"
-        except Exception as exc:
-            logger.warning("model_proxy: model-availability probe failed: %s", exc)
+    target_base, chosen, _why = await ollama_hosts.route(model_name, LOCAL_OLLAMA_URL)
 
     if "/v1" in target_base:
         target_url = target_base + "/chat/completions"
@@ -953,8 +852,8 @@ async def resolve_auto_model() -> str:
     The voice call warms the same model (plugins/hermes_ui/voice_warm.py)."""
     cfg = await _get_openclaw_config()
     # Configurable safety net: the model used when the user has no saved pick
-    # AND when the saved pick can't be served (laptop missing it + desktop
-    # unreachable). HARVIS_AUTO_MODEL_FALLBACK pins it; qwen3.5:latest is the
+    # AND when the saved pick can't be served (no configured Ollama machine
+    # has it, or the one that does is unreachable). HARVIS_AUTO_MODEL_FALLBACK pins it; qwen3.5:latest is the
     # preferred shape (fits 8GB VRAM with usable context, reliable tool-calling)
     # but is only a PREFERENCE, not a guarantee — it is verified below.
     # `or` not getenv's default — compose declares this var as "" so a .env
@@ -963,31 +862,18 @@ async def resolve_auto_model() -> str:
     fallback = (os.getenv("HARVIS_AUTO_MODEL_FALLBACK") or "qwen3.5:latest").strip()
     resolved = (cfg or {}).get("model_id") or fallback
 
-    # Check if the resolved model is actually reachable. Probe laptop
-    # first (the path we'll use), then desktop. If neither has it, swap
-    # in the fallback so the request doesn't 404 mid-task.
-    async def _ollama_has(base_url: str, name: str) -> bool:
-        try:
-            tags = base_url.rstrip("/").replace("/v1", "") + "/api/tags"
-            async with httpx.AsyncClient(timeout=httpx.Timeout(3.0)) as hc:
-                r = await hc.get(tags)
-            if r.status_code == 200:
-                return any(m.get("name") == name for m in r.json().get("models", []))
-        except Exception:
-            pass
-        return False
-
-    laptop = LOCAL_OLLAMA_URL.rstrip("/")
-    desktop = (os.getenv("DESKTOP_OLLAMA_URL", "") or "").rstrip("/")
+    # Check if the resolved model is actually installed on any configured Ollama
+    # machine. If none has it, swap in the fallback so the request doesn't 404
+    # mid-task.
     # A Claude model (Path A) is served by Anthropic, not Ollama — don't let
     # the reachability probe swap it out for the local fallback.
     from .model_proxy_anthropic import is_anthropic_model as _is_anthropic
+    from owui_compat import ollama_hosts as _oh
 
     async def _reachable(name: str) -> bool:
-        """Installed on either Ollama we can see."""
-        if await _ollama_has(laptop, name):
-            return True
-        return bool(desktop) and await _ollama_has(desktop, name)
+        """Installed on any Ollama we can see."""
+        base, _ = await _oh.resolve(name)
+        return base is not None
 
     if not _is_anthropic(resolved) and not await _reachable(resolved):
         # The fallback is NOT trusted either — on a fresh clone or a new machine
@@ -1001,11 +887,11 @@ async def resolve_auto_model() -> str:
         if replacement is None:
             try:
                 from plugins.models.resolver import resolve_default_local_model
-                replacement = await resolve_default_local_model(ollama_url=laptop)
+                replacement = await resolve_default_local_model(ollama_url=LOCAL_OLLAMA_URL.rstrip("/"))
             except Exception:
                 logger.exception("model_proxy: adaptive fallback resolution failed")
         logger.warning(
-            "model_proxy: resolved %r unreachable on laptop/desktop — using %r",
+            "model_proxy: resolved %r is on no reachable Ollama — using %r",
             resolved, replacement or resolved,
         )
         if replacement:
@@ -1073,6 +959,12 @@ async def execute_chat_completion(request: Request, body: dict):
         logger.info("model_proxy: auto-routing %r → %r", model_name, resolved)
         model_name = resolved
         body = {**body, "model": model_name}
+
+    # Ollama cloud models forward the prompt to ollama.com; refuse unless opted in.
+    from owui_compat.ollama_hosts import cloud_refusal
+    _cloud_msg = cloud_refusal(model_name)
+    if _cloud_msg:
+        raise HTTPException(status_code=400, detail=_cloud_msg)
 
 
     # ── Path A: OpenClaw → Claude via the Anthropic Messages API (api_key) ──

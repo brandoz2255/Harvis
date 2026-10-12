@@ -3,6 +3,7 @@ import { atom } from 'nanostores'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { $notifications, clearNotifications } from '@/store/notifications'
+import { resetServerCapabilities, setServerCapabilities } from '@/store/server-capabilities'
 
 vi.mock('@/store/coding-status', () => ({
   registerRepoStatusCwd: () => undefined,
@@ -25,6 +26,7 @@ const { CodingStatusRow } = await import('./coding-row')
 describe('CodingStatusRow', () => {
   afterEach(() => {
     cleanup()
+    resetServerCapabilities()
   })
 
   it('opens the review pane from the branch and the diff counts, never the bar itself', () => {
@@ -89,5 +91,42 @@ describe('CodingStatusRow', () => {
     // Confirmation is the button turning into a checkmark, not a notification.
     await waitFor(() => expect(screen.getByRole('button', { name: 'Copied' })).toBeTruthy())
     expect($notifications.get()).toHaveLength(0)
+  })
+
+  describe('branch menu on a Harvis sandbox', () => {
+    const branchOff = async () => undefined
+    const switchBranch = async () => undefined
+
+    it('offers no menu when the backend cannot add worktrees and there is nothing to switch to', () => {
+      setServerCapabilities({ capabilities: { git: true, git_worktrees: false } })
+      render(<CodingStatusRow onBranchOff={branchOff} onOpen={() => undefined} repoPath="/repo" />)
+
+      expect(screen.queryByLabelText('New branch')).toBeNull()
+    })
+
+    it('keeps the menu for switching branches, without the worktree entries', async () => {
+      setServerCapabilities({ capabilities: { git: true, git_worktrees: false } })
+      render(
+        <CodingStatusRow
+          onBranchOff={branchOff}
+          onOpen={() => undefined}
+          onSwitchBranch={switchBranch}
+          repoPath="/repo"
+        />
+      )
+
+      fireEvent.pointerDown(screen.getByLabelText('New branch'), { button: 0, ctrlKey: false })
+      fireEvent.click(screen.getByLabelText('New branch'))
+
+      await waitFor(() => expect(screen.getByText('Switch to main')).toBeTruthy())
+      expect(screen.queryByText('Worktrees')).toBeNull()
+    })
+
+    it('shows the full menu once worktrees are provided', () => {
+      setServerCapabilities({ capabilities: { git: true, git_worktrees: true } })
+      render(<CodingStatusRow onBranchOff={branchOff} onOpen={() => undefined} repoPath="/repo" />)
+
+      expect(screen.getByLabelText('New branch')).toBeTruthy()
+    })
   })
 })

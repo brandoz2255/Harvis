@@ -12,7 +12,7 @@ import { currentPickerSelection } from '@/lib/model-status-label'
 import { DEFAULT_REASONING_EFFORT } from '@/lib/reasoning-effort'
 import { cn } from '@/lib/utils'
 import { $modelPresets, applyModelPreset, modelPresetKey, setModelPreset } from '@/store/model-presets'
-import { $visibleModels } from '@/store/model-visibility'
+import { $hiddenModels } from '@/store/model-visibility'
 import { notifyError } from '@/store/notifications'
 import {
   $defaultReasoningEffort,
@@ -63,7 +63,7 @@ export function ModelMenuPanel({ gateway, onSelectModel, profile = 'default', re
   const currentReasoningEffort = useStore(view.$reasoningEffort)
   const modelPresets = useStore($modelPresets)
   const defaultEffort = useStore($defaultReasoningEffort) || DEFAULT_REASONING_EFFORT
-  const visibleModels = useStore($visibleModels)
+  const hiddenModels = useStore($hiddenModels)
   const touchesPrimary = view.kind === 'primary'
 
   // Subscribe to the SAME query the menu runs (identical key ⇒ React Query

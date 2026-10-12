@@ -25,6 +25,7 @@ import { getLogs } from '@/hermes'
 import { normalizeOrLocalPreviewTarget } from '@/lib/local-preview'
 import { cn } from '@/lib/utils'
 import { openPreview } from '@/store/preview'
+import { useCapability } from '@/store/server-capabilities'
 import { $currentCwd } from '@/store/session'
 
 // ---------------------------------------------------------------------------
@@ -34,11 +35,20 @@ import { $currentCwd } from '@/store/session'
 // ---------------------------------------------------------------------------
 
 export function LogsPane() {
+  const allowed = useCapability('logs')
+
   const { data, error } = useQuery({
+    enabled: allowed,
     queryKey: ['contrib-logs-tail'],
     queryFn: () => getLogs({ lines: 300 }),
     refetchInterval: 5000
   })
+
+  if (!allowed) {
+    return (
+      <div className="p-3 text-xs text-(--ui-text-quaternary)">Logs are only available to this server's admin.</div>
+    )
+  }
 
   if (error) {
     return <div className="p-3 text-xs text-(--ui-text-quaternary)">log unavailable: {String(error)}</div>

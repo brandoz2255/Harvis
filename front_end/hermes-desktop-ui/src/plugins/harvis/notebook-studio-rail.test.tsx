@@ -49,6 +49,33 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('NotebookStudioRail', () => {
+  it('labels Audio Overview as under construction and still offers Mind map', async () => {
+    renderWithQuery(<NotebookStudioRail notebookId={NB} sources={ready} title="Mars" />)
+    const audio = await screen.findByRole('button', { name: /Audio Overview/ })
+    expect(audio.textContent).toContain('Under construction')
+    expect((audio as HTMLButtonElement).disabled).toBe(false)
+    expect(audio.getAttribute('title')).toContain('custom voices are coming')
+    expect(screen.getByRole('button', { name: /Mind map/ })).toBeTruthy()
+  })
+
+  it('shows a script-only podcast with the reason and does not offer to play it', async () => {
+    log = [
+      {
+        id: 'p1',
+        kind: 'podcast',
+        title: 'Mars — audio overview',
+        format: 'audio',
+        content: null,
+        status: 'script_only',
+        audio_url: null,
+        error_message: 'The speech service is not running.',
+        created_at: '2026-10-12T00:00:00Z'
+      }
+    ]
+    renderWithQuery(<NotebookStudioRail notebookId={NB} sources={ready} title="Mars" />)
+    expect(await screen.findByText(/Script only\. The speech service is not running\./)).toBeTruthy()
+  })
+
   it('waits for a ready source before making anything', async () => {
     renderWithQuery(<NotebookStudioRail notebookId={NB} sources={[]} title="Mars" />)
 
@@ -69,7 +96,7 @@ describe('NotebookStudioRail', () => {
       )
     )
     fireEvent.click(await screen.findByRole('button', { name: 'Perseverance' }))
-    expect(screen.getByText('1 of 1 right so far')).toBeTruthy()
+    expect(screen.getByText('You scored 1 of 1')).toBeTruthy()
 
     fireEvent.click(screen.getByRole('button', { name: 'Back to Studio' }))
     expect(await screen.findByText('Quiz: Mars')).toBeTruthy()

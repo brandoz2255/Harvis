@@ -59,6 +59,7 @@ import {
 import { runImportProfileFlow } from '@/store/profile-share'
 import { $projectTree } from '@/store/projects'
 import type { PullRequestBucket } from '@/store/pull-requests'
+import { useCapability } from '@/store/server-capabilities'
 import { $unreadFinishedSessionIds, markAllSessionsRead } from '@/store/session'
 import type { SessionStatusBucket } from '@/store/session-dot-state'
 import { $sessionsHaveCost } from '@/store/sidebar-archive'
@@ -161,6 +162,7 @@ export function SidebarFilterMenu({ className }: { className?: string }) {
   const profileNames = useStore($profiles).map(profile => normalizeProfileKey(profile.name))
   const narrowsByProfile = showAllProfiles && profileNames.length > 1
   const prFilter = useStore($sidebarPrFilter)
+  const canProjects = useCapability('projects')
   const showArchived = useStore($sidebarShowArchived)
   const filtersActive = useStore($sidebarFiltersActive)
   const viewCustomized = useStore($sidebarViewCustomized)
@@ -171,12 +173,17 @@ export function SidebarFilterMenu({ className }: { className?: string }) {
   // PR state comes from `gh` on whichever machine holds the checkout — Electron
   // locally, the gateway's REST mirror remotely. Resolved per render, not once
   // at module load: switching to a remote profile swaps the bridge underneath.
-  const prAvailable = Boolean(desktopGit()?.review?.prList)
+  // Reading the flag here also re-renders the menu when the server's answer lands.
+  const prAvailable = useCapability('git_remote') && Boolean(desktopGit()?.review?.prList)
   // Project rows default open, so "all collapsed" means every one of them has
   // been explicitly shut.
   const projectsCollapsed = projects.length > 0 && projects.every(project => nodeOpen[project.id] === false)
 
-  const groupingLabel = GROUPINGS.find(option => option.id === grouping)?.label
+  const groupings = GROUPINGS.filter(option => option.id !== 'project' || canProjects)
+  // A stored Project grouping with no project tree to show reads as the first one left.
+  const activeGrouping = groupings.find(option => option.id === grouping) ?? groupings[0]
+  const projectGrouping = grouping === 'project' && canProjects
+  const groupingLabel = activeGrouping?.label
 
   // Two options are conditional: dragging a row is what picks manual, so it
   // only appears as a way back out once there's a hand-picked order to leave;
@@ -236,9 +243,9 @@ export function SidebarFilterMenu({ className }: { className?: string }) {
             <DropdownMenuSubContent>
               <DropdownMenuRadioGroup
                 onValueChange={value => setSidebarGrouping(value as SidebarGrouping)}
-                value={grouping}
+                value={activeGrouping?.id ?? grouping}
               >
-                {GROUPINGS.map(option => (
+                {groupings.map(option => (
                   <OptionRadio key={option.id} option={option} />
                 ))}
               </DropdownMenuRadioGroup>
@@ -345,7 +352,7 @@ export function SidebarFilterMenu({ className }: { className?: string }) {
             </DropdownMenuSubContent>
           </DropdownMenuSub>
 
-          {projects.length > 1 && (
+          {canProjects && projects.length > 1 && (
             <DropdownMenuSub>
               <DropdownMenuSubTrigger>Project</DropdownMenuSubTrigger>
               <DropdownMenuSubContent className="max-h-80 overflow-y-auto">
@@ -396,7 +403,7 @@ export function SidebarFilterMenu({ className }: { className?: string }) {
             looking at — sweeping Pinned and Cron shut alongside them is not
             what "collapse all" means here. Their lanes underneath keep their
             own state, so re-opening a project shows it as you left it. */}
-        {grouping === 'project' && projects.length > 0 && (
+        {projectGrouping && projects.length > 0 && (
           <DropdownMenuItem
             onSelect={() =>
               setWorkspaceNodesOpen(

@@ -153,6 +153,21 @@ async def validate_custom_endpoint(request: Request, user=Depends(get_current_us
     return await _probe_endpoint(payload)
 
 
+@router.post("/providers/validate")
+async def validate_provider_credential(request: Request, user=Depends(get_current_user_optimized)):
+    """The onboarding "is this endpoint up" probe: a base URL (and optional key) in, models out."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    body = body if isinstance(body, dict) else {}
+    if body.get("key") != "OPENAI_BASE_URL":
+        return {"ok": False, "reachable": False, "models": [],
+                "message": "Only an endpoint URL can be tested here."}
+    return await _probe_endpoint({"name": "Endpoint test", "base_url": body.get("value"),
+                                  "api_key": body.get("api_key")})
+
+
 @router.post("/providers/custom-endpoints")
 async def save_custom_endpoint(request: Request, user=Depends(get_current_user_optimized)):
     try:
@@ -257,11 +272,39 @@ async def moa_models_save(request: Request, user=Depends(get_current_user_optimi
 
 
 @router.get("/memory")
-async def memory_status(user=Depends(get_current_user_optimized)):
+async def memory_status(request: Request, user=Depends(get_current_user_optimized)):
+    """``builtin_files.memory`` is how many bytes of the user's own memories Harvis holds."""
+    try:
+        async with _pool(request).acquire() as conn:
+            size = await conn.fetchval(
+                "SELECT coalesce(sum(octet_length(content)), 0) FROM harvis_user_memory WHERE user_id = $1",
+                _uid(user))
+    except Exception:
+        size = 0
     return {"active": "harvis",
             "providers": [{"name": "harvis", "configured": True,
                            "description": "Harvis memory: postgres + vector store"}],
-            "builtin_files": {"memory": 0, "user": 0}}
+            "builtin_files": {"memory": int(size or 0), "user": 0}}
+
+
+@router.post("/memory/reset")
+async def memory_reset(request: Request, user=Depends(get_current_user_optimized)):
+    """Delete the signed-in user's own memories (never anyone else's). The UI confirms first."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    target = str(body.get("target") or "all") if isinstance(body, dict) else "all"
+    if target not in ("all", "memory", "user"):
+        raise HTTPException(400, "target must be all, memory or user")
+    if target == "user":  # Harvis keeps one memory store; there is no separate profile file.
+        return {"ok": True, "deleted": []}
+    from . import learn
+    provider = await learn._provider(_pool(request))
+    if provider is None:
+        raise HTTPException(503, "memory store unavailable")
+    count = await provider.forget(_uid(user))
+    return {"ok": True, "deleted": ["memory"] if count else []}
 
 
 @router.get("/curator")
@@ -279,6 +322,16 @@ async def terminal_backends(user=Depends(get_current_user_optimized)):
                           "active": True, "status": "ready", "detail": ""}]}
 
 
+@router.put("/tools/terminal/backend")
+async def select_terminal_backend(request: Request, user=Depends(get_current_user_optimized)):
+    """There is one backend. Choosing it is a no-op; naming any other is refused."""
+    body = await request.json()
+    name = str(body.get("backend") or "")
+    if name != "harvis":
+        raise HTTPException(400, "Harvis runs commands in its own workspace sandbox; there is no other backend.")
+    return {"ok": True, "backend": name}
+
+
 @router.get("/tools/computer-use/status")
 async def computer_use_status(user=Depends(get_current_user_optimized)):
     return {"platform": sys.platform, "platform_supported": False, "installed": False,
@@ -292,9 +345,47 @@ async def gh_auth(user=Depends(get_current_user_optimized)):
     return {"available": False, "authenticated": False}
 
 
+_SEARCH_SQL = """
+SELECT c.id, c.title, c.updated_at, c.created_at, c.chat->'models'->>0 AS model,
+       hit.role, hit.content
+FROM owui_chats c
+LEFT JOIN LATERAL (
+    SELECT m->>'role' AS role, m->>'content' AS content
+    FROM jsonb_array_elements(CASE WHEN jsonb_typeof(c.chat->'messages') = 'array'
+                                   THEN c.chat->'messages' ELSE '[]'::jsonb END) m
+    WHERE jsonb_typeof(m->'content') = 'string' AND m->>'content' ILIKE $2 ESCAPE '\\'
+    LIMIT 1
+) hit ON TRUE
+WHERE c.user_id = $1 AND c.archived = FALSE
+  AND coalesce(c.title, '') NOT LIKE 'Group: %' AND coalesce(c.title, '') NOT LIKE 'Voice: %'
+  AND (coalesce(c.title, '') ILIKE $2 ESCAPE '\\' OR hit.content IS NOT NULL)
+ORDER BY c.updated_at DESC
+LIMIT $3 OFFSET $4
+"""
+
+
+def _snippet(text: str, needle: str, width: int = 140) -> str:
+    flat = " ".join(text.split())
+    at = flat.lower().find(needle.lower())
+    start = max(0, at - width // 3) if at >= 0 else 0
+    return ("..." if start else "") + flat[start:start + width]
+
+
 @router.get("/sessions/search")
-async def sessions_search(user=Depends(get_current_user_optimized)):
-    return {"results": []}
+async def sessions_search(request: Request, q: str = "", limit: int = 30, offset: int = 0,
+                          user=Depends(get_current_user_optimized)):
+    """The signed-in user's own chats whose title or any message contains ``q``."""
+    needle = " ".join(q.split())[:200]
+    if not needle:
+        return {"results": []}
+    like = "%" + needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    async with _pool(request).acquire() as conn:
+        rows = await conn.fetch(_SEARCH_SQL, _uid(user), like, max(1, min(limit, 100)), max(0, offset))
+    return {"results": [
+        {"session_id": str(r["id"]), "lineage_root": None, "model": r["model"] or None,
+         "role": r["role"], "session_started": r["created_at"].timestamp(),
+         "snippet": _snippet(r["content"] or r["title"] or "", needle), "source": "harvis"}
+        for r in rows]}
 
 
 @router.get("/learning/graph")

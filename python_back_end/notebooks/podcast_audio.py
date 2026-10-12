@@ -30,10 +30,19 @@ def speech_url() -> str:
 
 
 def voice_for(speaker: str, order: dict[str, str]) -> str:
-    """Each new speaker takes the next voice; a fifth reuses the first."""
-    if speaker not in order:
-        order[speaker] = VOICES[len(order) % len(VOICES)]
-    return order[speaker]
+    """Each new speaker takes the next voice; a fifth reuses the first.
+
+    Speakers are matched ignoring case and spacing, so "Alex" and "alex " are one
+    person with one voice for the whole episode.
+    """
+    key = " ".join((speaker or "Speaker").split()).casefold()
+    if key not in order:
+        order[key] = VOICES[len(order) % len(VOICES)]
+    return order[key]
+
+
+class PodcastAudioError(Exception):
+    """The audio could not be made. ``str(exc)`` says why, in words the user can act on."""
 
 
 def join_wavs(clips: list[bytes], pause: float = PAUSE_SECONDS) -> tuple[bytes, float]:
@@ -80,6 +89,8 @@ async def synthesize(segments: list[dict], model: Optional[str] = None) -> tuple
             })
             resp.raise_for_status()
             clips.append(resp.content)
+    if not clips:
+        raise ValueError("no speech to join")
     audio, seconds = join_wavs(clips)
     AUDIO_DIR.mkdir(parents=True, exist_ok=True)
     name = f"{uuid.uuid4()}.wav"
@@ -94,3 +105,59 @@ def local_file(filename: str) -> Optional[Path]:
         return None
     path = AUDIO_DIR / filename
     return path if path.is_file() else None
+
+
+async def make_audio(segments: list[dict]) -> dict:
+    """Speak a script and return ``{audio_path, audio_url, duration_seconds}``.
+
+    Uses the optional ``tts-service`` when ``TTS_URL`` is set, otherwise the default
+    speech sidecar. Raises PodcastAudioError with a plain message on any failure so
+    the caller can save the script and show the reason instead of silently dropping
+    the audio.
+    """
+    segments = [s for s in segments if (s.get("text") or "").strip()]
+    if not segments:
+        raise PodcastAudioError("There was nothing to say: the script has no spoken lines.")
+    tts_url = os.environ.get("TTS_URL")
+    where = tts_url or speech_url()
+    try:
+        if not tts_url:
+            name, seconds = await synthesize(segments)
+            path = f"/api/notebooks/podcasts/tts-audio/{name}"
+            return {"audio_path": path, "audio_url": path, "duration_seconds": seconds}
+        voice_mapping = {(s.get("speaker") or "Speaker"): "__default__" for s in segments}
+        async with httpx.AsyncClient(timeout=600.0) as client:
+            resp = await client.post(f"{tts_url.rstrip('/')}/generate/podcast", json={
+                "script": segments,
+                "voice_mapping": voice_mapping,
+                "output_format": "wav",
+                "normalize_audio": True,
+                "add_silence_between_speakers": 0.3,
+            })
+        resp.raise_for_status()
+        data = resp.json()
+        if not data.get("success"):
+            raise PodcastAudioError("The speech service reported that it could not make the audio.")
+        filename = (data.get("audio_url") or "").split("/")[-1]
+        if not filename:
+            raise PodcastAudioError("The speech service did not return an audio file.")
+        path = f"/api/notebooks/podcasts/tts-audio/{filename}"
+        return {"audio_path": path, "audio_url": path, "duration_seconds": data.get("duration", 0)}
+    except PodcastAudioError:
+        raise
+    except httpx.HTTPStatusError as exc:
+        raise PodcastAudioError(
+            f"The speech service answered HTTP {exc.response.status_code}. Check that it is running "
+            "and has a voice model loaded, then generate the audio again."
+        ) from exc
+    except httpx.TimeoutException as exc:
+        raise PodcastAudioError("The speech service took too long to answer. Try a shorter episode.") from exc
+    except httpx.HTTPError as exc:
+        raise PodcastAudioError(
+            f"The speech service could not be reached at {where.split('//')[-1].split('/')[0]}. "
+            "Start it (the voice service) and generate the audio again."
+        ) from exc
+    except ValueError as exc:
+        raise PodcastAudioError(f"The speech service returned audio Notebooks could not join ({str(exc)[:80]}).") from exc
+    except OSError as exc:
+        raise PodcastAudioError(f"The audio could not be saved on the server ({str(exc)[:80]}).") from exc

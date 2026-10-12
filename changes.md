@@ -1,5 +1,756 @@
 # Recent Changes and Fixes Documentation
 
+## Date: 2026-10-12 — Verifier follow-up: git can't run sandbox programs, notebooks can't fetch tailnet hosts (branch `harvis1.5`)
+
+**Problem.** An independent review of this branch's changes found two real holes:
+- **Git review routes.** They checked `.git/config` once per request, before running git. Code running in the
+  sandbox could add a filter driver after that check, through `.git/config` plus `.gitattributes`, and the next
+  git command in the same request (status, diff, stage) would run it in the backend container. This was
+  reproduced in a scratch repo.
+- **Notebook URL sources and Discover "add".** They treated 100.64.0.0/10 (tailnet and carrier-NAT space) as
+  public, so a signed-in user could make the backend fetch a tailnet host and read the reply as source text.
+
+Smaller issues:
+- AI titles skipped the admin's per-person model list.
+- `/save` wrote into the workspace without the Build Space check.
+
+**Fix.**
+- **`git_run.py`:**
+  - Attributes come from the empty tree (`GIT_ATTR_SOURCE`), so a work-tree `.gitattributes` can't attach a
+    driver.
+  - A non-empty `.git/info/attributes` is refused.
+  - The `.git` checks run again right before every git command.
+- **`agent_reach/tools.py`:** `_ip_is_public` also requires `is_global`.
+- **`titles.py`:** server-side title calls go through `people.admit_turn(count=False)`.
+- **`ws_session.py`:** `session.save` needs `build_space_allowed`.
+
+**Tests.**
+- 3 new git tests:
+  - a filter added after the check never runs;
+  - work-tree attributes are ignored even if the check is bypassed;
+  - info/attributes is refused.
+- 5 new IP tests.
+- The full backend sweep passes 1,992 tests. The 6 left over fail only because the container runs in shared mode.
+
+**Files.** `python_back_end/plugins/hermes_ui/{git_run,titles,ws_session}.py`, `python_back_end/agent_reach/tools.py`,
+`python_back_end/tests/{test_hermes_ui_git,test_attachment_download_ssrf}.py`.
+
+## Date: 2026-10-12 — Notebooks reach NotebookLM parity: Discover, image/audio sources, flashcards, quiz, mind map (branch `harvis1.5`)
+
+**Problem.** Notebooks took only text and PDF sources and had no way to find sources on the web. Citations showed no
+quote, and an embedding failure stored fake vectors. Studio JSON (quiz, flashcards) broke on chatty models, and
+podcasts failed silently.
+
+**Fix.**
+- **Sources:** images (vision description plus OCR), audio (the existing speech-to-text) and HTML (main content
+  only). A failed embedding ends the source in a plain error with Retry; no fake vectors are stored.
+- **Discover:** Fast research searches the web, you tick results, and they become URL sources (12 searches a
+  minute, 50-source cap). Deep research runs with progress and cancel, adds its report as a source and offers
+  the pages it cited. Both use the SSRF-safe fetcher and per-person limits. A run with no report is an error,
+  not "done".
+- **Citations:** `quote` carries the chunk snippet, and the UI reads `[SOURCE n]`, `[SOURCE n, Para m]`, `[S2]`
+  and `【SOURCE n】`.
+- **Studio:**
+  - Quiz, flashcards and mind map are validated JSON with hardened parsing.
+  - Flashcards flip on click or Space, with shuffle and got it/again. The quiz scores you and explains each answer.
+  - The mind map is a new collapsible outline.
+  - Study guide, briefing, FAQ and timeline strip preambles and think tags.
+- **Podcasts:** speakers, length sizing and failures are fixed. A speech failure shows "Script only" with the
+  reason. Still badged **Under construction** until custom voices land.
+- `GET /api/notebooks/meta/capabilities` drives the Under-construction badges and disabled reasons.
+
+**Migration.** `schema.sql` (applied on boot) allows the `mindmap` artifact kind; `migrations/022_notebook_mindmap.sql`
+does the same.
+
+**Tests.** 106 backend and 63 notebook UI tests pass. Live with a non-admin account: all seven artifact kinds,
+HTML/image/audio/URL sources, retry after an embedding failure, Discover add (19 chunks), and a deep research
+report (12 sources, about 3.5 minutes).
+
+**Files.**
+- New backend: `notebooks/{source_types,extractors,citations,podcast_script,discover,capabilities}.py`,
+  `onb_compat/studio_generate.py`, `migrations/022_notebook_mindmap.sql`.
+- Edited backend: `notebooks/{ingestion,manager,rag_chat,podcast_audio,router}.py`, `schema.sql`,
+  `onb_compat/{router,podcasts}.py`.
+- UI: `src/plugins/harvis/notebook-*`.
+
+## Date: 2026-10-12 — No more dead buttons: git review, session search, ops, and hidden unsupported features (branch `harvis1.5`)
+
+**Problem.** Many Hermes UI controls called routes or gateway methods Harvis never had, and failed with 404 or
+"method not found".
+
+**Fix.**
+- **Implemented:**
+  - Git review over the person's own sandbox repo (`rest_git.py`): status, diff, stage, commit and branches.
+    There are no remote routes, and git runs with hooks, fsmonitor, pagers and credential helpers off.
+  - Session search, and memory reset and size.
+  - Logs and doctor (admin only).
+  - Provider validation.
+  - `cron.manage`.
+- **Answered cleanly:** projects, pets, wake word, browser control and stale prompt replies get clean empty or
+  "not available" answers (`ws_extras.py`).
+- **Hidden:** controls the server can't back are hidden through a new `store/server-capabilities.ts` fed by
+  `/api/status.capabilities`. This covers push, PR, worktrees, Kanban, maintenance actions, the skills hub,
+  memory-provider config, pets, and the logs pane for non-admins. The same store also hides:
+  - the chat-sidebar projects (grouping, filter, "Move to project", the new-project buttons);
+  - worktree and branch-off actions;
+  - the pull-request filter;
+  - the toolset setup panel, including its OAuth sign-in;
+  - the Computer Use panel.
+  These are gated on `projects`, `git_worktrees`, `git_remote`, `toolset_setup` and `computer_use_grant`. A
+  backend that sends no flags counts as everything on.
+- **Wiring:** `ExtraMethods` is mixed into the websocket `Connection`, and the git router is mounted in
+  `plugins/hermes_ui/router.py`.
+
+- **Stale filters:** a Project or pull-request filter saved while the feature was on is ignored once it is off,
+  so it can't keep narrowing the list with no menu to clear it.
+
+**Tests.** 78 new backend tests and 3 new UI test files. The full vitest run (8,841 tests) has 27 failures and tsc has
+3 errors, both the existing baseline.
+
+**Files.**
+- New backend: `plugins/hermes_ui/{rest_git,git_run,git_view,ops,ws_extras}.py`.
+- Edited backend: `rest.py`, `rest_settings.py`, `rest_harvis.py`, `router.py`, `ws.py`.
+- UI: the capability store and the panels it gates.
+
+## Date: 2026-10-12 — MCP by URL with OAuth, tool approvals in chat, web search that keeps partial results (branch `harvis1.5`)
+
+**Problem.**
+- Adding an MCP server by URL failed, and OAuth-protected servers couldn't connect.
+- Tool approvals only worked from the workspace page.
+- Toolset choices were ignored.
+- A slow page made web search throw away the results it already had.
+- The model was told to write `:::search` blocks, so it invented search results.
+
+**Fix.**
+- **MCP:** add by URL works, OAuth 2.1 with PKCE uses a popup (callback
+  `/hermes-api/api/mcp/oauth/callback`) and tokens are sealed at rest. The catalog shows "Needs setup".
+- **Approvals:** they arrive in the chat (`ws_approvals.py`, 300 s timeout via `HARVIS_APPROVAL_TIMEOUT_S`). The
+  "approve it from the workspace page" note is only shown when no chat is following the run.
+- **Toolsets:** the chosen toolsets are honored.
+- **Web search:** separate 12/15/40 s budgets (60 s when forced), partial results are kept, and queries are
+  clipped at a word boundary.
+- **No fake search blocks:** `:::search` is removed from the chat block vocabulary.
+
+**Known limits.** OAuth state lives in memory, so a backend restart in the middle of a sign-in means reconnecting.
+
+**Tests.** 130 backend tests and five new UI test files pass.
+
+**Files.**
+- New: `plugins/hermes_ui/{ws_approvals,mcp_inputs,mcp_oauth_flows}.py`, `plugins/mcp/oauth_discovery.py`,
+  `workspace/orchestration/{approval_notify,toolsets}.py`, `owui_compat/reach_budget.py`.
+- Edited: `rest_mcp.py`, `rest_capabilities.py`, `plugins/mcp/{oauth,token_storage}.py`, `risk.py`, `runner.py`,
+  `chat_reach.py`, `reach_gate.py`, `runs.py`, `ws.py`, `chat_completion.py`, and the MCP UI files.
+
+## Date: 2026-10-12 — Chat works like a cloud chat: regenerate, slash commands, AI titles, plain errors (branch `harvis1.5`)
+
+**Problem.**
+- Regenerate and edit-and-resend duplicated or broke history.
+- Most slash commands did nothing, and chats were titled with the whole first message.
+- Errors showed raw tracebacks, and a stop left "[interrupted]" in the text.
+- A failed turn lost the user's message.
+- The web-search globe did nothing.
+- The same memory was saved again every turn.
+- Code sometimes rendered as a fake terminal block.
+
+**Fix.**
+- **Regenerate and edit:** `prompt.submit` honors `confirm_truncate` and `truncate_before_*`, cutting the
+  stored rows and the live session.
+- **Model check:** `session.create` and a session-scope model switch refuse names the picker doesn't offer.
+- **New session handlers:** close, usage, status, context breakdown, compress, branch, save and attach
+  (`ws_session.py`).
+- **Slash commands:** a real catalog in `ws_slash.py` with `/new /clear /model /title /compress /branch /usage
+  /help /research /web`.
+- **AI titles:** a 3-6 word title is generated after the first reply. It never overwrites a name you set.
+- **Errors:** plain one-sentence errors (`errors.py`); the detail goes to the log.
+- **Stops and failures:** a stopped reply is stored clean with an `interrupted` flag. A failed turn keeps your
+  message, offers Retry, and a resend doesn't duplicate it.
+- **Code blocks:** code always goes in ordinary fenced blocks; `:::terminal` is only for real tool output.
+- **Web globe:** the composer globe and `/web on|off` turn web search on for the chat.
+- **Memories:** deduplicated (`plugins/memory/dedupe.py`), and `learn.py` no longer counts a duplicate as saved.
+
+**Tests.**
+- New tests: 37 chat-core tests, plus memory-dedupe and block-vocabulary tests.
+- The backend sweep passes 1,981 tests. The 7 left over fail only because the container runs in shared (`lan`)
+  mode.
+- Live over the websocket with a non-admin account:
+  - an unknown model is refused;
+  - 11 slash completions, and `/help` and `/usage` work;
+  - a real reply arrives and gets an AI title;
+  - regenerate leaves exactly one user/assistant pair;
+  - a typo'd session model is refused.
+
+**Files.**
+- New: `plugins/hermes_ui/{errors,titles,rewind,usage,session_ops,rpc,ws_session,ws_slash}.py`,
+  `plugins/memory/dedupe.py`.
+- Edited: `ws.py`, `sessions.py`, `store.py`, `chat.py`, `attachments.py`, `ws_settings.py`, `learn.py`, the memory
+  providers, `owui_compat/{chat_completion,router}.py`, and the chat UI files.
+
+## Date: 2026-10-12 — Security pass: open routes closed, web fetch can no longer reach inside (branch `harvis1.5`)
+
+**Problem.** The pre-push audit found several holes:
+- Server-wide routes anyone could call with no sign-in: model unload and reload, switching the TTS engine,
+  enqueueing background jobs, and web search.
+- Any signed-in user could approve another user's cluster (kubectl) write.
+- `/api/audio/{name}` served any file directly inside `/tmp`.
+- The agents' web-fetch tool followed redirects without re-checking them, and did not block the tailnet
+  range (100.64/10).
+- A server whose port 9000 was open to the network still ran with the relaxed "local" rules.
+- Smaller fallbacks were guessable or open.
+
+**Fix.**
+- **Admin only:** `/api/models/auto-cleanup`, `/api/models/reload`, `/api/tts-engine`, `/api/jobs/enqueue`
+  and `/api/jobs/{id}/status`.
+- **Sign-in required:** `/api/web-search`.
+- **Kubernetes approvals:** kubectl pending/approve/reject are admin-only.
+- **Artifact cleanup:** `/api/artifacts/cleanup` is admin-only.
+- **Audio files:** `/api/audio/{name}` serves only a generated `name.wav`/`.mp3` that is a regular file,
+  the same rule as nginx's `/audio/` alias.
+- **Web fetch:** every hop (redirects included) is re-checked by a transport. Any address that is not
+  globally routable is refused: RFC 1918, loopback, link-local metadata, CGNAT/tailnet, ULA, IPv4-mapped
+  IPv6 and multicast. Redirects are capped at 5.
+- **Exposure:** `HARVIS_EXPOSURE` unset or `local` now counts as `lan` when nginx publishes 9000 on a
+  non-loopback address, or when running in Kubernetes. Compose now passes `HARVIS_BIND_ADDR_PUBLIC`
+  to the backend.
+- **Model proxy:** `/v1` refuses with 503 when no gateway token is set, instead of allowing everyone.
+  It compares tokens in constant time.
+- **Sandbox links:** they are signed with a per-process random key when no secret is configured,
+  instead of the fixed "harvis-dev".
+- **Sign-in cookie:** it is marked Secure whenever the request arrived over HTTPS.
+- **Inference-node scripts:** the provision script refuses shell metacharacters in node name, model
+  and host, and returns 400.
+
+**Heads-up.** This laptop's nginx publishes 9000 on 0.0.0.0. Once the backend is recreated with the new
+compose env, it runs with the shared-server rules: Build Space and terminals are admin-only unless
+`HARVIS_BUILD_SPACE_ACCESS=everyone` is set.
+
+**Tests.**
+- `tests/test_web_fetch_ssrf.py` is new.
+- `test_exposure.py` gained the bind-address and k8s cases.
+- `test_inference_nodes.py` gained shell-injection cases.
+- 157 pass together with the tunnel tests.
+
+**Files.**
+- `python_back_end/main.py`
+- `python_back_end/workspace/{kubectl_proxy.py,model_proxy.py}`
+- `python_back_end/tools/openclaw_proxy.py`
+- `python_back_end/artifacts/routes.py`
+- `python_back_end/plugins/exposure/mode.py`
+- `python_back_end/plugins/hermes_ui/sandbox.py`
+- `python_back_end/plugins/inference_nodes/{provision.py,routes.py}`
+- `docker-compose.yaml`
+- the three test files
+
+## Date: 2026-10-12 — Admins can see the cluster's services from Settings → Hosting (branch `harvis1.5`)
+
+**Problem.** On a Kubernetes install the Hosting page only listed the machines. To find out why a service was
+down (crash loops, image pulls, restarts), an admin had to SSH in and run kubectl.
+
+**Fix.** A new panel, "Services in the cluster", shows each Harvis deployment with a state (Running /
+Struggling / Down / Turned off), ready count, restarts, image tags and its pods. Broken services open by
+themselves. Each pod has an on-demand log tail (last 300 lines, with a before-restart option). The panel also
+lists jobs and backups, and the latest warning events. Passwords, tokens, JWTs, PEM blocks and DB URL
+passwords are redacted from logs and events. The panel is admin-only on both sides: the UI hides it, and
+the backend returns 403. It only shows in Kubernetes mode.
+
+**Backend.** `plugins/hosting/workloads.py` (new) reads deployments, pods and events, and fetches a pod's
+log tail. It goes through the generic `cluster.api_get`, so the service-account token stays in one header and
+errors come back as plain text. The namespace and log path are fixed server-side, and pod and container names
+must be DNS labels. New routes: `GET /api/capabilities/hosting/workloads` and `GET /api/capabilities/hosting/logs/{pod}`.
+Both are admin-only.
+
+**Kubernetes.** The installer adds a namespaced read-only Role `harvis-backend-viewer` (pods, pods/log, events,
+deployments: get and list only, with no secrets and no writes) bound to the backend's service account. To pick
+it up, an existing k8s install needs `./install.sh --k8s` re-run.
+
+**Tests.** `tests/test_hosting_workloads.py` is new: together with the hosting-mode tests, 35 pass. The k8s generator
+tests pass 60/60 (new: backend can only read its own namespace). UI hosting tests pass 10/10 (hidden for
+non-admins, hidden on Docker, states, auto-open, logs, error). tsc is at its 3-error baseline. A live
+check on Docker mode gave 403 for a non-admin on both routes and 401 with no auth.
+
+**Files.** `python_back_end/plugins/hosting/{cluster.py,workloads.py,routes.py}`,
+`python_back_end/tests/test_hosting_workloads.py`, `scripts/k8s/k8s_extras.py`, `scripts/k8s/test_compose_to_k8s.py`,
+`front_end/hermes-desktop-ui/src/app/settings/{harvis-api.ts,hosting-cluster.tsx,hosting-settings.tsx,hosting-settings.test.tsx}`.
+
+## Date: 2026-10-10 — Muting the mic in a voice call no longer silences Harvis (branch `harvis1.5`)
+
+**Problem.** In the Harvis voice call (titlebar orb / bubble) and the composer's voice conversation, pressing
+the mic-mute button made Harvis go quiet too.
+
+**Root cause.** `toggleMute` in `use-voice-conversation.ts` cancelled the recording while listening, so what the
+user had said was thrown away and no turn (and no spoken reply) followed. It also left the barge-in monitor
+running, so any sound from a muted user still cut Harvis's reply off.
+
+**Fix.** Muting is input-only. Muting mid-sentence counts as the user going quiet: the recording is transcribed
+and answered aloud (nothing said = go idle, mic stays closed). Muting closes the barge-in monitor unless it is
+mid-capture; unmuting mid-turn re-arms it. Mute state is written to its ref synchronously so the turn sees it.
+
+**Tests.** Three new cases in `use-voice-conversation.test.tsx` (mute while listening submits, mute with silence
+idles, mute mid-turn closes the monitor and unmute re-arms it). Voice hook tests 102/102; full UI suite at its
+27-failure baseline with no voice failures; tsc at its 3-error baseline. UI republished.
+
+**Files.** `front_end/hermes-desktop-ui/src/app/chat/composer/hooks/use-voice-conversation.ts`,
+`front_end/hermes-desktop-ui/src/app/chat/composer/hooks/use-voice-conversation.test.tsx`.
+
+## Date: 2026-10-09 — Cloud models hidden, Build Space opt-in on Kubernetes, browser walled off the LAN, Models page fixes (branch `harvis1.5`)
+
+**Problem.** Ollama lists `:cloud` models (e.g. `kimi-k2.6:cloud`) that send prompts to ollama.com; Harvis is
+local-first. Open items from the LAN security review: the Kubernetes backend mounted the host's docker.sock, the
+host's `/tmp` read-write, and the kubelet port 10250 was open to the LAN. In Docker mode the agent browser sat on
+`ollama-n8n-network` and could reach the LAN. On Kubernetes, the in-cluster Ollama ignored models already on the
+host. Paired (ollama-dialect) computers got no chat titles. A pairing that failed to save left the other computer
+paired with no way to retry. A test leaked `./'/tmp/...` folders.
+
+**Fix.**
+- `owui_compat/ollama_hosts.py` `is_cloud_model()`; every Ollama model list and default pick drops cloud models,
+  and a chat naming one gets a 400 (`workspace/model_proxy.py`, `main.py` `/api/chat`). `HARVIS_ALLOW_CLOUD_MODELS=1`
+  opts back in. The UI hides them too (`harvis-api.ts` `isCloudModel`).
+- `plugins/inference_nodes/taskgen.py` works for ollama-dialect nodes over `/v1/chat/completions` with the node token.
+  `routes.py`: a save failure after the computer accepted the PIN returns 500 with `needs_repair` and says to re-run
+  the helper with `--repair`.
+- Kubernetes (`scripts/k8s/`): docker.sock is dropped unless `HARVIS_K8S_BUILD_SPACE=1` (`k8s_build_space.py`; the
+  backend gets `HARVIS_BUILD_SPACE_DOCKER=0` and readiness names the switch); a read-write host `/tmp` becomes an
+  `emptyDir`; `k8s-firewall.sh` allows 10250 only from loopback, pod/service CIDRs and node IPs (6443 stays open,
+  token-authenticated), refreshed on `up`/`status`/`join-command`, removed by `off`/`uninstall`;
+  `k8s-host-ollama.sh` adds a host Ollama reachable at the node IP to `HARVIS_OLLAMA_HOSTS`
+  (`HARVIS_K8S_REUSE_HOST_OLLAMA=0` opts out). `k8s_extras.py` split into `k8s_common.py` and `k8s_models.py`.
+- Docker mode: `browser-runner` is on `browser-ctl` (internal, with backend and nginx) and `browser-egress`
+  (pinned `HARVIS_BROWSER_SUBNET`, default `10.213.83.0/28`). `scripts/browser-egress-lock.sh` drops that subnet's
+  traffic to private ranges and to the host (DNS to the host's resolvers allowed; `HARVIS_BROWSER_ALLOW_CIDRS`
+  opens a range). `install.sh` applies it in Docker mode; without root it warns and continues.
+- Hermes UI: `electron/remote-lifecycle.ts` no longer double-quotes the update-mutex path (it became a relative
+  path, so the remote lock never locked); `settings/index.tsx` split (`use-config-transfer.ts`); Models page error
+  texts, stale request rows and missing `models` fields fixed.
+
+**Tests.** Backend in the container: cloud models, taskgen, pairing save failure, pairing, inference nodes, Ollama
+hosts, model requests, first admin, exposure, tunnel — 301 passed, 1 skipped. `scripts/k8s`: 59 passed; rendered
+manifests byte-identical before and after the split. `scripts/test_browser_egress_lock.sh` ALL PASS;
+`docker compose config -q` passes; `bash -n` on all shell files. UI: `tsc` at the 3 known baseline errors; settings
+and remote-lifecycle vitest 470 passed.
+
+**Verified.** Laptop installed with `./install.sh --expose lan --yes`: nginx on `0.0.0.0:9000`, backend
+`HARVIS_EXPOSURE=lan`, page 200 from another machine on the LAN. `kimi-k2.6:cloud` removed from the laptop's Ollama.
+Backend restarted with the changes: `/api/config` 200, `is_cloud_model` true for `kimi-k2.6:cloud` and
+`gpt-oss:120b-cloud`, false for `gemma4:e4b` and `cloudy:latest`. The backend sees the four Gemma models. UI rebuilt
+and served. Not yet run for real: the iptables rules (browser and kubelet) and the k8s changes on a cluster.
+
+**Files.** `python_back_end/owui_compat/ollama_hosts.py`, `python_back_end/workspace/{model_proxy,harvis_readiness}.py`,
+`python_back_end/main.py`, `python_back_end/plugins/inference_nodes/{probe,taskgen,routes,moe}.py`, the other
+filtered model lists (`plugins/{models/resolver,hermes_ui/models,agents/models}.py`, `owui_compat/{integrations_status,hermes_chat}.py`,
+`onb_compat/router.py`, `workspace/{workspace_router,kimi_workspace}.py`, `integrations/discord_workspace_bot.py`,
+`notebooks/{router,rag_chat}.py`, `vibecoding/ide_ai.py`, `rag_corpus/routes.py`, `cookbook/router.py`,
+`vison_models/llm_connector.py`), `python_back_end/tests/{test_ollama_cloud_models,test_inference_taskgen,test_inference_node_pairing_save_failure}.py`,
+`scripts/k8s/{k8s_build_space,k8s_common,k8s_models,k8s_extras,compose_to_k8s,test_compose_to_k8s,test_harvis_k8s_sh}.py`,
+`scripts/k8s/{harvis-k8s,k8s-firewall,k8s-host-ollama}.sh`, `scripts/{browser-egress-lock,test_browser_egress_lock}.sh`,
+`docker-compose.yaml`, `install.sh`, `front_end/hermes-desktop-ui/electron/remote-lifecycle{,.test}.ts`,
+`front_end/hermes-desktop-ui/src/app/settings/{index.tsx,use-config-transfer.ts,harvis-api.ts,models-page.tsx,models-download.tsx,model-requests.tsx,add-computer.tsx,model-requests.test.tsx,cloud-model.test.ts}`.
+
+## Date: 2026-10-09 — First-admin code, shared-model limits, model requests, and pairing another computer by PIN (branch `harvis1.5`)
+
+**Problem.** The security pass on a LAN server found: anyone who reached an unclaimed shared server first became
+its admin; the shared Ollama had no per-visitor limits and showed its version; the agent browser could reach the
+LAN. Users also could not ask the admin for a model, and the only way to use another computer's GPU was to edit
+compose by hand.
+
+**Fix.**
+- `plugins/exposure/first_admin.py`: a shared, unclaimed server makes a 6-digit code, keeps only a salted hash in
+  `instance_settings`, and shows the code in the backend log and on the installer's last screen (to the terminal
+  only). Sign-up asks for it; five wrong codes retire it; `./install.sh --admin-code` (and `install.ps1 -AdminCode`)
+  prints a new one. A local install still makes the first account admin with no code; `HARVIS_SETUP_CODE` still wins.
+- Kubernetes: Ollama gets `OLLAMA_NUM_PARALLEL=2`, `MAX_QUEUE=32`, `MAX_LOADED_MODELS=2`, `NO_CLOUD=1`; the LAN
+  models proxy limits each address to 2 requests/s (burst 20) and 4 connections, a 16 MB body and a 300 s read, and
+  hides its version. Pods get seccomp RuntimeDefault, no privilege escalation and no NET_RAW (`k8s_harden.py`); the
+  agent browser may reach public addresses only (`--browser-allow-cidr` opens a private range).
+- `nginx.conf`: `server_tokens off`. `nginx-harvis.conf`: an unbuffered `/api/cookbook/download` so the progress
+  stream reaches the page as it happens. The cookbook download is admin-only on a shared server.
+- New `plugins/model_requests` + `migrations/021_model_requests.sql`: a member asks for a model; a second person
+  asking for the same one joins the open request. Limits: 3 new requests a day, 5 open, a 7-day wait after a deny,
+  all under a per-user lock. Admins list, approve and deny.
+- Another computer: `scripts/inference-node/harvis_node.py` runs on that computer, shows a 6-digit PIN on its own
+  screen, and after pairing forwards only Ollama's chat/model paths with a bearer token (5 wrong PINs rotate it).
+  `POST /api/inference-nodes/pair` (admin, 10 tries per 10 minutes) trades the PIN for the token and stores it
+  encrypted. `./install.sh --inference-node` / `--inference-node-service` and `install.ps1 -InferenceNode` start it.
+
+**Tests.** Backend in the container: first-admin, model requests, pairing, inference nodes, exposure, tunnel —
+236 passed, 1 skipped (the database test; 50/50 against a throwaway Postgres). Node helper: 27 passed. Generator:
+34 passed; rendered LAN conf and `nginx-harvis.conf` pass `nginx -t`; `install.sh` `bash -n`; `install.ps1` parses.
+
+**Verified.** A throwaway stack (Postgres, backend, a fake Ollama, the node helper): wrong PIN 403, right PIN paired,
+second pairing 409, the node's own model appeared in the model list and its chat went through the node; calling the
+node without the token gets 401. Model requests: 201, join 200, the fourth new request 429, member admin list 403,
+deny then re-ask 409. First-admin code: no code 403, wrong code 403, five wrong retired, new code worked, code gone.
+
+**Files.** `python_back_end/main.py`, `python_back_end/plugins/exposure/first_admin.py`,
+`python_back_end/plugins/model_requests/{__init__,routes,store}.py`, `python_back_end/migrations/021_model_requests.sql`,
+`python_back_end/plugins/inference_nodes/{pairing,routes,store}.py`, `python_back_end/cookbook/router.py`,
+`python_back_end/tests/{test_first_admin,test_model_requests,test_inference_node_pairing}.py`,
+`scripts/inference-node/{harvis_node,test_harvis_node}.py`, `scripts/k8s/{k8s_extras,k8s_harden,compose_to_k8s,test_compose_to_k8s}.py`,
+`scripts/k8s/harvis-k8s.sh`, `install.sh`, `install.ps1`, `nginx.conf`, `nginx-harvis.conf`,
+`front_end/hermes-desktop-ui/src/lib/harvis-session.ts`, `front_end/hermes-desktop-ui/src/app/sign-in/sign-in-screen.tsx`.
+
+## Date: 2026-10-09 — The Cloudflare tunnel is experimental and lives in its own package (branch `harvis1.5`)
+
+**Problem.** Kubernetes on the LAN is ready to hand to people; the tunnel is not (it has never carried a real
+Cloudflare connection). The tunnel's Access checks, origin gate and `/api/tunnel/verify` route sat inside
+`plugins/exposure` and were imported on every server, tunnel or not.
+
+**Fix.**
+- New `python_back_end/plugins/tunnel/` (`access.py`, `origin.py` moved from `plugins/exposure`; new `routes.py`
+  for `/api/tunnel/verify`, `signup.py` for the Access-email rules). It is imported only when `tunnel_on()`.
+- `plugins/exposure` keeps the LAN rules: the mode, the admin-only Build Space gate, the `JWT_SECRET` check, the
+  admin card (`/api/exposure`) and the sign-up/sign-in hooks, which hand off to `plugins.tunnel` only in a tunnel mode.
+  The card shows Cloudflare fields only in a tunnel mode.
+- `main.py` adds `TunnelOriginGate` and the tunnel router only in a tunnel mode. With the tunnel off, nginx's 8081
+  check gets a 404 and still refuses.
+- `install.sh`, `scripts/exposure.sh` and `install.ps1` label `tunnel` and `lan+tunnel` experimental in the help and
+  warn when one is chosen. `SECURITY.md` says the same.
+
+**Tests.** `tests/test_exposure.py` (LAN rules, plus a check that a `local`/`lan` server never imports
+`plugins.tunnel`) and new `tests/test_tunnel.py` (the Cloudflare rules): 88 passed.
+
+**Files.** `python_back_end/main.py`, `python_back_end/plugins/exposure/{__init__,mode,routes,signup}.py`,
+`python_back_end/plugins/tunnel/{__init__,access,origin,routes,signup}.py`, `python_back_end/tests/test_exposure.py`,
+`python_back_end/tests/test_tunnel.py`, `install.sh`, `install.ps1`, `scripts/exposure.sh`, `SECURITY.md`.
+
+## Date: 2026-10-08 — LAN and tunnel together, on Docker and Kubernetes; site presets stay off git (branch `harvis1.5`)
+
+**Problem.** A lab wants Harvis on its own network and, for named people, from the internet. `--expose` offered
+`lan` or `tunnel`, and Kubernetes mode refused the tunnel outright. Lab-specific defaults (network names, people)
+had been written into `install.sh`, which is public.
+
+**Fix.**
+- New mode `lan+tunnel` in `install.sh` and `install.ps1`: port 9000 on the network, sign-up closed, the tunnel
+  through cloudflared to nginx:8081 behind Cloudflare Access. `HARVIS_COOKIE_SECURE` is dropped; nginx's 8081
+  server marks the `access_token` cookie Secure (`proxy_cookie_flags`), so the http lane on 9000 keeps working.
+- Kubernetes: `--k8s --expose lan+tunnel` renders a cloudflared Deployment (read-only root, non-root, no
+  capabilities) and NetworkPolicies so cloudflared reaches only nginx:8081, DNS and Cloudflare's edge, and only
+  cloudflared reaches 8081. `tunnel` and `local` stay refused on Kubernetes. Switching back to `lan` deletes the
+  cloudflared objects. With a network lock, `scripts/tunnel-guard.sh` installs as a root system service that scales
+  cloudflared to 0 or 2; when the guard stops or dies the tunnel goes to 0.
+- `--preset NAME` reads `config/presets/NAME.env` (`EXPOSE`, `TUNNEL_NETWORKS`, `ALLOW_EMAILS`), which git ignores,
+  so a site's network names and people never enter the repo. Flags win; the networks and emails apply only when the
+  mode is a tunnel mode; the name is checked (no paths) and the file is read, never sourced.
+- `--k8s-off` runs the exposure checks before stopping Kubernetes; a failed check used to leave Harvis running
+  nowhere. Saved modes are compared in lower case in both installers.
+
+**Bugs found while testing on a 3-node k3s VM.**
+- nginx's resolver ignores search domains, and the FQDN rewrite skipped `nginx.conf` and addresses with a path, so
+  8081 answered 500 ("backend could not be resolved"). The rewrite now covers both (`k8s_extras.py`; new test).
+- Under systemd the guard had no `HOME` and `set -u` killed it at start, including its stop-on-exit hook; it now
+  has `HOME=/root` in the unit and a fallback in the script. kubectl had also left a root-owned `.kube` in the repo.
+
+**Files.** `install.sh`, `install.ps1`, `.gitignore`, `scripts/exposure.sh`, `scripts/exposure-lock.sh`,
+`scripts/exposure-tunnel.sh`, `scripts/tunnel-guard.sh`, `scripts/k8s/harvis-k8s.sh`, `scripts/k8s/k8s_tunnel.py`,
+`scripts/k8s/compose_to_k8s.py`, `scripts/k8s/k8s_extras.py`, `scripts/k8s/test_compose_to_k8s.py`, `nginx.conf`,
+`python_back_end/plugins/exposure/`, `python_back_end/tests/test_exposure.py`, `SECURITY.md`.
+
+**Verified.**
+- On the k3s VM, from a pod labelled cloudflared: nginx:8081 answers 403 without Access. nginx:80, the backend,
+  Postgres, Ollama, the node's 9000, the Kubernetes API, the metadata address and port 80 on the internet are all
+  refused; Cloudflare's 7844 and 443 are open.
+- From an unlabelled pod, 8081 is refused, and from the LAN it does not answer.
+- cloudflared ran under the read-only root with a made-up token, and Cloudflare refused it.
+- The guard as a system service: leaving the allowed network, a hand scale-up while off it, `systemctl stop`
+  and `kill -9` each put cloudflared at 0; back on the network it returns to 2; uninstall leaves 0.
+- A throwaway nginx showed `Secure` added to `access_token` on 8081 only.
+- Preset cases run in bash: defaults, flags before and after, `--expose lan`, a missing file, a path as name, an
+  unknown key, and a CRLF file. `--k8s-off` with a failing check stops before teardown.
+- Tests: `test_compose_to_k8s.py` 29 passed (the new one fails without the fix), and `test_exposure.py` 82 passed.
+  `install.ps1` parses in pwsh 7.4.
+
+**Verifier fixes (same day).** Independent reviewers found these; each was fixed and re-run on the k3s VM.
+- A pod sharing a compose network with nginx could open 8081, because the `net-*` policies are additive with
+  `public-nginx`. Those policies now exclude nginx, so only cloudflared reaches 8081 (new test; on the VM a
+  shared-network pod went from OPEN to refused on 8081, while 80, the backend and Ollama stayed open to it).
+- The guard took about 50 s per check with the Kubernetes API down (a timeout per discovery call). One `/readyz`
+  probe now decides first. With the API down it stops cloudflared through the runtime, and with k3s stopped (its
+  containers keep running) it kills the cloudflared process found by its bundle, checking the pid's cgroup first.
+  On the VM, with k3s stopped, the tunnel process was gone within 1 s and the other 25 Harvis containers kept running.
+- Leaving a tunnel mode on Kubernetes now deletes cloudflared at once instead of at the next install.
+- `report_tunnel` no longer calls a 0-copy rollout "running"; it needs a ready copy. A guard that fails to install
+  is reported.
+- The backend's Access check crashed on a key python-jose cannot read (`JWKError` is not a `JWTError`); it now
+  catches `JOSEError` and refuses. A 30 s leeway accepts tokens from a host clock slightly behind (2 new tests).
+- Both installers warn when `.env` keeps `HARVIS_OWUI_ENABLE_SIGNUP=true` on a shared mode.
+- `SECURITY.md`: under Docker cloudflared can still reach the host and LAN by address; the `lan+tunnel` row; the
+  Kubernetes default; the guard's behaviour with the API or k3s down.
+
+Tests after these: `test_compose_to_k8s.py` 30 passed (locally and on the VM), `test_exposure.py` 84 passed,
+`bash -n` on the scripts, `install.ps1` 0 parse errors in pwsh 7.4, and no lab names in tracked files.
+
+**The network lock no longer requires an email list.** A site can lock the tunnel to its networks and let its
+Cloudflare Access policy alone decide who gets in; the preflight warns instead of failing. A preset can say
+`ALLOW_EMAILS=off` to keep no list and clear an old one. Files: `scripts/exposure-lock.sh`, `install.sh` (help),
+`SECURITY.md`.
+
+**End-to-end on the k3s VM with the real installer** (`./install.sh --k8s --preset NAME`, made-up Cloudflare values):
+exit 0, every service ready, the access row a warning, the old email list removed from `.env`, cloudflared at 0 off
+the allowed networks. Renaming the VM's network profile to an allowed name brought cloudflared to 2 copies in 2 s
+(Cloudflare refused the made-up token); renaming it back took it to 0 in 2 s. From the LAN only 9000 (302) and
+11434 answer; 8081, 80, 8000 and 5432 do not. Inside nginx, 8081 answers 403 with no token and with a forged one.
+Sign-up is closed. `./install.sh --k8s --expose lan` then removed the guard service, the cloudflared Deployment and
+its policies, and Harvis came back up.
+
+**Still open.** Port 9000 is open on whatever network the machine is on; on an unclaimed install the first sign-up
+becomes admin (the host-shown admin code is the planned fix). Old tunnel keys stay in `.env` after leaving a
+tunnel mode. Ollama's LAN models port (11434) has no sign-in, and the backend still mounts the Docker socket.
+The Access email is checked at sign-in only, not on each request of an existing session.
+
+## Date: 2026-10-07 — Five fixes before the tunnel goes live (branch `harvis1.5`)
+
+**Problem.** The 2026-10-06 hosting audit found five things to fix before the Cloudflare tunnel faces the internet:
+sign-up stayed open in tunnel mode, `.env` (JWT secret, database password, tunnel token) was readable by every account
+on the machine, cloudflared shared a network with the backend, Ollama and the database, nothing stopped a tunnel
+pointed at nginx's port 80 instead of 8081, and any signed-in user could pull models onto a shared server.
+
+**Fix.**
+- Sign-up: `--expose lan|tunnel` (and `install.ps1`) set `HARVIS_OWUI_ENABLE_SIGNUP=false` when it is unset; an
+  operator who chose open sign-up keeps it. The tunnel preflight warns when no `--allow-emails` list is set.
+- `.env` is `chmod 600` every time `install.sh` writes it (Windows unchanged: it inherits the profile's ACL).
+- cloudflared moved to its own `tunnel-edge` network, shared only with nginx, so a public hostname routed anywhere
+  but `http://nginx:8081` reaches nothing. The network gets a fixed /29 (`HARVIS_TUNNEL_SUBNET`) so Docker never
+  picks a range itself; the installers choose the first /29 in 10.213.82.0/24 that no Docker network or host route
+  uses and keep it in `.env`, so a second stack on the same machine does not collide.
+- nginx answers 403 to any request carrying `CF-Ray` on port 80 and on the HTTPS listener template.
+- `POST /api/cookbook/download` is admins-only on lan/tunnel (`require_build_space` gained a `detail` message).
+
+**Files.** `scripts/exposure.sh`, `scripts/exposure-lock.sh`, `install.sh`, `install.ps1`, `docker-compose.yaml`,
+`nginx.conf`, `nginx/tls/harvis-tls.conf.template`, `python_back_end/cookbook/router.py`,
+`python_back_end/plugins/exposure/gate.py`, `python_back_end/tests/test_exposure.py`.
+
+**Verified.** `test_exposure.py` 79 passed (4 new; the shared-mode cases fail without the fix); sign-up
+close/reopen round trip run in bash and in a pwsh 7.4 container;
+`test_compose_to_k8s.py` 23 passed; `bash -n` on the scripts; `install.ps1` parses with 0 errors and the subnet
+chooser was exercised in a pwsh 7.4 container; `nginx -t` passes with the HTTPS listener enabled, and a throwaway
+nginx answered 302 normally and 403 with `CF-Ray` on both 80 and 443.
+
+**Verifier fixes (Opus review, same day).**
+- Going back to `--expose local` reopens sign-up, but only when the installer closed it
+  (`HARVIS_SIGNUP_CLOSED_BY_EXPOSE` marker); an operator's own setting stays.
+- The subnet picker took the project name from a merged config that was already deleted, so a second stack in a
+  folder also named `Harvis` copied the first stack's /29 and nginx failed with "Pool overlaps". It now uses
+  `HARVIS_STACK_NAME` (environment, then `.env`, default `harvis`).
+- `install.sh` refreshes an existing `nginx/tls/harvis-tls.conf` from the template, so installs that already ran
+  `enable-https.sh` get the CF-Ray refusal on 443 too.
+
+**Still open.** tunnel-edge is not an internal network (cloudflared needs the internet), so cloudflared can still
+reach the host through the bridge gateway (for example host Ollama bound to 0.0.0.0) and the LAN, if someone with
+the Cloudflare account routes a hostname to such an address on purpose. Closing that needs an egress firewall in
+cloudflared's network namespace. `/api/models/unload`, `/reload` and `/auto-cleanup` still take no sign-in (from the
+2026-10-06 audit).
+
+## Date: 2026-10-05 — No setup code on lan and tunnel either (branch `harvis1.5`)
+
+**Problem.** The first-admin setup code was removed on 2026-08-25, but the exposure work brought it back: `--expose
+lan|tunnel` (and every `--k8s` install) generated a `HARVIS_SETUP_CODE`, and the backend refused the first sign-up on a
+shared server without one. The person installing had to dig a code out of `.env` to make their own account.
+
+**Fix.** Nothing generates a code any more and the backend no longer demands one in lan/tunnel. The first sign-up
+becomes admin everywhere; on lan/tunnel self-serve sign-up then closes, and tunnel sign-up still has to use the email
+Cloudflare Access verified. Setting `HARVIS_SETUP_CODE` by hand still turns the gate on (unchanged opt-in).
+
+**Files.** `scripts/exposure.sh` (`ensure_setup_code` removed), `install.ps1`, `install.sh` (help text),
+`python_back_end/plugins/exposure/signup.py` (`first_signup_allowed` removed), `python_back_end/main.py`,
+`python_back_end/plugins/exposure/mode.py`, `python_back_end/tests/test_exposure.py`, `docker-compose.yaml`, `SECURITY.md`.
+
+**Note.** Installs that already got a generated code keep it until the `HARVIS_SETUP_CODE` line is deleted from `.env`.
+
+## Date: 2026-10-05 — Tunnel lab profile: named people, named networks (branch `harvis1.5`)
+
+**Problem.** The tunnel had one setting for everyone: the Cloudflare Access policy decided who got in, and the
+installer only warned about eduroam. A lab can want stricter rules: the tunnel runs only on the lab
+networks it names, never on eduroam, and only named people get through. Other adopters should keep
+the standard setup and configure their own.
+
+**Fix.** Two opt-in settings; without them nothing changes (the regular profile).
+- `--allow-emails` / `-AllowEmails` → `HARVIS_CF_ACCESS_ALLOWED_EMAILS` (emails, or `@domain`). Enforced in
+  `plugins/exposure/access.py` `verify()`, so the nginx `auth_request` route, the origin gate and sign-up/sign-in
+  all refuse a valid Access token for anyone else. Service tokens (no email) are refused when a list is set.
+  `/api/exposure` reports how many entries, never the list.
+- `--tunnel-networks` → `HARVIS_TUNNEL_NETWORKS` (Linux + NetworkManager). New `scripts/tunnel-guard.sh`
+  (`check|enforce|hold|watch|stop|install|uninstall|status|installed`) runs as a systemd user service and keeps
+  cloudflared running only while every interface holding a default route (IPv4 and IPv6) is on the list: Wi-Fi by
+  the SSID it is connected to, anything else by the connection name. Connecting, unnamed, no route or no nmcli
+  all stop the tunnel. Under the lock `tunnel` leaves `COMPOSE_PROFILES`, cloudflared gets restart policy `no`
+  (`HARVIS_TUNNEL_RESTART`, read by compose), and the unit's `ExecStopPost` stops the tunnel whenever the guard
+  is not running. A tunnel already up from the regular profile is stopped at write time if this network is not
+  on the list, before the rebuild. The lock requires the email list (preflight FAIL otherwise).
+- New `scripts/exposure-lock.sh` (sourced by `exposure.sh`) holds the flags, validation, preflight rows, `.env`
+  writes and guard install/removal. Leaving tunnel mode or dropping the lock removes the service.
+- `install.ps1`: `-AllowEmails`; refuses tunnel mode when `.env` carries `HARVIS_TUNNEL_NETWORKS`, instead of
+  running the tunnel on any network, and drops a leftover `HARVIS_TUNNEL_RESTART`.
+
+**Verifier fixes (Opus review, same day).**
+- A running guard re-reads the list from `.env` on every check, so changing `--tunnel-networks` cannot leave an
+  old guard restarting the tunnel on a network just removed from the list.
+- The guard starts the tunnel through `docker compose up --no-deps cloudflared`, not `docker start`, so a new
+  token or image is applied (rotating a leaked token works under the lock).
+- Removing the lock deletes the container, so the regular profile gets its restart policy back (it used to stay
+  `no` and not return after a reboot).
+- A burst of network events can delay a check by about 3 seconds at most; it used to postpone it indefinitely.
+- `--tunnel-networks off` on an install that is not in tunnel mode only drops the key; it used to re-apply the
+  recorded mode and could close an open legacy install.
+- Also checks the interface that carries traffic to Cloudflare's edge (VPN split routes), stops the tunnel with
+  `kill` (no seconds of graceful drain on the wrong network), passes `DOCKER_HOST` into the service, warns about a
+  wired profile not tied to one adapter, and refuses non-ASCII emails when a list is set (`lower()` folds the
+  Kelvin sign into `k`).
+- `SECURITY.md`: both profiles, linger, and what the lab profile does not cover.
+
+**Verified.** `test_exposure.py` 75 passed (5 new); full backend suite 1437 passed, 13 skipped
+(`test_mcp_server_auth.py` deselected as before; `test_people_model_routes.py::test_trace_and_teammate_launches_face_the_limits`
+fails intermittently against the live database, 2 of 4 full runs, and passes alone — unrelated to this change).
+Each verifier finding was reproduced before the fix and re-run after it. The guard against fake `ip`/`nmcli`/`docker` across 14+
+network cases plus the watch loop; the installer simulated across 12 transitions; `install.ps1` parsed and its new
+functions exercised under PowerShell 7.4. Not yet run on a real NetworkManager/systemd host.
+
+**Files.** `python_back_end/plugins/exposure/access.py`, `mode.py`, `python_back_end/tests/test_exposure.py`,
+`docker-compose.yaml`, `scripts/tunnel-guard.sh` (new), `scripts/exposure-lock.sh` (new), `scripts/exposure.sh`,
+`install.sh`, `install.ps1`, `SECURITY.md`.
+
+## Date: 2026-10-05 — A new install is private until you share it (branch `harvis1.5`)
+
+**Problem.** A plain install published port 9000 (and 9443) on every address. On a shared network such as
+campus eduroam, anyone could reach the sign-in page, and on an unclaimed install the first sign-up becomes
+admin. A leftover `HARVIS_BIND_ADDR=0.0.0.0` also opened the backend (8000), notebook (5055/8502) and TTS ports
+with no sign-in at all, and in `lan` mode the installer said nothing about it.
+
+**Fix.** Who can reach Harvis now follows the host when `--expose` is left out:
+- A first install is `local`: port 9000 on 127.0.0.1 only.
+- `--k8s` is always `lan`: on the network, with sign-up closed once the admin exists. A recorded
+  `local` no longer stops `--k8s`; a recorded `tunnel` fails the preflight. `harvis-k8s.sh` itself now always
+  publishes port 9000, so running it directly cannot render a cluster nobody can reach.
+- An install whose running nginx publishes port 9000 to the network, with no recorded choice, keeps it open
+  (pinned in `.env`) and gets a warning. A recorded `lan` whose bind is missing is re-applied.
+- `--expose local` or `--expose tunnel` removes `HARVIS_BIND_ADDR=0.0.0.0`; without a flag the installer warns
+  and says how to remove it.
+- The install summary and `enable-https.sh` no longer list network addresses for a `local` install; they say
+  to run `--expose lan` first. The summary goes by the real bind, so a kept-open install is not called private.
+- `--k8s-off` on a Kubernetes install that recorded no choice keeps port 9000 open with a warning (Kubernetes
+  had it on the network). `--k8s-off --expose tunnel` no longer stops after teardown when the tunnel values
+  were typed at the prompt.
+- `exposure.sh` runs on macOS bash 3.2 (no `${v,,}`), reads a CRLF `.env`, and accepts `LAN`/`Tunnel`.
+
+The compose default for port 9000/9443 is now 127.0.0.1. So a `docker compose up` without the installer is
+private unless `.env` sets `HARVIS_BIND_ADDR_PUBLIC`. `install.ps1` follows the same rules.
+
+**Trade-off (fails closed on purpose).** An older install that is down while upgrading, or that is started
+with plain `docker compose up`, `build-and-run.sh` or `enable-https.sh` instead of the installer, comes back on
+127.0.0.1 if `.env` has no `HARVIS_BIND_ADDR_PUBLIC`. Its network users lose access until the owner runs
+`./install.sh --expose lan`. Existing Kubernetes installs move to the `lan` rules on their next `--k8s`.
+The 2026-10-03 entry's "without the flag nothing changes" no longer holds.
+
+**Ollama hosts review fixes (same day).**
+- A user's own saved Ollama URL that is not one of the operator's machines is never re-routed.
+- A saved API key is not sent to another machine.
+- `qwen3` and `Qwen3` match `qwen3:latest`.
+- Voice warm-up loads a preferred model on the machine chat will use.
+- The Hermes-model check probes all machines at once.
+- A `DESKTOP_OLLAMA_URL` repeated in `HARVIS_OLLAMA_HOSTS` logs a warning.
+
+**Files.** `docker-compose.yaml`, `scripts/exposure.sh`, `install.sh`, `install.ps1`,
+`scripts/k8s/harvis-k8s.sh`, `scripts/enable-https.sh`, `SECURITY.md`,
+`python_back_end/owui_compat/ollama_hosts.py`, `owui_compat/cad_generate.py`, `workspace/model_proxy.py`,
+`workspace/workspace_router.py`, `plugins/hermes_ui/voice_warm.py`, `tests/test_ollama_hosts.py`,
+`tests/test_voice_warm.py`, `tests/test_inference_nodes.py`.
+
+**Result.** The installer was simulated for ten host cases with a fake `docker` (fresh, worktree beside an
+old database, open and localhost-only nginx, `lan` missing its bind, Kubernetes with `lan`, `local` and
+`tunnel` recorded, stray `HARVIS_BIND_ADDR`), and each landed as described. The running-nginx check was also
+run read-only against this laptop's live stack, where it correctly ignored a stopped leftover container. `install.ps1` parses under PowerShell 7.4. The backend suite passed: 1432 passed, 13 skipped.
+
+## Date: 2026-10-05 — Model machines of any kind, any number (branch `harvis1.5`)
+
+**Problem.** Harvis could use exactly one extra Ollama machine, called "desktop" and shown to every user as
+"Desktop 5080". A Mac Studio, a second PC or a lab GPU box could not be added alongside it, and other adopters saw
+our hardware name in their picker.
+
+**Root cause.** "laptop" and "desktop" were hard-coded in seven places (chat routing twice, the `auto` model
+check, Build Space runs and planning, the provider list, Discord's model list, voice warm-up), each with its own
+copy of the probe.
+
+**Fix.** `owui_compat/ollama_hosts.py` owns one list of machines and every lane reads it. Add machines with
+`HARVIS_OLLAMA_HOSTS`, for example `studio=http://192.168.1.20:11434|label=Mac Studio|prefer=llama3.3+gemma4`
+(comma-separate several, or use a JSON array). This machine still serves any model it has; a model it lacks goes
+to the first listed machine that has it; `prefer=` sends named models to that machine even when this one has
+them too. `DESKTOP_OLLAMA_URL` still works, labelled by `DESKTOP_OLLAMA_LABEL` (default "Second machine"). Labels
+never show the URL. With no extra machines nothing is probed and nothing changes. A Build Space run for a model
+that is only on a machine that is not answering now says which machine is down.
+
+**Files.** `python_back_end/owui_compat/ollama_hosts.py`, `workspace/model_proxy.py`, `workspace/kimi_workspace.py`,
+`workspace/workspace_router.py`, `integrations/discord_workspace_bot.py`, `plugins/hermes_ui/voice_warm.py`,
+`main.py`, `docker-compose.yaml`, `tests/test_ollama_hosts.py`.
+
+**Result.** 27 Ollama-host tests pass; full suite 1424 passed. Live in the backend with a pretend Mac Studio and
+an unreachable lab box: local models stayed local, the Mac-Studio-only model went to the Mac Studio, and the
+lab box's model was reported as "not answering" rather than missing.
+
+## Date: 2026-10-05 — A linked model machine no longer takes over your own models (branch `harvis1.5`)
+
+**Problem.** Linking a second model machine (a lab 4090) as an inference node broke the laptop's own
+models. Chats for `gemma4:e4b`, `qwen3` and other names both machines carry went to the 4090, and when the 4090
+was out of reach they failed with "served by inference node … which is unreachable", though the laptop had the
+model.
+
+**Root cause.** `model_proxy._resolve_route` asks the inference nodes before Ollama, and
+`plugins/inference_nodes/probe.resolve` claimed any name a node served or had last served, never checking
+whether this install's own Ollama had it. The plugin's own docstring says nodes are for names Ollama does not
+know.
+
+**Fix.** `probe.resolve` asks `owui_compat.ollama_hosts` first; if a local Ollama host has the model it returns
+`(None, "local")` and the chat stays local. Names only the linked machine has still go to it, and still say
+"unreachable" when it is down. The same rule now feeds the runner's context-window lookup.
+
+**Files.** `python_back_end/plugins/inference_nodes/probe.py`, `python_back_end/tests/test_inference_nodes.py`.
+
+**Result.** 46 node and Ollama-host tests pass; full suite 1410 passed. Live in the backend with a pretend
+4090 that also carries `gemma4:e4b`: up or down, `gemma4:e4b` goes to the laptop's Ollama; `gemma4:31b` (4090
+only) goes to the 4090 when up and returns a clear 503 when down.
+
+## Date: 2026-10-03 — Choose who can reach Harvis: `--expose local|lan|tunnel` and a Cloudflare Tunnel entrance (branch `harvis1.5`)
+
+**Problem.** A lab 4090 has to be reachable from outside the lab without opening a router port or
+crossing eduroam. Every install also published port 9000 on all addresses, so the first person on the network to
+sign up became admin, and anyone signed in could run code on the host.
+
+**Root cause.** There was no notion of who a server is shared with: one set of rules for a laptop and a lab box.
+
+**Solution.** `HARVIS_EXPOSURE` (`local` default, `lan`, `tunnel`) read by `python_back_end/plugins/exposure/`.
+A shared server refuses to start on a weak `JWT_SECRET`, keeps Build Space
+(code execution, including Discord code threads) for admins, and in tunnel mode checks the Cloudflare Access token
+on every request. nginx has a second entrance on 8081 (never published) that only lets requests through when the
+backend accepts the Access token; `cloudflared` runs under the `tunnel` compose profile. `install.sh --expose` /
+`install.ps1 -Expose` write the `.env` keys, ask for the tunnel token, team domain and AUD tag, and warn about
+eduroam, a blocked port 7844, and a Docker network that hides the router. Kubernetes mode refuses `tunnel` and
+`local`. Without the flag nothing changes; a default install now shows a WARN row saying port 9000 is open.
+
+**Files.** `scripts/exposure.sh` (new), `install.sh`, `install.ps1`, `scripts/k8s/harvis-k8s.sh`, `nginx.conf`,
+`docker-compose.yaml`, `python_back_end/plugins/exposure/` (new), `main.py`, `owui_compat/{router,connections,
+workspace_bridge}.py`, `plugins/hermes_ui/{rest_capabilities,rest_sandbox_apps}.py`,
+`workspace/workspace_router.py`, `vibecoding/commands.py`, `tests/test_exposure.py` (new), `SECURITY.md`.
+
+**Result.** 45 exposure tests pass; full backend suite 1382 passed (one live-backend test is order-dependent and
+passes alone). Live: 9000 serves the app, the 8081 entrance answers 403 to a forged token. Two review passes found
+and fixed: a VPN default route crashing preflight, `.env` corruption without a final newline, Cloudflare key
+refetch on every forged key id, tokens without aud/exp, a sign-in lockout through the tunnel, and the Discord
+Build Space bypass.
+
+**Follow-up lockdown (same day).** The old vibe command runner (`/api/vibe/command`, `/api/ws/vibe`) ran shell
+commands in the backend, which holds docker.sock, with no sign-in; both are now disabled like `/api/run-command`.
+`/api/vibe-coding` and `/api/voice-transcribe` need a sign-in. In tunnel mode, any request Cloudflare stamped
+(`CF-Ray`) must carry a valid Access token wherever it arrives (`plugins/exposure/origin.py`), so a public hostname
+routed to `backend:8000` or `nginx:80` by mistake fails closed instead of skipping Access. A sign-in through Access
+must use the Access email, checked before the password so the answer says nothing about it. Sandbox apps no longer
+receive the visitor's Access token. 53 exposure tests; full suite 1391 passed. A rehearsal with the real nginx
+config, the real exposure code and test-signed tokens on an isolated network: no, forged, expired and wrong-app
+tokens 403; a valid one passes with the visitor's IP, POST bodies and WebSockets; both misroutes 403.
+
+**Regular users keep their own runs.** The admin gate covered all of `/api/workspace/`, so on a shared server a
+non-admin's image generation (which runs as a workspace run, not through the launch route) never showed its
+picture, and the Notebooks model list came back empty. `gate.py` now leaves open the read routes whose handlers
+only return the caller's own runs (providers, history, stream, status, events, artifacts) plus cancel. Launch,
+rerun, approvals, repo, files and vibecode stay admin-only. The cloud-Ollama "offline" reason no longer prints
+the server's `EXTERNAL_OLLAMA_URL`. 70 exposure tests; full suite 1408 passed (the 13
+`test_mcp_server_auth.py` failures are the known pip `mcp` name clash inside the container).
+
 ## Date: 2026-10-02 — Attach files in the browser UI; plain chat can drive the browser (branch `harvis1.5`)
 
 **Problem.** The browser Hermes UI could not attach files, and "scroll Instagram for me" only worked through a

@@ -44,7 +44,9 @@ async def probe_services(request: Request, user) -> tuple[dict, list]:
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as hc:
             r = await hc.get(f"{ollama_url}/api/tags")
         if r.status_code == 200:
-            models = (r.json() or {}).get("models", []) or []
+            from .ollama_hosts import drop_cloud
+
+            models = drop_cloud((r.json() or {}).get("models", []) or [])
             installed_models = [
                 str(m.get("name") or m.get("model") or "")
                 for m in models

@@ -68,6 +68,7 @@ import {
   openReview,
   REVIEW_PANE_ID
 } from '@/store/review'
+import { $serverCapabilities, hasCapability } from '@/store/server-capabilities'
 import { $currentCwd, $selectedStoredSessionId, $sessions, $yoloActive, sessionMatchesStoredId } from '@/store/session'
 import { watchSessionPins } from '@/store/session-pin-sync'
 import { watchUnreadWriteGuard } from '@/store/session-unread-remote'
@@ -687,21 +688,40 @@ registerPaneOpener('logs', () => $logsOpen.set(true))
 syncLogsPane($logsOpen.get())
 $logsOpen.listen(syncLogsPane)
 
-registry.register(
-  paletteToggle({
-    id: 'logs.toggle',
-    label: 'Toggle logs',
-    icon: FileText,
-    keywords: ['logs', 'agent log', 'tail', 'debug'],
-    // On-screen, not the store's boolean. Summon-only keeps the two in step
-    // while logs sits in its own zone, but the user can still drag it into the
-    // terminal's strip or minimize its zone — and then `$logsOpen` reads true
-    // with nothing visible, so the row would show "on" and its press would
-    // spend itself re-asserting a value it already held.
-    get: () => isPaneVisible('logs'),
-    set: () => togglePaneVisible('logs')
-  })
-)
+const logsToggle = () =>
+  registry.register(
+    paletteToggle({
+      id: 'logs.toggle',
+      label: 'Toggle logs',
+      icon: FileText,
+      keywords: ['logs', 'agent log', 'tail', 'debug'],
+      // On-screen, not the store's boolean. Summon-only keeps the two in step
+      // while logs sits in its own zone, but the user can still drag it into the
+      // terminal's strip or minimize its zone — and then `$logsOpen` reads true
+      // with nothing visible, so the row would show "on" and its press would
+      // spend itself re-asserting a value it already held.
+      get: () => isPaneVisible('logs'),
+      set: () => togglePaneVisible('logs')
+    })
+  )
+
+// The log tail is admin-only on Harvis, so the row exists only while this server
+// says the person may read logs (capability flags arrive after boot, hence the listener).
+{
+  let unregisterLogsToggle: (() => void) | null = null
+
+  const syncLogsToggle = () => {
+    if (hasCapability('logs')) {
+      unregisterLogsToggle ??= logsToggle()
+    } else {
+      unregisterLogsToggle?.()
+      unregisterLogsToggle = null
+    }
+  }
+
+  syncLogsToggle()
+  $serverCapabilities.listen(syncLogsToggle)
+}
 
 // Hide-only chrome tabs (sessions / Bots) get a ⌘K toggle each — the palette
 // door onto the same show/hide the zone menu offers. Auto-registered from the

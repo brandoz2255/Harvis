@@ -853,7 +853,10 @@ done
       logPath
     })
 
-    await exec(command, { shell: '/bin/bash' })
+    await exec(command, { shell: '/bin/bash', cwd: directory })
+
+    // The mutex must land at the real absolute path, not a quote-mangled relative one.
+    await readFile(path.join(directory, 'home', '.hermes-update-in-progress.mutex'))
 
     for (let attempt = 0; attempt < 40; attempt += 1) {
       try {

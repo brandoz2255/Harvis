@@ -25,6 +25,7 @@ import { cn } from '@/lib/utils'
 import { upsertDesktopActionTask } from '@/store/activity'
 import { confirm } from '@/store/confirm'
 import { notify, notifyError } from '@/store/notifications'
+import { useCapability } from '@/store/server-capabilities'
 import type { ActionStatusResponse } from '@/types/hermes'
 
 const ACTION_POLL_MS = 1200
@@ -54,6 +55,15 @@ export function MaintenancePanel() {
   const { t } = useI18n()
   const mm = t.commandCenter.maintenance
 
+  // Each action is offered only when this server provides it (see store/server-capabilities).
+  const canDoctor = useCapability('doctor')
+  const canAudit = useCapability('security_audit')
+  const canBackup = useCapability('backup')
+  const canShare = useCapability('debug_share')
+  const canCurate = useCapability('curator')
+  const canResetMemory = useCapability('memory_reset')
+  const hasOps = canDoctor || canAudit || canBackup || canShare
+
   const [actionName, setActionName] = useState<null | string>(null)
   const [actionStatus, setActionStatus] = useState<ActionStatusResponse | null>(null)
   const [curator, setCurator] = useState<CuratorStatusResponse | null>(null)
@@ -67,15 +77,18 @@ export function MaintenancePanel() {
   useEffect(() => {
     let cancelled = false
 
-    getCuratorStatus()
-      .then(next => !cancelled && setCurator(next))
-      .catch(() => {})
+    if (canCurate) {
+      getCuratorStatus()
+        .then(next => !cancelled && setCurator(next))
+        .catch(() => {})
+    }
+
     getMemoryStatus()
       .then(next => !cancelled && setMemory(next))
       .catch(() => {})
 
     return () => void (cancelled = true)
-  }, [])
+  }, [canCurate])
 
   // Tail the most recently launched spawn action.
   useEffect(() => {
@@ -198,119 +211,131 @@ export function MaintenancePanel() {
         </span>
       )}
 
-      <section>
-        <SectionLabel>{mm.runOps}</SectionLabel>
-        <OpRow
-          description={mm.doctorDesc}
-          disabled={actionStatus?.running === true}
-          label={mm.doctor}
-          onRun={() => void launch(mm.doctor, runDoctor)}
-        />
-        <OpRow
-          description={mm.securityAuditDesc}
-          disabled={actionStatus?.running === true}
-          label={mm.securityAudit}
-          onRun={() => void launch(mm.securityAudit, runSecurityAudit)}
-        />
-        <OpRow
-          description={mm.backupDesc}
-          disabled={actionStatus?.running === true}
-          label={mm.backup}
-          onRun={() => void launch(mm.backup, runBackup)}
-        />
-        <OpRow
-          description={mm.debugShareDesc}
-          disabled={sharing}
-          label={sharing ? mm.debugShareRunning : mm.debugShare}
-          onRun={() => void shareDebug()}
-        />
+      {hasOps && (
+        <section>
+          <SectionLabel>{mm.runOps}</SectionLabel>
+          {canDoctor && (
+            <OpRow
+              description={mm.doctorDesc}
+              disabled={actionStatus?.running === true}
+              label={mm.doctor}
+              onRun={() => void launch(mm.doctor, runDoctor)}
+            />
+          )}
+          {canAudit && (
+            <OpRow
+              description={mm.securityAuditDesc}
+              disabled={actionStatus?.running === true}
+              label={mm.securityAudit}
+              onRun={() => void launch(mm.securityAudit, runSecurityAudit)}
+            />
+          )}
+          {canBackup && (
+            <OpRow
+              description={mm.backupDesc}
+              disabled={actionStatus?.running === true}
+              label={mm.backup}
+              onRun={() => void launch(mm.backup, runBackup)}
+            />
+          )}
+          {canShare && (
+            <OpRow
+              description={mm.debugShareDesc}
+              disabled={sharing}
+              label={sharing ? mm.debugShareRunning : mm.debugShare}
+              onRun={() => void shareDebug()}
+            />
+          )}
 
-        {share && Object.keys(share.urls).length > 0 && (
-          <div className="mt-2 rounded-lg border border-(--ui-stroke-tertiary) bg-(--ui-bg-quinary) p-3">
-            <div className="mb-1.5 text-[0.68rem] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-              {mm.debugShareLinks}
-            </div>
-            {Object.entries(share.urls).map(([key, url]) => (
-              <div className="flex items-center justify-between gap-2 py-1" key={key}>
-                <span className="min-w-0 truncate font-mono text-[0.7rem]">
-                  {key}: {url}
-                </span>
-                <Button
-                  onClick={() => {
-                    void window.hermesDesktop.writeClipboard(url)
-                    notify({ durationMs: 1500, kind: 'success', message: mm.linkCopied })
-                  }}
-                  size="xs"
-                  variant="text"
-                >
-                  {mm.copyLink}
-                </Button>
+          {share && Object.keys(share.urls).length > 0 && (
+            <div className="mt-2 rounded-lg border border-(--ui-stroke-tertiary) bg-(--ui-bg-quinary) p-3">
+              <div className="mb-1.5 text-[0.68rem] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+                {mm.debugShareLinks}
               </div>
-            ))}
-          </div>
-        )}
+              {Object.entries(share.urls).map(([key, url]) => (
+                <div className="flex items-center justify-between gap-2 py-1" key={key}>
+                  <span className="min-w-0 truncate font-mono text-[0.7rem]">
+                    {key}: {url}
+                  </span>
+                  <Button
+                    onClick={() => {
+                      void window.hermesDesktop.writeClipboard(url)
+                      notify({ durationMs: 1500, kind: 'success', message: mm.linkCopied })
+                    }}
+                    size="xs"
+                    variant="text"
+                  >
+                    {mm.copyLink}
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
 
-        {actionStatus && (
-          <div className="mt-2">
-            <div className="mb-1.5 flex items-center gap-2 text-[0.68rem] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-              {mm.viewLog}
-              {actionStatus.running && <span className="normal-case tracking-normal">{mm.running}</span>}
-            </div>
-            <pre
-              className="max-h-48 overflow-auto whitespace-pre-wrap wrap-break-word rounded-lg border border-(--ui-stroke-tertiary) bg-(--ui-bg-quinary) p-3 font-mono text-[0.65rem] leading-relaxed text-(--ui-text-tertiary)"
-              data-selectable-text="true"
-            >
-              {actionStatus.lines.join('\n')}
-            </pre>
-          </div>
-        )}
-      </section>
-
-      <section>
-        <SectionLabel>{mm.curator}</SectionLabel>
-        {!curator ? (
-          <PageLoader className="min-h-16" label={mm.curator} />
-        ) : (
-          <div className="flex items-center justify-between gap-3 py-2">
-            <div className="min-w-0">
-              <div className="flex items-center gap-2">
-                <span className="text-[length:var(--conversation-text-font-size)] font-medium">{mm.curator}</span>
-                <Badge
-                  className={cn(
-                    !curator.enabled
-                      ? 'bg-(--ui-bg-quinary) text-(--ui-text-tertiary)'
-                      : curator.paused
-                        ? 'bg-amber-500/15 text-amber-400'
-                        : 'bg-emerald-500/15 text-emerald-400'
-                  )}
-                >
-                  {!curator.enabled ? mm.curatorDisabled : curator.paused ? mm.curatorPaused : mm.curatorActive}
-                </Badge>
+          {actionStatus && (
+            <div className="mt-2">
+              <div className="mb-1.5 flex items-center gap-2 text-[0.68rem] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
+                {mm.viewLog}
+                {actionStatus.running && <span className="normal-case tracking-normal">{mm.running}</span>}
               </div>
-              <div className="mt-0.5 text-[length:var(--conversation-caption-font-size)] text-(--ui-text-tertiary)">
-                {mm.curatorDesc}
-                {' · '}
-                {curator.last_run_at ? mm.curatorLastRun(curator.last_run_at) : mm.curatorNeverRan}
-              </div>
-            </div>
-            <div className="flex shrink-0 items-center gap-1.5">
-              {curator.enabled && (
-                <Button disabled={curatorBusy} onClick={() => void toggleCurator()} size="xs" variant="text">
-                  {curator.paused ? mm.resume : mm.pause}
-                </Button>
-              )}
-              <Button
-                disabled={actionStatus?.running === true}
-                onClick={() => void launch(mm.curator, runCurator)}
-                size="xs"
-                variant="textStrong"
+              <pre
+                className="max-h-48 overflow-auto whitespace-pre-wrap wrap-break-word rounded-lg border border-(--ui-stroke-tertiary) bg-(--ui-bg-quinary) p-3 font-mono text-[0.65rem] leading-relaxed text-(--ui-text-tertiary)"
+                data-selectable-text="true"
               >
-                {mm.runNow}
-              </Button>
+                {actionStatus.lines.join('\n')}
+              </pre>
             </div>
-          </div>
-        )}
-      </section>
+          )}
+        </section>
+      )}
+
+      {canCurate && (
+        <section>
+          <SectionLabel>{mm.curator}</SectionLabel>
+          {!curator ? (
+            <PageLoader className="min-h-16" label={mm.curator} />
+          ) : (
+            <div className="flex items-center justify-between gap-3 py-2">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-[length:var(--conversation-text-font-size)] font-medium">{mm.curator}</span>
+                  <Badge
+                    className={cn(
+                      !curator.enabled
+                        ? 'bg-(--ui-bg-quinary) text-(--ui-text-tertiary)'
+                        : curator.paused
+                          ? 'bg-amber-500/15 text-amber-400'
+                          : 'bg-emerald-500/15 text-emerald-400'
+                    )}
+                  >
+                    {!curator.enabled ? mm.curatorDisabled : curator.paused ? mm.curatorPaused : mm.curatorActive}
+                  </Badge>
+                </div>
+                <div className="mt-0.5 text-[length:var(--conversation-caption-font-size)] text-(--ui-text-tertiary)">
+                  {mm.curatorDesc}
+                  {' · '}
+                  {curator.last_run_at ? mm.curatorLastRun(curator.last_run_at) : mm.curatorNeverRan}
+                </div>
+              </div>
+              <div className="flex shrink-0 items-center gap-1.5">
+                {curator.enabled && (
+                  <Button disabled={curatorBusy} onClick={() => void toggleCurator()} size="xs" variant="text">
+                    {curator.paused ? mm.resume : mm.pause}
+                  </Button>
+                )}
+                <Button
+                  disabled={actionStatus?.running === true}
+                  onClick={() => void launch(mm.curator, runCurator)}
+                  size="xs"
+                  variant="textStrong"
+                >
+                  {mm.runNow}
+                </Button>
+              </div>
+            </div>
+          )}
+        </section>
+      )}
 
       <section>
         <SectionLabel>{mm.memoryData}</SectionLabel>
@@ -324,7 +349,7 @@ export function MaintenancePanel() {
               {mm.memoryProvider(memory.active || mm.builtinMemory)}
             </div>
             <MemoryFileRow
-              busy={memoryBusy}
+              busy={memoryBusy || !canResetMemory}
               label={mm.memoryFile}
               onReset={() => void doResetMemory('memory', mm.memoryFile)}
               resetLabel={mm.resetMemory}
@@ -332,7 +357,7 @@ export function MaintenancePanel() {
               sizeLabel={memory.builtin_files.memory > 0 ? formatBytes(memory.builtin_files.memory) : mm.empty}
             />
             <MemoryFileRow
-              busy={memoryBusy}
+              busy={memoryBusy || !canResetMemory}
               label={mm.userFile}
               onReset={() => void doResetMemory('user', mm.userFile)}
               resetLabel={mm.resetUser}

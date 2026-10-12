@@ -26,10 +26,13 @@ import { DEFAULT_REASONING_EFFORT, reasoningEffortLabel } from '@/lib/reasoning-
 import { normalize } from '@/lib/text'
 import { cn } from '@/lib/utils'
 import {
-  $visibleModels,
+  $hiddenModels,
+  $legacyVisibleModels,
   collapseModelFamilies,
   DEFAULT_VISIBLE_PER_PROVIDER,
   effectiveVisibleKeys,
+  inUseKeys,
+  migrateLegacyVisibility,
   type ModelFamily,
   modelVisibilityKey,
   setModelVisibilityOpen
@@ -138,7 +141,9 @@ export function ModelCatalogMenu({
   // as a prop: it's one global preference, so every surface that shows a
   // catalog must show the same shortlist. A per-caller opt-in is how the board
   // and the composer would end up disagreeing about what "my models" means.
-  const visibleModels = useStore($visibleModels)
+  // What's stored is what the user HID, so a model installed later still shows.
+  const hiddenModels = useStore($hiddenModels)
+  const legacyVisibleModels = useStore($legacyVisibleModels)
 
   const modelOptions = useQuery({
     queryKey: modelOptionsQueryKey(profile, sessionId),
@@ -175,10 +180,22 @@ export function ModelCatalogMenu({
   // Resolve visibility HERE, against the catalog we actually fetched: an empty
   // provider list would otherwise resolve to an empty key set that reads as
   // "user hid everything" and blanks the menu on first open.
-  const shownKeys = useMemo(
-    () => effectiveVisibleKeys(visibleModels, pickerProviders),
-    [visibleModels, pickerProviders]
+  const inUse = useMemo(
+    () => inUseKeys(pickerProviders, { model: current.model, provider: current.provider }),
+    [pickerProviders, current.model, current.provider]
   )
+
+  // The model in use is always listed, whatever the cap or a hide says.
+  const shownKeys = useMemo(
+    () => effectiveVisibleKeys(hiddenModels, pickerProviders, { inUse, legacyVisible: legacyVisibleModels }),
+    [hiddenModels, inUse, legacyVisibleModels, pickerProviders]
+  )
+
+  // A list saved by an older version names what to SHOW; turn it into what to
+  // hide the first time we have a real catalog to do it against.
+  useEffect(() => {
+    migrateLegacyVisibility(pickerProviders)
+  }, [pickerProviders])
 
   const groups = useMemo(
     () => groupModels(pickerProviders, search, { model: current.model, provider: current.provider }, shownKeys),

@@ -23,6 +23,7 @@ import { $keepAwake, setKeepAwake } from '@/store/keep-awake'
 import { notifyError } from '@/store/notifications'
 import { normalizeProfileKey } from '@/store/profile'
 import { repoDiscoveryPolicyFromConfig, repoDiscoveryPolicySignature, scanAndRecordRepos } from '@/store/projects'
+import { useCapability } from '@/store/server-capabilities'
 import { $settingsRequestProfile } from '@/store/settings-scope'
 import type { ConfigFieldSchema, HermesConfigRecord } from '@/types/hermes'
 
@@ -93,6 +94,7 @@ function ConfigSettingsInner({
   const c = t.settings.config
   const keepAwake = useStore($keepAwake)
   const disableF12 = useStore($disableF12)
+  const memoryProviderSetup = useCapability('memory_provider_config')
   // The editable draft is local (debounced autosave watches it), but it's seeded
   // from — and saved back through — the shared config cache, so edits are visible
   // in the MCP/model surfaces and reopening the page doesn't reload-flash.
@@ -408,7 +410,9 @@ function ConfigSettingsInner({
             <div className="scroll-mt-6 rounded-lg" id={`setting-field-${key}`} key={key}>
               <ConfigField
                 descriptionExtra={
-                  key === 'memory.provider' && isExternalMemoryProvider(getNested(config, key)) ? (
+                  memoryProviderSetup &&
+                  key === 'memory.provider' &&
+                  isExternalMemoryProvider(getNested(config, key)) ? (
                     <MemoryConnect profile={scopeProfile} provider={String(getNested(config, key))} />
                   ) : undefined
                 }
@@ -423,7 +427,7 @@ function ConfigSettingsInner({
                 schemaKey={key}
                 value={getNested(config, key)}
               />
-              {key === 'memory.provider' && isExternalMemoryProvider(getNested(config, key)) ? (
+              {memoryProviderSetup && key === 'memory.provider' && isExternalMemoryProvider(getNested(config, key)) ? (
                 <ProviderConfigPanel
                   key={String(getNested(config, key))}
                   profile={scopeProfile}

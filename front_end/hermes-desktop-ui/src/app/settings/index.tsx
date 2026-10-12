@@ -1,18 +1,17 @@
 import { useStore } from '@nanostores/react'
-import type { ChangeEvent } from 'react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo } from 'react'
 import { useLocation, useNavigate } from 'react-router'
 
 import { codiconIcon } from '@/components/ui/codicon'
 import { KbdCombo } from '@/components/ui/kbd'
 import { Tip } from '@/components/ui/tooltip'
-import { getHermesConfigDefaults, getHermesConfigRecord, saveHermesConfig } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { $session } from '@/lib/harvis-session'
 import { triggerHaptic } from '@/lib/haptics'
 import {
   Archive,
   Bell,
+  Box,
   Brain,
   Cpu,
   Download,
@@ -31,11 +30,8 @@ import { isEditableTarget } from '@/lib/keybinds/combo'
 import { typeToFocusChar } from '@/lib/keybinds/composer-focus-keys'
 import { cn } from '@/lib/utils'
 import { $commandPaletteOpen, openCommandPalettePage } from '@/store/command-palette'
-import { confirm } from '@/store/confirm'
 import { bindingsFor } from '@/store/keybinds'
-import { notify, notifyError } from '@/store/notifications'
 
-import { invalidateHermesConfig } from '../hooks/use-config-record'
 import { useRouteEnumParam } from '../hooks/use-route-enum-param'
 import { OverlayIconButton } from '../overlays/overlay-chrome'
 import { OverlayMain, OverlayNav, type OverlayNavGroup, OverlaySplitLayout } from '../overlays/overlay-split-layout'
@@ -53,16 +49,19 @@ import { HostingSettings } from './hosting-settings'
 import { KeybindSettings } from './keybind-settings'
 import { MemoryLearningSettings } from './memory-learning-settings'
 import { MODEL_VIEW_LABELS, MODEL_VIEWS, type ModelView } from './model-views'
+import { ModelsSettings } from './models-page'
 import { NotificationsSettings } from './notifications-settings'
 import { PeopleSettings } from './people-settings'
 import { PROVIDER_VIEWS, ProvidersSettings, type ProviderView } from './providers-settings'
 import { SessionsSettings } from './sessions-settings'
 import type { SettingsPageProps, SettingsView as SettingsViewId } from './types'
+import { useConfigTransfer } from './use-config-transfer'
 
 const SETTINGS_VIEWS: readonly SettingsViewId[] = [
   // Harvis: no Nous billing, API-keys page (env vars are the server's, read-only)
   // or desktop plugins, so those tabs are not routable either.
   ...HARVIS_SECTIONS.map(s => `config:${s.id}` as SettingsViewId),
+  'models',
   'providers',
   'harvis-memory',
   'gateway',
@@ -145,87 +144,7 @@ export function SettingsView({ onClose, onConfigSaved, onMainModelChanged }: Set
     [openSubView]
   )
 
-  const importInputRef = useRef<HTMLInputElement | null>(null)
-  // Bumped after an import or reset so the open config page re-seeds its draft
-  // from the saved record instead of autosaving its stale copy back over it.
-  const [configEpoch, setConfigEpoch] = useState(0)
-
-  const afterConfigReplaced = async () => {
-    await invalidateHermesConfig()
-    setConfigEpoch(epoch => epoch + 1)
-    onConfigSaved?.()
-  }
-
-  const importConfig = (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0]
-    event.target.value = ''
-
-    if (!file) {
-      return
-    }
-
-    void file
-      .text()
-      .then(async text => {
-        const parsed: unknown = JSON.parse(text)
-        // Accept both an exported record and a `{config: {...}}` wrapper.
-        const record =
-          parsed && typeof parsed === 'object' && !Array.isArray(parsed) && 'config' in parsed
-            ? (parsed as { config: unknown }).config
-            : parsed
-
-        if (!record || typeof record !== 'object' || Array.isArray(record)) {
-          throw new Error(t.settings.config.invalidJson)
-        }
-
-        const result = await saveHermesConfig(record as Parameters<typeof saveHermesConfig>[0])
-
-        if (!result.ok) {
-          throw new Error(t.settings.config.autosaveFailed)
-        }
-
-        await afterConfigReplaced()
-        triggerHaptic('success')
-        notify({ kind: 'success', title: t.settings.config.imported, message: file.name })
-      })
-      .catch(err => notifyError(err, t.settings.config.invalidJson))
-  }
-
-  const exportConfig = async () => {
-    try {
-      const cfg = await getHermesConfigRecord()
-      const blob = new Blob([JSON.stringify(cfg, null, 2)], { type: 'application/json' })
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = 'hermes-config.json'
-      a.click()
-      URL.revokeObjectURL(url)
-      triggerHaptic('success')
-    } catch (err) {
-      notifyError(err, t.settings.exportFailed)
-    }
-  }
-
-  const resetConfig = async () => {
-    const ok = await confirm({
-      confirmLabel: t.settings.resetToDefaults,
-      destructive: true,
-      title: t.settings.resetConfirm
-    })
-
-    if (!ok) {
-      return
-    }
-
-    try {
-      await saveHermesConfig(await getHermesConfigDefaults())
-      await afterConfigReplaced()
-      triggerHaptic('success')
-    } catch (err) {
-      notifyError(err, t.settings.resetFailed)
-    }
-  }
+  const { configEpoch, exportConfig, importConfig, importInputRef, resetConfig } = useConfigTransfer(onConfigSaved)
 
   const navGroups: OverlayNavGroup[] = useMemo(
     () => [
@@ -266,13 +185,20 @@ export function SettingsView({ onClose, onConfigSaved, onMainModelChanged }: Set
         onSelect: () => setActiveView('notifications')
       },
       {
+        active: activeView === 'models',
+        icon: Box,
+        id: 'models',
+        label: 'Models',
+        onSelect: () => setActiveView('models')
+      },
+      {
         active: activeView === 'providers',
         children: [
           {
             active: activeView === 'providers' && providerView === 'harvis',
             icon: Cpu,
             id: 'pview:harvis',
-            label: 'Models',
+            label: 'Model providers',
             onSelect: () => openProviderView('harvis')
           },
           {
@@ -462,6 +388,8 @@ export function SettingsView({ onClose, onConfigSaved, onMainModelChanged }: Set
       <CodingEnginesSettings />
     ) : activeView === 'harvis-memory' ? (
       <MemoryLearningSettings onClose={onClose} />
+    ) : activeView === 'models' ? (
+      <ModelsSettings />
     ) : activeView === 'hosting' ? (
       <HostingSettings />
     ) : activeView === 'people' && isAdmin ? (

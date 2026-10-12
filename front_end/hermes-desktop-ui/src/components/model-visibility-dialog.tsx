@@ -1,6 +1,6 @@
 import { useStore } from '@nanostores/react'
 import { useQuery } from '@tanstack/react-query'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -16,12 +16,14 @@ import { modelOptionsQueryKey, requestModelOptions } from '@/lib/model-options'
 import { displayModelName, modelDisplayParts } from '@/lib/model-status-label'
 import { normalize } from '@/lib/text'
 import {
-  $visibleModels,
+  $hiddenModels,
+  $legacyVisibleModels,
   collapseModelFamilies,
   effectiveVisibleKeys,
+  migrateLegacyVisibility,
   modelVisibilityKey,
+  setHiddenModels,
   setProviderVisibility,
-  setVisibleModels,
   toggleModelVisibility
 } from '@/store/model-visibility'
 import { $collapsedProviders, toggleCollapsedProvider } from '@/store/provider-collapse'
@@ -47,7 +49,8 @@ export function ModelVisibilityDialog({
   const { t } = useI18n()
   const copy = t.modelVisibility
   const [search, setSearch] = useState('')
-  const stored = useStore($visibleModels)
+  const stored = useStore($hiddenModels)
+  const legacyVisible = useStore($legacyVisibleModels)
   const collapsedProviders = useStore($collapsedProviders)
 
   const modelOptions = useQuery({
@@ -61,14 +64,23 @@ export function ModelVisibilityDialog({
     [modelOptions.data]
   )
 
-  const visible = effectiveVisibleKeys(stored, providers)
+  // A list saved by an older version names what to SHOW; convert it to what to
+  // hide as soon as there is a catalog to do it against.
+  useEffect(() => {
+    migrateLegacyVisibility(providers)
+  }, [providers])
 
+  const visible = effectiveVisibleKeys(stored, providers, { legacyVisible })
+
+  // Convert first so a click never builds on an unconverted list.
   const toggle = (provider: ModelOptionProvider, model: string) => {
-    setVisibleModels(toggleModelVisibility($visibleModels.get(), providers, provider.slug, model))
+    migrateLegacyVisibility(providers)
+    setHiddenModels(toggleModelVisibility($hiddenModels.get(), providers, provider.slug, model))
   }
 
   const setProviderVisible = (provider: ModelOptionProvider, next: boolean) => {
-    setVisibleModels(setProviderVisibility($visibleModels.get(), providers, provider.slug, next))
+    migrateLegacyVisibility(providers)
+    setHiddenModels(setProviderVisibility($hiddenModels.get(), providers, provider.slug, next))
   }
 
   const q = normalize(search)

@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from . import profiles, rest_mcp, sessions, settings_store
+from . import profiles, rest_mcp, session_ops, sessions, settings_store
 from .rest import CONFIG, apply_model_choice
 
 ERR_PARAMS = -32602
@@ -84,6 +84,9 @@ class SettingsMethods:
                 s, _, err = await self._open(rid, params)
                 if err:
                     return err
+                problem = await session_ops.model_error(self.pool, self.user_id, self.token, model)
+                if problem:
+                    return _err(rid, ERR_PARAMS, problem)
                 s.model = model
                 await self.emit("session.info", s.id, sessions.runtime_info(s))
             return _ok(rid, {"ok": True, "model": model, "provider": provider, "scope": scope})

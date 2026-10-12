@@ -18,6 +18,7 @@ import httpx
 from plugins.agents.browse import is_explicit_browser_request
 from plugins.people.controls import ADMITTED_HEADER, admitted_mark
 
+from . import errors
 from .research_follow import follow_research
 
 log = logging.getLogger("hermes_ui.chat")
@@ -167,7 +168,9 @@ async def _stream_completion(token: str, messages: list[dict], model: str, endpo
         async with client.stream("POST", target_url, json=body, headers=headers) as resp:
             if resp.status_code != 200:
                 detail = (await resp.aread())[:400].decode("utf-8", "replace")
-                raise ChatError(f"chat completion HTTP {resp.status_code}: {detail}")
+                failure = errors.from_http(resp.status_code, detail)
+                log.warning("hermes_ui: chat completion failed: %s", failure.raw)
+                raise ChatError(str(failure))
             ctype = resp.headers.get("content-type", "")
             if "text/event-stream" not in ctype:
                 data = json.loads(await resp.aread())
@@ -198,7 +201,8 @@ async def _stream_completion(token: str, messages: list[dict], model: str, endpo
                     log.debug("hermes_ui: unparseable SSE chunk %r", payload[:120])
                     continue
                 if chunk.get("error"):
-                    raise ChatError(str(chunk["error"])[:400])
+                    log.warning("hermes_ui: chat stream error chunk: %s", str(chunk["error"])[:400])
+                    raise ChatError(errors.friendly(ChatError(chunk["error"])))
                 for choice in chunk.get("choices") or []:
                     delta = choice.get("delta") or {}
                     reasoning = _reasoning_of(delta)

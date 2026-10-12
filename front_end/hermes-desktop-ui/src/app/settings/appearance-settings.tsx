@@ -20,6 +20,7 @@ import { $introSplash, setIntroSplash } from '@/store/intro-splash'
 import { $activeGatewayProfile, $profiles, normalizeProfileKey } from '@/store/profile'
 import { $reactionsEnabled, setReactionsEnabled } from '@/store/reactions-enabled'
 import { $reasoningCollapsedByDefault, setReasoningCollapsedByDefault } from '@/store/reasoning-disclosure'
+import { useCapability } from '@/store/server-capabilities'
 import { $sessionListDensity, type SessionListDensity, setSessionListDensity } from '@/store/session-list-density'
 import { $tabStripDefault, setTabStripDefault, type TabStripDefault } from '@/store/tabstrip-prefs'
 import { $retiredTips, $tipsEnabled, resetTips, setTipsEnabled } from '@/store/tips'
@@ -344,6 +345,7 @@ function GlassRow({ children, label }: GlassRowProps) {
 }
 
 export function AppearanceSettings() {
+  const petsAvailable = useCapability('pets')
   const { t, isSavingLocale } = useI18n()
   const { themeName, mode, resolvedMode, availableThemes, setTheme, setMode } = useTheme()
   const toolViewMode = useStore($toolViewMode)
@@ -896,9 +898,11 @@ export function AppearanceSettings() {
         </div>
       </div>
 
-      <div className="mt-6">
-        <PetSettings />
-      </div>
+      {petsAvailable && (
+        <div className="mt-6">
+          <PetSettings />
+        </div>
+      )}
     </SettingsContent>
   )
 }

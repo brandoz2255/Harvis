@@ -121,6 +121,9 @@ class _Translator:
             if policy == "deny":
                 return [("text", f"\n\n⛔ `{tool}` was blocked: {reason}\n")]
             if policy == "gate":
+                from .ws_approvals import delivers_for_run
+                if delivers_for_run(self.ws):
+                    return []  # the approval prompt is raised in this chat
                 return [("text", f"\n\n⏸ `{tool}` needs approval ({reason}). Approve it from the Harvis workspace page.\n")]
             return []
         if t == "artifact":

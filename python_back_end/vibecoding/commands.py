@@ -10,12 +10,13 @@ import tempfile
 import soundfile as sf
 import shlex
 import subprocess
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, UploadFile, File
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import logging
 
-from .core import get_vibe_agent, execute_vibe_coding_with_model_management
+from auth_utils import get_current_user
+from .core import execute_vibe_coding_with_model_management
 from model_manager import generate_speech_optimized, reload_models_if_needed
 from transcription import TranscriptionUnavailable, transcribe as transcribe_audio
 
@@ -52,49 +53,24 @@ class SaveFileRequest(BaseModel):
     content: str
 
 # Command endpoints
+_LEGACY_SHELL_GONE = ("The old vibe command runner is disabled: it ran shell commands in the backend "
+                      "with no sign-in. Use the governed sandbox shell (/api/harvis/exec).")
+
+
 @router.post("/api/vibe/command")
 async def vibe_command(req: VibeCommandRequest):
-    """Process a vibe command with the specified mode."""
-    try:
-        vibe_agent = get_vibe_agent()
-        if vibe_agent is None:
-            raise HTTPException(status_code=503, detail="Vibe agent not initialized")
-        
-        vibe_agent.mode = req.mode
-        response_text, _ = vibe_agent.process_command(req.command)
-        return {"response": response_text}
-    except Exception as e:
-        logger.error(f"Vibe command failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    """DISABLED — ran ``vibe_agent`` commands (a backend shell) with NO authentication.
+    Nothing in the shipped frontends calls it; superseded like ``/api/run-command``."""
+    raise HTTPException(status_code=410, detail=_LEGACY_SHELL_GONE)
 
 @router.websocket("/api/ws/vibe")
 async def websocket_vibe_endpoint(websocket: WebSocket):
-    """WebSocket endpoint for real-time vibe command processing."""
-    await websocket.accept()
-    try:
-        vibe_agent = get_vibe_agent()
-        if vibe_agent is None:
-            await websocket.send_json({"type": "error", "content": "Vibe agent not initialized"})
-            return
-        
-        while True:
-            data = await websocket.receive_json()
-            command = data.get("command")
-            mode = data.get("mode", "assistant")
-            
-            if command:
-                vibe_agent.mode = mode
-                await vibe_agent.process_command(command, websocket)
-            else:
-                await websocket.send_json({"type": "error", "content": "No command received"})
-    except WebSocketDisconnect:
-        logger.info("WebSocket disconnected")
-    except Exception as e:
-        logger.error(f"WebSocket error: {e}")
-        await websocket.send_json({"type": "error", "content": str(e)})
+    """DISABLED — same unauthenticated backend shell as ``/api/vibe/command``, over a socket.
+    The backend holds docker.sock, so any container on the network could reach root on the host."""
+    await websocket.close(code=1008, reason="disabled")
 
 @router.post("/api/vibe-coding", tags=["vibe-coding"])
-async def vibe_coding(req: VibeCodingRequest):
+async def vibe_coding(req: VibeCodingRequest, _user: Dict = Depends(get_current_user)):
     """
     Voice-enabled vibe coding with intelligent model management.
     Unloads models → Executes vibe agent → Generates TTS response → Reloads models.
@@ -152,7 +128,8 @@ async def vibe_coding(req: VibeCodingRequest):
         raise HTTPException(500, str(e)) from e
 
 @router.post("/api/voice-transcribe", tags=["vibe-coding"])
-async def voice_transcribe(file: UploadFile = File(...), model: str = DEFAULT_MODEL):
+async def voice_transcribe(file: UploadFile = File(...), model: str = DEFAULT_MODEL,
+                           _user: Dict = Depends(get_current_user)):
     """
     Transcribe voice input for vibe coding with model management.
     """

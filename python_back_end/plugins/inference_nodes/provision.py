@@ -18,7 +18,17 @@ the Harvis repo on it. Keep the two in step when the formula changes.
 
 from __future__ import annotations
 
+import re
+
 DEFAULT_MODEL_REPO = "FlashML-org/Qwen3.6-35B-A3B-NVFP4"
+
+# Every substituted value lands unquoted in a shell script someone will run as root,
+# so each must be a plain name, never a fragment of shell.
+_SAFE = {
+    "node_name": re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$"),
+    "model_repo": re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$"),
+    "host": re.compile(r"^[0-9A-Fa-f.:]{2,45}$|^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$"),
+}
 
 # Placeholders are ``@@NAME@@`` rather than ``{name}`` so the shell body can keep its
 # own braces (``${VAR}``, Caddy blocks) without doubling every one of them.
@@ -253,6 +263,15 @@ def render_script(
     value only to pin one; it is appended to the generated ``freetoken.env`` after
     the measured block, so it wins.
     """
+    for name, value in (("node_name", node_name), ("model_repo", model_repo), ("host", host)):
+        if not _SAFE[name].match(str(value or "")):
+            raise ValueError(f"{name} {value!r} is not a plain name; refusing to put it in a shell script")
+    if not 1 <= int(port) <= 65534:
+        raise ValueError("port must be between 1 and 65534")
+    for name, value in (("max_running", max_running), ("kv_reserve_tokens", kv_reserve_tokens),
+                        ("memory_ratio", memory_ratio), ("moe_cpu_threads", moe_cpu_threads)):
+        if value is not None and not isinstance(value, (int, float)):
+            raise ValueError(f"{name} must be a number")
     overrides = "\n".join(
         f"{name}={value}"
         for name, value in (

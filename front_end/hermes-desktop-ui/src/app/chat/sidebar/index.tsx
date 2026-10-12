@@ -112,6 +112,7 @@ import {
   sessionPrKey
 } from '@/store/pull-requests'
 import { openRouteTile } from '@/store/route-tiles'
+import { useCapability } from '@/store/server-capabilities'
 import {
   $cronSessions,
   $currentCwd,
@@ -183,6 +184,7 @@ import { CONTEXT_SPLIT_KIT, SplitSubmenu } from './split-submenu'
 // dominating the sidebar before the user asks to see it.
 const NON_SESSION_INITIAL_ROWS = 3
 const NON_SESSION_LOAD_STEP = 10
+const NO_FILTER: never[] = []
 
 // How long after connecting to warm the project tree for someone who isn't in
 // the grouped view. Long enough that the flat list — the thing actually on
@@ -360,9 +362,9 @@ export function ChatSidebar({
   const grouping = useStore($sidebarGrouping)
   const ordering = useStore($sidebarOrdering)
   const statusFilter = useStore($sidebarStatusFilter)
-  const projectFilter = useStore($sidebarProjectFilter)
+  const storedProjectFilter = useStore($sidebarProjectFilter)
   const profileFilter = useStore($sidebarProfileFilter)
-  const prFilter = useStore($sidebarPrFilter)
+  const storedPrFilter = useStore($sidebarPrFilter)
   const prDataWanted = useStore($sidebarPrDataWanted)
   const prBranchOverrides = useStore($prBranchBySession)
   const pullRequests = useStore($pullRequestsByBranch)
@@ -374,7 +376,14 @@ export function ChatSidebar({
   // The active sort key as an id order. The flat list applies it within its
   // dividers; groups apply it to their own lanes.
   const sortOrderIds = useStore($sidebarSessionRankIds)
-  const agentsGrouped = grouping === 'project'
+  // Harvis has no project tree: the Project grouping, its dialogs and "new project" entry points are not offered.
+  const canProjects = useCapability('projects')
+  const canWorktrees = useCapability('git_worktrees')
+  const canPrs = useCapability('git_remote')
+  // A filter saved while the feature was on would otherwise keep narrowing the list with no menu to clear it.
+  const projectFilter = canProjects ? storedProjectFilter : NO_FILTER
+  const prFilter = canPrs ? storedPrFilter : NO_FILTER
+  const agentsGrouped = grouping === 'project' && canProjects
   const pinnedSessionIds = useStore($pinnedSessionIds)
   const unconfirmedPinWrites = useStore($unconfirmedPinWrites)
   const pinsOpen = useStore($sidebarPinsOpen)
@@ -1909,15 +1918,15 @@ export function ChatSidebar({
           </div>
         )}
 
-        {!showSessionSections && <SidebarBlankState onNewProject={openProjectCreate} />}
+        {!showSessionSections && <SidebarBlankState onNewProject={canProjects ? openProjectCreate : undefined} />}
 
         <div className="shrink-0 px-0.5 pb-1 pt-0.5">
           <ProfileRail />
         </div>
       </SidebarContent>
-      <ProjectDialog />
+      {canProjects && <ProjectDialog />}
       {/* One mount for the whole app. The header of WorktreeDialog tells why. */}
-      <WorktreeDialog />
+      {canWorktrees && <WorktreeDialog />}
     </Sidebar>
   )
 }

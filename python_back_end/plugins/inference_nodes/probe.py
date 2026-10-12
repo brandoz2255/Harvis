@@ -74,6 +74,14 @@ def _ctx_of(entry: dict) -> int | None:
     return None
 
 
+def _visible(model_id: str, entry: dict | None = None) -> bool:
+    """False for an Ollama cloud model (it forwards prompts to ollama.com), unless the
+    operator opted in with HARVIS_ALLOW_CLOUD_MODELS=1."""
+    from owui_compat.ollama_hosts import is_hidden_cloud_model
+
+    return not is_hidden_cloud_model(model_id, entry)
+
+
 async def _probe_openai(spec: NodeSpec, timeout: float, st: NodeState) -> None:
     async with httpx.AsyncClient(timeout=httpx.Timeout(timeout), headers=spec.headers()) as hc:
         try:
@@ -94,7 +102,7 @@ async def _probe_openai(spec: NodeSpec, timeout: float, st: NodeState) -> None:
         st.reachable = True
         for m in data:
             mid = str(m.get("id") or "").strip()
-            if not mid:
+            if not mid or not _visible(mid, m):
                 continue
             st.models.add(mid)
             ctx = _ctx_of(m)
@@ -138,7 +146,7 @@ async def _probe_ollama(spec: NodeSpec, timeout: float, st: NodeState) -> None:
         st.reachable = True
         for m in models:
             tag = str(m.get("model") or m.get("name") or "").strip()
-            if tag:
+            if tag and _visible(tag, m):
                 st.models.add(tag)
 
 
@@ -229,18 +237,35 @@ def node_for_url(url: str) -> NodeSpec | None:
     return None
 
 
+async def _local_has(model: str) -> bool:
+    """Whether this install's own Ollama host(s) serve ``model`` right now."""
+    try:
+        from owui_compat import ollama_hosts
+        base_url, _ = await ollama_hosts.resolve(model)
+        return base_url is not None
+    except Exception:
+        return False
+
+
 async def resolve(model: str, *, force: bool = False) -> tuple[NodeState | None, str]:
     """Where to run ``model``: ``(state, reason)``.
 
-    ``state`` is ``None`` when no reachable node has it, and the reason then says which
-    failure it was: ``"absent"`` (every node answered, none has it), ``"unknown:<node>"``
-    (a node that last had it did not answer), or ``"no-nodes"``.
+    ``state`` is ``None`` when no node should run it, and the reason then says why:
+    ``"local"`` (this install's own Ollama has it), ``"absent"`` (every node answered,
+    none has it), ``"unknown:<node>"`` (a node that last had it did not answer), or
+    ``"no-nodes"``.
+
+    A node never takes a model name the local Ollama already serves. Linking a shared
+    box (a lab 4090) that happens to carry gemma4 or qwen3 too would otherwise move
+    every user's own copy onto that box, and 503 it whenever the box is out of reach.
     """
     if not (model or "").strip():
         return None, "absent"
     states = await snapshot(force=force)
     if not states:
         return None, "no-nodes"
+    if await _local_has(model):
+        return None, "local"
     for st in sorted(states.values(), key=lambda s: (s.spec.priority, s.spec.name)):
         if st.has(model):
             return st, st.spec.name

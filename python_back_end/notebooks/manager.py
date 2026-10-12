@@ -286,6 +286,11 @@ class NotebookManager:
 
     # ─── Chunk Management ──────────────────────────────────────────────────────
 
+    async def clear_chunks(self, source_id: UUID) -> None:
+        """Drop a source's chunks so a re-run does not stack a second copy on the first."""
+        async with self.db_pool.acquire() as conn:
+            await conn.execute("DELETE FROM notebook_chunks WHERE source_id = $1", source_id)
+
     async def create_chunks(
         self,
         source_id: UUID,
@@ -308,8 +313,7 @@ class NotebookManager:
                 if embedding:
                     embedding_str = '[' + ','.join(str(x) for x in embedding) + ']'
                 else:
-                    # Default zero vector if no embedding
-                    embedding_str = '[' + ','.join(['0.0'] * 1024) + ']'
+                    continue  # never store a placeholder vector; callers drop unembedded chunks
                 
                 records.append((
                     source_id, 
