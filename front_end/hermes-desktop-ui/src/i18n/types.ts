@@ -1443,6 +1443,13 @@ export interface Translations {
       actionFailed: (name: string) => string
       running: string
       viewLog: string
+      server: string
+      shutDown: string
+      shutDownDesc: string
+      shutDownConfirm: string
+      shutDownConfirmDetail: string
+      shutDownDone: string
+      shutDownFailed: string
     }
   }
 

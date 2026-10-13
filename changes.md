@@ -1,5 +1,48 @@
 # Recent Changes and Fixes Documentation
 
+## Date: 2026-10-13 — "Shut down Harvis" button for admins (branch `harvis1.5`)
+
+**Problem.** The only way to stop a Harvis server was a terminal on that machine (`./install.sh --stop`).
+
+**Solution.** Command Center → Maintenance → Server has a **Shut down Harvis** button. Only admins see it, and only
+on a Linux server where the host watcher is installed. It asks for confirmation, then does what `--stop` does:
+- Kubernetes mode disables k3s and kills its containers.
+- Docker mode stops this checkout's containers.
+
+It stays off after a reboot and nothing is deleted. Start again on the server with `./install.sh --start`.
+- The backend cannot stop its own host. It only creates `inbox/stop` in a mounted folder
+  (`/var/lib/harvis/control` → `/harvis-control`).
+- A systemd path unit (`harvis-power.path`) runs a root-owned copy of `scripts/power-button.sh fire`. The script
+  ignores what the file says.
+- The control folder and its `ready` marker belong to root. Only `inbox/` is the backend's (uid 1001, 0700), so
+  root never writes through a path the backend could redirect. `fire` and `--start` empty the whole inbox.
+- `POST /hermes-api/api/ops/shutdown`: non-admins get 403, and 409 when no watcher is installed.
+- The CSRF origin guard now also covers `/hermes-api/`, not just `/api/`. A page on another port can no longer ride
+  an admin's cookie into this or any other `/hermes-api` POST.
+
+**Install.**
+- `./install.sh --k8s` installs the watcher every time.
+- Docker mode installs it only with passwordless sudo, and never prompts. A failed watcher install leaves the button
+  hidden and the install still finishes.
+- No systemd (Mac, Windows, WSL without systemd): no button.
+
+**Files.**
+- New: `scripts/power-button.sh`, `scripts/test_power_button_sh.py`.
+- Changed: `install.sh`, `scripts/k8s/harvis-k8s.sh`, `docker-compose.yaml`, `.gitignore`,
+  `python_back_end/main.py`, `python_back_end/plugins/hermes_ui/ops.py` and `rest_harvis.py`,
+  `python_back_end/tests/test_hermes_ui_ops.py`.
+- Changed in the UI: `maintenance.tsx` and its test, `api/system.ts`, `store/server-capabilities.ts`, and i18n
+  `types.ts`, `en.ts`, `zh.ts`.
+
+**Verified on VM 204 (k8s practice install).**
+- An admin press returned 200. k3s went inactive and disabled, :9000 went down, and no containers were left.
+- It stayed off after a reboot.
+- `./install.sh --start` brought it back with no second stop.
+- A cross-site press carrying the admin cookie returned 403.
+- Reinstalling over the first layout migrated the folder to root-owned with an inbox.
+- Tests: shell 68 pass, backend ops 9 pass, maintenance vitest 4 pass.
+- **Not run live:** the Docker-mode watcher (needs passwordless sudo). It is covered by the shell test only.
+
 ## Date: 2026-10-12 — Phone scrolling: app frame fits the visible screen (branch `harvis1.5`)
 
 **Problem.** On a phone the bottom of Harvis (message box, status bar) could sit off-screen with no way to scroll to

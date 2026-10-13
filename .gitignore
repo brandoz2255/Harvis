@@ -18,6 +18,8 @@ python_back_end/**/*.pyd
 # everything the agent writes there (demo repos, nested .git, RW-mounted host files).
 harvis-fs-browse/*
 !harvis-fs-browse/.gitignore
+# The Shut down button's request folder when no watcher is installed.
+harvis-control/
 
 # Ignore .gradio folder
 .gradio/

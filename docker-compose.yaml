@@ -687,6 +687,11 @@ services:
       # Requires the file to be writable by UID 1001 (appuser) — chmod 664
       # and chgrp to a shared group if needed.
       - "${HOST_OPENCLAW_CONFIG_HOST_PATH:-./harvis-openclaw-config}:/host-openclaw:rw"
+      # The Shut down button (scripts/power-button.sh): the backend drops a "stop"
+      # file here and a root watcher on the host stops Harvis. The installer sets
+      # HARVIS_CONTROL_DIR when it sets the watcher up; without one (repo default)
+      # the button stays hidden.
+      - "${HARVIS_CONTROL_DIR:-./harvis-control}:/harvis-control:rw"
     networks:
       - ollama-n8n-network
       - openclaw-internal

@@ -1814,7 +1814,14 @@ export const zh: Translations = {
       actionStarted: name => `${name} 已启动 — 正在跟踪日志…`,
       actionFailed: name => `${name} 启动失败`,
       running: '运行中…',
-      viewLog: '操作日志'
+      viewLog: '操作日志',
+      server: '服务器',
+      shutDown: '关闭 Harvis',
+      shutDownDesc: '为此服务器上的所有人停止 Harvis。不会删除任何数据。',
+      shutDownConfirm: '为所有人关闭 Harvis？',
+      shutDownConfirmDetail: '所有人都会断开，此页面将停止工作。在服务器上运行 ./install.sh --start 重新启动。',
+      shutDownDone: 'Harvis 正在关闭。在服务器上运行 ./install.sh --start 重新启动。',
+      shutDownFailed: '无法关闭 Harvis'
     }
   },
 

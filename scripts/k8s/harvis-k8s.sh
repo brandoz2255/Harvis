@@ -369,6 +369,7 @@ cmd_up() {
   # Compose binds port 9000 to 127.0.0.1 unless told otherwise, and Kubernetes
   # publishes it only when it is bound to every address. The shell wins over .env.
   export HARVIS_BIND_ADDR_PUBLIC=0.0.0.0
+  export HARVIS_CONTROL_DIR=/var/lib/harvis/control
   install_k3s
   wait_node_ready
   setup_gpu
@@ -385,6 +386,7 @@ cmd_up() {
   if bash scripts/tunnel-guard.sh installed 2>/dev/null; then bash scripts/tunnel-guard.sh uninstall >/dev/null || true; fi
   docker_hand_over
   $SUDO mkdir -p /var/lib/harvis/ollama
+  bash scripts/power-button.sh install || true
   say "Applying Harvis to the cluster (namespace $NS) ..."
   render "$node" "$ip" "$dns" | kc apply -f - >/dev/null
   # From here Kubernetes holds the ports, ready or not. Marked now, not after the
@@ -473,6 +475,8 @@ cmd_start() {
   local unit
   unit="$(k3s_unit)"
   say "Starting Kubernetes ($unit) and Harvis ..."
+  # A Shut down press that was never picked up would stop it again at once.
+  bash scripts/power-button.sh clear 2>/dev/null || true
   svc enable --now "$unit" >/dev/null 2>&1 || die "k3s did not start — see: sudo journalctl -u $unit -n 100"
   if [ "$unit" = k3s-agent ]; then say "✓ This worker is back in the cluster"; return 0; fi
   wait_node_ready
