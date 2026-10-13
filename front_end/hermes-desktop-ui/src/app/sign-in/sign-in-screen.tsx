@@ -52,7 +52,7 @@ function Frame({ children, overlay }: { children: ReactNode; overlay?: boolean }
           Agents, models and memory that run on your own machine.
         </p>
       </aside>
-      <div className="flex min-w-0 flex-col items-center justify-center overflow-y-auto px-4 py-10">
+      <div className="flex min-w-0 flex-col items-center justify-center-safe overflow-y-auto px-4 py-10">
         <div className="flex w-full max-w-[24rem] flex-col items-start gap-6">
           <img alt="Harvis" className="size-12 min-[900px]:hidden" src={LOGO} />
           {children}
