@@ -1,5 +1,58 @@
 # Recent Changes and Fixes Documentation
 
+## Date: 2026-10-12 — Phone scrolling: app frame fits the visible screen (branch `harvis1.5`)
+
+**Problem.** On a phone the bottom of Harvis (message box, status bar) could sit off-screen with no way to scroll to
+it, and on a short screen the top of the sign-in / create-account form was cut off and unreachable.
+
+**Root cause.**
+- The app frame was `h-screen` (100vh). On phones 100vh is the height *with the address bar hidden*, so while the
+  bar shows, the frame is taller than the screen. The page is locked (`html, body, #root { overflow: hidden }`), so
+  the overflow is clipped instead of scrollable.
+- The sign-in column used `justify-center` inside its own scroller. When the form is taller than the screen, centred
+  content overflows upward too, and a scroller can't reach content above its top.
+
+**Solution.**
+- `src/app/contrib/controller.tsx`: the shell is `h-dvh` (the height you can actually see) instead of `h-screen`.
+  Desktop is unchanged, because dvh equals vh there.
+- `src/app/sign-in/sign-in-screen.tsx`: `justify-center-safe` centres the form when it fits and top-aligns it when it
+  doesn't.
+
+**Verified.**
+- Headless Chromium (Pixel 7) and WebKit (iPhone 13) with real touch swipes. The chat scrolls, including during a
+  streaming reply. Skills, Artifacts, Command Center, Profiles and Messaging all scroll.
+- The app frame equals the window height on phone and desktop sizes.
+- At 375×520, the create-account form's top is reachable and its button can be scrolled to.
+- The sign-in and contrib vitest suites pass: 11 files, 101 tests.
+- The UI was republished via `hermes-ui-builder`.
+- **Not testable in an emulator:** a real address bar. That case needs one check on a real phone.
+
+## Date: 2026-10-12 — One stop button: `./install.sh --stop` / `--start` (branch `harvis1.5`)
+
+**Problem.** There was no single way to shut Harvis off. `--k8s-off` moves Harvis back to plain Docker and starts
+it there, so it keeps running. Stopping the k3s service alone leaves the pods' containers and their ports up, and
+k3s comes back on the next boot.
+
+**Solution.** `./install.sh --stop` stops Harvis in whichever mode it runs.
+- **Kubernetes:** it disables the k3s (or k3s-agent) service, runs `k3s-killall.sh`, and fails loudly if port 9000
+  still answers.
+- **Docker:** it runs `docker compose stop`. The containers are "unless-stopped", so they stay down after a reboot.
+
+`./install.sh --start` brings it back. On Kubernetes it re-enables k3s, waits for the node, re-applies the kubelet
+port firewall and waits for every deployment. Nothing is deleted either way.
+
+**Files.** `install.sh` (`--stop`, `--start`, `cmd_power`, help), `scripts/k8s/harvis-k8s.sh` (`stop`, `start`),
+`scripts/k8s/test_harvis_k8s_sh.py` (5 tests).
+
+**Result.**
+- **Tests:** `scripts/k8s` passes 65 tests.
+- **On test VM 204 (k8s, LAN):**
+  - `--stop` closed the UI (port 9000) and the models port (11434), on localhost and on the LAN address.
+  - It stayed off through a reboot.
+  - `--start` brought all 11 deployments back, with the UI and models answering 200 and the kubelet firewall
+    back in place.
+- **Docker:** this path was checked with `docker compose --dry-run stop` only.
+
 ## Date: 2026-10-12 — Verifier follow-up: git can't run sandbox programs, notebooks can't fetch tailnet hosts (branch `harvis1.5`)
 
 **Problem.** An independent review of this branch's changes found two real holes:
