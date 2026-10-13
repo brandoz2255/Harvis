@@ -33,6 +33,7 @@ export type ServerCapability =
   | 'provider_validate'
   | 'sandbox'
   | 'security_audit'
+  | 'server_power'
   | 'session_search'
   | 'skills_hub'
   | 'toolset_setup'

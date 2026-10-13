@@ -17,7 +17,8 @@ import {
   runDebugShare,
   runDoctor,
   runSecurityAudit,
-  setCuratorPaused
+  setCuratorPaused,
+  shutdownServer
 } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { AlertCircle } from '@/lib/icons'
@@ -62,6 +63,7 @@ export function MaintenancePanel() {
   const canShare = useCapability('debug_share')
   const canCurate = useCapability('curator')
   const canResetMemory = useCapability('memory_reset')
+  const canShutDown = useCapability('server_power')
   const hasOps = canDoctor || canAudit || canBackup || canShare
 
   const [actionName, setActionName] = useState<null | string>(null)
@@ -73,6 +75,7 @@ export function MaintenancePanel() {
   const [share, setShare] = useState<DebugShareResponse | null>(null)
   const [sharing, setSharing] = useState(false)
   const [error, setError] = useState('')
+  const [shuttingDown, setShuttingDown] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -202,6 +205,20 @@ export function MaintenancePanel() {
     [mm]
   )
 
+  const shutDown = useCallback(async () => {
+    if (!(await confirm({ description: mm.shutDownConfirmDetail, destructive: true, title: mm.shutDownConfirm }))) {
+      return
+    }
+
+    try {
+      await shutdownServer()
+      setShuttingDown(true)
+      notify({ kind: 'success', title: mm.shutDownDone, message: '' })
+    } catch (err) {
+      notifyError(err, mm.shutDownFailed)
+    }
+  }, [mm])
+
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto pb-2">
       {error && (
@@ -286,6 +303,19 @@ export function MaintenancePanel() {
               </pre>
             </div>
           )}
+        </section>
+      )}
+
+      {canShutDown && (
+        <section>
+          <SectionLabel>{mm.server}</SectionLabel>
+          <OpRow
+            description={shuttingDown ? mm.shutDownDone : mm.shutDownDesc}
+            destructive
+            disabled={shuttingDown}
+            label={mm.shutDown}
+            onRun={() => void shutDown()}
+          />
         </section>
       )}
 
@@ -381,11 +411,13 @@ function SectionLabel({ children }: { children: string }) {
 
 function OpRow({
   description,
+  destructive,
   disabled,
   label,
   onRun
 }: {
   description: string
+  destructive?: boolean
   disabled?: boolean
   label: string
   onRun: () => void
@@ -398,7 +430,13 @@ function OpRow({
           {description}
         </div>
       </div>
-      <Button disabled={disabled} onClick={onRun} size="xs" variant="textStrong">
+      <Button
+        className={cn(destructive && 'text-destructive hover:text-destructive')}
+        disabled={disabled}
+        onClick={onRun}
+        size="xs"
+        variant="textStrong"
+      >
         {label}
       </Button>
     </div>

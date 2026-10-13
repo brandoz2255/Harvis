@@ -148,6 +148,25 @@ async def run_doctor(pool) -> dict[str, Any]:
     return {"name": "doctor", "ok": True, "pid": 0}
 
 
+# ---- the Shut down button -----------------------------------------------------------
+# scripts/power-button.sh mounts a folder here and watches it from the host as root.
+# The backend can only ask: the watcher reads nothing from the file, it just stops
+# Harvis the way ./install.sh --stop does.
+
+CONTROL_DIR = "/harvis-control"
+
+
+def power_ready() -> bool:
+    """True while the host watcher is installed and this process can reach its inbox."""
+    inbox = os.path.join(CONTROL_DIR, "inbox")
+    return os.path.isfile(os.path.join(CONTROL_DIR, "ready")) and os.access(inbox, os.W_OK)
+
+
+def request_shutdown() -> None:
+    with open(os.path.join(CONTROL_DIR, "inbox", "stop"), "w") as fh:
+        fh.write("stop\n")
+
+
 # ---- what this server can do for this person --------------------------------------
 
 def capabilities(user) -> dict[str, bool]:
@@ -173,6 +192,7 @@ def capabilities(user) -> dict[str, bool]:
         "logs": admin,
         "doctor": admin,
         "provider_validate": True,
+        "server_power": admin and power_ready(),
         # not provided by Harvis: the UI hides these controls
         "git_remote": False,
         "git_worktrees": False,

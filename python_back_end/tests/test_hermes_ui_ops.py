@@ -195,6 +195,23 @@ def test_doctor_runs_real_checks_and_reports_through_action_status(monkeypatch):
     assert "database: reachable" in text and "FAIL ollama" in text and "disk:" in text and "1 of" in text
 
 
+def test_shutdown_is_admin_only_and_needs_the_host_watcher(monkeypatch, tmp_path):
+    async def press(uid):
+        async with client(make_app(uid)) as c:
+            r = await c.post("/hermes-api/api/ops/shutdown")
+            caps = (await c.get("/hermes-api/api/status")).json()["capabilities"]
+            return r.status_code, caps["server_power"]
+
+    monkeypatch.setattr(ops, "CONTROL_DIR", str(tmp_path))
+    assert asyncio.run(press(1)) == (409, False)  # no watcher: no button, and the call says why
+    (tmp_path / "ready").write_text("installed\n")
+    (tmp_path / "inbox").mkdir()
+    assert asyncio.run(press(2)) == (403, False)
+    assert not (tmp_path / "inbox" / "stop").exists()
+    assert asyncio.run(press(1)) == (200, True)
+    assert (tmp_path / "inbox" / "stop").exists()
+
+
 # --- capability flags ------------------------------------------------------------------------------
 
 def test_status_tells_each_person_what_works(monkeypatch):

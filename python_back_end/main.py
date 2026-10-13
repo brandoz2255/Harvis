@@ -1748,6 +1748,7 @@ app.add_middleware(
 # credentialed, state-changing API calls as the logged-in user (SameSite=Lax gives
 # no protection between two localhost ports). Reject unsafe /api/ requests whose
 # Origin is present and is neither same-origin nor on the trusted allowlist.
+# /hermes-api/ is the same backend behind the Hermes UI and is guarded the same way.
 # Same-origin requests, allowlisted (CORS) origins, and non-browser callers (no
 # Origin header, which are Bearer-authed and not a CSRF vector) all pass untouched.
 _CSRF_ALLOWED_NETLOCS = {
@@ -1761,7 +1762,7 @@ _CSRF_UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 @app.middleware("http")
 async def csrf_origin_guard(request: Request, call_next):
-    if request.method in _CSRF_UNSAFE_METHODS and request.url.path.startswith("/api/"):
+    if request.method in _CSRF_UNSAFE_METHODS and request.url.path.startswith(("/api/", "/hermes-api/")):
         origin = request.headers.get("origin")
         if origin:
             netloc = origin.split("://", 1)[-1]  # strip scheme → host[:port]

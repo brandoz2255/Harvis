@@ -1233,6 +1233,22 @@ run_k8s() { # $@ = harvis-k8s.sh arguments
   bash scripts/k8s/harvis-k8s.sh "$@"
 }
 
+# The Shut down button's host watcher (scripts/power-button.sh). Only with
+# passwordless sudo: a Docker install never stops to ask for a password.
+setup_power_button() {
+  [ -d /run/systemd/system ] || return 0
+  if [ "$(id -u)" -ne 0 ] && ! sudo -n true 2>/dev/null; then
+    if ! bash scripts/power-button.sh installed; then
+      echo "  The Shut down button in Command Center needs a root watcher. Add it: sudo -v && ./install.sh"
+    fi
+    return 0
+  fi
+  # Optional: a watcher that will not install leaves the button hidden, not the install broken.
+  if HARVIS_POWER_SUDO="sudo -n" bash scripts/power-button.sh install; then
+    set_env_value HARVIS_CONTROL_DIR /var/lib/harvis/control
+  fi
+}
+
 # One switch for both modes. A joined worker has no mode file, only k3s-agent.
 cmd_power() { # stop|start
   if [ -f "$K8S_MODE_FILE" ] || systemctl cat k3s-agent >/dev/null 2>&1; then run_k8s "$1"; return $?; fi
@@ -1241,6 +1257,8 @@ cmd_power() { # stop|start
     docker compose stop && echo "✓ Harvis is stopped and stays off after a reboot. Nothing was deleted." &&
       echo "  Start it again: ./install.sh --start"
   else
+    # A Shut down press that was never picked up would stop it again at once.
+    HARVIS_POWER_SUDO="sudo -n" bash scripts/power-button.sh clear 2>/dev/null || true
     docker compose start || { echo "✗ No stopped Harvis to start here — run ./install.sh"; return 1; }
     echo "✓ Harvis is back → http://localhost:9000/harvis/"
   fi
@@ -1327,6 +1345,7 @@ main() {
     # Docker mode: the agent browser reaches the internet, not this machine or the LAN.
     # Kubernetes does the same with a NetworkPolicy (scripts/k8s/k8s_harden.py).
     bash scripts/browser-egress-lock.sh apply || true
+    setup_power_button
     launch; report_exposure
   fi
 }

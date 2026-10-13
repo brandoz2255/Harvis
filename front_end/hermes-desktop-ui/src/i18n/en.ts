@@ -1628,7 +1628,15 @@ export const en: Translations = {
       actionStarted: name => `${name} started — tailing log...`,
       actionFailed: name => `${name} failed to start`,
       running: 'Running...',
-      viewLog: 'Action log'
+      viewLog: 'Action log',
+      server: 'Server',
+      shutDown: 'Shut down Harvis',
+      shutDownDesc: 'Stops Harvis for everyone on this server. Nothing is deleted.',
+      shutDownConfirm: 'Shut down Harvis for everyone?',
+      shutDownConfirmDetail:
+        'Everyone is signed out and this page stops working. Start it again on the server with ./install.sh --start.',
+      shutDownDone: 'Harvis is shutting down. Start it again on the server with ./install.sh --start.',
+      shutDownFailed: 'Could not shut Harvis down'
     }
   },
 

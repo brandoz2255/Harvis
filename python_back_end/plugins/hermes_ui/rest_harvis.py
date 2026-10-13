@@ -198,6 +198,19 @@ async def ops_doctor(request: Request, user=Depends(get_current_user_optimized))
     return await ops.run_doctor(request.app.state.pg_pool)
 
 
+@router.post("/ops/shutdown")
+async def ops_shutdown(user=Depends(get_current_user_optimized)):
+    """The Shut down button: Harvis stops for everyone a few seconds after this answers."""
+    from owui_compat.authz import is_admin, user_id_of
+    if not is_admin(user):
+        raise HTTPException(403, "Only an administrator can shut Harvis down.")
+    if not ops.power_ready():
+        raise HTTPException(409, "This server has no Shut down watcher. Stop it on the machine: ./install.sh --stop")
+    ops.request_shutdown()
+    log.warning("Shut down requested from Command Center by user %s", user_id_of(user))
+    return {"ok": True}
+
+
 @router.get("/actions/{name}/status")
 async def action_status(name: str, lines: int = 200, user=Depends(get_current_user_optimized)):
     _require_admin(user)

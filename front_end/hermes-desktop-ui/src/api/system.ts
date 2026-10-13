@@ -224,6 +224,11 @@ export function runDoctor(): Promise<ActionResponse> {
   return hermesApi<ActionResponse>({ path: '/api/ops/doctor', method: 'POST', body: {} })
 }
 
+/** The Shut down button: the server stops Harvis for everyone a few seconds later. */
+export function shutdownServer(): Promise<{ ok: boolean }> {
+  return hermesApi<{ ok: boolean }>({ path: '/api/ops/shutdown', method: 'POST', body: {} })
+}
+
 export function runSecurityAudit(): Promise<ActionResponse> {
   return hermesApi<ActionResponse>({ path: '/api/ops/security-audit', method: 'POST', body: {} })
 }
