@@ -49,6 +49,7 @@ GPU_RUNTIME=""
 K8S_ACTION=""
 ADMIN_CODE=0
 NODE_ACTION=""
+POWER_ACTION=""
 K8S_JOIN_ARGS=()
 # Set when this run just moved Harvis out of Kubernetes (--k8s-off / --k8s-uninstall).
 LEFT_K8S=0
@@ -112,6 +113,8 @@ parse_args() {
       --k8s) K8S_ACTION=up; shift ;;
       --k8s-off) K8S_ACTION=off; shift ;;
       --k8s-status) K8S_ACTION=status; shift ;;
+      --stop) POWER_ACTION=stop; shift ;;
+      --start) POWER_ACTION=start; shift ;;
       --admin-code) ADMIN_CODE=1; shift ;;
       --inference-node) NODE_ACTION=run; shift ;;
       --inference-node-service) NODE_ACTION=service; shift ;;
@@ -183,6 +186,10 @@ parse_args() {
         echo "  --k8s-off           Back to plain Docker. Nothing is deleted."
         echo "  --k8s-status        Nodes, pods and addresses."
         echo "  --k8s-join-command  Print the command another machine runs to join."
+        echo ""
+        echo "  --stop          Stop Harvis (Docker or Kubernetes) and keep it off after"
+        echo "                  a reboot. Nothing is deleted."
+        echo "  --start         Start it again after --stop."
         echo ""
         echo "  --admin-code    A new 6-digit first-admin code for a shared server that"
         echo "                  has no admin yet (printed to this terminal only)."
@@ -1226,6 +1233,19 @@ run_k8s() { # $@ = harvis-k8s.sh arguments
   bash scripts/k8s/harvis-k8s.sh "$@"
 }
 
+# One switch for both modes. A joined worker has no mode file, only k3s-agent.
+cmd_power() { # stop|start
+  if [ -f "$K8S_MODE_FILE" ] || systemctl cat k3s-agent >/dev/null 2>&1; then run_k8s "$1"; return $?; fi
+  if [ "$1" = stop ]; then
+    # Stopped, not removed: "unless-stopped" containers then stay down across reboots.
+    docker compose stop && echo "✓ Harvis is stopped and stays off after a reboot. Nothing was deleted." &&
+      echo "  Start it again: ./install.sh --start"
+  else
+    docker compose start || { echo "✗ No stopped Harvis to start here — run ./install.sh"; return 1; }
+    echo "✓ Harvis is back → http://localhost:9000/harvis/"
+  fi
+}
+
 # Kubernetes mode after the normal preflight and .env: build the images with
 # Docker, then hand the stack to k3s. The generated secrets in .env are the
 # same ones either mode uses, so switching back and forth keeps logins working.
@@ -1249,6 +1269,7 @@ main() {
   if [ -n "$PRESET_NAME" ]; then echo "Preset: config/presets/${PRESET_NAME}.env"; fi
   if [ "$ADMIN_CODE" -eq 1 ]; then cmd_admin_code; exit $?; fi
   if [ -n "$NODE_ACTION" ]; then cmd_inference_node "$NODE_ACTION"; exit $?; fi
+  if [ -n "$POWER_ACTION" ]; then cmd_power "$POWER_ACTION"; exit $?; fi
   case "$K8S_ACTION" in
     status|join-command) run_k8s "$K8S_ACTION"; exit $? ;;
     join) run_k8s join "${K8S_JOIN_ARGS[@]}"; exit $? ;;

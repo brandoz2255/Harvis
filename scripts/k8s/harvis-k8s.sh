@@ -4,6 +4,8 @@
 #
 #   scripts/k8s/harvis-k8s.sh up             install k3s if needed, move Harvis into it
 #   scripts/k8s/harvis-k8s.sh status         nodes, pods and the addresses Harvis is on
+#   scripts/k8s/harvis-k8s.sh stop           stop Harvis and k3s, off after reboots too; all data kept
+#   scripts/k8s/harvis-k8s.sh start          start them again
 #   scripts/k8s/harvis-k8s.sh off            back to plain Docker; all data kept
 #   scripts/k8s/harvis-k8s.sh uninstall      off, then remove k3s from this machine
 #   scripts/k8s/harvis-k8s.sh join-command   print the command another machine runs to join
@@ -446,6 +448,39 @@ cmd_uninstall() {
   $SUDO rm -rf "$STATE_DIR/images"
 }
 
+# ── Stop / start ────────────────────────────────────────────────────────────
+svc() { $SUDO systemctl "$@"; }
+# A server runs the k3s unit, a joined worker k3s-agent.
+k3s_unit() { if svc cat k3s >/dev/null 2>&1; then echo k3s; else echo k3s-agent; fi; }
+# Stopping the k3s service leaves the pods' containers (and their ports) running.
+k3s_killall() { if [ -x /usr/local/bin/k3s-killall.sh ]; then $SUDO /usr/local/bin/k3s-killall.sh >/dev/null 2>&1; fi; }
+
+cmd_stop() {
+  command -v k3s >/dev/null 2>&1 || { say "Kubernetes mode is off here (k3s is not installed) — nothing to stop."; return 0; }
+  local unit
+  unit="$(k3s_unit)"
+  say "Stopping Harvis and Kubernetes ($unit) ..."
+  # Disabled too, so a reboot does not bring Harvis back onto the network.
+  svc disable --now "$unit" >/dev/null 2>&1 || true
+  k3s_killall || true
+  if port_busy 9000; then die "something still answers on port 9000 — see: sudo ss -tlnp 'sport = :9000'"; fi
+  say "✓ Harvis is stopped and stays off after a reboot. Nothing was deleted."
+  say "  Start it again: ./install.sh --start"
+}
+
+cmd_start() {
+  command -v k3s >/dev/null 2>&1 || die "Kubernetes mode is off here — start Harvis with ./install.sh"
+  local unit
+  unit="$(k3s_unit)"
+  say "Starting Kubernetes ($unit) and Harvis ..."
+  svc enable --now "$unit" >/dev/null 2>&1 || die "k3s did not start — see: sudo journalctl -u $unit -n 100"
+  if [ "$unit" = k3s-agent ]; then say "✓ This worker is back in the cluster"; return 0; fi
+  wait_node_ready
+  apply_kubelet_firewall
+  wait_rollout || return 1
+  say "✓ Harvis is back → http://$(node_ip "$(server_node)"):9000"
+}
+
 cmd_join_command() {
   k3s_installed || die "Kubernetes mode is not on here — run ./install.sh --k8s first"
   if k8s_mode_on; then apply_kubelet_firewall quiet; fi
@@ -477,9 +512,11 @@ cmd_join() {
 case "${1:-}" in
   up) cmd_up ;;
   status) cmd_status ;;
+  stop) cmd_stop ;;
+  start) cmd_start ;;
   off) cmd_off ;;
   uninstall) cmd_uninstall ;;
   join-command) cmd_join_command ;;
   join) shift; cmd_join "$@" ;;
-  *) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+  *) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

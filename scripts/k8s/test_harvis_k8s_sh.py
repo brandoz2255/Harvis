@@ -192,5 +192,50 @@ class RenderPlumbingTest(unittest.TestCase):
         self.assertEqual((rc, hosts), (0, "<unset>"))
 
 
+# Records systemctl and killall calls; `k3s` exists on PATH via a function.
+FAKE_POWER = '''
+LOG=$(mktemp)
+k3s() { :; }
+svc() { echo "systemctl $*" >> "$LOG"; case "$1" in cat) [ "$2" = "$UNIT" ] ;; *) return 0 ;; esac; }
+k3s_killall() { echo killall >> "$LOG"; }
+port_busy() { return 1; }
+'''
+
+
+class StopStartTest(unittest.TestCase):
+    def test_stop_disables_the_server_and_kills_its_pods(self):
+        out, rc = bash(FAKE_POWER + 'cmd_stop; cat "$LOG"', env={"UNIT": "k3s"})
+        self.assertEqual(rc, 0, out)
+        self.assertIn("systemctl disable --now k3s", out)
+        self.assertIn("killall", out)
+        self.assertIn("stays off after a reboot", out)
+
+    def test_stop_on_a_worker_stops_the_agent(self):
+        out, rc = bash(FAKE_POWER + 'cmd_stop; cat "$LOG"', env={"UNIT": "none"})
+        self.assertEqual(rc, 0, out)
+        self.assertIn("systemctl disable --now k3s-agent", out)
+
+    def test_stop_fails_loudly_when_port_9000_still_answers(self):
+        out, rc = bash(FAKE_POWER + 'port_busy() { return 0; }; cmd_stop', env={"UNIT": "k3s"})
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("still answers on port 9000", out)
+
+    def test_stop_without_k3s_changes_nothing(self):
+        out, rc = bash(FAKE_POWER + 'unset -f k3s; PATH=/nonexistent; cmd_stop; echo log=$(cat "$LOG")')
+        self.assertEqual(rc, 0, out)
+        self.assertIn("nothing to stop", out)
+        self.assertIn("log=\n", out + "\n")
+
+    def test_start_enables_the_server_then_reapplies_the_kubelet_firewall(self):
+        out, rc = bash(FAKE_POWER + 'wait_node_ready() { echo ready >> "$LOG"; }; '
+                       'apply_kubelet_firewall() { echo firewall >> "$LOG"; }; wait_rollout() { echo rollout >> "$LOG"; }; '
+                       'server_node() { echo n; }; node_ip() { echo 192.168.1.10; }; cmd_start; cat "$LOG"',
+                       env={"UNIT": "k3s"})
+        self.assertEqual(rc, 0, out)
+        log = [line for line in out.splitlines() if line in ("ready", "firewall", "rollout") or line.startswith("systemctl enable")]
+        self.assertEqual(log, ["systemctl enable --now k3s", "ready", "firewall", "rollout"])
+        self.assertIn("http://192.168.1.10:9000", out)
+
+
 if __name__ == "__main__":
     unittest.main()
