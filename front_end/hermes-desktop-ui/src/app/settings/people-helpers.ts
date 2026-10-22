@@ -117,3 +117,12 @@ export function lastSeen(iso: null | string, now = Date.now()): string {
 
   return `Active ${days} day${days === 1 ? '' : 's'} ago`
 }
+
+/** "Signed up 5 min ago" for the waiting list, from the same clock rules as lastSeen. */
+export function signedUpAgo(iso: null | string, now = Date.now()): string {
+  if (!iso) {
+    return ''
+  }
+
+  return lastSeen(iso, now).replace(/^Active/, 'Signed up')
+}

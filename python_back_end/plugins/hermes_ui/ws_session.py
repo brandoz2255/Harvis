@@ -8,10 +8,13 @@ ws.py so the turn loop stays readable; ``Connection.dispatch`` finds every
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 from . import attachments, bots, profiles, providers, runs, sandbox, session_ops, sessions, store, usage
 from .rpc import ERR_INTERNAL, ERR_PARAMS, ERR_SESSION_BUSY, REPLAY_EPOCH, err as _err, ok as _ok
+
+log = logging.getLogger(__name__)
 
 
 def _seed_rows(raw: Any) -> list[dict]:
@@ -71,6 +74,13 @@ class SessionMethods:
         title = str(params.get("title") or "").strip()
         if title:
             s.title = title  # written into the row when the first message creates it
+        parent_id = str(params.get("parent_session_id") or "").strip()
+        if parent_id:
+            # A right-click Branch names its source; linked before seeding so the new row is born nested.
+            try:
+                await sessions.set_parent(self.pool, s, parent_id)
+            except ValueError:
+                log.info("hermes_ui: %s not linked to parent %s", s.id, parent_id)
         msgs = await sessions.seed(self.pool, s, seed) if seed else []
         return _ok(rid, {"session_id": s.id, "stored_session_id": s.id, "message_count": len(msgs),
                          "messages": msgs, "info": self._announce(s)})
@@ -175,7 +185,30 @@ class SessionMethods:
         first = next((m["content"] for m in rows if m["role"] == "user"), "")
         base = s.title or " ".join(first.split())[:48] or "Chat"
         child = sessions.fork(s, f"{base} (branch)")
-        return child, await sessions.seed(self.pool, child, rows)
+        rows = await sessions.seed(self.pool, child, rows)
+        await self._link_parent(child, s)
+        return child, rows
+
+    async def _link_parent(self, child, parent) -> None:
+        """Record the parent so the sidebar nests the child under it (sessions.set_parent, when present)."""
+        set_parent = getattr(sessions, "set_parent", None)
+        if set_parent is None:
+            return
+        try:
+            await set_parent(self.pool, child, parent.id)
+        except ValueError:
+            # The parent is a draft that was never stored (a /btw from an empty chat): the child stays top-level.
+            log.info("hermes_ui: %s not linked to unstored parent %s", child.id, parent.id)
+
+    async def _btw(self, s, msgs: list[dict], question: str) -> dict:
+        """/btw: a side session that sees this chat; the main transcript is left untouched. The UI opens
+        it in a new tab and sends ``message`` there. An empty chat is fine, so no rows is allowed."""
+        rows = [m for m in msgs if not m.get("error")]
+        child = sessions.fork(s, f"btw: {' '.join(question.split())[:40]}")
+        await sessions.seed(self.pool, child, rows)
+        await self._link_parent(child, s)
+        return {"type": "btw", "session_id": child.id, "stored_session_id": child.id, "parent_session_id": s.id,
+                "title": child.title, "message": question, "output": "Side question opened in its own tab."}
 
     async def m_session_branch(self, rid, params):
         s, msgs, err = await self._open(rid, params)

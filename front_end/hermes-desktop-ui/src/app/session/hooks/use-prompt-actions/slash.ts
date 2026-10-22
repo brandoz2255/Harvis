@@ -62,6 +62,7 @@ import type {
   SlashExecResponse
 } from '../../../types'
 
+import { openBtwSession, parseBtwResult } from './btw'
 import { resolveTargetSessionId } from './resolve-target-session'
 import {
   type GatewayRequest,
@@ -381,6 +382,27 @@ export function useSlashCommand(deps: SlashCommandDeps) {
             session_id: sessionId,
             command: command.replace(/^\/+/, '')
           })
+
+          // `/btw` answers with a side session the backend already forked, not
+          // text to print: show its notice here, then open it beside this chat.
+          const btw = parseBtwResult(result)
+
+          if (btw) {
+            if (btw.output) {
+              renderSlashOutput(btw.output)
+            }
+
+            // The backend already created the session: a failure past this
+            // point must not fall through to the command.dispatch retry below,
+            // which would fork a second one.
+            try {
+              await openBtwSession(btw, { refreshSessions, resumeStoredSession, submitPromptText, updateSessionState })
+            } catch (err) {
+              renderSlashOutput(`error: /${name} failed: ${err instanceof Error ? err.message : String(err)}`)
+            }
+
+            return
+          }
 
           const dispatch = parseCommandDispatch(result)
 

@@ -111,10 +111,14 @@ class ModelRouter:
 
         if timeout is None:
             timeout = step_timeout_s()
-        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0)) as client:
-            data = await _post_with_backoff(
-                client, target_url, body, headers, model_name=model_name
-            )
+        from workspace.model_pool import lease
+
+        with lease(body["model"]) as pooled:
+            body["model"] = pooled
+            async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0)) as client:
+                data = await _post_with_backoff(
+                    client, target_url, body, headers, model_name=model_name
+                )
 
         choices = data.get("choices") or [{}]
         msg = (choices[0] or {}).get("message") or {}

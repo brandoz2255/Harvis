@@ -1,5 +1,6 @@
 import { useStore } from '@nanostores/react'
 import { type ReactNode, useEffect, useMemo, useState } from 'react'
+import { useNavigate } from 'react-router'
 
 import { useElapsedSeconds } from '@/components/chat/activity-timer'
 import { ActivityTimerText } from '@/components/chat/activity-timer-text'
@@ -9,7 +10,7 @@ import { FadeText } from '@/components/ui/fade-text'
 import { GlyphSpinner } from '@/components/ui/glyph-spinner'
 import { type Translations, useI18n } from '@/i18n'
 import { compactNumber } from '@/lib/format'
-import { AlertCircle, CheckCircle2 } from '@/lib/icons'
+import { AlertCircle, ArrowUpRight, CheckCircle2 } from '@/lib/icons'
 import { useEnterAnimation } from '@/lib/use-enter-animation'
 import { cn } from '@/lib/utils'
 import {
@@ -21,6 +22,7 @@ import {
   type SubagentStreamEntry
 } from '@/store/subagents'
 
+import { openSession } from '../open-session'
 import { Panel, PanelEmpty, PanelHeader } from '../overlays/panel'
 
 // Mirrors statusGlyph() in tool-fallback.tsx so subagent rows speak the
@@ -80,12 +82,20 @@ interface AgentsViewProps {
 
 export function AgentsView({ onClose }: AgentsViewProps) {
   const { t } = useI18n()
+  const navigate = useNavigate()
   const subagentsBySession = useStore($subagentsBySession)
 
   // Aggregate every session, matching the status-bar indicator — a subagent
   // running in a background session must still be visible here, or the two
   // desync ("Agents N running" vs an empty tree).
   const tree = useMemo(() => buildSubagentTree(allSubagents(subagentsBySession)), [subagentsBySession])
+
+  // A tab, not main: the user keeps the chat they were in. The overlay sits over
+  // the workspace, so it has to close for the opened tab to be seen.
+  const openStep = (storedSessionId: string) => {
+    openSession(storedSessionId, navigate, 'tab')
+    onClose()
+  }
 
   return (
     <Panel closeLabel={t.agents.close} onClose={onClose}>
@@ -94,7 +104,7 @@ export function AgentsView({ onClose }: AgentsViewProps) {
       ) : (
         <>
           <PanelHeader subtitle={t.agents.subtitle} title={t.agents.title} />
-          <SubagentTree tree={tree} />
+          <SubagentTree onOpenSession={openStep} tree={tree} />
         </>
       )}
     </Panel>
@@ -177,7 +187,7 @@ function groupDelegations(roots: readonly SubagentNode[]): RootGroup[] {
   return groups
 }
 
-function SubagentTree({ tree }: { tree: SubagentNode[] }) {
+function SubagentTree({ onOpenSession, tree }: { onOpenSession: (sessionId: string) => void; tree: SubagentNode[] }) {
   const { t } = useI18n()
   const flat = useMemo(() => flatten(tree), [tree])
   const groups = useMemo(() => groupDelegations(tree), [tree])
@@ -228,7 +238,7 @@ function SubagentTree({ tree }: { tree: SubagentNode[] }) {
       <div className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain pr-1">
         <div className="flex min-w-0 flex-col gap-6">
           {groups.map(group => (
-            <DelegationGroup group={group} key={group.id} nowMs={nowMs} />
+            <DelegationGroup group={group} key={group.id} nowMs={nowMs} onOpenSession={onOpenSession} />
           ))}
         </div>
       </div>
@@ -236,11 +246,19 @@ function SubagentTree({ tree }: { tree: SubagentNode[] }) {
   )
 }
 
-function DelegationGroup({ group, nowMs }: { group: RootGroup; nowMs: number }) {
+function DelegationGroup({
+  group,
+  nowMs,
+  onOpenSession
+}: {
+  group: RootGroup
+  nowMs: number
+  onOpenSession: (sessionId: string) => void
+}) {
   const { t } = useI18n()
 
   if (group.nodes.length === 1 && group.taskCount <= 1) {
-    return <SubagentRow node={group.nodes[0]!} nowMs={nowMs} />
+    return <SubagentRow node={group.nodes[0]!} nowMs={nowMs} onOpenSession={onOpenSession} />
   }
 
   const activeWorkers = group.nodes.filter(n => n.status === 'running' || n.status === 'queued').length
@@ -254,7 +272,7 @@ function DelegationGroup({ group, nowMs }: { group: RootGroup; nowMs: number }) 
       </p>
       <div className="grid min-w-0 gap-4">
         {group.nodes.map(node => (
-          <SubagentRow key={node.id} node={node} nowMs={nowMs} />
+          <SubagentRow key={node.id} node={node} nowMs={nowMs} onOpenSession={onOpenSession} />
         ))}
       </div>
     </section>
@@ -294,7 +312,17 @@ function StreamLine({
   )
 }
 
-function SubagentRow({ node, depth = 0, nowMs }: { node: SubagentNode; depth?: number; nowMs: number }) {
+function SubagentRow({
+  node,
+  depth = 0,
+  nowMs,
+  onOpenSession
+}: {
+  node: SubagentNode
+  depth?: number
+  nowMs: number
+  onOpenSession: (sessionId: string) => void
+}) {
   const { t } = useI18n()
   const running = node.status === 'running' || node.status === 'queued'
   const elapsed = useElapsedSeconds(running, `subagent:${node.id}`)
@@ -349,6 +377,19 @@ function SubagentRow({ node, depth = 0, nowMs }: { node: SubagentNode; depth?: n
         {running ? <ActivityTimerText className="mt-1 shrink-0 text-[0.6rem]" seconds={durationSeconds} /> : null}
       </button>
 
+      {!running && node.sessionId ? (
+        <div className="pl-6">
+          <button
+            className="inline-flex items-center gap-1 text-[0.7rem] font-medium text-primary/85 hover:text-primary"
+            onClick={() => onOpenSession(node.sessionId!)}
+            type="button"
+          >
+            {t.agents.openSession}
+            <ArrowUpRight aria-hidden className="size-3" />
+          </button>
+        </div>
+      ) : null}
+
       {visibleRows.length > 0 ? (
         <div className="grid min-w-0 gap-1 pl-6" data-selectable-text="true">
           {visibleRows.map((entry, i) => (
@@ -384,7 +425,7 @@ function SubagentRow({ node, depth = 0, nowMs }: { node: SubagentNode; depth?: n
       {node.children.length > 0 ? (
         <div className="grid min-w-0 gap-3 pl-6">
           {node.children.map(child => (
-            <SubagentRow depth={depth + 1} key={child.id} node={child} nowMs={nowMs} />
+            <SubagentRow depth={depth + 1} key={child.id} node={child} nowMs={nowMs} onOpenSession={onOpenSession} />
           ))}
         </div>
       ) : null}

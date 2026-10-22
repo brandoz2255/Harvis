@@ -410,7 +410,13 @@ cmd_up() {
   report_tunnel
   say ""
   say "✓ Harvis runs on Kubernetes → http://$ip:9000  (and http://localhost:9000)"
-  if [ "$TUNNEL" = "1" ]; then say "  From the internet: your Cloudflare hostname, behind Cloudflare Access"; fi
+  if [ "$TUNNEL" = "1" ]; then
+    if [ "$(env_get HARVIS_TUNNEL_AUTH)" = harvis ]; then
+      say "  From the internet: your Cloudflare hostname; new sign-ups wait for you in Settings → People"
+    else
+      say "  From the internet: your Cloudflare hostname, behind Cloudflare Access"
+    fi
+  fi
   if [ "${HARVIS_K8S_OLLAMA:-1}" = "1" ] && [ "$LAN_PORT" != "0" ]; then
     say "  Models shared on your network at http://$ip:$LAN_PORT (chat and model listing only)"
     say "  Add a model:  sudo k3s kubectl -n $NS exec deploy/ollama -- ollama pull gemma4:e2b"

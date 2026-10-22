@@ -44,3 +44,23 @@ def quantity(value):
     """'10161480Ki' / '6Gi' / '3500m' / '4' -> bytes or cores; None if unreadable."""
     m = re.fullmatch(r"\s*([\d.]+)\s*([KMGT]i|[kMGTm]?)\s*", str(value or ""))
     return float(m.group(1)) * QUANTITY_UNITS[m.group(2)] if m else None
+
+
+_UNITS = {"": "", "b": "", "k": "Ki", "m": "Mi", "g": "Gi"}
+
+
+def tmpfs_volume(vname, size=None):
+    """A memory-backed emptyDir; `size` is a docker tmpfs size such as 512m (or bytes)."""
+    empty = {"medium": "Memory"}
+    m = re.fullmatch(r"(\d+)\s*([bkmg]?)b?", str(size or "").strip().lower())
+    if m and int(m.group(1)) > 0:
+        empty["sizeLimit"] = m.group(1) + _UNITS[m.group(2)]
+    return {"name": vname, "emptyDir": empty}
+
+
+def tmpfs_option_size(spec):
+    """size=... from a short-syntax tmpfs entry like /tmp:rw,noexec,size=512m."""
+    for opt in spec.partition(":")[2].split(","):
+        if opt.startswith("size="):
+            return opt[5:]
+    return None

@@ -24,6 +24,7 @@ from owui_compat.workspace_method import (
     LANE_WORKSPACE_FILES,
 )
 
+from .docs_lane import DOCS_READ_TOOLS, DOCS_TOOL_NAMES, DOCS_WRITE_TOOLS
 from .isolation import validate_agent_path
 from .syntax_gate import check_source
 
@@ -661,10 +662,10 @@ def wire_tool_names() -> set[str]:
     sub-agent's allowed-tools ALLOWLIST into the offer-time WITHHOLD set the runner
     consumes (disabled = all_offered - allowed). authorize_action stays the dispatch
     authority regardless."""
-    return {
+    return ({
         ((entry.get("function") or {}).get("name") or "")
         for entry in WIRE_TOOL_SCHEMA
-    } - {""}
+    } - {""}) | set(DOCS_TOOL_NAMES)
 
 
 def filter_wire_schema(disabled: set[str]) -> list[dict]:
@@ -690,6 +691,10 @@ _EXTRA_TOOL_LANES = {
     "ssh.targets.list": LANE_EXTERNAL_SERVICES,
     "ssh.probe": LANE_EXTERNAL_SERVICES,
     "ssh.exec": LANE_EXTERNAL_SERVICES,
+    # harvis-doc tools (docs_lane.py). The checkers only read; docs_export stores one file
+    # under the caller's own id, which is a workspace file write, not an external service.
+    **{n: LANE_UI_MOCK for n in DOCS_READ_TOOLS},
+    **{n: LANE_WORKSPACE_FILES for n in DOCS_WRITE_TOOLS},
 }
 
 

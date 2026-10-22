@@ -82,7 +82,7 @@ load_preset() {
   if ! [[ "$PRESET_NAME" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
     echo "✗ --preset takes a name such as mylab (lower-case letters, digits, - and _)"; exit 1
   fi
-  local file="config/presets/${PRESET_NAME}.env" line key value expose="" networks="" emails=""
+  local file="config/presets/${PRESET_NAME}.env" line key value expose="" networks="" emails="" public=""
   [ -f "$file" ] || { echo "✗ No preset '${PRESET_NAME}': ${file} does not exist on this machine"; exit 1; }
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line%$'\r'}"
@@ -93,14 +93,16 @@ load_preset() {
       EXPOSE) expose="$value" ;;
       TUNNEL_NETWORKS) networks="$value" ;;
       ALLOW_EMAILS) emails="$value" ;;
-      *) echo "✗ ${file}: unknown key '${key}' (EXPOSE, TUNNEL_NETWORKS, ALLOW_EMAILS)"; exit 1 ;;
+      PUBLIC_ACCESS) public="$value" ;;
+      *) echo "✗ ${file}: unknown key '${key}' (EXPOSE, TUNNEL_NETWORKS, ALLOW_EMAILS, PUBLIC_ACCESS)"; exit 1 ;;
     esac
   done < "$file"
   EXPOSE_MODE="${EXPOSE_MODE:-$expose}"
   case "$EXPOSE_MODE" in
     tunnel|lan+tunnel)
       TUNNEL_NETWORKS_ARG="${TUNNEL_NETWORKS_ARG:-$networks}"
-      ALLOW_EMAILS_ARG="${ALLOW_EMAILS_ARG:-$emails}" ;;
+      ALLOW_EMAILS_ARG="${ALLOW_EMAILS_ARG:-$emails}"
+      PUBLIC_ACCESS="${PUBLIC_ACCESS:-$public}" ;;
   esac
 }
 
@@ -129,6 +131,10 @@ parse_args() {
       --tunnel-networks=*) TUNNEL_NETWORKS_ARG="${1#*=}"; shift ;;
       --allow-emails) ALLOW_EMAILS_ARG="${2:-}"; shift $(( $# >= 2 ? 2 : 1 )) ;;
       --allow-emails=*) ALLOW_EMAILS_ARG="${1#*=}"; shift ;;
+      --public-access) PUBLIC_ACCESS="${2:-}"; shift $(( $# >= 2 ? 2 : 1 ))
+        [ -n "$PUBLIC_ACCESS" ] || { echo "✗ --public-access needs access or harvis"; exit 1; } ;;
+      --public-access=*) PUBLIC_ACCESS="${1#*=}"; shift
+        [ -n "$PUBLIC_ACCESS" ] || { echo "✗ --public-access needs access or harvis"; exit 1; } ;;
       --preset) PRESET_NAME="${2:-}"; shift $(( $# >= 2 ? 2 : 1 ))
         [ -n "$PRESET_NAME" ] || { echo "✗ --preset needs a name"; exit 1; } ;;
       --preset=*) PRESET_NAME="${1#*=}"; shift
@@ -169,12 +175,18 @@ parse_args() {
         echo "  --tunnel-networks LIST  Run the tunnel only on these networks (Wi-Fi name"
         echo "                          or NetworkManager connection), e.g. lab-wifi,lab-wired;"
         echo "                          anywhere else it is stopped. Linux with NetworkManager"
+        echo "  --public-access WHO     Who checks people arriving through the tunnel:"
+        echo "                          access  Cloudflare Access signs them in first (default)"
+        echo "                          harvis  no Cloudflare login: they sign up in Harvis and"
+        echo "                                  wait until you approve them in Settings → People"
+        echo "                                  (asks for the tunnel token only)"
         echo ""
         echo "  --preset NAME   Read this site's defaults from config/presets/NAME.env, a"
         echo "                  file you make on the machine (git ignores it). Lines:"
         echo "                    EXPOSE=lan+tunnel"
         echo "                    TUNNEL_NETWORKS=lab-wifi,lab-wired"
         echo "                    ALLOW_EMAILS=a@x.edu,b@x.edu   (or off: no list)"
+        echo "                    PUBLIC_ACCESS=harvis           (or access)"
         echo "                  Flags on the command line win over the file."
         echo ""
         echo "  Kubernetes hosting mode (optional; Linux, needs sudo):"

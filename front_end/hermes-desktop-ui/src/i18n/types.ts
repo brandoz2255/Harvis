@@ -1251,6 +1251,7 @@ export interface Translations {
     failed: string
     done: string
     streaming: string
+    openSession: string
     files: string
     moreFiles: (count: number) => string
     delegation: (index: number) => string
@@ -1860,6 +1861,104 @@ export interface Translations {
     missingBody: string
   }
 
+  docCard: {
+    kind: Record<'deck' | 'doc' | 'pdf' | 'sheet', string>
+    /** Header of the block is still arriving. */
+    starting: string
+    /** Status while the block is open: "Writing slide 3 of 8". `total` is 0 when no outline was given. */
+    writing: (kind: 'deck' | 'doc' | 'pdf' | 'sheet', current: number, total: number) => string
+    /** Status once finished: "8 slides". */
+    done: (kind: 'deck' | 'doc' | 'pdf' | 'sheet', count: number) => string
+    open: string
+    /** File-type noun on the card's second line: "Presentation · PPTX". */
+    noun: Record<'deck' | 'doc' | 'pdf' | 'sheet', string>
+    downloadAll: string
+    downloadingAll: (done: number, total: number) => string
+    downloadAllFailed: (count: number) => string
+  }
+
+  docPreview: {
+    untitled: string
+    writing: string
+    done: string
+    progressAria: string
+    pending: (name: string) => string
+    slide: (index: number) => string
+    slides: string
+    notes: string
+    showSlides: string
+    hideSlides: string
+    page: (index: number) => string
+    paginationProvisional: string
+    jumpToLive: string
+    formulaBar: string
+    emptySheet: string
+    sheetTabs: string
+    moreActions: string
+    copySource: string
+    missingTitle: string
+    missingBody: string
+    caretName: string
+    blocks: {
+      timeline: string
+      chart: string
+      quadrant: string
+      cards: string
+      flow: string
+      csv: string
+      drawing: (kind: string) => string
+      source: string
+      range: (from: string, to: string) => string
+      axisX: string
+      axisY: string
+      moreRows: (count: number) => string
+    }
+    export: {
+      download: (ext: string) => string
+      writing: string
+      converting: string
+      downloaded: string
+      failed: string
+      retry: string
+      moreFormats: string
+    }
+    view: {
+      aria: string
+      live: string
+      preview: string
+      previewWaiting: string
+    }
+    pages: {
+      label: (current: number, total: number) => string
+      prev: string
+      next: string
+      loading: string
+      unavailableTitle: string
+      unavailableBody: string
+      failed: string
+      retry: string
+      pageAlt: (current: number, total: number, title: string) => string
+      truncated: (shown: number, total: number) => string
+    }
+    check: {
+      button: string
+      checking: string
+      none: string
+      failed: string
+      vision: string
+      fix: string
+      fixSent: string
+      fixUnavailable: string
+      checkedBy: (model: string) => string
+      noRender: string
+      visionBusy: string
+      visionPartial: string
+      error: string
+      warn: string
+      dismiss: string
+    }
+  }
+
   sidebar: {
     nav: Record<string, string>
     searchAria: string
@@ -2081,6 +2180,9 @@ export interface Translations {
     queueDelete: string
     queueResume: string
     queueResumeTip: string
+    followupStart: string
+    followupStartAria: (title: string) => string
+    followupDismiss: string
     queueStuckTitle: string
     queueStuckBody: string
     previewUnavailable: string
@@ -2590,6 +2692,21 @@ export interface Translations {
     terminalCloseOthers: string
     terminalCloseAll: string
     addToChat: string
+    sessionTitle: string
+    sessionCollapse: string
+    sessionExpand: string
+    sessionRunsOn: string
+    sessionModelNone: string
+    sessionFolder: string
+    sessionFolderNone: string
+    sessionContext: string
+    sessionContextPercent: (percent: number) => string
+    sessionContextTokens: (used: string, max: string) => string
+    sessionContextUnknown: string
+    sessionChanges: string
+    sessionNoChanges: string
+    sessionMoreChanges: (count: number) => string
+    sessionOpenFile: (path: string) => string
   }
 
   preview: {

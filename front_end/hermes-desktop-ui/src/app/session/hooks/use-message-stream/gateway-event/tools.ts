@@ -16,7 +16,14 @@ import type { GatewayEventContext } from './types'
 /** tool.generating / tool.start / tool.progress / tool.complete / subagent.*. */
 export function handleToolEvent(ctx: GatewayEventContext): boolean {
   const { deps, event, payload, sessionId, isActiveEvent, occurredAt } = ctx
-  const { flushQueuedDeltas, nativeSubagentSessionsRef, sessionInterrupted, updateSessionState, upsertToolCall } = deps
+  const {
+    flushQueuedDeltas,
+    nativeSubagentSessionsRef,
+    scheduleSessionsRefresh,
+    sessionInterrupted,
+    updateSessionState,
+    upsertToolCall
+  } = deps
 
   if (event.type === 'todo.updated') {
     if (sessionId && !sessionInterrupted(sessionId)) {
@@ -141,6 +148,13 @@ export function handleToolEvent(ctx: GatewayEventContext): boolean {
         event.type === 'subagent.spawn_requested' || event.type === 'subagent.start',
         event.type
       )
+
+      // The backend stores the step's child session (linked to this chat) before
+      // it sends subagent.complete, so the sidebar can list it now instead of
+      // waiting for the whole turn to end.
+      if (event.type === 'subagent.complete' && (payload as Record<string, unknown>).child_session_id) {
+        scheduleSessionsRefresh()
+      }
     }
 
     return true

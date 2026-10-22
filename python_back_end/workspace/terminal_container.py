@@ -18,6 +18,8 @@ Design choices for MVP:
 """
 
 import asyncio
+import codecs
+import contextvars
 import json
 import logging
 import mimetypes
@@ -26,12 +28,19 @@ import shlex
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import docker
 from docker.errors import APIError, NotFound
 
 from workspace.host_mounts import host_mounts_from_env
+
+# Set by an agent run that wants an exec's output live (the chat's agent
+# terminal tab): each decoded chunk is handed to it on the event loop as it
+# arrives. Unset, exec buffers exactly as it always has.
+exec_output_sink: contextvars.ContextVar[Optional[Callable[[str], None]]] = (
+    contextvars.ContextVar("exec_output_sink", default=None)
+)
 
 logger = logging.getLogger(__name__)
 
@@ -456,14 +465,23 @@ class WorkspaceTerminalManager:
         wrapped = f"timeout --kill-after=2 {int(timeout)}s sh -c {shlex.quote(cmd)}"
 
         t0 = time.time()
+        sink = exec_output_sink.get()
         try:
-            result = await asyncio.to_thread(
-                container.exec_run,
-                ["sh", "-c", wrapped],
-                workdir=workdir,
-                demux=True,
-                tty=False,
-            )
+            if sink is not None:
+                exit_code, stdout_b, stderr_b = await asyncio.to_thread(
+                    self._exec_streaming, container, wrapped, workdir,
+                    sink, asyncio.get_running_loop(),
+                )
+            else:
+                result = await asyncio.to_thread(
+                    container.exec_run,
+                    ["sh", "-c", wrapped],
+                    workdir=workdir,
+                    demux=True,
+                    tty=False,
+                )
+                exit_code = result.exit_code if result.exit_code is not None else -1
+                stdout_b, stderr_b = result.output if isinstance(result.output, tuple) else (result.output, b"")
         except APIError as exc:
             logger.warning("[terminal:%s] exec_run APIError: %s", container_name, exc)
             return {
@@ -476,8 +494,6 @@ class WorkspaceTerminalManager:
             }
         duration_ms = int((time.time() - t0) * 1000)
 
-        exit_code = result.exit_code if result.exit_code is not None else -1
-        stdout_b, stderr_b = result.output if isinstance(result.output, tuple) else (result.output, b"")
         stdout = (stdout_b or b"").decode("utf-8", errors="replace")
         stderr = (stderr_b or b"").decode("utf-8", errors="replace")
 
@@ -497,6 +513,28 @@ class WorkspaceTerminalManager:
             "truncated": truncated,
             "container": container_name,
         }
+
+    def _exec_streaming(self, container, wrapped: str, workdir: str,
+                        sink: Callable[[str], None], loop) -> tuple[int, bytes, bytes]:
+        """exec_run's streaming twin (runs in a worker thread): the same command,
+        but each chunk also goes to ``sink`` on ``loop`` as it arrives. Returns
+        (exit_code, stdout, stderr) with each stream kept to the output cap."""
+        api = self._client.api
+        ex = api.exec_create(container.id, ["sh", "-c", wrapped], workdir=workdir, tty=False)
+        bufs = (bytearray(), bytearray())
+        decoders = (codecs.getincrementaldecoder("utf-8")("replace"),
+                    codecs.getincrementaldecoder("utf-8")("replace"))
+        for frame in api.exec_start(ex["Id"], stream=True, demux=True):
+            for buf, dec, chunk in zip(bufs, decoders, frame):
+                if not chunk:
+                    continue
+                if len(buf) <= _OUTPUT_CAP_BYTES:
+                    buf.extend(chunk)
+                text = dec.decode(chunk)
+                if text:
+                    loop.call_soon_threadsafe(sink, text)
+        code = api.exec_inspect(ex["Id"]).get("ExitCode")
+        return (code if code is not None else -1), bytes(bufs[0]), bytes(bufs[1])
 
     # ── Isolated per-session runner (Build Space Phase 3 — SECURITY) ────────
     # A vibecode session's AI-issued shell commands run HERE: a hardened

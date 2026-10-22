@@ -14,6 +14,8 @@ const admin: Person = {
   email: 'admin@example.test',
   joined: '2026-09-01T00:00:00Z',
   is_admin: true,
+  pending: false,
+  note_to_host: null,
   blocked: false,
   daily_message_limit: null,
   allowed_models: null,
@@ -39,8 +41,20 @@ const member: Person = {
 
 const off: Person = { ...member, id: 8, name: 'Sam', email: 'sam@example.test', blocked: true, paired: [] }
 
+const waiting: Person = {
+  ...member,
+  id: 9,
+  name: 'Jane',
+  email: 'jane@example.test',
+  pending: true,
+  note_to_host: 'Jane from CSE 4800',
+  daily_message_limit: null,
+  paired: []
+}
+
 type Call = { path: string; method: string; body: unknown }
 let calls: Call[] = []
+let extraUsers: Person[] = []
 
 const fetchMock = vi.fn(async (path: string, init?: RequestInit) => {
   const method = init?.method ?? 'GET'
@@ -50,7 +64,7 @@ const fetchMock = vi.fn(async (path: string, init?: RequestInit) => {
     new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
 
   if (path.endsWith('/admin/users') && method === 'GET') {
-    return json({ users: [admin, member, off] })
+    return json({ users: [admin, member, off, ...extraUsers] })
   }
 
   if (path.endsWith('/admin/models')) {
@@ -83,6 +97,7 @@ const writes = () => calls.filter(c => c.method !== 'GET')
 
 beforeEach(() => {
   calls = []
+  extraUsers = []
   fetchMock.mockClear()
   confirmMock.mockReset()
   vi.stubGlobal('fetch', fetchMock)
@@ -105,6 +120,46 @@ describe('PeopleSettings', () => {
     expect(screen.getByText('pat#0001')).toBeTruthy()
     // The admin has no limits, so no controls on their row.
     expect(screen.getAllByRole('button', { name: /Turn off|Turn on/ })).toHaveLength(2)
+  })
+
+  it('shows the waiting list only when someone is waiting, apart from everyone else', async () => {
+    renderPage()
+    await screen.findByText('Pat')
+    expect(screen.queryByText('Waiting for you')).toBeNull()
+
+    cleanup()
+    extraUsers = [waiting]
+    renderPage()
+    expect(await screen.findByText('Waiting for you')).toBeTruthy()
+    expect(screen.getByText('“Jane from CSE 4800”')).toBeTruthy()
+    expect(screen.getByText('Waiting')).toBeTruthy()
+    // Waiting people get Let in / Turn away, not the member controls.
+    expect(screen.getAllByRole('button', { name: /Turn off|Turn on/ })).toHaveLength(2)
+  })
+
+  it('lets a waiting person in with one click', async () => {
+    extraUsers = [waiting]
+    renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'Let in' }))
+    await waitFor(() => expect(writes()).toHaveLength(1))
+    expect(writes()[0]).toMatchObject({ path: '/hermes-api/api/harvis/admin/users/9/approve', method: 'POST' })
+    expect(confirmMock).not.toHaveBeenCalled()
+  })
+
+  it('turns a waiting person away only after the admin confirms', async () => {
+    extraUsers = [waiting]
+    renderPage()
+    const away = await screen.findByRole('button', { name: 'Turn away' })
+
+    confirmMock.mockResolvedValueOnce(false)
+    fireEvent.click(away)
+    await waitFor(() => expect(confirmMock).toHaveBeenCalledTimes(1))
+    expect(writes()).toHaveLength(0)
+
+    confirmMock.mockResolvedValueOnce(true)
+    fireEvent.click(away)
+    await waitFor(() => expect(writes()).toHaveLength(1))
+    expect(writes()[0]).toMatchObject({ path: '/hermes-api/api/harvis/admin/users/9/reject', method: 'POST' })
   })
 
   it('turns a person off only after the admin confirms', async () => {

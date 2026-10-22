@@ -29,6 +29,7 @@ import asyncpg
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from workspace import model_pool as _model_pool
 
 logger = logging.getLogger(__name__)
 
@@ -1363,7 +1364,10 @@ async def execute_chat_completion(request: Request, body: dict):
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(600.0, connect=10.0)
         ) as client:
-            resp = await client.post(target_url, json=body, headers=headers)
+            with _model_pool.lease(body.get("model")) as _pooled:
+                if _pooled != body.get("model"):
+                    body = {**body, "model": _pooled}
+                resp = await client.post(target_url, json=body, headers=headers)
             if resp.status_code != 200:
                 logger.error(
                     "model_proxy: upstream error %s: %s",
@@ -1620,20 +1624,23 @@ async def _stream_from_upstream(
     Safe to retry at this point: a non-200 means nothing has been yielded yet.
     """
     state: dict = {}
-    async for event in _stream_from_upstream_once(
-        url, headers, body, model_name, is_kimi, is_nvidia, state
-    ):
-        yield event
-    if state.get("retry_without_stream_options"):
-        logger.info(
-            "model_proxy: upstream rejected stream_options — retrying without it (%s)",
-            model_name or url,
-        )
-        retry_body = {k: v for k, v in body.items() if k != "stream_options"}
+    with _model_pool.lease(body.get("model")) as _pooled:
+        if _pooled != body.get("model"):
+            body = {**body, "model": _pooled}
         async for event in _stream_from_upstream_once(
-            url, headers, retry_body, model_name, is_kimi, is_nvidia, None
+            url, headers, body, model_name, is_kimi, is_nvidia, state
         ):
             yield event
+        if state.get("retry_without_stream_options"):
+            logger.info(
+                "model_proxy: upstream rejected stream_options — retrying without it (%s)",
+                model_name or url,
+            )
+            retry_body = {k: v for k, v in body.items() if k != "stream_options"}
+            async for event in _stream_from_upstream_once(
+                url, headers, retry_body, model_name, is_kimi, is_nvidia, None
+            ):
+                yield event
 
 
 def _harvis_stream_metrics(usage: dict, first_tok, last_tok) -> dict:

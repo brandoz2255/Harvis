@@ -128,6 +128,20 @@ def harvis_user_to_owui(user: dict, *, expires_at: Optional[int] = None) -> dict
     """
     uid = user["id"]
     role = "admin" if int(uid) in _admin_user_ids() else "user"
+    # The waiting room (plugins/people/approval.py): OWUI's own word for an
+    # account the admin has not approved yet. The app shows the waiting room
+    # instead of mounting when it sees it.
+    if role == "user":
+        from plugins.people.approval import cached_pending
+
+        # Sign-in and sign-up pass the row's own status; the session probe relies
+        # on the gate's lookup earlier in the same request.
+        if "account_status" in user:
+            pending = user["account_status"] == "pending"
+        else:
+            pending = cached_pending(int(uid))
+        if pending:
+            role = "pending"
     # `name` is the display name from migration 017, NOT the login identity.
     # It is NULL for every row written before that migration, and for anyone who
     # has never opened Settings -> Account, so it falls back to `username` —

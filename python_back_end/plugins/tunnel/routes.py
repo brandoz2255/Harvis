@@ -15,6 +15,13 @@ def create_tunnel_router() -> APIRouter:
 
     @router.get("/api/tunnel/verify", include_in_schema=False)
     async def tunnel_verify(request: Request):
+        from plugins.exposure.mode import HARVIS, tunnel_auth, tunnel_on
+
+        if tunnel_on() and tunnel_auth() == HARVIS:
+            # HARVIS_TUNNEL_AUTH=harvis: Cloudflare only carries the traffic.
+            # Who gets in is the Harvis sign-in plus the admin's approval.
+            # Anything else, including no tunnel mode at all, keeps the Access check.
+            return Response(status_code=204)
         claims = await access.request_identity(request.headers)
         if claims is None:
             return Response(status_code=403)

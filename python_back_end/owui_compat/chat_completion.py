@@ -26,6 +26,7 @@ import os
 import re
 
 from . import file_content
+from .doc_bridge import DOC_PROMPT_MARKER
 from .system_prompt import inject_core
 from .translate import owui_body_to_proxy
 
@@ -654,12 +655,13 @@ def _inject_block_vocabulary(owui_body: dict) -> None:
     messages = owui_body.get("messages")
     if not isinstance(messages, list) or not messages:
         return
-    for m in messages:
-        if isinstance(m, dict) and m.get("role") == "system":
-            content = m.get("content")
-            if isinstance(content, str):
-                m["content"] = content + _BLOCK_VOCABULARY
-            return
+    systems = [m for m in messages if isinstance(m, dict) and m.get("role") == "system"]
+    # A document turn's own prompt (its own message, next to the question) forbids
+    # colon fences around the block, so a persona before it must not teach them.
+    if any(isinstance(m.get("content"), str) and DOC_PROMPT_MARKER in m["content"] for m in systems):
+        return
+    if systems and isinstance(systems[0].get("content"), str):
+        systems[0]["content"] += _BLOCK_VOCABULARY
 
 
 def _grounded_retry(owui_body: dict, lane):
@@ -730,6 +732,8 @@ async def run_chat_completion(request, owui_body: dict, user_id: int | None = No
     # workspace package (avoids any chance of a circular import at load).
     from workspace.model_proxy import execute_chat_completion
 
+    from .chat_tools import snapshot_user_text
+    user_text = snapshot_user_text(owui_body)  # the user's own words, before any injection
     await _inject_media(request, owui_body, user_id=user_id)  # links/audio/video → context
     # Live web facts for a turn the model cannot answer from training data ("what's
     # the current X?"). Runs AFTER _inject_media because that one owns pasted links;
@@ -738,6 +742,11 @@ async def run_chat_completion(request, owui_body: dict, user_id: int | None = No
     # the same way without any of them implementing tool calling.
     from .chat_reach import append_reach_sources, maybe_inject_reach
     await maybe_inject_reach(request, owui_body, user_id=user_id)
+    # Read-only lookups in the user's connected MCP services (GitHub, Higgsfield, …),
+    # injected as text the same way; writes are left to a workspace run. Costs a
+    # turn that names no connector nothing — see chat_tools.
+    from .chat_tools import append_connector_trailer, maybe_inject_connectors
+    await maybe_inject_connectors(request, owui_body, user_id=user_id, user_text=user_text)
     await _inject_files(request, owui_body, user_id=user_id)
     await _inject_knowledge(request, owui_body, user_id=user_id)
     # NOTE: skills are NOT auto-injected into every chat — that bled a globally-
@@ -773,12 +782,12 @@ async def run_chat_completion(request, owui_body: dict, user_id: int | None = No
         # that turn is to search and ask THIS SAME LANE again with the results in
         # context. Each lane supplies its own, because only the lane knows how to
         # call itself.
-        return await append_reach_sources(
+        return await append_connector_trailer(request, await append_reach_sources(
             request, await proxy_cloud_chat(owui_body, pool, user_id),
             retry=_grounded_retry(
                 owui_body, lambda b: proxy_cloud_chat(b, pool, user_id)
             ),
-        )
+        ))
     # H2: Hermes Agent as a Chat "Agent Mode" — the request carries harvis_agent_mode='hermes'
     # (the user's picked model does NOT drive Hermes; its own runtime model does). The legacy
     # sentinel-model path is kept for back-compat. Routed to the real app's API server (sidecar),
@@ -786,17 +795,17 @@ async def run_chat_completion(request, owui_body: dict, user_id: int | None = No
     from .hermes_chat import is_hermes_chat_model, proxy_hermes_chat
     if (owui_body.get("harvis_agent_mode") == "hermes") or is_hermes_chat_model(owui_body.get("model")):
         pool = getattr(request.app.state, "pg_pool", None)
-        return await append_reach_sources(
+        return await append_connector_trailer(request, await append_reach_sources(
             request, await proxy_hermes_chat(owui_body, pool, user_id),
             retry=_grounded_retry(
                 owui_body, lambda b: proxy_hermes_chat(b, pool, user_id)
             ),
-        )
+        ))
     proxy_body = owui_body_to_proxy(owui_body)
-    return await append_reach_sources(
+    return await append_connector_trailer(request, await append_reach_sources(
         request, await execute_chat_completion(request, proxy_body),
         retry=_grounded_retry(
             owui_body,
             lambda b: execute_chat_completion(request, owui_body_to_proxy(b)),
         ),
-    )
+    ))

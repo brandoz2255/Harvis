@@ -35,6 +35,8 @@ import logging
 import os
 import re
 
+from .docs_lane import DOCS_READ_TOOLS, DOCS_WRITE_TOOLS
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_APPROVAL_TIMEOUT_S = 300.0
@@ -77,8 +79,11 @@ def classify_action_risk_with_reason(tool: str, args: dict) -> tuple[str, str]:
     approval_request payload so the acknowledge-popup can say what was flagged."""
     t = (tool or "").lower()
     args = args or {}
-    if t in _READ_TOOLS or t == "finish":
+    if t in _READ_TOOLS or t in DOCS_READ_TOOLS or t == "finish":
         return "low", "read-only action"
+    if t in DOCS_WRITE_TOOLS:
+        # One document file under the caller's own id; never the working tree or a path.
+        return "med", "saves a document file to your file store"
     if t in _EDIT_TOOLS:
         path = str(args.get("path") or args.get("file") or args.get("filename") or "")
         if _ENV_WRITE.search(path):

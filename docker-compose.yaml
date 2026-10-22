@@ -183,6 +183,9 @@ services:
       # Passed through as-is (empty when unset) so the backend can tell a provider
       # the installer chose from the default guess — both can be the same URL.
       HARVIS_LLM_BASE_URL: "${HARVIS_LLM_BASE_URL:-}"
+      # Tags of one model held by different PAIR nodes, shared by load
+      # (workspace/model_pool.py). "a,b" per pool, pools split by ";".
+      HARVIS_MODEL_POOLS: "${HARVIS_MODEL_POOLS:-}"
       # Which optional capability packs the operator turned on. A container cannot
       # see `docker compose --profile`, so without this the health endpoints have
       # no way to tell "engines were never installed" from "openclaw crashed", and
@@ -351,9 +354,10 @@ services:
       # The backend's own upload cap. nginx.conf's client_max_body_size is 50m and
       # the two must agree, or one of them answers 413 for a file the other allows.
       HARVIS_MAX_UPLOAD_MB: "50"
-      # For Docker Compose, run code locally (not in separate containers)
-      # This avoids needing Docker socket access
-      CODE_EXECUTOR_LOCAL: "true"
+      # Model-written document code runs in the sandbox service, never in this
+      # process. With this unset or the sandbox down, document generation fails
+      # with an error instead of falling back to running the code here.
+      CODE_EXECUTOR_URL: "http://sandbox:8080"
       # OpenClaw integration
       # OPENCLAW_URL / OPENCLAW_BUNDLED_URL default to the local container.
       # Override in .env to route to a remote gateway (e.g. desktop GPU box).
@@ -441,6 +445,13 @@ services:
       # even if the Access policy in the dashboard is wider. Set by
       # ./install.sh --allow-emails.
       HARVIS_CF_ACCESS_ALLOWED_EMAILS: "${HARVIS_CF_ACCESS_ALLOWED_EMAILS:-}"
+      # Who checks people arriving through the tunnel: "access" (Cloudflare
+      # Access, the default) or "harvis" (Harvis sign-in, then the admin's
+      # approval; no Cloudflare login). Set by ./install.sh --public-access.
+      HARVIS_TUNNEL_AUTH: "${HARVIS_TUNNEL_AUTH:-}"
+      # New accounts wait for the admin's approval (Settings ▸ People). Empty =
+      # on for lan/tunnel, off for local; true/false overrides.
+      HARVIS_SIGNUP_APPROVAL: "${HARVIS_SIGNUP_APPROVAL:-}"
       # "everyone" lets non-admins use Build Space on a shared server too.
       HARVIS_BUILD_SPACE_ACCESS: "${HARVIS_BUILD_SPACE_ACCESS:-}"
       # Server-enforced (main.py signup gate) AND read by the frontend config.
@@ -703,6 +714,9 @@ services:
       # Drives browser-runner (automation API on :8765). browser-ctl is
       # internal:true and holds only backend, nginx and browser-runner.
       - browser-ctl
+      # Sends document code to the sandbox. internal:true; only backend and
+      # document-worker are on it.
+      - sandbox-net
     extra_hosts:
       # Allow backend container to reach host-installed openclaw gateway on :18790
       - "host.docker.internal:host-gateway"
@@ -1056,6 +1070,7 @@ services:
       PYTHONUNBUFFERED: "1"
       ARTIFACT_STORAGE_DIR: "/data/artifacts"
       WORKER_NAME: "document-worker-docker"
+      CODE_EXECUTOR_URL: "http://sandbox:8080"
     user: "1001:1001"
     volumes:
       - artifact_data:/data/artifacts
@@ -1075,6 +1090,7 @@ services:
           cpus: '0.25'
     networks:
       - ollama-n8n-network
+      - sandbox-net
     healthcheck:
       test: [ "CMD-SHELL", "python -c 'import asyncpg; import openpyxl; print(\"healthy\")'" ]
       interval: 30s
@@ -1409,6 +1425,9 @@ services:
       # default on purpose: unset, the server answers 503 to every request
       # rather than accepting a value that is published in the repo.
       HARVIS_MCP_SERVER_TOKEN: "${HARVIS_MCP_SERVER_TOKEN:-}"
+      # Optional comma-separated scopes that narrow what the token may call on
+      # /mcp and /mcp/invoke (mcp/server/auth.py). Empty keeps every scope.
+      HARVIS_MCP_SERVER_SCOPES: "${HARVIS_MCP_SERVER_SCOPES:-}"
       PYTHONPATH: "/app"
     depends_on:
       backend:
@@ -1891,6 +1910,53 @@ services:
     cpus: 2.0
     stop_grace_period: 10s
 
+  # Document sandbox: runs the Python that models write to build pptx/docx/xlsx files,
+  # and renders finished documents to page images for the checks. Before this, that
+  # code ran inside harvis-backend, which mounts the docker socket and holds every
+  # secret in its env. Unprofiled so a fresh install has it; without it document
+  # generation fails closed (code_generator.py never runs model code itself).
+  # Same shape as cad-engine: no volume, no secret, no host port, read-only root. The
+  # network is internal, and child.py also makes socket() fail inside each job, because
+  # backend and document-worker share the network and a script could otherwise open them.
+  sandbox:
+    build:
+      context: ./python_back_end
+      dockerfile: Dockerfile.sandbox
+    image: harvis-sandbox:latest
+    pull_policy: build
+    container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-sandbox
+    restart: unless-stopped
+    networks:
+      - sandbox-net
+    environment:
+      PYTHONUNBUFFERED: "1"
+      HOME: /tmp
+    user: "1001:1001"
+    read_only: true
+    tmpfs:
+      # Job scratch and LibreOffice profiles. Scripts are run by the interpreter, and
+      # soffice lives in the image, so nothing here is ever executed.
+      - /tmp:rw,noexec,nosuid,nodev,size=512m,mode=1777
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
+    mem_limit: 2g
+    cpus: 2.0
+    # The same limits again under deploy: compose_to_k8s.py reads only deploy.resources.
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+          cpus: '2.0'
+          pids: 256
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    stop_grace_period: 10s
+
   # Agent Reach (optional) — Phase 1 tools run IN the Harvis backend
   # (agent_reach package) when HARVIS_AGENT_REACH_ENABLED=1.
   # This profile is a placeholder for a future exec sandbox with controlled egress.
@@ -1944,6 +2010,11 @@ networks:
     driver: bridge
     internal: true
   cad-internal:
+    driver: bridge
+    internal: true
+  # Backend and document-worker to the sandbox, nothing else. internal:true, so the
+  # sandbox has no route to the internet or the LAN.
+  sandbox-net:
     driver: bridge
     internal: true
   # Repo Runner sandbox network — NOT internal:true (untrusted repo code needs the

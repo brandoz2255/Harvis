@@ -90,7 +90,7 @@ services:
       LOG_LEVEL: "INFO"
       PYTHONUNBUFFERED: "1"
       ARTIFACT_STORAGE_DIR: "/data/artifacts"
-      CODE_EXECUTOR_LOCAL: "true"
+      CODE_EXECUTOR_URL: "http://sandbox:8080"
       # OpenClaw workspace backend
       OPENCLAW_URL: "ws://openclaw:18789"
       OPENCLAW_GATEWAY_TOKEN: "${OPENCLAW_GATEWAY_TOKEN:-4db7787b4e17f58b2034eb704aa7d450a6e813a49fe67fda6a5257926eace615}"
@@ -125,6 +125,7 @@ services:
     networks:
       - ollama-n8n-network
       - openclaw-internal
+      - sandbox-net
 
   # Next.js Frontend - Using pre-built image from Docker Hub
   frontend:
@@ -185,6 +186,7 @@ services:
       PYTHONUNBUFFERED: "1"
       ARTIFACT_STORAGE_DIR: "/data/artifacts"
       WORKER_NAME: "document-worker-docker"
+      CODE_EXECUTOR_URL: "http://sandbox:8080"
     user: "1001:1001"
     volumes:
       - artifact_data:/data/artifacts
@@ -204,11 +206,49 @@ services:
           cpus: '0.25'
     networks:
       - ollama-n8n-network
+      - sandbox-net
     healthcheck:
       test: [ "CMD-SHELL", "python -c 'import asyncpg; import openpyxl; print(\"healthy\")'" ]
       interval: 30s
       timeout: 10s
       retries: 3
+
+  # Document sandbox: runs the Python models write for pptx/docx/xlsx files, away from
+  # the backend's secrets. Same service as in docker-compose.yaml; without it document
+  # generation fails closed.
+  sandbox:
+    build:
+      context: ./python_back_end
+      dockerfile: Dockerfile.sandbox
+    image: harvis-sandbox:latest
+    container_name: harvis-sandbox
+    restart: unless-stopped
+    networks:
+      - sandbox-net
+    environment:
+      PYTHONUNBUFFERED: "1"
+      HOME: /tmp
+    user: "1001:1001"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=512m,mode=1777
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
+    mem_limit: 2g
+    cpus: 2.0
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+          cpus: '2.0'
+          pids: 256
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   # OpenClaw DB schema init — runs once, creates openclaw_sessions + openclaw_messages tables.
   # Uses CREATE TABLE IF NOT EXISTS so it is safe to re-run on every stack restart.
@@ -376,6 +416,10 @@ networks:
   # This mirrors the k8s NetworkPolicy egress-deny-all-except model as closely as
   # Docker Compose allows. For full packet-level enforcement use k8s + NetworkPolicy.
   openclaw-internal:
+    driver: bridge
+    internal: true
+  # Backend and document-worker to the sandbox, nothing else.
+  sandbox-net:
     driver: bridge
     internal: true
 

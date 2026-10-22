@@ -4,20 +4,22 @@ import { useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
-import { Loader2, MessageCircle, Power, Users } from '@/lib/icons'
+import { Check, Clock, Loader2, MessageCircle, Power, Users, X } from '@/lib/icons'
 import { confirm } from '@/store/confirm'
 import { notify, notifyError } from '@/store/notifications'
 
 import {
+  approvePerson,
   fetchInstanceConfig,
   fetchPeople,
   fetchServerModels,
   type Person,
+  rejectPerson,
   saveInstanceConfig,
   unpairContact,
   updatePerson
 } from './harvis-api'
-import { draftFor, lastSeen, modelChoices, patchFrom, toggleModel, usageLabel } from './people-helpers'
+import { draftFor, lastSeen, modelChoices, patchFrom, signedUpAgo, toggleModel, usageLabel } from './people-helpers'
 import { EmptyState, ListRow, ListRowSkeleton, Pill, SettingsContent, SettingsSection, ToggleRow } from './primitives'
 
 const peopleKey = ['harvis', 'settings', 'people'] as const
@@ -263,17 +265,105 @@ function PersonRow({ person, serverModels }: { person: Person; serverModels: str
   )
 }
 
+/** Someone who signed up and is waiting in the waiting room for the admin's approval. */
+function WaitingRow({ person }: { person: Person }) {
+  const queryClient = useQueryClient()
+  const [busy, setBusy] = useState<'approve' | 'reject' | null>(null)
+
+  const approve = async () => {
+    setBusy('approve')
+
+    try {
+      await approvePerson(person.id)
+      await queryClient.invalidateQueries({ queryKey: peopleKey })
+      notify({ kind: 'success', title: 'Let in', message: `${person.name} can use Harvis now.` })
+    } catch (err) {
+      notifyError(err, 'Could not let them in')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const reject = async () => {
+    const ok = await confirm({
+      title: `Turn ${person.name} away?`,
+      description:
+        'Their sign-up is deleted. They see the sign-in page again and could sign up again while new ' +
+        'sign-ups are allowed.',
+      confirmLabel: 'Turn away',
+      destructive: true
+    })
+
+    if (!ok) {
+      return
+    }
+
+    setBusy('reject')
+
+    try {
+      await rejectPerson(person.id)
+      await queryClient.invalidateQueries({ queryKey: peopleKey })
+    } catch (err) {
+      notifyError(err, 'Could not turn them away')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  return (
+    <ListRow
+      action={
+        <div className="flex flex-wrap items-center gap-2 @2xl:justify-end">
+          <Button disabled={busy !== null} onClick={() => void approve()} size="sm">
+            {busy === 'approve' ? <Loader2 className="animate-spin" /> : <Check />}
+            Let in
+          </Button>
+          <Button disabled={busy !== null} onClick={() => void reject()} size="sm" variant="outline">
+            {busy === 'reject' ? <Loader2 className="animate-spin" /> : <X />}
+            Turn away
+          </Button>
+        </div>
+      }
+      below={
+        <div className="mt-1.5 grid gap-1 text-[0.75rem] text-(--ui-text-secondary)">
+          {person.note_to_host ? (
+            <p className="text-foreground">&ldquo;{person.note_to_host}&rdquo;</p>
+          ) : (
+            <p className="text-(--ui-text-tertiary)">No note.</p>
+          )}
+          <span className="tabular-nums">{signedUpAgo(person.joined)}</span>
+        </div>
+      }
+      description={person.email}
+      title={
+        <span className="flex flex-wrap items-center gap-2">
+          {person.name}
+          <Pill tone="warn">Waiting</Pill>
+        </span>
+      }
+    />
+  )
+}
+
 /**
  * Admin only: everyone with an account on this Harvis, what they used today,
  * the messaging contacts paired to them, and the limits the admin sets.
  */
 export function PeopleSettings() {
   const queryClient = useQueryClient()
-  const people = useQuery({ queryFn: fetchPeople, queryKey: peopleKey })
+  // Polls so a sign-up shows up while the admin has this page open, as the waiting room polls its side.
+  const people = useQuery({
+    queryFn: fetchPeople,
+    queryKey: peopleKey,
+    refetchInterval: 10_000,
+    refetchOnWindowFocus: true
+  })
   const config = useQuery({ queryFn: fetchInstanceConfig, queryKey: configKey })
   const models = useQuery({ queryFn: fetchServerModels, queryKey: modelsKey, staleTime: 60_000 })
   const serverModels = (models.data?.models ?? []).map(m => m.id)
-  const users = people.data?.users ?? []
+  const everyone = people.data?.users ?? []
+  const waiting = everyone.filter(p => p.pending)
+  const users = everyone.filter(p => !p.pending)
 
   const setSignup = async (on: boolean) => {
     try {
@@ -299,6 +389,20 @@ export function PeopleSettings() {
           />
         )}
       </SettingsSection>
+
+      {waiting.length > 0 && (
+        <SettingsSection icon={Clock} meta={String(waiting.length)} title="Waiting for you">
+          <p className="pb-2 text-[0.8125rem] text-(--ui-text-tertiary)">
+            They signed up and can&apos;t use Harvis until you let them in. Sign-ups nobody lets in are removed after
+            two weeks.
+          </p>
+          <div className="divide-y">
+            {waiting.map(p => (
+              <WaitingRow key={p.id} person={p} />
+            ))}
+          </div>
+        </SettingsSection>
+      )}
 
       <SettingsSection icon={Users} meta={people.data ? String(users.length) : undefined} title="People">
         {people.isPending ? (

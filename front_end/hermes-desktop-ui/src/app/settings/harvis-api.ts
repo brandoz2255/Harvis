@@ -306,6 +306,10 @@ export interface Person {
   email: string
   joined: null | string
   is_admin: boolean
+  /** Signed up, waiting for the admin's approval (the waiting room). */
+  pending: boolean
+  /** What they wrote on the sign-up form, if anything. */
+  note_to_host: null | string
   blocked: boolean
   /** Chat messages per day; null = no limit, 0 = no chatting. */
   daily_message_limit: null | number
@@ -332,6 +336,14 @@ export const updatePerson = (id: number, patch: PersonControls) =>
 
 export const unpairContact = (id: number) =>
   harvisFetch<{ ok: boolean }>(`${PEOPLE}/senders/${id}`, { method: 'DELETE' })
+
+/** Let someone out of the waiting room. */
+export const approvePerson = (id: number) =>
+  harvisFetch<{ ok: boolean }>(`${PEOPLE}/users/${id}/approve`, { method: 'POST' })
+
+/** Turn a waiting sign-up away: the account is deleted. */
+export const rejectPerson = (id: number) =>
+  harvisFetch<{ ok: boolean }>(`${PEOPLE}/users/${id}/reject`, { method: 'POST' })
 
 export const fetchServerModels = () =>
   harvisFetch<{ models: { id: string; provider: string }[]; error?: string }>(`${PEOPLE}/models`)

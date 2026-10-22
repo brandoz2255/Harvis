@@ -13,7 +13,8 @@ POD_CIDR=10.42.0.0/16
 SVC_CIDR=10.43.0.0/16
 
 ipt() { $SUDO iptables -w "$@"; }
-have_iptables() { command -v iptables >/dev/null 2>&1; }
+ipt_restore() { $SUDO iptables-restore -w --noflush; }
+have_iptables() { command -v iptables >/dev/null 2>&1 && command -v iptables-restore >/dev/null 2>&1; }
 
 cluster_node_ips() {
   kc get nodes -o jsonpath='{range .items[*]}{range .status.addresses[?(@.type=="InternalIP")]}{.address}{"\n"}{end}{end}' 2>/dev/null || true
@@ -31,15 +32,15 @@ kubelet_rules() { # node IPs...
 }
 
 # Rebuilt from scratch every time, so a re-run (or a node that joined) converges.
-# While it rebuilds the chain has no DROP yet, so the cluster never loses a node.
+# The chain is written in one iptables-restore transaction. k3s's network policy
+# controller saves and restores the filter table, and on nf_tables a restore that
+# names a chain empties it: rule-by-rule writes could lose the loopback rule while
+# DROP stayed, which hangs kubectl exec and logs.
 fw_install() { # node IPs...
-  local line
-  ipt -N "$FW_CHAIN" 2>/dev/null || true
-  ipt -F "$FW_CHAIN" || return 1
-  while IFS= read -r line; do
-    # shellcheck disable=SC2086
-    ipt $line || return 1
-  done < <(kubelet_rules "$@")
+  { printf '*filter\n:%s - [0:0]\n-F %s\n' "$FW_CHAIN" "$FW_CHAIN"
+    kubelet_rules "$@"
+    printf 'COMMIT\n'
+  } | ipt_restore || return 1
   ipt -C INPUT -p tcp --dport "$KUBELET_PORT" -j "$FW_CHAIN" 2>/dev/null ||
     ipt -I INPUT 1 -p tcp --dport "$KUBELET_PORT" -j "$FW_CHAIN" || return 1
 }

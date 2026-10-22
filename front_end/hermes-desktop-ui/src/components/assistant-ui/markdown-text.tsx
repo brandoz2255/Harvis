@@ -17,6 +17,7 @@ import { ZoomableImage } from '@/components/chat/zoomable-image'
 import { ErrorBoundary } from '@/components/error-boundary'
 import { detectArtifact } from '@/lib/artifact-detect'
 import { normalizeExternalUrl, openExternalLink, PrettyLink } from '@/lib/external-link'
+import { isHarvisDocLanguage, openHarvisDocFence } from '@/lib/harvis-doc'
 import { createMemoizedMathPlugin } from '@/lib/katex-memo'
 import { parseMarkdownIntoBlocksCached } from '@/lib/markdown-blocks'
 import { preprocessMarkdown } from '@/lib/markdown-preprocess'
@@ -39,6 +40,7 @@ import { cn } from '@/lib/utils'
 
 import { ArtifactCard } from './artifact-card'
 import { SessionRefLink } from './directive-text'
+import { OpenDocFenceContext, TranscriptDocCard } from './doc-card'
 import { detectEmbed, extractAlert, MarkdownAlert, RichCodeBlock, UrlEmbed } from './embeds'
 import { ResizableMarkdownTable, ResizableMarkdownTh } from './markdown-table'
 import { paragraphPlainText, TranscriptDirectiveLeaf, useIsClaimedDirective } from './transcript-directive'
@@ -547,6 +549,10 @@ function MarkdownTextSurface({
   // `SyntaxHighlighter` below when `isStreaming` is true, and the code plugin
   // itself arrives async (useCodePlugin) so shiki never blocks cold start.
   const code = useCodePlugin()
+
+  // The still-open `harvis-doc` fence, so its card can tell "being written"
+  // from "finished, but the message is still going".
+  const openDocFence = useMemo(() => (isStreaming ? openHarvisDocFence(text) : null), [isStreaming, text])
   const plugins = useMemo(() => (code ? { math: mathPlugin, code } : { math: mathPlugin }), [code])
 
   const components = useMemo(
@@ -630,6 +636,13 @@ function MarkdownTextSurface({
         // right rail; every other language falls back to the Shiki-highlighted
         // code block.
         SyntaxHighlighter: (props: SyntaxHighlighterProps) => {
+          // ```harvis-doc is a deck/document/sheet the model is writing: a
+          // card here, the live document in the right rail. Reasoning text
+          // never builds one (same rule as artifacts).
+          if (!disableArtifacts && isHarvisDocLanguage(props.language)) {
+            return <TranscriptDocCard code={props.code} running={isStreaming} />
+          }
+
           const artifact = disableArtifacts ? null : detectArtifact(props.language, props.code)
 
           if (artifact) {
@@ -676,23 +689,25 @@ function MarkdownTextSurface({
       fallback={() => <HugeTextFallback containerClassName={containerClassName} text={text} />}
       label="markdown-render"
     >
-      <StreamdownTextPrimitive
-        components={components}
-        containerClassName={cn(MARKDOWN_CONTAINER_CLASS_NAME, containerClassName)}
-        containerProps={containerProps}
-        defer={defer}
-        lineNumbers={false}
-        mode="streaming"
-        // Incomplete-markdown repair runs in preprocessWithTailRepair on the
-        // full accumulated text; the built-in tail-bounded remend is disabled
-        // because a custom parseMarkdownIntoBlocksFn is supplied, and
-        // parseIncompleteMarkdown stays false to avoid a second full-text
-        // remend pass.
-        parseIncompleteMarkdown={false}
-        parseMarkdownIntoBlocksFn={parseMarkdownIntoBlocksCached}
-        plugins={plugins}
-        preprocess={preprocessWithTailRepair}
-      />
+      <OpenDocFenceContext.Provider value={openDocFence}>
+        <StreamdownTextPrimitive
+          components={components}
+          containerClassName={cn(MARKDOWN_CONTAINER_CLASS_NAME, containerClassName)}
+          containerProps={containerProps}
+          defer={defer}
+          lineNumbers={false}
+          mode="streaming"
+          // Incomplete-markdown repair runs in preprocessWithTailRepair on the
+          // full accumulated text; the built-in tail-bounded remend is disabled
+          // because a custom parseMarkdownIntoBlocksFn is supplied, and
+          // parseIncompleteMarkdown stays false to avoid a second full-text
+          // remend pass.
+          parseIncompleteMarkdown={false}
+          parseMarkdownIntoBlocksFn={parseMarkdownIntoBlocksCached}
+          plugins={plugins}
+          preprocess={preprocessWithTailRepair}
+        />
+      </OpenDocFenceContext.Provider>
     </ErrorBoundary>
   )
 }

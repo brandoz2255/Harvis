@@ -29,6 +29,14 @@ from plugins.people import controls, gate, routes
 DATABASE_URL = os.getenv("DATABASE_URL")
 pytestmark = pytest.mark.skipif(not DATABASE_URL, reason="no DATABASE_URL")
 
+
+@pytest.fixture(autouse=True)
+def _no_waiting_room(monkeypatch):
+    # These tests are about turned-off accounts and limits. Several gates here run
+    # with no database, where an unread waiting list counts as "everyone waits"
+    # while approval is on (tests/test_waiting_room.py covers that).
+    monkeypatch.setenv("HARVIS_SIGNUP_APPROVAL", "false")
+
 _MIGRATION = os.path.join(os.path.dirname(__file__), "..", "migrations", "020_user_controls.sql")
 
 

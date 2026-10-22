@@ -278,7 +278,14 @@ class SignupRequest(BaseModel):
     username: str
     email: str
     password: str
+    # The sign-up form's "note to the host" (plugins/people/approval.py).
+    note_to_host: Optional[str] = None
 
+
+# New passwords: casual use, so short is fine; very long is refused before bcrypt
+# (which only reads 72 bytes anyway). Existing passwords are never re-checked.
+MIN_PASSWORD_LENGTH = 6
+MAX_PASSWORD_LENGTH = 128
 
 class TokenResponse(BaseModel):
     access_token: str
@@ -698,6 +705,7 @@ async def lifespan(app: FastAPI):
                     "019_hermes_bots.sql",
                     "020_user_controls.sql",
                     "021_model_requests.sql",
+                    "023_account_status.sql",
                 ):
                     _mig_path = os.path.join(_mig_dir, _mig_name)
                     try:
@@ -1716,6 +1724,11 @@ if startup_problems():
 
 app.add_middleware(BuildSpaceGate)
 app.add_middleware(BlockedAccountGate)
+
+# nginx's auth_request for the paths it serves itself (plugins/people/session.py).
+from plugins.people.session import router as _session_check_router  # noqa: E402
+
+app.include_router(_session_check_router)
 if tunnel_on():
     # Experimental, and loaded only in a tunnel mode. Added last, so Cloudflare
     # traffic without an Access sign-in never reaches an account check.
@@ -3194,6 +3207,11 @@ async def _signup_with_connection(request: SignupRequest, conn, setup_code: str 
 
     try:
         await _shared_signup.before_signup(request.email, headers)
+        if not MIN_PASSWORD_LENGTH <= len(request.password or "") <= MAX_PASSWORD_LENGTH:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Use a password of {MIN_PASSWORD_LENGTH} to {MAX_PASSWORD_LENGTH} characters.",
+            )
         # The first-admin code is checked in a transaction of its own so a wrong
         # guess is counted even though this sign-up then fails. None = not checked.
         code_ok = None
@@ -3247,14 +3265,27 @@ async def _signup_with_connection(request: SignupRequest, conn, setup_code: str 
                     detail="User with this email or username already exists",
                 )
 
-            # Hash password and create user
+            # Hash password and create user. After the first (admin) account, a
+            # shared server puts new people in the waiting room until the admin
+            # approves them (plugins/people/approval.py). Status is written in
+            # the same INSERT, so an account can never exist without it.
+            from plugins.people import approval as _approval
+
+            await _approval.forget_stale(conn)
+            waits = user_count > 0 and _approval.approval_required()
             hashed_password = get_password_hash(request.password)
             user_id = await conn.fetchval(
-                "INSERT INTO users (username, email, password) VALUES ($1, $2, $3) RETURNING id",
+                "INSERT INTO users (username, email, password, account_status, note_to_host) "
+                "VALUES ($1, $2, $3, $4, $5) RETURNING id",
                 request.username,
                 request.email,
                 hashed_password,
+                _approval.PENDING_STATUS if waits else _approval.ACTIVE_STATUS,
+                _approval.clean_note(request.note_to_host),
             )
+            if waits:
+                _approval.note_status(int(user_id), _approval.PENDING_STATUS)
+                logger.info("👋 New sign-up %s is waiting for approval", user_id)
 
             if user_count == 0:
                 await conn.execute(

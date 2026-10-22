@@ -40,6 +40,7 @@ except Exception:  # pragma: no cover - keeps the runner importable without it
     def _prov_begin(*_a, **_k): return None
     def _prov_drop(*_a, **_k): return None
     def _prov_note(*_a, **_k): return None
+from .docs_lane import DOCS_TOOL_NAMES, dispatch_docs_tool, docs_tool_specs, is_docs_tool
 from .model_router import ModelRouter
 from .approval_notify import TIMEOUT_NOTICE, announce as announce_approval, withdraw as withdraw_approval
 from .risk import (
@@ -143,7 +144,7 @@ _READ_RESULT_CHARS = max(1000, int(os.getenv("HARVIS_ORCH_READ_RESULT_CHARS", "1
 _READ_TOTAL_CHARS = max(4000, int(os.getenv("HARVIS_ORCH_READ_TOTAL_CHARS", "36000")))
 # Tools whose output IS the information the agent was asked for. Every agent_reach_*
 # tool qualifies (matched by prefix below), plus reading a file off the workspace.
-_CONTENT_TOOLS = ("read_file",)
+_CONTENT_TOOLS = ("read_file", *DOCS_TOOL_NAMES)
 
 # Every computer_* call answers with a fresh page snapshot, shaped
 # "Page: … / URL: … / Controls: …refs… / Text: …". Controls come FIRST, so the
@@ -270,6 +271,71 @@ def _compact_messages(msgs: list, used_tokens: int, window: int) -> tuple[int, i
         msg["content"] = shrunk
         changed += 1
     return (changed, saved)
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[()][A-Za-z0-9]|\x1b[=>78]|\r")
+
+
+def _with_run_output(summary: str, last_run: tuple[str, str, bool] | None) -> str:
+    """End the answer with what the agent ran and what it printed.
+
+    A local model that ran the script still tends to answer with a feature list,
+    so "make a script and run it" read as if nothing had run ("make it super
+    super duper fire script now" ran fire.sh and never said so). Skipped when
+    the answer already quotes the output."""
+    if not last_run:
+        return summary
+    cmd, output, ok = last_run
+    lines = [ln.rstrip() for ln in _ANSI_RE.sub("", output or "").splitlines() if ln.strip()]
+    if lines and len(lines[0]) >= 8 and lines[0].strip() in (summary or ""):
+        return summary
+    if len(lines) > 30:
+        lines = lines[:15] + [f"… ({len(lines) - 30} more lines)"] + lines[-15:]
+    body = "\n".join(lines)[:2500] or "(no output)"
+    fence = "````" if "```" in body else "```"
+    cmd = " ".join(cmd.split())
+    cmd = cmd if len(cmd) <= 160 else cmd[:157] + "..."
+    status = "ran OK" if ok else "exited with an error"
+    return f"{(summary or '').rstrip()}\n\n**Ran** `{cmd}` ({status}):\n{fence}\n{body}\n{fence}"
+
+
+# One workspace_events row per flush, so batch the stream rather than send
+# every few bytes the command prints.
+_LIVE_FLUSH_S = 0.15
+
+
+async def _exec_live(dispatch, *, command: str, command_id: str):
+    """Run an exec dispatch while streaming its output for the agent terminal tab.
+
+    Yields ``exec_output`` payloads while the command runs (the first carries the
+    command line, which opens the tab; the last carries the exit), then the
+    dispatch's own ``(result, ok)`` tuple, unchanged, for the tool loop."""
+    from ..terminal_container import exec_output_sink
+
+    chunks: asyncio.Queue[str] = asyncio.Queue()
+    token = exec_output_sink.set(chunks.put_nowait)
+    try:
+        task = asyncio.ensure_future(dispatch)  # copies the context, sink included
+    finally:
+        exec_output_sink.reset(token)
+    yield {"command_id": command_id, "command": command, "content": ""}
+    try:
+        while True:
+            done = task.done()
+            await asyncio.sleep(0 if done else _LIVE_FLUSH_S)
+            text = ""
+            while not chunks.empty():
+                text += chunks.get_nowait()
+            if text:
+                yield {"command_id": command_id, "content": text}
+            if done:
+                break
+    finally:
+        if not task.done():
+            task.cancel()
+    result, ok = task.result()
+    yield {"command_id": command_id, "content": "", "ok": bool(ok)}
+    yield (result, ok)
 
 
 def _ws_fingerprint(path: str) -> str:
@@ -689,6 +755,8 @@ class SubAgentRunner:
         edit_attempted = False
         answered = False
         pending_results: list[str] = []
+        stop_note = ""
+        last_run: tuple[str, str, bool] | None = None
         _EDIT_TOOLS = ("edit_file", "str_replace", "write", "apply_patch")
         # Stand-in for an assistant turn that carried only tool calls. Several APIs
         # reject an empty assistant content, so SOMETHING has to go here — but it is
@@ -813,6 +881,10 @@ class SubAgentRunner:
             _img_ready = False
         if not _img_ready or pool is None:
             disabled.add("generate_image")
+        # docs_export files the document under the caller's own id; with no user there
+        # is nowhere to put it, and the checkers still work without one.
+        if pool is None or user_id is None:
+            disabled.add("docs_export")
         # screenshot_preview — Build verify loop. Offer only when the per-capability
         # flag is on (lane-5 gate also enforces at dispatch).
         try:
@@ -894,6 +966,13 @@ class SubAgentRunner:
             yield ev("token", {
                 "content": f"[{len(mcp_specs)} connector tool(s) available]\n"
             })
+        # harvis-doc tools: five small specs, outside the connector budget above.
+        try:
+            docs_all = docs_tool_specs()
+        except Exception:
+            logger.exception("docs tools: spec load failed; continuing without them")
+            docs_all = []
+        docs_specs = [s for s in docs_all if s["function"]["name"] not in disabled]
 
         try:
             while steps < max_steps and (time.monotonic() - started) < max_runtime_seconds:
@@ -912,7 +991,7 @@ class SubAgentRunner:
                     )
                 msg = await self.router.complete(
                     model_name=model_name, messages=messages,
-                    tools=filter_wire_schema(disabled) + mcp_specs, temperature=0.2,
+                    tools=filter_wire_schema(disabled) + docs_specs + mcp_specs, temperature=0.2,
                     # Per-user cloud credentials (the five free tiers, OpenAI, Moonshot)
                     # live per-user in the database, so the router can only reach them
                     # with this run's pool + user. Without them a cloud model falls back
@@ -954,7 +1033,7 @@ class SubAgentRunner:
                 # with the raw JSON printed at the user. Recover it here; the
                 # withheld-tool policy is enforced at dispatch below, where it can
                 # tell the model what happened.
-                _wire = filter_wire_schema(set()) + mcp_specs
+                _wire = filter_wire_schema(set()) + docs_all + mcp_specs
                 tcs = parse_tool_calls(msg, known={
                     (s.get("function") or {}).get("name")
                     for s in _wire if isinstance(s, dict)
@@ -1028,6 +1107,7 @@ class SubAgentRunner:
                 vision_parts: list[dict] = []  # multimodal parts from screenshot_preview
                 finished = False
                 forced_answer = False
+                ran_check = False  # exec/run_tests this step — testing an edit is not churn
                 for tc in tcs:
                     name, args = tc["name"], tc["args"]
                     if name == "finish":
@@ -1325,6 +1405,13 @@ class SubAgentRunner:
                                     yield ev("tool_result", {"output": "Denied by the user.", "success": False})
                                     results_text.append(f"{name} DENIED by user")
                                 continue
+                    if is_docs_tool(name):
+                        result, ok = await dispatch_docs_tool(name, args, pool=pool, user_id=user_id)
+                        if ok and call_key:
+                            seen_calls[call_key] = steps
+                        yield ev("tool_result", {"tool": name, "output": result, "success": ok})
+                        results_text.append(f"{name}: {fit(name, result)}")
+                        continue
                     if name.startswith("mcp__"):
                         # Connector tools go to the MCP runtime, not dispatch_tool
                         # — same reason as propose_skill/generate_image: they need
@@ -1351,10 +1438,28 @@ class SubAgentRunner:
                     # session_id (vibecode turns only) routes exec/run_tests into
                     # the hardened per-session runner container (Phase 3 security);
                     # orchestrated/generic runs pass None → unchanged in-process path.
-                    result, ok = await dispatch_tool(
-                        workspace_path, name, args, session_id=session_id,
-                        pool=pool, run_id=run_id, computer=computer_call,
-                    )
+                    if name in ("exec", "run_tests") and session_id:
+                        # Same container as the chat's terminal pane, so run it where
+                        # the user can watch: chunks stream into an agent terminal tab.
+                        dispatched = None
+                        async for item in _exec_live(
+                            dispatch_tool(
+                                workspace_path, name, args, session_id=session_id,
+                                pool=pool, run_id=run_id, computer=computer_call,
+                            ),
+                            command=str(args.get("command") or ("pytest -q" if name == "run_tests" else "")),
+                            command_id=f"{run_id}:{steps}:{len(results_text)}",
+                        ):
+                            if isinstance(item, tuple):
+                                dispatched = item
+                            else:
+                                yield ev("exec_output", item)
+                        result, ok = dispatched
+                    else:
+                        result, ok = await dispatch_tool(
+                            workspace_path, name, args, session_id=session_id,
+                            pool=pool, run_id=run_id, computer=computer_call,
+                        )
                     # NOTE: a single failed tool no longer marks the whole agent failed —
                     # the agent can (and often does) recover and finish. Success is decided
                     # by completion (finish() / real edits), not by per-tool `ok`.
@@ -1363,6 +1468,12 @@ class SubAgentRunner:
                     # not trip the no-progress guard.
                     if ok and name in _EDIT_TOOLS:
                         made_edit = True
+                    if name in ("exec", "run_tests"):
+                        ran_check = True
+                        last_run = (
+                            str(args.get("command") or ("pytest -q" if name == "run_tests" else "")),
+                            str(result or ""), bool(ok),
+                        )
                     # Ledger only records what actually succeeded: a failed call is worth
                     # retrying (a transient 403, a typo'd path), an identical successful
                     # one never is.
@@ -1388,14 +1499,17 @@ class SubAgentRunner:
                 # re-reading / re-writing the same file without ever calling finish).
                 # Only after a real edit, and only when the workspace has been
                 # unchanged for _MAX_IDLE_STEPS in a row — so edit→test→edit loops
-                # (which DO change files) keep going. ──────────────────────────────
+                # (which DO change files) keep going. A step that ran the code is not
+                # idle either: write → run → read the error → fix was cut off at the
+                # read ("make a fire script" stopped on its own `rand: unbound variable`).
                 fp = await asyncio.to_thread(_ws_fingerprint, workspace_path)
-                idle = idle + 1 if fp == last_fp else 0
+                idle = 0 if (fp != last_fp or ran_check) else idle + 1
                 last_fp = fp
                 if made_edit and idle >= _MAX_IDLE_STEPS:
-                    summary = summary or (
-                        f"Stopped — no further changes after {idle} idle steps."
-                    )
+                    # No summary here: the answer round below must still run, or the
+                    # user's whole reply is this stop line instead of what was built.
+                    stop_note = f"Stopped — no further changes after {idle} idle steps."
+                    pending_results = list(results_text)
                     logger.info(
                         "subagent %s: no-progress guard tripped at step %d", label, steps
                     )
@@ -1460,7 +1574,7 @@ class SubAgentRunner:
                         "subagent %s: final answer round failed", label, exc_info=True
                     )
             if not summary:
-                summary = f"Reached step limit ({steps})."
+                summary = stop_note or f"Reached step limit ({steps})."
         except Exception as exc:
             logger.warning("subagent runner error (%s): %s", label, exc, exc_info=True)
             # httpx timeout exceptions stringify to "" — the user's run card read
@@ -1506,6 +1620,7 @@ class SubAgentRunner:
             return
 
         _prov_drop(run_id)
+        summary = _with_run_output(summary, last_run)
         yield ev(
             "agent_end",
             {

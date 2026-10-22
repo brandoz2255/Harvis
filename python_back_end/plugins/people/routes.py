@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from auth_optimized import get_current_user_optimized
 from owui_compat.authz import is_admin
 
-from . import controls
+from . import approval, controls
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +40,7 @@ def _pool(request: Request):
 
 _USERS_SQL = """
 SELECT u.id, u.username, u.email, u.name, u.created_at,
+       u.account_status, u.note_to_host,
        COALESCE(c.blocked, FALSE) AS blocked, c.daily_message_limit, c.allowed_models,
        COALESCE(t.messages, 0) AS today,
        COALESCE(w.messages, 0) AS week,
@@ -68,6 +69,7 @@ def _iso(value) -> Optional[str]:
 async def list_people(request: Request, _admin=Depends(require_admin)):
     pool = _pool(request)
     async with pool.acquire() as conn:
+        await approval.forget_stale(conn)
         users = await conn.fetch(_USERS_SQL)
         try:
             senders = await conn.fetch(_SENDERS_SQL)
@@ -86,6 +88,8 @@ async def list_people(request: Request, _admin=Depends(require_admin)):
         "email": u["email"],
         "joined": _iso(u["created_at"]),
         "is_admin": controls.is_admin_id(u["id"]),
+        "pending": u["account_status"] == approval.PENDING_STATUS,
+        "note_to_host": u["note_to_host"],
         "blocked": bool(u["blocked"]),
         "daily_message_limit": u["daily_message_limit"],
         "allowed_models": list(u["allowed_models"]) if u["allowed_models"] is not None else None,
@@ -141,6 +145,35 @@ async def update_person(user_id: int, body: ControlsPatch, request: Request, adm
     controls.note_blocked(user_id, new["blocked"])
     log.info("people: admin %s set controls for user %s: %s", admin["id"], user_id, sorted(sent))
     return {"ok": True, **new}
+
+
+@router.post("/users/{user_id}/approve")
+async def approve_person(user_id: int, request: Request, admin=Depends(require_admin)):
+    """Let someone out of the waiting room. Their next request goes through."""
+    pool = _pool(request)
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE users SET account_status = 'active', status_changed_at = NOW() "
+            "WHERE id = $1 AND account_status = 'pending' RETURNING id", user_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Nobody with that account is waiting.")
+    approval.note_status(user_id, approval.ACTIVE_STATUS)
+    log.info("people: admin %s approved account %s", admin["id"], user_id)
+    return {"ok": True}
+
+
+@router.post("/users/{user_id}/reject")
+async def reject_person(user_id: int, request: Request, admin=Depends(require_admin)):
+    """Turn a waiting sign-up away: the account is deleted, so the email can sign up again."""
+    pool = _pool(request)
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "DELETE FROM users WHERE id = $1 AND account_status = 'pending' RETURNING id", user_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Nobody with that account is waiting.")
+    approval.note_status(user_id, approval.GONE_STATUS)
+    log.info("people: admin %s turned away sign-up %s", admin["id"], user_id)
+    return {"ok": True}
 
 
 @router.delete("/senders/{sender_id}")

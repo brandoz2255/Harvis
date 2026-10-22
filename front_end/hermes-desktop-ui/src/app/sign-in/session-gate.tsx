@@ -1,9 +1,9 @@
 import { useStore } from '@nanostores/react'
 import { type ReactNode, useEffect, useRef, useState } from 'react'
 
-import { $session, type HarvisUser, probeSession, startSessionWatch } from '@/lib/harvis-session'
+import { $session, type HarvisUser, isWaiting, probeSession, startSessionWatch } from '@/lib/harvis-session'
 
-import { SignInScreen, UnreachableScreen } from './sign-in-screen'
+import { SignInScreen, UnreachableScreen, WaitingRoom } from './sign-in-screen'
 
 /**
  * Nothing behind this gate mounts until the server says someone is signed in:
@@ -24,7 +24,9 @@ export function SessionGate({ children }: { children: ReactNode }) {
   }, [])
 
   useEffect(() => {
-    if (session.status !== 'signed-in') {
+    // Waiting for the admin's approval: the server refuses everything but the
+    // session probe, so nothing mounts until the role comes back approved.
+    if (session.status !== 'signed-in' || isWaiting(session.user)) {
       return
     }
 
@@ -41,6 +43,10 @@ export function SessionGate({ children }: { children: ReactNode }) {
 
     return startSessionWatch()
   }, [session])
+
+  if (session.status === 'signed-in' && isWaiting(session.user)) {
+    return <WaitingRoom user={session.user} />
+  }
 
   if (!mounted) {
     if (session.status === 'checking') {

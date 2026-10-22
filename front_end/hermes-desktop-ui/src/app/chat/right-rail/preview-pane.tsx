@@ -40,6 +40,7 @@ import {
 } from './preview-console'
 import { type ConsoleEntry } from './preview-console-state'
 import { previewConsoleState } from './preview-console-store'
+import { DocumentPreview } from './preview-document'
 import { LocalFilePreview, PreviewEmptyState } from './preview-file'
 import { type PreviewInputEvent, registerPreviewInput } from './preview-input'
 import { PREVIEW_BROWSER_ATTR, registerPreviewNav } from './preview-nav'
@@ -1069,7 +1070,11 @@ export function PreviewPane({ embedded = false, onRestartServer, reloadRequest =
           )}
           {!isWebPreview &&
             (target.kind === 'artifact' ? (
-              <ArtifactPreview target={target} />
+              target.url.startsWith('doc:') ? (
+                <DocumentPreview target={target} />
+              ) : (
+                <ArtifactPreview target={target} />
+              )
             ) : (
               <LocalFilePreview reloadKey={localReloadKey} target={target} />
             ))}

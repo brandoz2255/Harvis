@@ -7,12 +7,15 @@ shapes rows into the Hermes protocol's SessionInfo / SessionRuntimeInfo.
 """
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass
 from typing import Optional
 
 from . import sandbox, store
 from .models import is_hidden_model
+
+log = logging.getLogger("hermes_ui.sessions")
 
 DESKTOP_CONTRACT = 6  # tui_gateway.server.DESKTOP_BACKEND_CONTRACT the vendored UI requires
 PROFILE_NAME = "default"  # the one profile the facade exposes
@@ -32,6 +35,7 @@ class Live:
     bot_id: str = ""  # the bot this chat speaks as (bots.py); "" for a plain chat
     web_search: bool = False  # the composer's globe: force a live web search on each turn
     usage: Optional[dict] = None  # token counts of the latest turn (context meter); None until one ran
+    parent_id: str = ""  # the chat this one branched or was spawned from; written to the row when it is created
 
     def next_seq(self) -> int:
         self.seq += 1
@@ -138,6 +142,7 @@ async def append(pool, s: Live, role: str, content: str, reasoning: str = "",
             # first-message derivation. Bot Mode relies on "Bot Chat" sticking.
             blob["title"] = s.title
             blob["title_source"] = "user"
+        _stamp_parent(blob, s)
     if truncate_at is not None:
         store.truncate_blob(blob, truncate_at)
     if s.model and (blob.get("models") or []) != [s.model]:
@@ -162,6 +167,7 @@ async def seed(pool, s: Live, rows: list[dict]) -> list[dict]:
         blob["bot_id"] = s.bot_id
     if s.title:
         blob["title"], blob["title_source"] = s.title, "user"
+    _stamp_parent(blob, s)
     for row in rows:
         parent = (blob.get("history") or {}).get("currentId")
         store.append_to_blob(blob, store.make_message(row["role"], row["content"], parent, s.model,
@@ -176,6 +182,48 @@ def fork(parent: Live, title: str) -> Live:
     """A draft that continues ``parent``'s model and bot; seed() writes its shared history."""
     return _remember(Live(id=str(uuid.uuid4()), user_id=parent.user_id, model=parent.model, title=title,
                           bot_id=parent.bot_id, effort=parent.effort, web_search=parent.web_search))
+
+
+def _stamp_parent(blob: dict, s: Live) -> None:
+    if s.parent_id:
+        blob.setdefault("meta", {})["parent_session_id"] = s.parent_id
+
+
+async def set_parent(pool, s: Live, parent_id: str) -> None:
+    """Nest ``s`` under ``parent_id`` in the sidebar. A draft carries the link until its row is
+    created; a stored row is updated now. Raises ValueError when the parent is not this user's chat."""
+    if not parent_id or parent_id == s.id or not await store.chat_exists(pool, s.user_id, parent_id):
+        raise ValueError("parent session not found")
+    s.parent_id = parent_id
+    if s.persisted:
+        await store.set_parent_link(pool, s.user_id, s.id, parent_id)
+
+
+async def spawn_child(pool, parent: Live, title: str, goal: str, summary: str) -> Live:
+    """A stored session under ``parent`` holding one agent step: the goal it was given and what it reported."""
+    child = fork(parent, (title or goal or "Agent step").strip()[:60])
+    child.bot_id, child.effort, child.web_search = "", "", False
+    try:
+        await set_parent(pool, child, parent.id)
+        rows = [{"role": "user", "content": goal or title}, {"role": "assistant", "content": summary}]
+        await seed(pool, child, [r for r in rows if r["content"]])
+    except Exception:
+        forget(child.id)
+        raise
+    return child
+
+
+async def step_child_payload(pool, parent: Live, payload: dict) -> dict:
+    """``payload`` (a subagent.complete) with ``child_session_id`` once its step has a session.
+    A failure is logged and the payload comes back unchanged: the turn goes on without the link."""
+    try:
+        child = await spawn_child(pool, parent, str(payload.get("goal") or ""), str(payload.get("goal") or ""),
+                                  str(payload.get("summary") or ""))
+        return {**payload, "child_session_id": child.id}
+    except Exception:  # noqa: BLE001
+        log.exception("hermes_ui: could not create a child session for step %s of %s",
+                      payload.get("subagent_id"), parent.id)
+        return payload
 
 
 async def replace_transcript(pool, s: Live, rows: list[dict]) -> list[dict]:
@@ -234,6 +282,7 @@ def to_session_info(r: dict) -> dict:
         "profile": PROFILE_NAME,
         "is_default_profile": True,
         "bot_id": r.get("bot_id") or None,
+        "parent_session_id": r.get("parent_id") or None,
     }
 
 

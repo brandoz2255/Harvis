@@ -173,6 +173,7 @@ SELECT id, title, pinned, archived, created_at, updated_at,
             THEN jsonb_array_length(chat->'messages') ELSE 0 END AS n,
        chat->'models'->>0 AS model,
        chat->>'bot_id' AS bot_id,
+       chat->'meta'->>'parent_session_id' AS parent_id,
        (SELECT m->>'content' FROM jsonb_array_elements(
             CASE WHEN jsonb_typeof(chat->'messages') = 'array'
                  THEN chat->'messages' ELSE '[]'::jsonb END) m
@@ -193,6 +194,7 @@ def _summary(r) -> dict:
         "archived": bool(r["archived"]),
         "model": r["model"] or "", "message_count": int(r["n"] or 0),
         "bot_id": r["bot_id"] or "",
+        "parent_id": r["parent_id"] or "",
         "preview": (r["preview"] or "")[:120],
         "created": r["created_at"].timestamp(), "updated": r["updated_at"].timestamp(),
     }
@@ -271,6 +273,28 @@ async def get_summary(pool, user_id: int, sid: str) -> Optional[dict]:
     async with pool.acquire() as conn:
         r = await conn.fetchrow(_SUMMARY_SQL + " AND id = $2", user_id, cid)
     return _summary(r) if r else None
+
+
+async def chat_exists(pool, user_id: int, sid: str) -> bool:
+    cid = persistence._as_uuid(sid)
+    if cid is None:
+        return False
+    async with pool.acquire() as conn:
+        found = await conn.fetchval("SELECT 1 FROM owui_chats WHERE id = $1 AND user_id = $2", cid, user_id)
+    return bool(found)
+
+
+async def set_parent_link(pool, user_id: int, sid: str, parent_id: str) -> bool:
+    """Record ``parent_id`` under chat.meta so the sidebar nests the row; no schema change."""
+    cid = persistence._as_uuid(sid)
+    if cid is None:
+        return False
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "UPDATE owui_chats SET chat = jsonb_set(chat, '{meta}', "
+            "coalesce(chat->'meta', '{}'::jsonb) || jsonb_build_object('parent_session_id', $3::text)) "
+            "WHERE id = $1 AND user_id = $2", cid, user_id, parent_id)
+    return not result.endswith(" 0")
 
 
 async def get_blob(pool, user_id: int, sid: str) -> Optional[dict]:

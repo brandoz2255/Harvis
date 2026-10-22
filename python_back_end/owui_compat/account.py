@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 # Same scheme + defaults as main.py:161. Keep in sync.
 _pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-MIN_PASSWORD_LENGTH = 8
+MIN_PASSWORD_LENGTH = 6  # same as sign-up (main.MIN_PASSWORD_LENGTH)
 
 
 class OwuiPasswordUpdateBody(BaseModel):

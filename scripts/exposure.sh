@@ -62,6 +62,7 @@ current_exposure() {
 
 validate_expose_arg() {
   validate_lock_args
+  validate_public_access
   [ -z "$EXPOSE_MODE" ] && return 0
   case "$EXPOSE_MODE" in
     local|lan|tunnel|lan+tunnel) : ;;
@@ -274,19 +275,23 @@ check_exposure() {
       fi ;;
     lan) add_row PASS exposure "lan — your network; sign-up closed once the admin exists" ;;
     tunnel|lan+tunnel)
+      local via="Cloudflare Access"
+      [ "$(tunnel_auth_choice)" = harvis ] && via="the tunnel, Harvis sign-in + your approval"
       if [ "$mode" = tunnel ]; then
         [ "$K8S_ACTION" = "up" ] && return 0
-        add_row PASS exposure "tunnel — internet through Cloudflare Access"
+        add_row PASS exposure "tunnel — internet through ${via}"
       else
-        add_row PASS exposure "lan+tunnel — your network, plus the internet through Cloudflare Access"
+        add_row PASS exposure "lan+tunnel — your network, plus the internet through ${via}"
       fi
-      check_access_list
+      check_public_access
       if [ -n "$(tunnel_networks)" ]; then check_network_lock; else check_eduroam; fi
       check_tunnel_reach ;;
     *) add_row WARN exposure "HARVIS_EXPOSURE='${mode}' is not local, lan, tunnel or lan+tunnel; Harvis treats it as lan" ;;
   esac
   # close_signup keeps an operator's explicit choice, so say out loud what it means here.
-  if [ "$mode" != local ] && [ "$(lower "$(env_value HARVIS_OWUI_ENABLE_SIGNUP)")" = true ]; then
+  # With approval on, open sign-up only fills the waiting room, so that is no warning.
+  if [ "$mode" != local ] && [ "$(lower "$(env_value HARVIS_OWUI_ENABLE_SIGNUP)")" = true ] &&
+     [ "$(lower "$(env_value HARVIS_SIGNUP_APPROVAL)")" = false ]; then
     add_row WARN signup ".env keeps sign-up open: anyone who reaches port 9000 can make an account"
     add_hint "Remove HARVIS_OWUI_ENABLE_SIGNUP from .env, and check Settings → General, which can open it too."
   fi
@@ -371,8 +376,7 @@ write_exposure_env() {
       # Visitors arrive over HTTPS, so the sign-in cookie can insist on it.
       set_env_value HARVIS_COOKIE_SECURE true
       set_env_value HARVIS_TUNNEL_TOKEN "$EXPOSE_TOKEN"
-      set_env_value HARVIS_CF_ACCESS_TEAM_DOMAIN "$EXPOSE_TEAM"
-      set_env_value HARVIS_CF_ACCESS_AUD "$EXPOSE_AUD"
+      write_public_access_env
       lock_tunnel_profile ;;
     lan+tunnel)
       set_env_value HARVIS_BIND_ADDR_PUBLIC 0.0.0.0
@@ -380,14 +384,20 @@ write_exposure_env() {
       # Plain http on the LAN; nginx marks the cookie Secure on the tunnel entrance.
       drop_env_key HARVIS_COOKIE_SECURE
       set_env_value HARVIS_TUNNEL_TOKEN "$EXPOSE_TOKEN"
-      set_env_value HARVIS_CF_ACCESS_TEAM_DOMAIN "$EXPOSE_TEAM"
-      set_env_value HARVIS_CF_ACCESS_AUD "$EXPOSE_AUD"
+      write_public_access_env
       lock_tunnel_profile ;;
   esac
   # Leaving tunnel mode: the secure-only cookie would break sign-in over plain
   # http://<lan-ip>:9000, and the tunnel should close now, not at the next start.
   if is_tunnel_mode "$was" && ! is_tunnel_mode "$EXPOSE_MODE"; then
     drop_env_key HARVIS_COOKIE_SECURE
+    drop_env_key HARVIS_TUNNEL_AUTH
+    [ "$EXPOSE_MODE" = local ] || forget_public_access_signup
+    if [ "$EXPOSE_MODE" = local ] && [ -n "$(env_value HARVIS_SIGNUP_OPENED_FOR_APPROVAL)" ]; then
+      drop_env_key HARVIS_OWUI_ENABLE_SIGNUP
+      drop_env_key HARVIS_SIGNUP_OPENED_FOR_APPROVAL
+      drop_env_key HARVIS_SIGNUP_APPROVAL
+    fi
     remove_tunnel_guard
     if [ "$(cat /var/lib/harvis/k8s/mode 2>/dev/null)" = k8s ]; then
       # Now, not at the end of the Kubernetes run: that may build for minutes, or stop early.

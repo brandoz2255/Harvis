@@ -28,14 +28,22 @@ export interface AuthConfig {
   onboarding: boolean
   signupEnabled: boolean
   setupCodeRequired: boolean
+  /** New accounts wait for the admin's approval; the sign-up form asks for a note to the host. */
+  signupApproval: boolean
 }
 
 export const $session = atom<SessionState>({ status: 'checking' })
 
 const SESSION_PATH = '/api/v1/auths/'
-const MIN_PASSWORD = 8
+// Same as the server (python_back_end/main.py MIN_PASSWORD_LENGTH): casual use.
+const MIN_PASSWORD = 6
+const NOTE_MAX = 280
 
 export const MIN_PASSWORD_LENGTH = MIN_PASSWORD
+export const NOTE_TO_HOST_MAX = NOTE_MAX
+
+/** The server's word for an account the admin has not approved yet. */
+export const isWaiting = (user: HarvisUser) => user.role === 'pending'
 
 /** An error whose message is safe to show the person as-is. */
 export class AuthError extends Error {
@@ -165,13 +173,14 @@ export async function fetchAuthConfig(): Promise<AuthConfig> {
 
   const body = (await res.json()) as {
     onboarding?: boolean
-    features?: { enable_signup?: boolean; setup_code_required?: boolean }
+    features?: { enable_signup?: boolean; setup_code_required?: boolean; signup_approval?: boolean }
   }
 
   return {
     onboarding: Boolean(body.onboarding),
     signupEnabled: body.features?.enable_signup !== false,
-    setupCodeRequired: Boolean(body.features?.setup_code_required)
+    setupCodeRequired: Boolean(body.features?.setup_code_required),
+    signupApproval: Boolean(body.features?.signup_approval)
   }
 }
 
@@ -201,6 +210,7 @@ export async function signUp(input: {
   email: string
   password: string
   setupCode?: string
+  noteToHost?: string
 }): Promise<HarvisUser> {
   // The form turns off browser validation to show its own messages, and the
   // server accepts empty strings, so blank fields have to stop here.
@@ -217,10 +227,16 @@ export async function signUp(input: {
   }
 
   const code = input.setupCode?.trim()
+  const note = input.noteToHost?.trim().slice(0, NOTE_MAX)
 
   const res = await send(
     '/api/v1/auths/signup',
-    { name: input.name.trim(), email: input.email.trim(), password: input.password },
+    {
+      name: input.name.trim(),
+      email: input.email.trim(),
+      password: input.password,
+      ...(note ? { note_to_host: note } : {})
+    },
     code ? { 'X-Setup-Code': code } : undefined
   )
 

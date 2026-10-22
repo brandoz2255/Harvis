@@ -19,6 +19,7 @@ import { SidebarPanelLabel } from '../shell/sidebar-label'
 
 import { ProjectTree } from './files/tree'
 import { useProjectTree } from './files/use-project-tree'
+import { SessionPanel } from './session-panel'
 
 interface RightSidebarPaneProps {
   onActivateFile: (path: string) => void
@@ -83,6 +84,7 @@ export function RightSidebarPane({ onActivateFile, onActivateFolder }: RightSide
           : 'border-l shadow-[inset_0.0625rem_0_0_color-mix(in_srgb,white_18%,transparent)]'
       )}
     >
+      <SessionPanel onActivateFile={onActivateFile} />
       <FilesystemTab
         canCollapse={canCollapse}
         collapseNonce={collapseNonce}

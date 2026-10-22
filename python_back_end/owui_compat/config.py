@@ -76,6 +76,15 @@ def _setup_code_required(onboarding) -> bool:
     return bool(onboarding) and shared()
 
 
+def _signup_approval() -> bool:
+    try:
+        from plugins.people.approval import approval_required
+
+        return approval_required()
+    except Exception:  # noqa: BLE001 — config must render even if the plugin is absent
+        return False
+
+
 def build_config(
     onboarding: bool = False,
     signup_enabled: bool | None = None,
@@ -131,6 +140,9 @@ def build_config(
             # server asks for the host's 6-digit code, and so does any server
             # whose operator set HARVIS_SETUP_CODE. A laptop asks for nothing.
             "setup_code_required": _setup_code_required(onboarding),
+            # New accounts wait for the admin's approval (plugins/people/approval.py);
+            # the sign-up form then asks for a note to the host.
+            "signup_approval": _signup_approval(),
             "enable_login_form": True,
             # OPTION A: HTTP-SSE chat, no Socket.IO. Do not flip without also
             # implementing an OWUI-compatible Socket.IO server (owui_compat).

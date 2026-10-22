@@ -28,3 +28,12 @@ export const runInTerminal = (command: string) => {
   setTerminalTakeover(true)
   $terminalInjection.set(trimmed)
 }
+
+const SESSION_PANEL_COLLAPSED_KEY = 'hermes.desktop.rightSidebar.sessionPanelCollapsed'
+
+/** Whether this viewer folded the "This session" panel. Stored per browser. */
+export const $sessionPanelCollapsed = atom(storedBoolean(SESSION_PANEL_COLLAPSED_KEY, false))
+
+$sessionPanelCollapsed.subscribe(collapsed => persistBoolean(SESSION_PANEL_COLLAPSED_KEY, collapsed))
+
+export const setSessionPanelCollapsed = (collapsed: boolean) => $sessionPanelCollapsed.set(collapsed)

@@ -4,12 +4,14 @@ from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 from .registry import registry, invoke_tool
 from .auth import TOKEN_ENV, configured_token, require_scopes
+from .mcp_http import router as mcp_router
 from .tools.os_ops import register_os_ops  # registers tools at import
 from .tools.openclaw_workspace import register_openclaw_workspace
 
 logger = logging.getLogger("harvis-mcp")
 
 app = FastAPI(title="MCP Harvis Server")
+app.include_router(mcp_router)
 register_os_ops()
 register_openclaw_workspace()
 
