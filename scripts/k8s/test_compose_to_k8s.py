@@ -367,6 +367,7 @@ class TunnelTest(unittest.TestCase):
         script = find(render(), "CronJob", "pgsql-backup")
         cmd = script["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]["command"][2]
         self.assertIn("umask 077", cmd)
+        self.assertLess(cmd.index("pg_isready"), cmd.index("pg_dump"))  # boot catch-up waits for pgsql
 
     def test_public_ports_keep_the_visitor_address(self):
         for o in render():

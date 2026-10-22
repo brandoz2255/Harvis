@@ -1,7 +1,11 @@
 import { readActivePreview } from '@/app/chat/right-rail/preview-reader'
-import { writeAgentTerminalChunk } from '@/app/right-sidebar/terminal/agent-terminal-stream'
+import { seedAgentTerminalCommand, writeAgentTerminalChunk } from '@/app/right-sidebar/terminal/agent-terminal-stream'
 import { readActiveTerminal } from '@/app/right-sidebar/terminal/buffer'
-import { closeAgentTerminalByProc } from '@/app/right-sidebar/terminal/terminals'
+import {
+  closeAgentTerminalByProc,
+  ensureAgentTerminal,
+  openAgentTerminal
+} from '@/app/right-sidebar/terminal/terminals'
 import type { PreviewActAction } from '@/lib/preview-act/act-in-page'
 import type { TourAction, TourStep } from '@/lib/tour'
 import { $gateway } from '@/store/gateway'
@@ -156,7 +160,19 @@ export function handleDesktopBridgeEvent(ctx: GatewayEventContext): boolean {
 
   if (event.type === 'agent.terminal.output') {
     // Live chunk from a background process → its read-only agent terminal tab.
-    writeAgentTerminalChunk(payload?.process_id ?? '', payload?.chunk ?? '')
+    const procId = payload?.process_id ?? ''
+
+    // A Harvis agent command names itself on its first chunk: open its tab in
+    // the chat being watched (focused, pane shown), quietly in any other.
+    if (procId && payload?.command) {
+      if (isActiveEvent) {
+        openAgentTerminal(procId, payload.command)
+      } else if (ensureAgentTerminal(procId, payload.command)) {
+        seedAgentTerminalCommand(procId, payload.command)
+      }
+    }
+
+    writeAgentTerminalChunk(procId, payload?.chunk ?? '')
 
     return true
   }

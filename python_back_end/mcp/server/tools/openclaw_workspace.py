@@ -134,6 +134,8 @@ async def _openclaw_read(inp: ReadInput) -> dict:
     """Read a file from the OpenClaw workspace."""
     # Use exec to cat the file — simpler than WebSocket
     result = await _openclaw_exec(ExecInput(command=f"cat {inp.path}"))
+    if result.get("exit_code", 1) != 0:
+        raise RuntimeError(result.get("stderr") or "read failed")
     content = result.get("stdout", "")
     return {"content": content, "size": len(content)}
 
@@ -193,11 +195,11 @@ async def _search(inp: SearchInput) -> dict:
                 headers=_auth_headers(),
                 json={"query": inp.query, "max_results": inp.max_results},
             )
-        if resp.status_code == 200:
-            return {"results": resp.json().get("results", [])}
-        return {"results": []}
-    except Exception:
-        return {"results": []}
+    except Exception as e:
+        raise RuntimeError(f"search request failed: {e}") from e
+    if resp.status_code != 200:
+        raise RuntimeError(f"search failed: HTTP {resp.status_code}")
+    return {"results": resp.json().get("results", [])}
 
 
 async def _web_fetch(inp: WebFetchInput) -> dict:
@@ -225,11 +227,11 @@ async def _list_repos(inp: ListReposInput) -> dict:
                 f"{BACKEND_URL}/api/workspace/repos",
                 headers=_auth_headers(),
             )
-        if resp.status_code == 200:
-            return {"repos": resp.json().get("repos", [])}
-        return {"repos": []}
-    except Exception:
-        return {"repos": []}
+    except Exception as e:
+        raise RuntimeError(f"list_repos request failed: {e}") from e
+    if resp.status_code != 200:
+        raise RuntimeError(f"list_repos failed: HTTP {resp.status_code}")
+    return {"repos": resp.json().get("repos", [])}
 
 
 async def _clone_repo(inp: CloneRepoInput) -> dict:

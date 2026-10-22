@@ -78,6 +78,33 @@ describe('preprocessMarkdown', () => {
     expect(output).toContain('const value = 1;')
   })
 
+  it('keeps a dangling code fence that follows prose', () => {
+    const input = ['Here you go:', '', '```ts', 'const value = 1;'].join('\n')
+    const output = preprocessMarkdown(input)
+
+    expect(output).toBe(input)
+  })
+
+  it('keeps a four-backtick fence whole around inner fences and leaves its body unrewritten', () => {
+    const input = [
+      'Intro',
+      '',
+      '````harvis-doc',
+      '---',
+      'kind: doc',
+      '---',
+      'See https://example.com/a and note[1]',
+      '```py',
+      'print(1)',
+      '```',
+      '````',
+      '',
+      'After'
+    ].join('\n')
+
+    expect(preprocessMarkdown(input)).toBe(input)
+  })
+
   it('demotes dangling prose fences', () => {
     const input = ['```', '- Pure white (`#ffffff`)', '- Ambient dropped to 0.18'].join('\n')
     const output = preprocessMarkdown(input)

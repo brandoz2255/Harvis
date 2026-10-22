@@ -71,9 +71,10 @@ spec:
             - name: LOG_LEVEL
               value: "INFO"
 
-            # Run document generation locally in pod (Docker not available in K8s)
-            - name: CODE_EXECUTOR_LOCAL
-              value: "true"
+            # Model-written document code runs in the sandbox service, never in this pod.
+            # Unset or unreachable means document generation fails; it does not fall back.
+            - name: CODE_EXECUTOR_URL
+              value: "http://sandbox.ai-agents.svc.cluster.local:8080"
 
             # Worker-specific settings
             - name: WORKER_NAME

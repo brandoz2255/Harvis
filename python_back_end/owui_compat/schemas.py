@@ -22,6 +22,8 @@ class OwuiSignupBody(BaseModel):
     email: str
     password: str
     profile_image_url: Optional[str] = None
+    # Shown to the admin beside an account waiting for approval.
+    note_to_host: Optional[str] = None
 
 
 class OwuiChatNewBody(BaseModel):

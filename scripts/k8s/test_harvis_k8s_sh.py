@@ -29,6 +29,7 @@ def bash(body, env=None, cwd=None, real_env_readers=False):
 FAKE_IPT = '''
 LOG=$(mktemp); STATE=$(mktemp -u)
 ipt() { echo "$*" >> "$LOG"; case "$1 $2" in "-C INPUT") [ -e "$STATE" ] ;; "-I INPUT") touch "$STATE" ;; "-D INPUT") rm -f "$STATE" ;; esac; }
+ipt_restore() { cat >> "$LOG"; }
 have_iptables() { return 0; }
 cluster_node_ips() { printf '192.168.1.10\\n192.168.1.11\\n'; }
 '''
@@ -58,6 +59,30 @@ class KubeletFirewallTest(unittest.TestCase):
         self.assertEqual(removed.splitlines()[:2], ["-C INPUT -p tcp --dport 10250 -j HARVIS-K3S",
                                                     "-D INPUT -p tcp --dport 10250 -j HARVIS-K3S"])
         self.assertIn("-X HARVIS-K3S", removed)
+
+    def test_chain_is_written_in_one_restore_transaction(self):
+        # A rule-by-rule rebuild could be emptied halfway by k3s's own iptables-restore,
+        # leaving DROP without the loopback rule (kubectl exec and logs then hang).
+        out, rc = bash(FAKE_IPT + 'apply_kubelet_firewall quiet; cat "$LOG"')
+        self.assertEqual(rc, 0, out)
+        lines = out.splitlines()
+        start, end = lines.index("*filter"), lines.index("COMMIT")
+        self.assertEqual(lines[start + 1:start + 3], [":HARVIS-K3S - [0:0]", "-F HARVIS-K3S"])
+        self.assertEqual(lines[start + 3:end], [
+            "-A HARVIS-K3S -s 127.0.0.0/8 -j RETURN",
+            "-A HARVIS-K3S -s 10.42.0.0/16 -j RETURN",
+            "-A HARVIS-K3S -s 10.43.0.0/16 -j RETURN",
+            "-A HARVIS-K3S -s 192.168.1.10 -j RETURN",
+            "-A HARVIS-K3S -s 192.168.1.11 -j RETURN",
+            "-A HARVIS-K3S -j DROP"])
+        self.assertFalse([l for l in lines if l.startswith(("-A HARVIS-K3S", "-F HARVIS-K3S")) and
+                          not start < lines.index(l) < end], out)
+
+    def test_a_failed_restore_never_hooks_the_chain(self):
+        out, rc = bash(FAKE_IPT + 'ipt_restore() { cat > /dev/null; return 1; }; apply_kubelet_firewall; cat "$LOG"')
+        self.assertEqual(rc, 0, out)
+        self.assertIn("Could not set the firewall", out)
+        self.assertNotIn("-I INPUT", out)
 
     def test_never_touches_6443(self):
         out, _ = bash(FAKE_IPT + 'apply_kubelet_firewall quiet; cat "$LOG"')

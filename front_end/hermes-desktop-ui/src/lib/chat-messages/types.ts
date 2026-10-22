@@ -90,6 +90,8 @@ export type GatewayEventPayload = {
   install_warning?: string
   personality?: string
   usage?: Partial<UsageStats>
+  // harvis.followups — [{ title, prompt }] suggestion cards (validated by store/followups)
+  items?: unknown
   // agent.terminal.output — live chunk for a read-only agent terminal tab
   process_id?: string
   chunk?: string

@@ -1421,6 +1421,7 @@ export const en: Translations = {
     failed: 'Failed',
     done: 'Done',
     streaming: 'Streaming',
+    openSession: 'Open',
     files: 'Files',
     moreFiles: count => `+${count} more files`,
     delegation: index => `Delegation ${index}`,
@@ -2189,6 +2190,108 @@ export const en: Translations = {
     missingBody: 'This artifact is no longer in the local registry.'
   },
 
+  docCard: {
+    kind: { deck: 'Slide deck', doc: 'Document', pdf: 'PDF', sheet: 'Spreadsheet' },
+    starting: 'Starting…',
+    writing: (kind, current, total) => {
+      const unit = { deck: 'slide', doc: 'section', pdf: 'section', sheet: 'sheet' }[kind]
+
+      return total > 0 ? `Writing ${unit} ${current} of ${total}` : `Writing ${unit} ${current}`
+    },
+    done: (kind, count) => {
+      const unit = { deck: 'slide', doc: 'section', pdf: 'section', sheet: 'sheet' }[kind]
+
+      return `${count} ${unit}${count === 1 ? '' : 's'}`
+    },
+    open: 'Open',
+    noun: { deck: 'Presentation', doc: 'Document', pdf: 'PDF', sheet: 'Spreadsheet' },
+    downloadAll: 'Download all',
+    downloadingAll: (done, total) => `Downloading ${done} of ${total}…`,
+    downloadAllFailed: count => `${count} ${count === 1 ? 'file' : 'files'} failed to download`
+  },
+
+  docPreview: {
+    untitled: 'Untitled',
+    writing: 'Writing…',
+    done: 'Done',
+    progressAria: 'Writing progress',
+    pending: name => `${name} (not written yet)`,
+    slide: index => `Slide ${index}`,
+    slides: 'Slides',
+    notes: 'Notes',
+    showSlides: 'Show slide list',
+    hideSlides: 'Hide slide list',
+    page: index => `Page ${index}`,
+    paginationProvisional: 'Page breaks are provisional while the document is being written',
+    jumpToLive: 'Jump to live',
+    formulaBar: 'Formula bar',
+    emptySheet: 'No rows yet',
+    sheetTabs: 'Sheets',
+    moreActions: 'More actions',
+    copySource: 'Copy source',
+    missingTitle: 'Document unavailable',
+    missingBody: 'This document is no longer in memory. Reopen it from the message that wrote it.',
+    caretName: 'Harvis',
+    blocks: {
+      timeline: 'Timeline',
+      chart: 'Chart',
+      quadrant: 'Priority grid',
+      cards: 'Cards',
+      flow: 'Diagram',
+      csv: 'Data',
+      drawing: kind => `${kind}: drawing…`,
+      source: 'Source',
+      range: (from, to) => `${from} to ${to}`,
+      axisX: 'x axis',
+      axisY: 'y axis',
+      moreRows: count => `${count} more rows in the source`
+    },
+    export: {
+      download: ext => `Download .${ext}`,
+      writing: 'Writing…',
+      converting: 'Converting…',
+      downloaded: 'Downloaded',
+      failed: 'Export failed',
+      retry: 'Retry',
+      moreFormats: 'More formats'
+    },
+    view: {
+      aria: 'Document view',
+      live: 'Live',
+      preview: 'Preview',
+      previewWaiting: 'Preview is available once the document is written'
+    },
+    pages: {
+      label: (current, total) => `Page ${current} / ${total}`,
+      prev: 'Previous page',
+      next: 'Next page',
+      loading: 'Rendering pages…',
+      unavailableTitle: 'Preview needs the document sandbox',
+      unavailableBody: 'The sandbox that renders the real file is not running. The live view still works.',
+      failed: 'Could not render the preview',
+      retry: 'Retry',
+      pageAlt: (current, total, title) => `${title}, page ${current} of ${total}`,
+      truncated: (shown, total) => `Showing the first ${shown} of ${total} pages`
+    },
+    check: {
+      button: 'Check',
+      checking: 'Checking…',
+      none: 'No problems found',
+      failed: 'Check failed',
+      vision: 'Also look at the pages (slower)',
+      fix: 'Fix it',
+      fixSent: 'Sent',
+      fixUnavailable: 'Sending to the chat is not available here',
+      checkedBy: model => `Checked by ${model}`,
+      noRender: 'Pages were not drawn, so only the text was checked',
+      visionBusy: 'The page look-over is busy; only the text was checked',
+      visionPartial: 'Some pages could not be looked over',
+      error: 'Error',
+      warn: 'Warning',
+      dismiss: 'Dismiss'
+    }
+  },
+
   sidebar: {
     nav: {
       'new-session': 'New session',
@@ -2452,6 +2555,9 @@ export const en: Translations = {
     queueDelete: 'Delete',
     queueResume: 'Resume',
     queueResumeTip: 'Paused by Stop — resume sending the queued turns',
+    followupStart: 'Start',
+    followupStartAria: title => `Start a new chat: ${title}`,
+    followupDismiss: 'Dismiss suggestions',
     queueStuckTitle: 'Queued message not sent',
     queueStuckBody: 'A queued turn kept failing to send. It is still in the queue — try sending it again.',
     previewUnavailable: 'Preview unavailable',
@@ -3025,7 +3131,22 @@ export const en: Translations = {
     terminalNew: 'New terminal',
     terminalCloseOthers: 'Close others',
     terminalCloseAll: 'Close all',
-    addToChat: 'Add to chat'
+    addToChat: 'Add to chat',
+    sessionTitle: 'This session',
+    sessionCollapse: 'Hide session details',
+    sessionExpand: 'Show session details',
+    sessionRunsOn: 'Runs on',
+    sessionModelNone: 'No model chosen yet',
+    sessionFolder: 'Folder',
+    sessionFolderNone: 'Created with your first message',
+    sessionContext: 'Context',
+    sessionContextPercent: percent => `${percent}% full`,
+    sessionContextTokens: (used, max) => `${used} of ${max} tokens`,
+    sessionContextUnknown: 'Not measured yet',
+    sessionChanges: 'Changes',
+    sessionNoChanges: 'No changes yet',
+    sessionMoreChanges: count => `+${count} more`,
+    sessionOpenFile: path => `Open ${path}`
   },
 
   preview: {

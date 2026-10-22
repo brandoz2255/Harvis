@@ -27,7 +27,7 @@ import {
   setMessages,
   setSessions
 } from '@/store/session'
-import { dropSessionState, publishSessionState } from '@/store/session-states'
+import { $sessionTiles, closeSessionTile, dropSessionState, publishSessionState } from '@/store/session-states'
 import { $wakeWord, resetWakeWordState } from '@/store/wake-word'
 import type { SessionInfo } from '@/types/hermes'
 
@@ -506,6 +506,76 @@ describe('usePromptActions slash session targeting', () => {
 
     expect(createBackendSessionForSend).not.toHaveBeenCalled()
     expect(calls).not.toContain('slash.exec')
+  })
+})
+
+describe('usePromptActions /btw', () => {
+  beforeEach(() => {
+    setSessions(() => [sessionInfo()])
+    $messages.set([])
+  })
+
+  afterEach(() => {
+    cleanup()
+    closeSessionTile('stored-btw')
+    vi.restoreAllMocks()
+  })
+
+  const btwResult = {
+    message: 'why is the build red?',
+    output: 'Side question opened in a new tab',
+    parent_session_id: RUNTIME_SESSION_ID,
+    session_id: 'rt-btw',
+    stored_session_id: 'stored-btw',
+    title: 'btw',
+    type: 'btw'
+  }
+
+  it('opens the side session as a tab, asks it, and never retries through command.dispatch', async () => {
+    const calls: { method: string; params?: Record<string, unknown> }[] = []
+    const refreshSessions = vi.fn(async () => undefined)
+
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params })
+
+      return (method === 'slash.exec' ? btwResult : {}) as never
+    })
+
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness onReady={h => (handle = h)} refreshSessions={refreshSessions} requestGateway={requestGateway} />
+    )
+
+    await handle!.submitText('/btw why is the build red?')
+
+    expect(calls.map(c => c.method)).toEqual(['slash.exec', 'prompt.submit'])
+    expect(calls[0]?.params).toEqual({ command: 'btw why is the build red?', session_id: RUNTIME_SESSION_ID })
+    // The question goes to the NEW session, not the chat the command was typed in.
+    expect(calls[1]?.params).toMatchObject({ session_id: 'rt-btw', text: 'why is the build red?' })
+    expect($sessionTiles.get().find(t => t.storedSessionId === 'stored-btw')?.runtimeId).toBe('rt-btw')
+    expect(refreshSessions).toHaveBeenCalled()
+  })
+
+  it('shows the output as the usual notice in the chat it was typed in', async () => {
+    const onUpdateState = vi.fn()
+
+    const requestGateway = vi.fn(async (method: string) => (method === 'slash.exec' ? btwResult : {}) as never)
+
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness
+        onReady={h => (handle = h)}
+        onUpdateState={(sessionId, _stored, state) => onUpdateState(sessionId, JSON.stringify(state))}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    await handle!.submitText('/btw why is the build red?')
+
+    expect(
+      onUpdateState.mock.calls.some(([sid, state]) => sid === RUNTIME_SESSION_ID && state.includes(btwResult.output))
+    ).toBe(true)
   })
 })
 

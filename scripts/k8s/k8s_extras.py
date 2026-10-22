@@ -22,6 +22,8 @@ NGINX_CONF_TARGETS = {"/etc/nginx/nginx.conf": "nginx.conf", "/etc/nginx/harvis.
 BACKEND_SA = "harvis-backend"
 DB = "pgsql"
 DB_BACKUP = "pgsql-backup"
+#: Seconds the backup job waits for pgsql to answer before it gives up.
+DB_BACKUP_WAIT = 600
 # Services that never join the shared compose networks in Kubernetes: each gets
 # its own ingress allowlist instead (see network_policies).
 ISOLATED = {DB, tunnel.NAME}
@@ -224,7 +226,7 @@ def network_policies(gen):
     internal = {n for n, spec in gen.networks.items() if (spec or {}).get("internal")}
     for name, svc in gen.services.items():
         nets = set((svc.get("networks") or {}).keys())
-        if not nets or not nets <= internal:
+        if not nets or not nets <= internal or name == harden.SANDBOX:
             continue
         to = [{"podSelector": {"matchLabels": {net_label(n): "1"}}} for n in sorted(nets)]
         if name in clients:
@@ -305,8 +307,14 @@ def db_backup(gen):
     if not svc or not svc.get("image"):
         return
     excludes = " ".join(f"--exclude-table={t}" for t in PG_DUMP_EXCLUDES)
+    # A node that was off at the scheduled hour runs the missed job the moment it boots, before
+    # pgsql is up; waiting here keeps that catch-up run from failing.
+    wait = DB_BACKUP_WAIT // 10
     script = (
-        'set -eu; umask 077; f="/backups/harvis_backup_$(date +%Y%m%d_%H%M%S).sql.gz"; '
+        'set -eu; umask 077; n=0; '
+        f'until pg_isready -q -h {gen.fqdn(DB)}; do n=$((n+1)); '
+        f'[ "$n" -lt {wait} ] || {{ echo "database not ready after {DB_BACKUP_WAIT}s" >&2; exit 1; }}; sleep 10; done; '
+        'f="/backups/harvis_backup_$(date +%Y%m%d_%H%M%S).sql.gz"; '
         f'PGPASSWORD="$POSTGRES_PASSWORD" pg_dump -h {gen.fqdn(DB)} -U "$POSTGRES_USER" "$POSTGRES_DB" {excludes} '
         '| gzip > "$f"; [ "$(gzip -dc "$f" | head -c 1 | wc -c)" = 1 ] || { rm -f "$f"; echo "empty dump" >&2; exit 1; }; '
         f'ls -t /backups/harvis_backup_*.sql.gz | tail -n +{BACKUPS_KEPT + 1} | xargs -r rm -f; '
@@ -342,4 +350,5 @@ def add_all(gen):
     db_backup(gen)
     tunnel.add(gen)
     harden.browser_egress(gen)
+    harden.sandbox_isolation(gen)
     harden.apply(gen)

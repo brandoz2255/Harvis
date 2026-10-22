@@ -1608,6 +1608,7 @@ export const zh: Translations = {
     failed: '失败',
     done: '完成',
     streaming: '流式传输',
+    openSession: '打开',
     files: '文件',
     moreFiles: count => `还有 ${count} 个文件`,
     delegation: index => `派发 ${index}`,
@@ -2369,6 +2370,108 @@ export const zh: Translations = {
     missingBody: '此产物已不在本地注册表中。'
   },
 
+  docCard: {
+    kind: { deck: '幻灯片', doc: '文档', pdf: 'PDF', sheet: '电子表格' },
+    starting: '正在开始…',
+    writing: (kind, current, total) => {
+      const unit = { deck: '张幻灯片', doc: '节', pdf: '节', sheet: '个工作表' }[kind]
+
+      return total > 0 ? `正在写第 ${current}/${total} ${unit}` : `正在写第 ${current} ${unit}`
+    },
+    done: (kind, count) => {
+      const unit = { deck: '张幻灯片', doc: '节', pdf: '节', sheet: '个工作表' }[kind]
+
+      return `${count} ${unit}`
+    },
+    open: '打开',
+    noun: { deck: '演示文稿', doc: '文档', pdf: 'PDF', sheet: '电子表格' },
+    downloadAll: '全部下载',
+    downloadingAll: (done, total) => `正在下载 ${done}/${total}…`,
+    downloadAllFailed: count => `${count} 个文件下载失败`
+  },
+
+  docPreview: {
+    untitled: '未命名',
+    writing: '写作中…',
+    done: '完成',
+    progressAria: '写作进度',
+    pending: name => `${name}（尚未写出）`,
+    slide: index => `第 ${index} 张`,
+    slides: '幻灯片',
+    notes: '备注',
+    showSlides: '显示幻灯片列表',
+    hideSlides: '隐藏幻灯片列表',
+    page: index => `第 ${index} 页`,
+    paginationProvisional: '文档写作期间，分页仅为暂定',
+    jumpToLive: '跳到最新',
+    formulaBar: '公式栏',
+    emptySheet: '暂无数据',
+    sheetTabs: '工作表',
+    moreActions: '更多操作',
+    copySource: '复制源码',
+    missingTitle: '文档不可用',
+    missingBody: '该文档已不在内存中。请从生成它的消息重新打开。',
+    caretName: 'Harvis',
+    blocks: {
+      timeline: '时间线',
+      chart: '图表',
+      quadrant: '优先级矩阵',
+      cards: '卡片',
+      flow: '流程图',
+      csv: '数据',
+      drawing: kind => `${kind}：绘制中…`,
+      source: '源数据',
+      range: (from, to) => `${from} 至 ${to}`,
+      axisX: 'X 轴',
+      axisY: 'Y 轴',
+      moreRows: count => `源数据中还有 ${count} 行`
+    },
+    export: {
+      download: ext => `下载 .${ext}`,
+      writing: '写作中…',
+      converting: '转换中…',
+      downloaded: '已下载',
+      failed: '导出失败',
+      retry: '重试',
+      moreFormats: '更多格式'
+    },
+    view: {
+      aria: '文档视图',
+      live: '实时',
+      preview: '预览',
+      previewWaiting: '文档写完后即可预览'
+    },
+    pages: {
+      label: (current, total) => `第 ${current} / ${total} 页`,
+      prev: '上一页',
+      next: '下一页',
+      loading: '正在渲染页面…',
+      unavailableTitle: '预览需要文档沙盒',
+      unavailableBody: '用于渲染真实文件的沙盒未运行。实时视图仍可使用。',
+      failed: '无法生成预览',
+      retry: '重试',
+      pageAlt: (current, total, title) => `${title}，第 ${current} 页，共 ${total} 页`,
+      truncated: (shown, total) => `仅显示前 ${shown} 页，共 ${total} 页`
+    },
+    check: {
+      button: '检查',
+      checking: '检查中…',
+      none: '未发现问题',
+      failed: '检查失败',
+      vision: '同时查看页面（较慢）',
+      fix: '修复',
+      fixSent: '已发送',
+      fixUnavailable: '此处无法发送到聊天',
+      checkedBy: model => `由 ${model} 检查`,
+      noRender: '页面未能绘制，只检查了文字',
+      visionBusy: '页面检查繁忙，只检查了文字',
+      visionPartial: '部分页面未能查看',
+      error: '错误',
+      warn: '警告',
+      dismiss: '关闭'
+    }
+  },
+
   sidebar: {
     nav: {
       'new-session': '新建会话',
@@ -2630,6 +2733,9 @@ export const zh: Translations = {
     queueDelete: '删除',
     queueResume: '继续',
     queueResumeTip: '已被停止操作暂停 — 继续发送排队的回合',
+    followupStart: '开始',
+    followupStartAria: title => `开始新对话：${title}`,
+    followupDismiss: '关闭建议',
     queueStuckTitle: '排队消息未发送',
     queueStuckBody: '排队的对话多次发送失败。它仍在队列中，请重试发送。',
     previewUnavailable: '预览不可用',
@@ -3187,7 +3293,22 @@ export const zh: Translations = {
     terminalNew: '新建终端',
     terminalCloseOthers: '关闭其他',
     terminalCloseAll: '关闭全部',
-    addToChat: '添加到对话'
+    addToChat: '添加到对话',
+    sessionTitle: '本次对话',
+    sessionCollapse: '隐藏对话详情',
+    sessionExpand: '显示对话详情',
+    sessionRunsOn: '运行于',
+    sessionModelNone: '尚未选择模型',
+    sessionFolder: '文件夹',
+    sessionFolderNone: '发送第一条消息后创建',
+    sessionContext: '上下文',
+    sessionContextPercent: percent => `已用 ${percent}%`,
+    sessionContextTokens: (used, max) => `${used} / ${max} 个词元`,
+    sessionContextUnknown: '尚未统计',
+    sessionChanges: '更改',
+    sessionNoChanges: '暂无更改',
+    sessionMoreChanges: count => `另有 ${count} 个`,
+    sessionOpenFile: path => `打开 ${path}`
   },
 
   preview: {

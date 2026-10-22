@@ -17,6 +17,7 @@ COMMANDS: tuple[tuple[str, str, str, Optional[str]], ...] = (
     ("/new", "Start a new chat", "", None),
     ("/title", "Rename this chat", "<title>", "text"),
     ("/branch", "Branch this chat into a new one", "", None),
+    ("/btw", "Ask a side question in its own tab", "<question>", "text"),
     ("/compress", "Summarize older turns to free up context", "[focus]", "text"),
     ("/save", "Save this transcript as Markdown in the workspace", "", None),
     ("/status", "Show this chat's model, size and settings", "", None),
@@ -26,9 +27,9 @@ COMMANDS: tuple[tuple[str, str, str, Optional[str]], ...] = (
     ("/research", "Run deep research on a question", "<question>", "text"),
     ("/help", "List the slash commands", "", None),
 )
-ALIASES = {"/reset": "/new", "/clear": "/new", "/fork": "/branch", "/compact": "/compress", "/commands": "/help",
+ALIASES = {"/reset": "/new", "/clear": "/new", "/fork": "/branch", "/aside": "/btw", "/compact": "/compress", "/commands": "/help",
            "/deep-research": "/research", "/deepresearch": "/research"}
-SECTIONS = (("Chat", ("/new", "/title", "/branch", "/compress", "/save")),
+SECTIONS = (("Chat", ("/new", "/title", "/branch", "/btw", "/compress", "/save")),
             ("Info", ("/status", "/usage", "/help")),
             ("Model and search", ("/model", "/web", "/research")))
 WEB_OPTIONS = (("on", "Search the web on every message"), ("off", "Answer without searching the web"))
@@ -166,6 +167,10 @@ class SlashMethods:
             except ValueError as exc:
                 return {"output": str(exc)}
             return {"output": f"Branched into \"{child.title}\" ({len(rows)} messages). Open it from the sidebar."}
+        if cmd == "/btw":
+            if not arg:
+                return {"output": "Usage: /btw <question>"}
+            return await self._btw(s, msgs, arg)
         if cmd == "/compress":
             if s.running:
                 return {"output": "Wait for the current reply to finish, then compress."}

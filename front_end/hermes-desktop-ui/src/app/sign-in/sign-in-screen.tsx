@@ -1,5 +1,6 @@
 import { type FormEvent, type ReactNode, useEffect, useId, useRef, useState } from 'react'
 
+import { AsciiField } from '@/components/chat/ascii-field'
 import { HarvisWordmark } from '@/components/chat/harvis-wordmark'
 import { Button } from '@/components/ui/button'
 import { Field, FieldHint } from '@/components/ui/field'
@@ -10,11 +11,15 @@ import {
   fetchAuthConfig,
   type HarvisUser,
   MIN_PASSWORD_LENGTH,
+  NOTE_TO_HOST_MAX,
+  probeSession,
   signIn,
+  signOut,
   signUp
 } from '@/lib/harvis-session'
-import { AlertTriangle, ArrowRight, Eye, EyeOff, Loader2, RefreshCw } from '@/lib/icons'
+import { AlertTriangle, ArrowRight, Clock, Eye, EyeOff, Loader2, LogOut, RefreshCw } from '@/lib/icons'
 import { cn } from '@/lib/utils'
+import { asciiPlaces } from '@/store/ascii-places'
 
 type Mode = 'signin' | 'signup' | 'claim'
 type FieldName = NonNullable<AuthError['field']>
@@ -42,17 +47,19 @@ function Frame({ children, overlay }: { children: ReactNode; overlay?: boolean }
       )}
       data-glass-opaque=""
     >
-      <aside className="hidden min-w-0 flex-col justify-between gap-8 overflow-hidden border-r border-(--stroke-nous) bg-(--ui-chat-bubble-background) px-12 py-10 min-[900px]:flex">
-        <div className="flex items-center gap-2.5 text-[0.9375rem] font-semibold text-foreground">
+      {asciiPlaces.has('signin-full') && <AsciiField className="absolute inset-0" />}
+      <aside className="relative hidden min-w-0 flex-col justify-between gap-8 overflow-hidden border-r border-(--stroke-nous) bg-(--ui-chat-bubble-background) px-12 py-10 min-[900px]:flex">
+        {asciiPlaces.has('signin') && <AsciiField className="absolute inset-0" />}
+        <div className="relative flex items-center gap-2.5 text-[0.9375rem] font-semibold text-foreground">
           <img alt="" className="size-7" src={LOGO} />
           Harvis
         </div>
-        <HarvisWordmark className="harvis-cycle-brand" />
-        <p className="max-w-[20rem] text-[0.9375rem] leading-6 text-(--ui-text-tertiary)">
+        <HarvisWordmark className="harvis-cycle-brand relative" />
+        <p className="relative max-w-[20rem] text-[0.9375rem] leading-6 text-(--ui-text-tertiary)">
           Agents, models and memory that run on your own machine.
         </p>
       </aside>
-      <div className="flex min-w-0 flex-col items-center justify-center-safe overflow-y-auto px-4 py-10">
+      <div className="relative flex min-w-0 flex-col items-center justify-center-safe overflow-y-auto px-4 py-10">
         <div className="flex w-full max-w-[24rem] flex-col items-start gap-6">
           <img alt="Harvis" className="size-12 min-[900px]:hidden" src={LOGO} />
           {children}
@@ -81,6 +88,11 @@ const COPY: Record<Mode, { title: string; description: string; submit: string; b
     submit: 'Create admin account',
     busy: 'Setting up…'
   }
+}
+
+// Sign-up on a server where the admin approves new accounts.
+const APPROVAL_COPY = {
+  description: 'The host lets new people in. Sign up, and Harvis opens as soon as they approve you.'
 }
 
 const EXPIRED_COPY = {
@@ -142,6 +154,7 @@ export function SignInScreen({
   const [email, setEmail] = useState(previousUser?.email ?? '')
   const [password, setPassword] = useState('')
   const [setupCode, setSetupCode] = useState('')
+  const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<{ message: string; field?: FieldName } | null>(null)
   const firstField = useRef<HTMLInputElement>(null)
@@ -164,7 +177,7 @@ export function SignInScreen({
       .catch(() => {
         // Sign-in still works without the config; only sign-up is hidden.
         if (live) {
-          setConfig({ onboarding: false, signupEnabled: false, setupCodeRequired: false })
+          setConfig({ onboarding: false, signupEnabled: false, setupCodeRequired: false, signupApproval: false })
         }
       })
 
@@ -198,7 +211,13 @@ export function SignInScreen({
       if (mode === 'signin') {
         await signIn(email, password)
       } else {
-        await signUp({ name, email, password, setupCode: mode === 'claim' ? setupCode : undefined })
+        await signUp({
+          name,
+          email,
+          password,
+          setupCode: mode === 'claim' ? setupCode : undefined,
+          noteToHost: mode === 'signup' ? note : undefined
+        })
       }
     } catch (err) {
       if (err instanceof AuthError) {
@@ -213,7 +232,9 @@ export function SignInScreen({
 
   const copy = COPY[mode]
   const title = expired && mode === 'signin' ? EXPIRED_COPY.title : copy.title
-  const description = expired && mode === 'signin' ? EXPIRED_COPY.description : copy.description
+  const waits = mode === 'signup' && Boolean(config?.signupApproval)
+  const description =
+    expired && mode === 'signin' ? EXPIRED_COPY.description : waits ? APPROVAL_COPY.description : copy.description
   const needsName = mode !== 'signin'
   const needsCode = mode === 'claim' && Boolean(config?.setupCodeRequired)
   const canSignUp = Boolean(config?.signupEnabled) && !config?.onboarding
@@ -293,6 +314,21 @@ export function SignInScreen({
                 mode !== 'signin' && <FieldHint>At least {MIN_PASSWORD_LENGTH} characters.</FieldHint>
               )}
             </Field>
+
+            {waits && (
+              <Field htmlFor={id('note')} label="Note to the host">
+                <Input
+                  id={id('note')}
+                  maxLength={NOTE_TO_HOST_MAX}
+                  name="note-to-host"
+                  onChange={e => setNote(e.target.value)}
+                  placeholder="Who you are, e.g. Jane from CSE 4800"
+                  size="lg"
+                  value={note}
+                />
+                <FieldHint>Optional. The host sees it beside your sign-up.</FieldHint>
+              </Field>
+            )}
 
             {needsCode && (
               <Field htmlFor={id('code')} label="Server code">
@@ -415,6 +451,68 @@ export function UnreachableScreen({ detail, onRetry }: { detail: string; onRetry
             docker compose logs backend pgsql
           </code>
         </p>
+      </div>
+    </Frame>
+  )
+}
+
+const WAIT_POLL_MS = 10_000
+
+/**
+ * Signed up on a server where the admin approves new accounts, and not approved
+ * yet. The server refuses everything else this account asks for, so the app
+ * stays unmounted; this asks again every few seconds and the gate opens the app
+ * as soon as the session comes back with an approved role.
+ */
+export function WaitingRoom({ user }: { user: HarvisUser }) {
+  const [leaving, setLeaving] = useState(false)
+
+  useEffect(() => {
+    const t = window.setInterval(() => void probeSession(), WAIT_POLL_MS)
+    const onFocus = () => void probeSession()
+    window.addEventListener('focus', onFocus)
+
+    return () => {
+      window.clearInterval(t)
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [])
+
+  const leave = async () => {
+    setLeaving(true)
+
+    try {
+      await signOut()
+    } finally {
+      setLeaving(false)
+    }
+  }
+
+  return (
+    <Frame>
+      <div className={cn(CARD, 'harvis-glitch-in grid gap-4 p-6')} role="status">
+        <header className="grid gap-1">
+          <h1 className="flex items-center gap-2 text-[1.0625rem] font-semibold tracking-tight text-foreground">
+            <Clock className="size-4 text-(--ui-text-tertiary)" />
+            You&apos;re on the list
+          </h1>
+          <p className="text-[0.8125rem] leading-5 text-(--ui-text-tertiary)">
+            The host lets new people into this Harvis. Once they approve you, it opens here by itself; you can also
+            close this page and sign in later.
+          </p>
+        </header>
+        <p className="text-[0.8125rem] text-(--ui-text-tertiary)">
+          Signed up as <span className="text-foreground">{user.email || user.name}</span>
+        </p>
+        <div className="flex items-center justify-between gap-3 border-t border-(--ui-stroke-tertiary) pt-3">
+          <span className="text-[0.75rem] text-(--ui-text-tertiary)" aria-live="polite">
+            Checking every {WAIT_POLL_MS / 1000}s
+          </span>
+          <Button disabled={leaving} onClick={() => void leave()} size="sm" type="button" variant="secondary">
+            {leaving ? <Loader2 className="animate-spin" /> : <LogOut />}
+            Sign out
+          </Button>
+        </div>
       </div>
     </Frame>
   )

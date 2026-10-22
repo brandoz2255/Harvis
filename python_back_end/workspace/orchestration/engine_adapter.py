@@ -215,12 +215,15 @@ async def _stage_attachments(
 from .conversation import conversation_prefix as _conversation_prefix
 
 
-def _sidecar_mcp_args(user_id, *, artifact_run_id=None, **context) -> list[str]:
+def _sidecar_mcp_args(user_id, *, artifact_run_id=None, include_docs=True, **context) -> list[str]:
     """One `--mcp-config` carrying every Harvis MCP server this run should see.
 
     A single config holds many servers, so the CAD tools and the brokered artifact
     door travel together in one argument rather than fighting over the flag — the
     CLI keeps only the last `--mcp-config` it is given.
+
+    The document tools (:mod:`owui_compat.docs_mcp`) ride along unless ``include_docs`` is
+    False, which a lane dedicated to one job (the CAD agent) passes so it stays that job.
 
     ``artifact_run_id`` opens :mod:`artifact_mcp` for that run. Pass it wherever the
     sidecar runs with ``Write`` withheld, because otherwise a model that composed a
@@ -238,6 +241,15 @@ def _sidecar_mcp_args(user_id, *, artifact_run_id=None, **context) -> list[str]:
         # A run that could have had CAD and did not is worth far less than a run that
         # refused to start, so this never raises into the launch path.
         logger.debug("cad mcp config unavailable for this run", exc_info=True)
+
+    if include_docs:
+        try:
+            from owui_compat.docs_mcp import sidecar_mcp_config as docs_mcp_config
+            cfg = docs_mcp_config(user_id)
+            if cfg:
+                servers.update(cfg.get("mcpServers") or {})
+        except Exception:
+            logger.debug("docs mcp config unavailable for this run", exc_info=True)
 
     try:
         # Whatever this user connected themselves — Higgsfield, GitHub, an MCP
@@ -286,6 +298,30 @@ def _artifact_delivery_note(mcp_args: list[str]) -> list[str]:
         "`index.html` becomes a preview the user can open, so inline all CSS and "
         "JavaScript into that single file rather than delivering siblings."
     )]
+
+
+def _docs_tools_note(mcp_args: list[str]) -> list[str]:
+    """`--append-system-prompt` naming the document tools, or nothing at all.
+
+    Only when the docs server is actually in this run's `--mcp-config`.
+    """
+    try:
+        from owui_compat.docs_mcp import SERVER_INFO, SIDECAR_NOTE
+    except Exception:
+        return []
+    if not any(SERVER_INFO["name"] in arg for arg in mcp_args):
+        return []
+    return ["--append-system-prompt", SIDECAR_NOTE.format(server=SERVER_INFO["name"])]
+
+
+def _merge_append_prompts(*parts: list[str]) -> list[str]:
+    """Fold several `--append-system-prompt <text>` pairs into one.
+
+    Not every CLI build keeps more than one occurrence of the flag, and dropping the
+    delivery note silently is the failure this prevents.
+    """
+    texts = [p[1] for p in parts if len(p) == 2 and p[0] == "--append-system-prompt" and p[1]]
+    return ["--append-system-prompt", "\n\n".join(texts)] if texts else []
 
 
 def _cad_mcp_args(user_id, **context) -> list[str]:
@@ -1334,13 +1370,14 @@ async def run_claude_chat_workspace(
     cmd += _mcp_args
     # Only lie about Write when this run really cannot write (auto / read-only).
     if launch_mode == "auto":
-        cmd += _artifact_delivery_note(_mcp_args)
+        _run_note = _artifact_delivery_note(_mcp_args)
     else:
-        cmd += ["--append-system-prompt", (
+        _run_note = ["--append-system-prompt", (
             "This directory persists across turns. Read SANDBOX.md. You can write files "
             "(notes.md, scripts). Run them with python3 / node / bash, then "
             "`bash harvis-check.sh`. Answer in Markdown with fenced code blocks."
         )]
+    cmd += _merge_append_prompts(_run_note, _docs_tools_note(_mcp_args))
     if claude_model:
         cmd += ["--model", claude_model]
     if launch_mode == "auto":

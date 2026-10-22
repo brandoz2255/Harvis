@@ -749,6 +749,7 @@ async def _author_via_sidecar(description: str, *, lane: Lane,
 
     mcp_args = _cad_mcp_args(
         lane.user_id,
+        include_docs=False,
         conversation_id=ctx.conversation_id,
         # The answer key. Without this the DesignSpec would be extracted from the
         # model's own paraphrase of the request — see `cad_tools._design_spec`.

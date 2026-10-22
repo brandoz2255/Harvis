@@ -10,11 +10,11 @@ from __future__ import annotations
 
 from typing import Mapping, Optional
 
-from .mode import tunnel_on
+from .mode import access_gate_on
 
 
 async def before_signup(email: str, headers: Optional[Mapping]) -> None:
-    if tunnel_on():
+    if access_gate_on():
         from plugins.tunnel import signup
 
         await signup.before_signup(email, headers)
@@ -22,7 +22,7 @@ async def before_signup(email: str, headers: Optional[Mapping]) -> None:
 
 async def before_login(account_email: str, headers: Optional[Mapping]) -> None:
     """Before the password check, so a refusal never confirms a password."""
-    if tunnel_on():
+    if access_gate_on():
         from plugins.tunnel import signup
 
         await signup.before_login(account_email, headers)

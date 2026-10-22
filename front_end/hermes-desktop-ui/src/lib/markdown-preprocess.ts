@@ -11,7 +11,6 @@ const REASONING_BLOCK_RE = /<(think|thinking|reasoning|scratchpad|analysis)>[\s\
 const PREVIEW_MARKER_RE = /\[Preview:[^\]]+\]\(#preview[:/][^)]+\)/gi
 
 const FENCE_LINE_RE = /^([ \t]*)(`{3,}|~{3,})([^\n]*)$/
-const EMPTY_FENCE_BLOCK_RE = /(^|\n)[ \t]*(?:`{3,}|~{3,})[^\n]*\n[ \t]*(?:`{3,}|~{3,})[ \t]*(?=\n|$)/g
 const CODE_FENCE_SPLIT_RE = /((?:```|~~~)[\s\S]*?(?:```|~~~))/g
 const INLINE_CODE_SPLIT_RE = /(`[^`\n]+`)/g
 // Math spans as remark-math will see them: a `$$…$$` block, which may span
@@ -107,6 +106,11 @@ function scrubBacktickNoise(text: string): string {
   }
 
   const danglingCodeFenceRe = /(^|\n)[ \t]*(`{3,}|~{3,})([a-z0-9][a-z0-9+#-]{0,15})[ \t]*\n([\s\S]*)$/gi
+  // Only text after the last balanced fence can hold the dangling one: a reply
+  // with a finished block followed by one still streaming in must protect both.
+  const danglingFrom = protectedRanges.reduce((end, range) => Math.max(end, range.end), 0)
+
+  danglingCodeFenceRe.lastIndex = danglingFrom
 
   while ((match = danglingCodeFenceRe.exec(text)) !== null) {
     const start = match.index + match[1].length
@@ -148,10 +152,6 @@ function scrubBacktickNoise(text: string): string {
   }
 
   return out
-}
-
-function stripEmptyFenceBlocks(text: string): string {
-  return text.replace(EMPTY_FENCE_BLOCK_RE, '$1')
 }
 
 function isUrlOnlyBlock(lines: string[]): boolean {
@@ -623,13 +623,12 @@ function normalizeFenceBlocks(text: string): string {
   return out.join('\n')
 }
 
-export function preprocessMarkdown(text: string): string {
-  const cleaned = text.replace(REASONING_BLOCK_RE, '').replace(PREVIEW_MARKER_RE, '')
-  const scrubbed = scrubBacktickNoise(cleaned)
-  const normalizedFences = normalizeFenceBlocks(scrubbed)
-  const strippedEmptyFences = stripEmptyFenceBlocks(normalizedFences)
-
-  return strippedEmptyFences
+/**
+ * Rewrite prose segments only. A segment may still hold same-line triple
+ * backticks (```x``` inside a sentence), which CODE_FENCE_SPLIT_RE shields.
+ */
+function rewriteProseRegion(text: string): string {
+  return text
     .split(CODE_FENCE_SPLIT_RE)
     .map(part => {
       // Fence blocks pass through untouched.
@@ -664,7 +663,79 @@ export function preprocessMarkdown(text: string): string {
       return leading + transformed + trailing
     })
     .join('')
-    .replace(/[ \t]+\n/g, '\n')
+}
+
+/**
+ * Split text into prose and whole fenced blocks by walking fence lines, the
+ * way normalizeFenceBlocks pairs them: a closing line is a bare run of the
+ * same character at least as long as the opener. A fence with no closer yet —
+ * the document still streaming in — runs to the end of the text. Pairing by
+ * lines rather than by CODE_FENCE_SPLIT_RE is what keeps (a) a dangling fence
+ * after prose from being treated as prose, which strips its backticks until it
+ * closes, and (b) a four-backtick fence that wraps inner ``` fences in one piece.
+ */
+interface FenceRegion {
+  /** A fence with its closing line; false for prose and for a fence still open. */
+  closed: boolean
+  fence: boolean
+  text: string
+}
+
+function splitFenceRegions(text: string): FenceRegion[] {
+  const regions: FenceRegion[] = []
+  let cursor = 0
+  let offset = 0
+  let open: { char: string; length: number; start: number } | null = null
+
+  for (const line of text.split('\n')) {
+    const match = line.match(FENCE_LINE_RE)
+    const end = offset + line.length
+
+    if (match) {
+      const marker = match[2] || ''
+
+      if (!open) {
+        open = { char: marker[0], length: marker.length, start: offset }
+      } else if (!(match[3] || '').trim() && marker[0] === open.char && marker.length >= open.length) {
+        regions.push(
+          { closed: false, fence: false, text: text.slice(cursor, open.start) },
+          { closed: true, fence: true, text: text.slice(open.start, end) }
+        )
+        cursor = end
+        open = null
+      }
+    }
+
+    offset = end + 1
+  }
+
+  if (open) {
+    regions.push(
+      { closed: false, fence: false, text: text.slice(cursor, open.start) },
+      { closed: false, fence: true, text: text.slice(open.start) }
+    )
+  } else {
+    regions.push({ closed: false, fence: false, text: text.slice(cursor) })
+  }
+
+  return regions
+}
+
+export function preprocessMarkdown(text: string): string {
+  const cleaned = text.replace(REASONING_BLOCK_RE, '').replace(PREVIEW_MARKER_RE, '')
+  const scrubbed = scrubBacktickNoise(cleaned)
+  const normalizedFences = normalizeFenceBlocks(scrubbed)
+
+  return (
+    splitFenceRegions(normalizedFences)
+      // An opener and its closer with nothing between them. Judged on the
+      // paired region, so an inner ``` closer sitting right above the outer
+      // ```` closer of a longer fence is not mistaken for an empty block.
+      .filter(region => !(region.closed && region.text.split('\n').length === 2))
+      .map(region => (region.fence ? region.text : rewriteProseRegion(region.text)))
+      .join('')
+      .replace(/[ \t]+\n/g, '\n')
+  )
 }
 
 /**

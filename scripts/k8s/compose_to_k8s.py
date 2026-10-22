@@ -36,6 +36,7 @@ import sys
 
 import k8s_build_space as build_space
 import k8s_extras as extras
+from k8s_common import tmpfs_option_size, tmpfs_volume
 
 LABEL_APP = "app.kubernetes.io/name"
 LABEL_PART = "app.kubernetes.io/part-of"
@@ -169,7 +170,7 @@ class Generator:
                 htype = extras.bind_host_path_type(path, target)
             elif vtype == "tmpfs":
                 vname = f"tmpfs-{i}"
-                vols.append({"name": vname, "emptyDir": {"medium": "Memory"}})
+                vols.append(tmpfs_volume(vname, (v.get("tmpfs") or {}).get("size")))
                 mounts.append({"name": vname, "mountPath": target})
                 continue
             elif vtype == "emptydir":  # made by build_space.restrict
@@ -200,7 +201,7 @@ class Generator:
             mounts.append(m)
         for t in svc.get("tmpfs") or []:
             vname = f"tmpfs-{len(vols)}"
-            vols.append({"name": vname, "emptyDir": {"medium": "Memory"}})
+            vols.append(tmpfs_volume(vname, tmpfs_option_size(t)))
             mounts.append({"name": vname, "mountPath": t.split(":")[0]})
         return vols, mounts
 

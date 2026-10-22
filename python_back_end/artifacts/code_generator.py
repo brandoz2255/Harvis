@@ -3,40 +3,36 @@ Code-based document generator
 
 Instead of JSON manifests, LLM writes Python code that generates documents.
 This is more flexible and easier for LLMs to write correctly.
+
+The code never runs in this process. It is posted to the document sandbox
+(CODE_EXECUTOR_URL, the `sandbox` service), which returns the files the script
+wrote; this module stores them under the artifact directory.
 """
 
+import base64
+import binascii
+import json
 import os
 import re
 import logging
-import subprocess
-import tempfile
-import shutil
-from pathlib import Path
+import urllib.error
+import urllib.request
 from typing import Optional, Dict, Any, Tuple
-from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
 # Output directory for generated documents
 ARTIFACT_DIR = os.environ.get("ARTIFACT_STORAGE_DIR", "/data/artifacts")
 
-# Docker image for code execution
-CODE_EXECUTOR_IMAGE = os.environ.get(
-    "CODE_EXECUTOR_IMAGE", "harvis-code-executor:latest"
-)
-
-# K8s configuration
-USE_K8S_EXECUTION = os.environ.get("USE_K8S_EXECUTION", "false").lower() == "true"
-CODE_EXECUTOR_NAMESPACE = os.environ.get("CODE_EXECUTOR_NAMESPACE", "artifact-executor")
-CODE_EXECUTOR_POD = os.environ.get("CODE_EXECUTOR_POD", "harvis-code-executor")
-
-# Local execution mode (for Docker Compose - avoids Docker socket dependency)
-CODE_EXECUTOR_LOCAL = os.environ.get("CODE_EXECUTOR_LOCAL", "false").lower() == "true"
-
-# Resource limits for code execution
+# Wall-clock limit for one script; the sandbox caps it again at 120 s.
 MAX_EXECUTION_TIME = int(os.environ.get("CODE_MAX_EXECUTION_TIME", "60"))  # seconds
-MAX_MEMORY = os.environ.get("CODE_MAX_MEMORY", "512m")
-MAX_CPUS = os.environ.get("CODE_MAX_CPUS", "1.0")
+
+DEFAULT_SANDBOX_URL = "http://sandbox:8080"
+SANDBOX_DOWN = "the document sandbox is not running"
+SANDBOX_BUSY = "the document sandbox is busy or took too long to answer; try again shortly"
+SANDBOX_SLOT_WAIT = 30  # sandbox_runner.server.SLOT_WAIT_S: how long it queues a job before answering 429
+# The sandbox caps its output at 25 MB (about 34 MB as base64); this is a bound on what we read.
+MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 
 
 def extract_document_code(llm_response: str, artifact_type: str) -> Optional[str]:
@@ -227,53 +223,29 @@ def _validate_document_code(code: str, artifact_type: str) -> bool:
     for pattern in dangerous_patterns:
         if re.search(pattern, code):
             logger.warning(f"Code contains potentially dangerous pattern: {pattern}")
-            # Still allow it - Docker isolation will protect us
+            # Still allow it - the sandbox is what contains it
 
     return True
 
 
-def prepare_code_for_execution(
-    code: str,
-    artifact_id: str,
-    output_filename: str,
-    output_dir: str = None,
-    container_output_path: str = None,
-) -> Tuple[str, str]:
+def prepare_code_for_execution(code: str, artifact_id: str, output_filename: str) -> str:
     """
-    Prepare Python code for execution by adding boilerplate and output handling.
+    Wrap the LLM's code so its OUTPUT_PATH lands in the sandbox's OUTPUT_DIR.
 
-    Args:
-        code: Original Python code from LLM
-        artifact_id: Unique artifact ID
-        output_filename: Name of output file
-        output_dir: Directory for output (default: ARTIFACT_DIR)
-        container_output_path: Path to use inside container (for Docker/K8s execution)
-
-    Returns:
-        Tuple of (prepared_code, output_path)
+    The sandbox hands back every file the script leaves in OUTPUT_DIR, so the
+    path is relative to the job and never names a directory on this host.
     """
-    if output_dir is None:
-        output_dir = os.path.join(ARTIFACT_DIR, artifact_id)
-
-    os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, output_filename)
-
-    # Use container path if provided (for Docker/K8s), otherwise use host path
-    actual_output_path = container_output_path if container_output_path else output_path
-
-    # Prepare the code with boilerplate
-    prepared_code = f'''#!/usr/bin/env python3
+    return f'''#!/usr/bin/env python3
 """
 Auto-generated document generation script
 Artifact ID: {artifact_id}
-Generated: {datetime.now().isoformat()}
 """
 
 import os
 import sys
 
 # Set output path
-OUTPUT_PATH = "{actual_output_path}"
+OUTPUT_PATH = os.path.join(os.environ.get("OUTPUT_DIR", "out"), {output_filename!r})
 
 # Ensure output directory exists
 os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
@@ -283,14 +255,37 @@ os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
 
 # Verify output was created
 if not os.path.exists(OUTPUT_PATH):
-    print(f"ERROR: Output file not created at {{OUTPUT_PATH}}", file=sys.stderr)
+    print("ERROR: Output file not created", file=sys.stderr)
     sys.exit(1)
 
-file_size = os.path.getsize(OUTPUT_PATH)
-print(f"SUCCESS: Generated {{OUTPUT_PATH}} ({{file_size}} bytes)")
+print(f"SUCCESS: Generated {{os.path.basename(OUTPUT_PATH)}} ({{os.path.getsize(OUTPUT_PATH)}} bytes)")
 '''
 
-    return prepared_code, output_path
+
+def _failure(error: str, **extra: Any) -> Dict[str, Any]:
+    return {
+        "success": False,
+        "error": error,
+        "file_path": None,
+        "file_size": 0,
+        "stdout": "",
+        "stderr": "",
+        "returncode": -1,
+        **extra,
+    }
+
+
+def _post_to_sandbox(url: str, payload: Dict[str, Any], timeout: int) -> Dict[str, Any]:
+    req = urllib.request.Request(
+        f"{url}/run",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    # The sandbox may hold the request for a free slot, then enforces `timeout` itself,
+    # then needs a moment to answer; giving up earlier would drop a finished job's result.
+    with urllib.request.urlopen(req, timeout=SANDBOX_SLOT_WAIT + timeout + 20) as resp:
+        return json.loads(resp.read(MAX_RESPONSE_BYTES))
 
 
 def execute_document_code(
@@ -302,372 +297,81 @@ def execute_document_code(
     use_docker: bool = True,
 ) -> Dict[str, Any]:
     """
-    Execute Python code to generate a document.
+    Run document-generation code in the sandbox and store the file it produces.
 
-    Args:
-        code: Python code to execute
-        artifact_id: Unique artifact ID
-        output_filename: Name of output file
-        timeout: Execution timeout in seconds
-        memory_limit: Docker memory limit
-        use_docker: Whether to use Docker isolation
+    Fails closed: with the sandbox unreachable (CODE_EXECUTOR_URL, default
+    http://sandbox:8080) the result is an error, never a local subprocess. memory_limit and use_docker
+    are accepted for old callers and ignored; the sandbox sets its own limits.
 
     Returns:
-        Dict with success status, output path, and any errors
+        Dict with success status, file_path, file_size, stdout/stderr and error.
     """
     timeout = timeout or MAX_EXECUTION_TIME
-    memory_limit = memory_limit or MAX_MEMORY
 
-    # Calculate paths
-    output_dir = os.path.join(ARTIFACT_DIR, artifact_id)
-    output_path = os.path.join(output_dir, output_filename)
+    if not output_filename or os.path.basename(output_filename) != output_filename:
+        return _failure("Invalid output filename")
 
-    # Container path for Docker execution
-    container_output_path = f"/data/artifacts/{artifact_id}/{output_filename}"
+    url = (os.environ.get("CODE_EXECUTOR_URL", "").strip() or DEFAULT_SANDBOX_URL).rstrip("/")
 
-    # Prepare code with appropriate output path
-    if USE_K8S_EXECUTION or use_docker:
-        prepared_code, output_path = prepare_code_for_execution(
-            code, artifact_id, output_filename, output_dir, container_output_path
-        )
-    else:
-        prepared_code, output_path = prepare_code_for_execution(
-            code, artifact_id, output_filename, output_dir
-        )
-
-    # Save code to temporary file
-    work_dir = os.path.join(ARTIFACT_DIR, "code", artifact_id)
-    os.makedirs(work_dir, exist_ok=True)
-
-    script_path = os.path.join(work_dir, "generate.py")
-    with open(script_path, "w") as f:
-        f.write(prepared_code)
-
-    logger.info(f"Executing document generation code for {artifact_id}")
-    logger.info(f"Output will be written to: {output_path}")
-    logger.info(f"Script saved to: {script_path}")
-
-    # Verify script file exists
-    if not os.path.exists(script_path):
-        logger.error(f"Script file does not exist: {script_path}")
-        return {
-            "success": False,
-            "error": f"Script file not found: {script_path}",
-            "output_path": None,
-            "file_size": 0,
-        }
-
-    # Verify output directory exists (create if needed)
-    output_dir = os.path.dirname(output_path)
-    if not os.path.exists(output_dir):
-        logger.info(f"Creating output directory: {output_dir}")
-        os.makedirs(output_dir, exist_ok=True)
-
-    # Determine execution mode
-    use_k8s = USE_K8S_EXECUTION
-    use_docker_local = use_docker
-
-    if CODE_EXECUTOR_LOCAL:
-        logger.info("Using local execution mode (CODE_EXECUTOR_LOCAL=true)")
-        use_docker_local = False
-        use_k8s = False
+    prepared_code = prepare_code_for_execution(code, artifact_id, output_filename)
+    logger.info(f"Sending document generation code for {artifact_id} to the sandbox")
 
     try:
-        if use_k8s:
-            result = _execute_in_k8s(script_path, output_path, timeout)
-        elif use_docker_local:
-            result = _execute_in_docker(script_path, output_path, timeout, memory_limit)
-        else:
-            result = _execute_locally(script_path, timeout)
+        reply = _post_to_sandbox(url, {"code": prepared_code, "timeout": timeout}, timeout)
+    except urllib.error.HTTPError as e:
+        logger.error(f"Sandbox answered HTTP {e.code} for {artifact_id}")
+        if e.code == 429:
+            return _failure(SANDBOX_BUSY)
+        return _failure(f"the document sandbox refused the job (HTTP {e.code})")
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        if isinstance(e, TimeoutError) or isinstance(getattr(e, "reason", None), TimeoutError):
+            logger.error(f"Document sandbox did not answer {artifact_id} in time: {e}")
+            return _failure(SANDBOX_BUSY)
+        logger.error(f"Document sandbox unreachable at {url}: {e}")
+        return _failure(f"{SANDBOX_DOWN} (could not reach it at {url})")
 
-        # Check if output was created
-        if result["success"] and os.path.exists(output_path):
-            file_size = os.path.getsize(output_path)
-            result["file_path"] = output_path
-            result["file_size"] = file_size
-            logger.info(f"Successfully generated {output_filename} ({file_size} bytes)")
-        elif result["success"]:
-            result["success"] = False
-            result["error"] = "Code executed but output file was not created"
-            logger.error(result["error"])
-
+    result = {
+        "success": bool(reply.get("ok")),
+        "stdout": reply.get("stdout", ""),
+        "stderr": reply.get("stderr", ""),
+        "returncode": reply.get("returncode", -1),
+    }
+    if not result["success"]:
+        result["error"] = reply.get("error") or "Document generation code failed"
         return result
 
-    except Exception as e:
-        logger.exception("Failed to execute document generation code")
-        return {
-            "success": False,
-            "error": str(e),
-            "file_path": None,
-            "file_size": 0,
-        }
-
-
-def _execute_in_docker(
-    script_path: str, output_path: str, timeout: int, memory_limit: str
-) -> Dict[str, Any]:
-    """Execute code in isolated Docker container."""
-
-    # Check if Docker is available
-    try:
-        docker_check = subprocess.run(
-            ["docker", "--version"], capture_output=True, text=True
-        )
-        if docker_check.returncode != 0:
-            logger.error("Docker is not available")
-            return {
-                "success": False,
-                "error": "Docker is not available in this environment",
-                "stdout": "",
-                "stderr": "",
-                "returncode": -1,
-            }
-    except FileNotFoundError:
-        logger.error("Docker command not found")
-        return {
-            "success": False,
-            "error": "Docker command not found. Is Docker installed?",
-            "stdout": "",
-            "stderr": "",
-            "returncode": -1,
-        }
-
-    script_dir = os.path.dirname(script_path)
-    output_dir = os.path.dirname(output_path)
-    script_name = os.path.basename(script_path)
-
-    # Container paths (inside Docker)
-    # The script is mounted at /workspace/code/generate.py
-    container_script_path = f"/workspace/code/{script_name}"
-
-    logger.info(f"Docker execution:")
-    logger.info(f"  Host script path: {script_path}")
-    logger.info(f"  Host script dir: {script_dir}")
-    logger.info(f"  Script exists: {os.path.exists(script_path)}")
-    logger.info(f"  Container script path: {container_script_path}")
-    logger.info(f"  Host output path: {output_path}")
-    logger.info(f"  Host output dir: {output_dir}")
-    logger.info(f"  Output dir exists: {os.path.exists(output_dir)}")
-
-    # Build Docker command - mount entire artifact directory to allow writing anywhere
-    # Run as UID 1001 (appuser) to match volume permissions
-    cmd = [
-        "docker",
-        "run",
-        "--rm",
-        "--network",
-        "none",  # No network access
-        "--memory",
-        memory_limit,
-        "--cpus",
-        MAX_CPUS,
-        "--user",
-        "1001:1001",  # Run as appuser for proper permissions
-        "-v",
-        f"{ARTIFACT_DIR}:/data/artifacts:rw",  # Mount entire artifact directory
-        "-v",
-        f"{script_dir}:/workspace/code:ro",  # Read-only code mount
-        "-w",
-        "/workspace",
-        CODE_EXECUTOR_IMAGE,
-        "python3",
-        container_script_path,
-    ]
-
-    logger.info(f"Docker command: {' '.join(cmd)}")
+    produced = next((f for f in reply.get("files") or [] if f.get("name") == output_filename), None)
+    if produced is None:
+        result["success"] = False
+        result["error"] = "Code executed but output file was not created"
+        logger.error(result["error"])
+        return result
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        data = base64.b64decode(produced.get("b64", ""), validate=True)
+    except (binascii.Error, ValueError):
+        result["success"] = False
+        result["error"] = "The sandbox returned a file that could not be decoded"
+        return result
 
-        return {
-            "success": result.returncode == 0,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "returncode": result.returncode,
-        }
-
-    except subprocess.TimeoutExpired:
-        logger.error(f"Code execution timed out after {timeout} seconds")
-        return {
-            "success": False,
-            "error": f"Execution timed out after {timeout} seconds",
-            "stdout": "",
-            "stderr": "",
-            "returncode": -1,
-        }
-    except Exception as e:
-        logger.error(f"Docker execution failed: {e}")
-        return {
-            "success": False,
-            "error": str(e),
-            "stdout": "",
-            "stderr": "",
-            "returncode": -1,
-        }
-
-
-def _is_kubectl_available() -> bool:
-    """Check if kubectl is available in the environment."""
+    output_dir = os.path.join(ARTIFACT_DIR, artifact_id)
+    output_path = os.path.join(output_dir, output_filename)
     try:
-        result = subprocess.run(
-            ["kubectl", "version", "--client", "--short"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        return result.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
+        os.makedirs(output_dir, exist_ok=True)
+        partial = output_path + ".part"
+        with open(partial, "wb") as fh:
+            fh.write(data)
+        os.replace(partial, output_path)
+    except OSError as e:
+        logger.exception("Failed to store generated document")
+        result["success"] = False
+        result["error"] = f"Could not store the generated file: {e.strerror or e}"
+        return result
 
-
-def _execute_in_k8s(script_path: str, output_path: str, timeout: int) -> Dict[str, Any]:
-    """Execute code in Kubernetes pod."""
-
-    # Check if kubectl is available
-    if not _is_kubectl_available():
-        logger.warning("kubectl not available, falling back to local execution")
-        return _execute_locally(script_path, timeout)
-
-    script_dir = os.path.dirname(script_path)
-    output_dir = os.path.dirname(output_path)
-    script_name = os.path.basename(script_path)
-
-    # Get pod name (may need to find it dynamically)
-    pod_name = CODE_EXECUTOR_POD
-
-    try:
-        # First, try to get the actual pod name if it's a deployment
-        get_pod_cmd = [
-            "kubectl",
-            "get",
-            "pods",
-            "-n",
-            CODE_EXECUTOR_NAMESPACE,
-            "-l",
-            "app.kubernetes.io/component=code-executor",
-            "-o",
-            "jsonpath={.items[0].metadata.name}",
-        ]
-        result = subprocess.run(get_pod_cmd, capture_output=True, text=True)
-        if result.returncode == 0 and result.stdout.strip():
-            pod_name = result.stdout.strip()
-            logger.info(f"Found code executor pod: {pod_name}")
-    except Exception as e:
-        logger.warning(f"Could not get pod name dynamically, using default: {e}")
-
-    # Copy script to pod
-    try:
-        copy_cmd = [
-            "kubectl",
-            "cp",
-            "-n",
-            CODE_EXECUTOR_NAMESPACE,
-            script_path,
-            f"{pod_name}:/tmp/{script_name}",
-        ]
-        result = subprocess.run(copy_cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            logger.error(f"Failed to copy script to pod: {result.stderr}")
-            return {
-                "success": False,
-                "error": f"Failed to copy script to pod: {result.stderr}",
-                "stdout": "",
-                "stderr": result.stderr,
-                "returncode": -1,
-            }
-    except Exception as e:
-        logger.error(f"Failed to copy script to pod: {e}")
-        return {
-            "success": False,
-            "error": str(e),
-            "stdout": "",
-            "stderr": "",
-            "returncode": -1,
-        }
-
-    # Execute code in pod
-    try:
-        exec_cmd = [
-            "kubectl",
-            "exec",
-            "-n",
-            CODE_EXECUTOR_NAMESPACE,
-            pod_name,
-            "--",
-            "python3",
-            f"/tmp/{script_name}",
-        ]
-        logger.debug(f"K8s exec command: {' '.join(exec_cmd)}")
-
-        result = subprocess.run(
-            exec_cmd, capture_output=True, text=True, timeout=timeout
-        )
-
-        # Copy output back from pod if it exists
-        if result.returncode == 0:
-            try:
-                copy_back_cmd = [
-                    "kubectl",
-                    "cp",
-                    "-n",
-                    CODE_EXECUTOR_NAMESPACE,
-                    f"{pod_name}:{output_path}",
-                    output_path,
-                ]
-                subprocess.run(copy_back_cmd, capture_output=True, text=True)
-            except Exception as e:
-                logger.warning(f"Failed to copy output from pod: {e}")
-
-        return {
-            "success": result.returncode == 0,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "returncode": result.returncode,
-        }
-
-    except subprocess.TimeoutExpired:
-        logger.error(f"K8s code execution timed out after {timeout} seconds")
-        return {
-            "success": False,
-            "error": f"Execution timed out after {timeout} seconds",
-            "stdout": "",
-            "stderr": "",
-            "returncode": -1,
-        }
-    except Exception as e:
-        logger.error(f"K8s execution failed: {e}")
-        return {
-            "success": False,
-            "error": str(e),
-            "stdout": "",
-            "stderr": "",
-            "returncode": -1,
-        }
-
-
-def _execute_locally(script_path: str, timeout: int) -> Dict[str, Any]:
-    """Execute code locally (fallback if Docker not available)."""
-
-    try:
-        result = subprocess.run(
-            ["python3", script_path], capture_output=True, text=True, timeout=timeout
-        )
-
-        return {
-            "success": result.returncode == 0,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "returncode": result.returncode,
-        }
-
-    except subprocess.TimeoutExpired:
-        return {
-            "success": False,
-            "error": f"Execution timed out after {timeout} seconds",
-            "stdout": "",
-            "stderr": "",
-            "returncode": -1,
-        }
+    result["file_path"] = output_path
+    result["file_size"] = len(data)
+    logger.info(f"Successfully generated {output_filename} ({len(data)} bytes)")
+    return result
 
 
 def get_output_filename(artifact_type: str, title: str) -> str:
@@ -714,7 +418,7 @@ def generate_document_from_code(
         artifact_type: Type of artifact to generate
         title: Title of the document
         artifact_id: Unique artifact ID
-        use_docker: Whether to use Docker isolation
+        use_docker: Ignored; kept so existing callers still work
 
     Returns:
         Dict with success status and output information

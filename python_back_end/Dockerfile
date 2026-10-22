@@ -74,6 +74,7 @@ FROM pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime
 # Install system dependencies for AI services (including sox for TTS)
 RUN apt-get update && apt-get install -y --no-install-recommends \
   libgl1 ffmpeg tesseract-ocr tesseract-ocr-eng curl sox libsox-dev \
+  fonts-dejavu-core fonts-dejavu-extra fonts-noto-cjk \
   && rm -rf /var/lib/apt/lists/*
 
 # Install dependencies in controlled order to avoid conflicts

@@ -57,6 +57,51 @@ describe('SessionGate', () => {
     expect(await screen.findByRole('button', { name: 'Create an account' })).toBeTruthy()
   })
 
+  it('keeps a waiting account in the waiting room until the host approves it', async () => {
+    let role = 'pending'
+    vi.stubGlobal(
+      'fetch',
+      route(() => json(200, { ...USER, id: '9', role }))
+    )
+
+    render(
+      <SessionGate>
+        <p>the app</p>
+      </SessionGate>
+    )
+
+    expect(await screen.findByRole('heading', { name: /on the list/ })).toBeTruthy()
+    expect(screen.queryByText('the app')).toBeNull()
+
+    role = 'user'
+    // The waiting room re-asks on focus as well as on its timer.
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'))
+    })
+    expect(await screen.findByText('the app')).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: /on the list/ })).toBeNull()
+  })
+
+  it('asks for a note to the host when sign-ups wait for approval', async () => {
+    vi.stubGlobal(
+      'fetch',
+      route(
+        () => json(401, {}),
+        { onboarding: false, features: { enable_signup: true, signup_approval: true } } as never
+      )
+    )
+
+    render(
+      <SessionGate>
+        <p>the app</p>
+      </SessionGate>
+    )
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Create an account' }))
+    expect(await screen.findByLabelText('Note to the host')).toBeTruthy()
+    expect(screen.getByText(/At least 6 characters/)).toBeTruthy()
+  })
+
   it('offers the admin claim on a fresh install', async () => {
     vi.stubGlobal(
       'fetch',

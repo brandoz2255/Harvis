@@ -8,6 +8,7 @@ import {
   UNSCOPED_STREAM_EVENT_TYPES
 } from '@/lib/gateway-events'
 import { reconcileSessionCompacting } from '@/store/compaction'
+import { clearSessionFollowups } from '@/store/followups'
 import { $gateway, activeGatewayConnectionId } from '@/store/gateway'
 import { $activeGatewayProfile, normalizeProfileKey } from '@/store/profile'
 import { replayPendingApproval } from '@/store/prompts'
@@ -16,6 +17,7 @@ import { setSessionDraftingTool } from '@/store/tool-drafting'
 import type { RpcEvent } from '@/types/hermes'
 
 import { handleDesktopBridgeEvent } from './desktop-bridge'
+import { handleFollowupsEvent } from './followups'
 import { handleInputRequestEvent } from './input-requests'
 import { handleLifecycleEvent } from './lifecycle'
 import { handleMessageStreamEvent } from './message-stream'
@@ -87,6 +89,7 @@ const HANDLERS: GatewayEventHandler[] = [
   handleToolEvent,
   handleInputRequestEvent,
   handleDesktopBridgeEvent,
+  handleFollowupsEvent,
   handleStatusEvent
 ]
 
@@ -215,6 +218,11 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
 
       if (sessionId && PROVIDER_WAIT_SUPERSEDING_EVENT_TYPES.has(event.type)) {
         setSessionProviderWait(sessionId, '')
+      }
+
+      // Follow-up cards belong to the turn that produced them.
+      if (sessionId && event.type === 'message.start') {
+        clearSessionFollowups(sessionId)
       }
 
       const ctx: GatewayEventContext = {

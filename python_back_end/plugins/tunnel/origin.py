@@ -15,7 +15,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from starlette.websockets import WebSocket
 
 from . import access
-from plugins.exposure.mode import tunnel_on
+from plugins.exposure.mode import access_gate_on
 
 MESSAGE = ("This request came through Cloudflare without a valid Access sign-in. Check that the "
            "tunnel's public hostname points at http://nginx:8081 and that an Access app covers it.")
@@ -26,7 +26,7 @@ class TunnelOriginGate:
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] not in ("http", "websocket") or not tunnel_on():
+        if scope["type"] not in ("http", "websocket") or not access_gate_on():
             await self.app(scope, receive, send)
             return
         headers: dict[str, str] = {}

@@ -400,6 +400,14 @@ class Connection(SettingsMethods, SessionMethods, SlashMethods, ApprovalMethods,
             await self.emit("reasoning.delta", s.id, {"text": delta})
         elif kind in ("tool.start", "tool.complete"):
             await self.emit(kind, s.id, delta)
+        elif kind == "agent_terminal":
+            await self.emit("agent.terminal.output", s.id, delta)
+        elif kind.startswith("subagent."):
+            if kind == "subagent.complete":
+                delta = await sessions.step_child_payload(self.pool, s, delta)
+            await self.emit(kind, s.id, delta)
+        elif kind == "followups":
+            await self.emit("harvis.followups", s.id, delta)
         else:
             parts.append(delta)
             await self.emit("message.delta", s.id, {"text": delta})

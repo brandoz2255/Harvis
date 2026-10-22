@@ -62,6 +62,28 @@ def tunnel_on() -> bool:
     return exposure() in (TUNNEL, LAN_TUNNEL)
 
 
+# Who checks people arriving through the tunnel (HARVIS_TUNNEL_AUTH):
+#   access — Cloudflare Access signs them in first and Harvis re-checks its token
+#            on every request. The default.
+#   harvis — no Cloudflare login: they reach the Harvis sign-in page, sign up, and
+#            wait for the admin's approval (plugins/people/approval.py). Cloudflare
+#            only carries the traffic. The server refuses to start this way while
+#            approval is off, so a stranger can never get straight in.
+ACCESS = "access"
+HARVIS = "harvis"
+
+
+def tunnel_auth() -> str:
+    """Unknown values mean ``access``: a typo must not drop the Cloudflare check."""
+    raw = os.getenv("HARVIS_TUNNEL_AUTH", "").strip().lower()
+    return HARVIS if raw == HARVIS else ACCESS
+
+
+def access_gate_on() -> bool:
+    """Is Cloudflare Access the gate for tunnel traffic?"""
+    return tunnel_on() and tunnel_auth() == ACCESS
+
+
 def build_space_open_to_all() -> bool:
     """Can a non-admin run code on this computer? Always on a local install."""
     if not shared():

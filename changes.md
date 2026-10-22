@@ -1,5 +1,296 @@
 # Recent Changes and Fixes Documentation
 
+## Date: 2026-10-21 — k8s install could hang on its own firewall (branch `harvis1.5`)
+
+**Problem.** `./install.sh --k8s --expose lan+tunnel` on test VM 204 hung at the database-password step, which runs
+`kubectl exec`. `kubectl exec` and `kubectl logs` hung everywhere on the node.
+
+**Root cause.** The kubelet firewall chain `HARVIS-K3S` had lost its first two rules (`127.0.0.0/8` and
+`10.42.0.0/16`) while its DROP stayed, so the API server's own connection to the kubelet over loopback was dropped.
+The journal shows the script added all five rules at 22:48:32–33. The script rebuilt the chain one `iptables` call at
+a time (flush, then append each rule), and k3s's network policy controller saves and restores the filter table. On
+the nf_tables backend a `--noflush` restore that names a chain empties it (checked on the VM with a scratch chain),
+so a restore that landed between the second and third append left the chain with only the last three rules.
+
+**Fix.** `scripts/k8s/k8s-firewall.sh` writes the whole chain in one `iptables-restore -w --noflush` transaction
+(declare, flush, rules, DROP, COMMIT). Any snapshot k3s takes now holds either the complete old chain or the
+complete new one. The INPUT hook is still added once, and only after the chain write succeeded.
+`have_iptables` also requires `iptables-restore`.
+
+**Files.** `scripts/k8s/k8s-firewall.sh`, `scripts/k8s/test_harvis_k8s_sh.py` (fake restore; new tests for the
+single transaction and for a failed restore never hooking the chain).
+
+**Verified.** `test_harvis_k8s_sh.py` 24 passed. On VM 204 with the fixed file: `apply_kubelet_firewall` gives all five
+rules and one INPUT hook, `kubectl exec` and `kubectl logs` exit 0, and a connection to 10250 from the pve host is
+dropped. A 10-second watch of the chain from 23:02 showed no further changes, so it was a one-time race during
+install, not a recurring remover.
+
+## Date: 2026-10-21 — Waiting room tested live; turned-away tokens now refused (branch `harvis1.5`)
+
+**What.**
+- **Live test of the waiting room** (sign-ups wait for the host's approval) on the laptop stack. Sign-up gives role
+  "pending"; a waiting account reaches only the waiting-room calls (session probe, public config) and gets 403 on
+  everything else, by Bearer, cookie or `?token=`; approve lets the same token in; turn away deletes the account.
+  nginx's own paths (`/kokoro/`, `/audio/*.wav`, `/onb`, `/onb/`, `/agents/vnc/`) answer 401 to nobody and to a waiting
+  account and pass approved and admin accounts through.
+- **Fix: a turned-away sign-up's old token kept working.** Its row is deleted but the token stays signed for days, and
+  the gate only refused ids on the pending or blocked lists, so routes that check only the signature (`/api/artifacts/`,
+  the `/hermes-api/ws` socket) let it in. The gate now signs such tokens out (401 and the cookie cleared, socket closed
+  4401), except on the waiting-room calls, which answer them themselves so the sign-in page still loads.
+- **Fix: the waiting list could drop a new sign-up for a few seconds.** The gate cached one shared list of pending ids;
+  a re-read already in flight could overwrite a sign-up added a moment earlier. Each account's status is now read and
+  cached on its own (5 s), and sign-up, approve and turn away record their change directly.
+- **After an Opus review of the fix:** a page's burst of requests shares one status read per account, and that read
+  gives up after 3 s instead of holding requests while the database pool is busy; admins skip the lookup. The 14-day
+  cleanup no longer records the accounts it deletes, because it runs inside the sign-up's transaction, which can still
+  roll back (until the cache expires they read as waiting, which is refused anyway). The session reply no longer says
+  "user" when an account's status is unknown while approval is on: it says "pending", as the gate treats it.
+- **Fix: a new sign-up never showed up on the admin's open People page.** The People list was fetched once; the app
+  turns off refetch-on-focus globally and the query had no interval, so the admin had to reload. It now refreshes every
+  10 s and on focus, as the waiting room does on its side.
+- The sign-in and sign-up responses read `account_status` from the row, so the role they report no longer depends on
+  the cache. Migration 023's comment named the old `HARVIS_REGISTRATION` setting; it now names `HARVIS_SIGNUP_APPROVAL`.
+
+**Files.** `python_back_end/plugins/people/{approval,gate,routes}.py`, `python_back_end/main.py` (sign-up),
+`python_back_end/owui_compat/router.py` (sign-in/sign-up SELECTs), `python_back_end/migrations/023_account_status.sql`
+(comment only), `python_back_end/owui_compat/translate.py` (role from the row when given),
+`python_back_end/tests/test_waiting_room.py` (three new tests, cache fixture updated),
+`front_end/hermes-desktop-ui/src/app/settings/people-settings.tsx` (People list polls).
+
+**Verified.** In harvis-backend: waiting-room, tunnel, exposure and people tests 154 passed. Frontend sign-in and People
+tests 17 passed. Live after `docker restart harvis-backend`: a turned-away account's token got 401 "This account no
+longer exists" with the cookie cleared on `/api/artifacts/` (was 200) and a refused socket (was open), while
+`/api/config` still answered 200; approved account 200 and socket open; waiting account 403 with role "pending";
+an active account's sign-in reports role "user". A sweep of all 892 backend routes and 6 sockets, directly and through
+nginx, found no route a waiting account can use (23 destructive routes were left unprobed on purpose).
+Test accounts were deleted afterwards. After the review fixes: the same suites plus the Hermes socket tests, 163 passed;
+live again after a restart, sign-up pending, waiting 403, approve then 200 with role "user" and socket open, sign-in role
+"user", turned-away 401 with the cookie cleared and socket refused; the three test accounts were removed.
+On test VM 204 under k3s (`install.sh --k8s --expose lan`, all 12 deployments ready), a headless browser clicked the
+whole flow through the real UI in 21 screenshots: admin turns sign-ups on, one person signs up and waits (the Settings
+address still shows the waiting room, the chat API answers 403), appears on the admin's open People page by itself in
+4 s, is let in, and their waiting room opens into Harvis by itself in 7 s; a second person is turned away through the
+confirm dialog, is dropped to sign-in, their old cookie gets 401 and the same password is refused; an approved
+non-admin sees no People page; Hosting reports Kubernetes; sign-ups are switched back off and the Create an account
+link disappears. Test accounts deleted afterwards; sign-ups left off as found.
+
+**Not yet checked / open.**
+- `test_people_model_routes.py`: 3 tests fail on this laptop because the server runs in shared (LAN) mode, where
+  Build Space is admin-only; they expect a local-mode server. Not a waiting-room bug.
+- An open socket is checked only when it opens: blocking or turning someone away does not close a socket they already
+  have (low; a waiting account cannot open one).
+- The tunnel listener in `nginx.conf` trusts `CF-Connecting-IP` from all private ranges; the plan says to narrow it to
+  the tunnel's own subnet.
+- `/api/ai-chat` reaches the Next.js app without nginx's session check (the backend still refuses waiting accounts).
+- `tests/test_waiting_room.py` creates and deletes rows in the live database, and its 14-day cleanup test runs the
+  real cleanup on the real `users` table (it would also delete a real sign-up older than 14 days).
+- `plugins/people/approval.py`, `plugins/people/session.py` and migration 023 are untracked, and sign-in now selects
+  `account_status`: commit them together, or sign-in breaks on a database without 023.
+- Not done from the earlier report: `install.ps1 --public-access`, ESLint, the plan doc's 15-character password and
+  Turnstile lines, SECURITY.md.
+
+## Date: 2026-10-21 — MCP wiring and document-pipeline fixes (branch `harvis1.5`)
+
+**What.**
+- **Chat connectors answer from the chat.** A message that names one of the user's MCP connectors and asks to read
+  from it ("what's in my local-fs /tmp") now goes to the normal chat turn, where the connector tools are injected and
+  the reply ends with "Used: server · tool". Before, the workspace auto-detector grabbed these turns first.
+- **Fair limits on document builds.** A request refused because every build slot is busy no longer uses up the
+  user's per-minute allowance; a request with a wrong format is refused (400) before it counts or takes a slot.
+  Rate limits: export 20/min, preview 30, check 30 (env `DOCS_RATE_<KIND>_PER_MIN`), 429 with Retry-After.
+- **Text in files.** Download names keep accents and non-Latin letters (ASCII fallback plus `filename*`), drop
+  invisible characters, avoid reserved names. PDF italic works without an oblique font (skew fallback, not applied
+  twice to code). `***bold italic***` renders; `___x___` inside a word is left alone. Cards blocks draw their title in
+  SVG, PDF, DOCX and PPTX; only the first line can be the title, and Check now says a later `title:` line "is drawn as
+  a card" instead of falsely calling it skipped. Dockerfiles add fonts-noto-cjk and fonts-dejavu-extra.
+- **Layout check.** New overflow estimate per slide placeholder and a glyph check: characters no installed font can
+  draw are reported before download.
+- **Chat flow.** A finished doc card stays finished while a later one streams; doc turns skip the `:::writing`
+  vocabulary; revision requests in Spanish, French, German and Chinese stay in doc mode.
+
+**Files.**
+- Backend `python_back_end/`: `owui_compat/{chat_tools,router,docs_tools,doc_bridge,doc_revision,doc_revision_i18n}.py`,
+  `plugins/hermes_ui/{docs_limits,docs_fonts,docs_check_layout}.py` (new), `plugins/hermes_ui/{rest_docs,docs_export,
+  docs_pdf,docs_rich,docs_svg,docs_check,docs_check_rich,docs_pptx_layouts,docs_blocks}.py`; `Dockerfile`,
+  `Dockerfile.core`, `Dockerfile.sandbox`. Tests: `tests/conftest.py` (new), `test_chat_tools.py`, `test_docs_limits.py`,
+  `test_docs_export_text.py`, `test_docs_check_layout.py`, `test_docs_check.py`, `test_doc_bridge_chatflow.py`.
+- Frontend `src/`: `lib/{markdown-preprocess,harvis-doc-blocks}.ts`, `components/assistant-ui/cards-block.tsx`, tests
+  beside them (`markdown-preprocess.harvis-doc.test.ts`, `markdown-text.harvis-doc.test.tsx`, `harvis-doc-blocks.test.ts`).
+
+**Verified.** Backend (in harvis-backend): 785 passed, 2 skipped across 20 test files after the second round; after the
+last cards/underscore fix, docs + chat-tools + chatflow 491 passed, 2 skipped. harvis-mcp spec 41 passed, 1 skipped.
+Frontend: every harvis-doc, markdown-preprocess, doc-card, markdown-text and right-rail test passes; the 20 failing
+thread tests fail the same way on HEAD; tsc errors are 3 pre-existing module-resolution errors; prettier clean.
+Live after `docker restart harvis-backend`: a chat turn naming local-fs answered with the "Used:" trailer; docx export
+of "Café Résumé 计划" gave `filename*=UTF-8''caf%C3%A9-r%C3%A9sum%C3%A9-%E8%AE%A1%E5%88%92.docx`; Check reported the late
+cards title and the missing CJK glyphs; the docs MCP answers 401 signed out.
+
+**Not yet checked / open.**
+- CJK fonts only arrive with the next backend and sandbox image build (large package, disk at 97%). After that, italic
+  CJK may render upright (Noto CJK has no italic face). Emoji are flagged by the glyph check (no emoji font).
+- harvis-mcp answers 503 until `HARVIS_MCP_SERVER_TOKEN` is set in `.env` and the container is recreated. Its
+  leftovers: shell quoting in openclaw_read/write (unreachable today), `assert_in_jail` prefix check lets a sibling
+  directory through, `/mcp/invoke` names tools before auth, no Origin check, README out of date.
+- A finished doc card shows "Writing" if a later open fence repeats its whole body (prefix match, low). A fence
+  opener shows its language word for one frame (also on HEAD). `**a ***b*** c**` nesting and `\***x***` still render
+  wrong. A source that parses but fails inside the builder still counts against the allowance.
+- Connector answers take ~46 s warm on qwen3:4b and need a tool-capable model. docs_export is not disallowed in auto
+  sidecar runs. harvis-document-worker restart loop (DB password mismatch) is unchanged.
+
+## Date: 2026-10-21 — Document panel, part 2: page previews, Check and Fix it, file cards, agent document tools, sandbox hardening (branch `harvis1.5`)
+
+**What.** The live document panel now works more like Claude's file features.
+- **Preview tab:** the finished file drawn as real pages, "Page N / M", arrow keys.
+- **Check:** finds problems before you download (export failures, empty slides, content the title slide will not draw,
+  rich-block lines the reader skipped, sheet formulas pointing at the wrong column, #DIV/0!, circular references).
+  **Fix it** sends the list back to the chat so the model repairs the document.
+- **Optional vision pass** ("Also look at the pages", off by default): uses a vision model the user already has
+  (gemma3:4b, gemma4:e2b/e4b all see images), so nothing new is downloaded. Findings are hints ("Looks like ...").
+- **File cards in chat:** "Presentation · PPTX · 8 slides", a format dropdown, and "Download all" when a reply holds 2+ documents.
+- **Agent tools:** `docs_guide`, `docs_validate`, `docs_preview`, `docs_check`, `docs_export`, as a provider-neutral
+  list and as an MCP server at `POST /api/docs/mcp` (JWT). Not yet wired into the sidecars or the workspace loop.
+- **Sandbox hardening:** job code can no longer kill, ptrace or prlimit the sandbox server or PID 1 (pid-aware seccomp
+  on x86_64 and aarch64; server sets itself non-dumpable and refuses to start if that fails; tini made 0711).
+**Small-model fixes.** A deck that forgets the `---` slide lines now splits at each `#`/`##` heading (not inside code or
+rich blocks), in both the Python and TS parsers; before, everything after slide 1 vanished with no warning. The panel
+and the exporter now agree on dates with dots ("Oct. 26"), "a -> b" / "a => b" / "a → b" arrows, spaces after commas in
+CSV, "€5" and ".5" numbers, and chip colours (High red, Low gray).
+**Files.**
+- Backend `python_back_end/`: `plugins/hermes_ui/{rest_docs,docs_preview,docs_check,docs_check_sheet,docs_check_rich,docs_vision,docs_rich,docs_chips,docs_parse}.py`,
+  `owui_compat/{docs_tools,docs_tools_checks,docs_mcp,router}.py`, `sandbox_runner/{child,server}.py`, `Dockerfile.sandbox`;
+  `scripts/doc_eval.py`. Tests: `test_docs_{preview,check,tools,mcp,rich,export,export_route}.py`, `test_sandbox_{filter,runner}.py`.
+- Frontend `src/`: `components/assistant-ui/doc-card.tsx`, `app/chat/right-rail/{preview-document,preview-document-pages,preview-document-check}.tsx`,
+  `lib/{harvis-doc,harvis-doc-files,harvis-doc-preview-api,harvis-doc-blocks,harvis-doc-flow,harvis-doc-timeline}.ts`,
+  `app/contrib/hooks/use-followup-bridge.ts` (registers the Fix it sender), i18n `types/en/zh`. Tests beside each.
+**Verified.** Backend document tests 511 passed (in harvis-backend); sandbox tests on the host 121 passed, 7 skipped;
+k8s scripts 72 passed. Frontend: the 15 doc/right-rail/follow-up test files pass (237); `tsc` shows only the known
+pre-existing errors. Rebuilt sandbox image healthy; live probes show kill/ptrace/prlimit on the server now EPERM while
+numpy/pandas/openpyxl/docx/pptx jobs still work. Backend restarted, UI rebuilt, nginx restarted; new routes answer 401
+signed out. Live in the backend: a 4-slide deck with no `---` lines previewed as 4 pages in 1.4 s (cards, timeline,
+coloured table all drawn), Check with gemma3:4b vision in 15 s, no false findings; the MCP tools answer.
+**Not yet checked / open.** Preview, Check and Fix it in a signed-in browser. Vision is a hint only: gemma3:4b caught an
+overlap but missed off-edge text. A request that times out (504) keeps running in a worker thread. No per-user export
+quota. aarch64 seccomp untested on ARM hardware. A second harvis-doc fence that is still streaming shows as raw text
+until it closes. The backend image still bakes a stale `sandbox_runner` copy (run its tests on the host).
+
+## Date: 2026-10-21 — Live document panel: decks, docs, sheets and PDFs written in front of you (branch `harvis1.5`)
+
+**What.** Ask for a deck, a document, a spreadsheet or a PDF in chat, and a side panel opens and fills in as
+the model types, the way Claude's file creation does. Parts not written yet show as grey skeletons (a 16:9
+slide, a heading plus text bars, a 6x8 grid). A progress line reads "Writing slide 3 of 8". The panel follows
+the live part unless you scroll up, which shows "Jump to live". In chat the raw block is replaced by a small
+card with Open. When the reply finishes, Export downloads a real file: deck to .pptx or .pdf, doc to .docx,
+.pdf or .md, sheet to .xlsx (live formulas, frozen bold header) or .csv (formulas computed, injection-safe).
+UI layout reviewed with GPT-6 Astra on the school account (no code or data sent).
+**How it works.** The backend spots a document ask (`owui_compat/doc_bridge.py`, after the browse hook and
+before workspace; skipped in agent/orchestrate mode) and tells the model to answer in a `harvis-doc` fenced
+block (header with kind/title/outline, then the body). The frontend parses that block as it streams
+(`src/lib/harvis-doc.ts`), and `POST /hermes-api/api/harvis/docs/export` builds the file
+(`plugins/hermes_ui/docs_*.py`; 1 MB cap, slugged filenames, PDF fetches only `data:` URLs).
+**Files.**
+- Backend: `owui_compat/doc_bridge.py`, `owui_compat/router.py`, `owui_compat/chat_completion.py`,
+  `plugins/hermes_ui/{docs_parse,docs_blocks,docs_formula,docs_pptx,docs_docx,docs_xlsx,docs_pdf,docs_export,rest_docs,router}.py`.
+  Tests: `tests/test_doc_bridge.py`, `tests/test_docs_export.py`.
+- Frontend `front_end/hermes-desktop-ui/src/`: `lib/harvis-doc.ts`, `lib/harvis-doc-export.ts`,
+  `store/live-docs.ts`, `components/assistant-ui/{doc-card,markdown-text}.tsx`, `lib/markdown-preprocess.ts`,
+  `app/chat/right-rail/{preview-pane,preview-document,preview-document-views,preview-document-sheet,preview-document-export}.tsx`,
+  `app/chat/right-rail/{preview-document-follow,preview-document-parts}.ts`, i18n `types/en/zh`. Tests beside each.
+**Small-model fixes found by live runs.** gemma3:4b copied a `<body>` placeholder (slide 1 lost its title):
+removed from the prompt and dropped by both parsers. Models bold whole total cells (`**=SUM(B2:B4)**`): the
+sheet view shows them bold, and xlsx/csv still treat them as formulas or numbers. A new chat getting its saved id
+mid-stream no longer splits one document into two tabs.
+**Verified.** Backend 174 tests pass (docs export + doc bridge). Frontend: the 5 doc test files pass (97);
+the full suite has the same 27 failures as before (baseline). Live, in the backend container: gemma3:4b made
+a 7-slide phishing deck and exported pptx and pdf; qwen3.8-heretic:9b made a correct one-sheet budget (live
+formulas, total checked against the $2000 limit) and exported xlsx and csv. UI rebuilt and served by nginx
+(new bundle), export route answers 401 when signed out.
+**Not yet checked.** The panel in a signed-in browser, and an export through nginx while signed in. gemma3:4b
+still splits a budget into one sheet per category with formulas that point at the wrong column; the 9B model
+does not.
+
+## Date: 2026-10-17 — k8s DB backup waits for pgsql after a boot (branch `harvis1.5`)
+
+**Problem.** On VM 204 the nightly `pgsql-backup` job failed after pve rebooted. A k3s CronJob that missed
+its hour runs as soon as the node is back, and that was before pgsql was answering, so `pg_dump` failed.
+**Fix.** The generated job now runs `pg_isready` every 10 s, for up to 10 minutes (`DB_BACKUP_WAIT`),
+before `pg_dump`. If the database is still down after that, the job fails with a plain message.
+**Files.** `scripts/k8s/k8s_extras.py` (`db_backup()`). Test: `scripts/k8s/test_compose_to_k8s.py`
+(`pg_isready` must come before `pg_dump`).
+**Verified.** k8s tests pass (65). The same wait was patched into 204's live CronJob, and a run with pgsql
+scaled to 0 waited, then backed up once pgsql was back. Also on 204: two dead k3s worker nodes left over
+from old clones were deleted, which cleared the pods stuck on them.
+
+## Date: 2026-10-16 — Agent steps as child chats, /btw, follow-up cards, session side panel (branch `harvis1.5`)
+
+**What.** Four features modelled on the Claude Code desktop app (rebuilt from its public docs, no code copied).
+- **Agent steps become child chats.** When a teammate run splits into steps, each step shows as a live row in the
+  agents panel. When the step finishes it is saved as its own chat, nested under the main chat in the sidebar,
+  and the row gets an Open button. The sidebar picks the child up while the run is still going.
+- **`/btw <question>`** (alias `/aside`) asks a side question in a new tab. That chat can see the main chat, and
+  the main transcript is left alone. `/branch` and right-click Branch now nest the new chat under its source.
+- **Follow-up cards.** The run's "worth doing next" suggestions show as up to 3 cards above the composer. Start
+  opens a fresh chat and sends that prompt. The same list is no longer repeated at the end of the reply text.
+- **Session side panel** (top of the right sidebar, collapsible): model and provider, sandbox folder, context
+  use, and the files this chat changed.
+
+**Files.**
+- Backend `python_back_end/plugins/hermes_ui/`:
+  - `runs.py`: step events become `subagent.*` events, with files written, billed tokens and duration. Open steps
+    are closed when a run is cancelled, fails, or its stream drops. Suggestions become a `followups` event.
+  - `ws.py`: relays them and saves each finished step as a child chat.
+  - `sessions.py`, `store.py`: parent link kept in `chat.meta.parent_session_id`. No migration.
+  - `ws_slash.py`, `ws_session.py`: add `/btw`; `/branch` and `session.create` set the parent link.
+- UI `front_end/hermes-desktop-ui/src/`:
+  - Follow-up cards: `store/followups.ts`, `gateway-event/followups.ts`, `composer/followup-cards.tsx`,
+    `contrib/hooks/use-followup-bridge.ts`.
+  - /btw tab: `use-prompt-actions/btw.ts`.
+  - Side panel: `right-sidebar/session-panel.tsx`, `session-changes.ts`.
+  - Open button: `app/agents/index.tsx`.
+  - Sidebar refresh on a step finishing: `gateway-event/tools.ts`.
+- Tests: `tests/test_hermes_btw.py`, `tests/test_hermes_child_sessions.py`, plus UI tests beside each file.
+
+**Verified.**
+- Backend: 117 tests pass across the hermes_ui test files, run in the container.
+- UI: 5187 tests pass. The only failing file is the existing one with a missing fixture.
+- Type check: `tsc` shows only the 3 known baseline errors.
+- Review: Sonnet reviewers and Opus verifiers checked the change. All 7 confirmed problems are fixed.
+- Published: the UI is published and the laptop backend restarted cleanly.
+
+**Not yet verified.**
+- No live end-to-end run in a browser yet.
+- No VM test yet: pve does not have the memory free for VM 204.
+- The files-changed list empties when a chat is reopened, because Harvis stores only the text of each turn.
+- A stop sent from a different device can still leave a step row spinning.
+
+## Date: 2026-10-15 — ASCII field with a blue click ripple, trial placements (branch `harvis1.5`)
+
+**What.** A slow, dim field of drifting ASCII characters, the same look as the Claude Code new-session screen.
+Clean-room canvas code, nothing copied.
+- Patches of characters drift in and out. It paints in the theme's muted text colour, so light and dark both work.
+- A click anywhere over it sends a blue ring out through the characters (about 1.4 s), even when the click
+  lands on a button or the form above it. Up to 4 rings at once.
+- Reduced motion gets one still frame and no ripples. A hidden tab stops redrawing.
+
+**Where it shows (trial switch).** Add `?ascii=` to any Harvis URL; the choice sticks in that browser.
+- `chat` — behind the empty new-chat screen, middle kept clear for the wordmark (follows the intro toggle).
+- `chat-always` — behind every chat, transcript included.
+- `signin` — inside the left brand panel of the sign-in screen (wide windows only).
+- `signin-full` — behind the whole sign-in screen.
+- Combine with commas (`?ascii=chat,signin`). `?ascii=off` hides it everywhere; `?ascii=reset` goes back to
+  the default, which is `chat` + `signin`.
+
+**Files.**
+- New: `front_end/hermes-desktop-ui/src/components/chat/ascii-field.tsx`, `ascii-field.test.ts`.
+- New: `front_end/hermes-desktop-ui/src/store/ascii-places.ts`, `ascii-places.test.ts` (the trial switch).
+- `src/app/chat/index.tsx`: renders the field behind the thread for `chat` / `chat-always`.
+- `src/app/sign-in/sign-in-screen.tsx`: renders it for `signin` / `signin-full`; the panel and form get `relative`
+  so they paint above it. This frame is shared with the "can't reach Harvis" screen.
+
+**Verified.** 22 tests pass across 6 files; `tsc` shows only the 3 known baseline errors. Seen live on the real
+sign-in screen (local vite against the running Harvis): the field animates, and the ripple measured 0 blue
+pixels before a click, about 10,000 at 0.15 s, 3,000 at 0.9 s, 0 at 1.7 s. The chat placements need a signed-in
+browser after a UI rebuild; not yet seen there. `signin-full` puts dense patches behind the form text.
+
 ## Date: 2026-10-13 — "Shut down Harvis" button for admins (branch `harvis1.5`)
 
 **Problem.** The only way to stop a Harvis server was a terminal on that machine (`./install.sh --stop`).

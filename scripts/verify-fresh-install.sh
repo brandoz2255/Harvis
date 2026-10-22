@@ -127,8 +127,10 @@ say "Check 2a — the default set is actually up"
 # multi-file build preview. Both are unprofiled in docker-compose.yaml, so a
 # fresh `./install.sh` starts them. `repo-sandbox-image` (2026-09-30) only builds
 # the per-chat sandbox image. `owui-builder` left on 2026-10-01 when Hermes
-# became the only frontend. Update this list when that file changes.
-EXPECTED="artifact-init backend browser-runner harvis-mcp hermes-ui-builder llmfit nginx pgsql preview-runner repo-sandbox-image voice-onnx"
+# became the only frontend. `sandbox` (2026-10-21) runs model-written document
+# code away from the backend's secrets; without it document generation fails
+# closed. Update this list when that file changes.
+EXPECTED="artifact-init backend browser-runner harvis-mcp hermes-ui-builder llmfit nginx pgsql preview-runner repo-sandbox-image sandbox voice-onnx"
 # -f pins this to the file we SHIP. Without it Compose silently merges
 # docker-compose.override.yml, which is gitignored and personal — on a
 # developer box that makes this check measure their machine, not the deploy.
@@ -143,7 +145,7 @@ fi
 
 # artifact-init and hermes-ui-builder are one-shot: they populate a bind mount and
 # exit 0. Treating their absence from `ps` as a failure would be wrong.
-for svc in backend browser-runner harvis-mcp llmfit nginx pgsql preview-runner voice-onnx; do
+for svc in backend browser-runner harvis-mcp llmfit nginx pgsql preview-runner sandbox voice-onnx; do
   state=$(docker compose ps --format '{{.Service}} {{.State}}' 2>/dev/null | awk -v s="$svc" '$1==s {print $2}')
   case "$state" in
     running) pass "$svc running" ;;

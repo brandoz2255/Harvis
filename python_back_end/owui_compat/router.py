@@ -142,7 +142,7 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
         await shared_signup.before_login(payload.email, request.headers)
         async with pool.acquire() as conn:
             user = await conn.fetchrow(
-                "SELECT id, username, email, avatar, password FROM users WHERE email = $1",
+                "SELECT id, username, email, avatar, password, account_status FROM users WHERE email = $1",
                 payload.email,
             )
         if not user or not deps.verify_password(payload.password, user["password"]):
@@ -164,7 +164,8 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
     async def owui_signup(payload: OwuiSignupBody, request: Request):
         pool = _require_pool(request)
         signup_req = deps.signup_request_cls(
-            username=payload.name, email=payload.email, password=payload.password
+            username=payload.name, email=payload.email, password=payload.password,
+            note_to_host=payload.note_to_host,
         )
         async with pool.acquire() as conn:
             token_resp = await deps.signup_with_connection(
@@ -172,7 +173,7 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
                 headers=request.headers,
             )
             user = await conn.fetchrow(
-                "SELECT id, username, email, avatar FROM users WHERE email = $1",
+                "SELECT id, username, email, avatar, account_status FROM users WHERE email = $1",
                 payload.email,
             )
         token = token_resp.access_token
@@ -377,6 +378,21 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
         browse = await maybe_handle_browse(request, owui_body, user)
         if browse is not None:
             return browse
+        # "Make me a deck / report / spreadsheet / PDF" is answered in chat with one
+        # harvis-doc block (doc_bridge). It goes straight to the model: the workspace
+        # detector below would otherwise grab "write a report" as a sandbox task.
+        # An explicit Agent/Orchestrate pick still gets its run.
+        from .doc_bridge import maybe_prepare_doc_turn
+
+        if str(owui_body.get("harvis_mode") or "auto").strip().lower() not in ("agent", "orchestrate"):
+            if maybe_prepare_doc_turn(owui_body):
+                return await run_chat_completion(request, owui_body, user_id=user.id)
+            # "List my GitHub repos" reads a connector in chat (chat_tools); the
+            # detector below would launch a sandbox run for the same words.
+            from .chat_tools import is_connector_read_turn
+
+            if await is_connector_read_turn(request, owui_body, user.id):
+                return await run_chat_completion(request, owui_body, user_id=user.id)
         # Auto-detect workspace tasks → launch a run + return a WorkspaceRunCard
         # marker (the OWUI card attaches to /api/workspace/stream/{id}). Falls
         # through to a normal chat completion when it's not a workspace task.
@@ -982,6 +998,16 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
     else:
         register_cad_routes(router, get_current_user)
         register_cad_mcp_routes(router, get_current_user)
+
+    # The document pipeline (harvis-doc validate / export / preview) over MCP for the
+    # same sidecars. No feature flag: it only touches the caller's own documents and
+    # their own files; same auth dependency, and absent modules just skip it.
+    try:
+        from .docs_mcp import register_docs_mcp_routes
+    except ImportError as exc:
+        logger.info("Docs MCP route not registered (%s)", exc)
+    else:
+        register_docs_mcp_routes(router, get_current_user)
 
     # The same door, for whatever the user has connected themselves. Registered
     # unconditionally: unlike CAD this has no feature flag of its own, and a
