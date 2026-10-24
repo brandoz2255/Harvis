@@ -1581,7 +1581,16 @@ class SubAgentRunner:
             # literally "error:" with nothing after it. Never surface a blank cause.
             detail = str(exc).strip()
             kind = exc.__class__.__name__
-            if "Timeout" in kind:
+            resp = getattr(exc, "response", None)
+            if kind == "HTTPStatusError" and resp is not None:
+                # httpx's own text is just the status line; the provider's body says why.
+                from plugins.hermes_ui.errors import from_http
+                try:
+                    body = resp.text
+                except Exception:
+                    body = ""
+                detail = str(from_http(resp.status_code, body, upstream=True))
+            elif "Timeout" in kind:
                 detail = (
                     f"the model stopped responding ({kind}). The conversation may have "
                     "grown too large for it to answer in time."

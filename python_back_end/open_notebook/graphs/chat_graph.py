@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
-CLOUD_OLLAMA_URL = os.getenv("OLLAMA_CLOUD_URL", "https://coyotegpt.ngrok.app/ollama")
+CLOUD_OLLAMA_URL = os.getenv("OLLAMA_CLOUD_URL", "").rstrip("/")
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "mistral")
 
 CHAT_SYSTEM_PROMPT = """You are a cognitive study assistant that helps users research and learn by engaging in focused discussions about documents in their workspace.
@@ -145,7 +145,10 @@ async def _call_llm(prompt: str, model: str) -> str:
     except Exception as e:
         logger.warning(f"Local Ollama failed: {e}")
     
-    # Try cloud
+    # The prompt carries source text, so a remote fallback is opt-in.
+    if not CLOUD_OLLAMA_URL:
+        raise Exception("All LLM providers failed")
+
     try:
         response = requests.post(
             f"{CLOUD_OLLAMA_URL}/api/generate",

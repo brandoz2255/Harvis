@@ -1,10 +1,11 @@
 import { useStore } from '@nanostores/react'
 import DOMPurify from 'dompurify'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { CopyButton } from '@/components/ui/copy-button'
 import { Tip } from '@/components/ui/tooltip'
 import { useI18n } from '@/i18n'
+import { newBridgeToken, useArtifactBridge, withArtifactBridge } from '@/lib/artifact-bridge'
 import { artifactDownloadName, type ArtifactKind } from '@/lib/artifact-detect'
 import { downloadTextFile } from '@/lib/download-text'
 import { ChevronLeft, ChevronRight, Download, ExternalLink } from '@/lib/icons'
@@ -76,8 +77,10 @@ async function openHtmlInBrowser(content: string): Promise<void> {
  *
  * HTML runs in an `<iframe sandbox="allow-scripts">` — scripts execute in an
  * opaque origin with no same-origin access, no top navigation, no popups, no
- * form submission out of the frame. The parent app is unreachable. SVG is
- * DOMPurify-sanitized with the same profile as the inline ```svg embed.
+ * form submission out of the frame. The parent app is unreachable except
+ * through the token-gated `window.harvis` bridge (lib/artifact-bridge): ask the
+ * model a plain question, save and load a little data. SVG is DOMPurify-
+ * sanitized with the same profile as the inline ```svg embed.
  */
 function ArtifactLiveView({ content, kind, title }: { content: string; kind: ArtifactKind; title: string }) {
   const svgClean = useMemo(
@@ -93,11 +96,23 @@ function ArtifactLiveView({ content, kind, title }: { content: string; kind: Art
     )
   }
 
+  return <HtmlArtifactFrame content={content} title={title} />
+}
+
+function HtmlArtifactFrame({ content, title }: { content: string; title: string }) {
+  const frameRef = useRef<HTMLIFrameElement | null>(null)
+  // One token per mount: only the document THIS mount built is answered.
+  const token = useMemo(() => newBridgeToken(), [])
+  const srcDoc = useMemo(() => withArtifactBridge(composeArtifactHtml(content), token), [content, token])
+
+  useArtifactBridge(frameRef, token, content)
+
   return (
     <iframe
       className="block size-full border-0 bg-white"
+      ref={frameRef}
       sandbox="allow-scripts"
-      srcDoc={composeArtifactHtml(content)}
+      srcDoc={srcDoc}
       // Deliberately raw white + forced light scheme: the frame hosts foreign
       // generated HTML that assumes a light canvas, so it renders deterministically
       // light in both app themes instead of inheriting theme tokens it can't see.

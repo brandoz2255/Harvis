@@ -3,6 +3,7 @@
     GET  /health
     POST /run     {code, timeout?, files?: [{name, b64}]}
     POST /render  {b64, ext: pptx|docx|xlsx|pdf, max_pages?, scale?, want_pdf?}
+    POST /recalc  {b64}  -> the .xlsx with every formula's value stored
 
 Whoever can reach this port can run Python, so it has no host port and sits on an
 internal network shared only with the backend and the document worker.
@@ -69,7 +70,7 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(404, {"ok": False, "error": "not found"})
 
     def do_POST(self):
-        if self.path not in ("/run", "/render"):
+        if self.path not in ("/run", "/render", "/recalc"):
             self.reply(404, {"ok": False, "error": "not found"})
             return
         body = self.read_json()
@@ -81,6 +82,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if self.path == "/run":
                 result = jobs.run_python(body.get("code"), body.get("timeout", jobs.DEFAULT_TIMEOUT), body.get("files"))
+            elif self.path == "/recalc":
+                result = render.recalc(body.get("b64"))
             else:
                 result = render.render(body.get("b64"), body.get("ext"), body.get("max_pages", 20),
                                        body.get("scale", 1.0), bool(body.get("want_pdf")))

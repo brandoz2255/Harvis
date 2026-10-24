@@ -1,22 +1,30 @@
-"""A document block to a .docx: headings, lists, tables and code, from the shared block reader."""
+"""A document block to a .docx: headings, lists, tables and code, from the shared block reader.
+
+The theme (docs_theme) sets the fonts and colours of the styles, and the file gets a page-number footer, a table of
+contents field when it has four or more sections, and no thumbnail of the stock template."""
 from __future__ import annotations
 
 import io
+from contextvars import ContextVar
 
 from docx import Document
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Inches, Pt, RGBColor
 from docx.table import _Cell
 
-from .docs_blocks import Block, ListItem, Run, csv_table, inline_runs, parse_blocks
+from .docs_blocks import Block, ListItem, Run, csv_table, inline_runs, parse_blocks, plain_text
 from .docs_chips import tone_color
 from .docs_parse import ParsedDoc
 from .docs_rich import caption_of, rich_as_rows
+from .docs_theme import DEFAULT_THEME, Theme, get_theme, restyle_theme_xml
 
 MONO = "Consolas"
-LINK = RGBColor(0x05, 0x63, 0xC1)
+RULE_COLOR = "CBD5E1"
+TOC_MIN_SECTIONS = 4
+_theme: ContextVar[Theme] = ContextVar("docx_theme", default=DEFAULT_THEME)     # the theme of the document being built
 
 
 def _style_run(run, r: Run) -> None:
@@ -38,7 +46,7 @@ def _write_runs(paragraph, runs: list[Run]) -> None:
         wr = OxmlElement("w:r")
         rpr = OxmlElement("w:rPr")
         color, under = OxmlElement("w:color"), OxmlElement("w:u")
-        color.set(qn("w:val"), "0563C1")
+        color.set(qn("w:val"), _theme.get().accent2)
         under.set(qn("w:val"), "single")
         rpr.extend([color, under])
         if r.bold:
@@ -106,7 +114,7 @@ def _table(doc, block: Block) -> None:
             runs = row[ci] if ci < len(row) else []
             if ri == 0:
                 runs = [Run(r.text, True, r.italic, r.code, r.href) for r in runs]
-                _shade(cell._tc, "D9E2F3", "w:tcPr")
+                _shade(cell._tc, _theme.get().tint, "w:tcPr")
             _write_runs(p, runs)
             tone = block.tones[ri][ci] if ri < len(block.tones) and ci < len(block.tones[ri]) else None
             if tone:                                    # a status chip is colored bold text
@@ -120,7 +128,7 @@ def _table(doc, block: Block) -> None:
 
 def _code(doc, block: Block) -> None:
     p = doc.add_paragraph()
-    _shade(p._p, "F2F2F2", "w:pPr")
+    _shade(p._p, _theme.get().card, "w:pPr")
     lines = block.text.split("\n")
     for i, line in enumerate(lines):
         run = p.add_run(line)
@@ -133,7 +141,7 @@ def _code(doc, block: Block) -> None:
 
 def _math(doc, block: Block) -> None:
     p = doc.add_paragraph()
-    _shade(p._p, "F2F2F2", "w:pPr")
+    _shade(p._p, _theme.get().card, "w:pPr")
     for i, line in enumerate(block.text.split("\n")):
         run = p.add_run(line)
         run.font.name = MONO
@@ -168,6 +176,20 @@ def _rich(doc, block: Block) -> None:
         _table(doc, Block("table", rows=[[[Run(c)] for c in r] for r in rows]))
 
 
+def _rule(doc) -> None:
+    """A horizontal rule: an empty paragraph with a thin bottom border (it is the same line at any page width)."""
+    p = doc.add_paragraph()
+    pPr = p._p.get_or_add_pPr()
+    border = OxmlElement("w:pBdr")
+    bottom = OxmlElement("w:bottom")
+    for key, value in (("val", "single"), ("sz", "6"), ("space", "1"), ("color", RULE_COLOR)):
+        bottom.set(qn(f"w:{key}"), value)
+    border.append(bottom)
+    pPr.append(border)
+    p.paragraph_format.space_before = Pt(6)
+    p.paragraph_format.space_after = Pt(6)
+
+
 def _blocks(doc, blocks: list[Block]) -> None:
     for b in blocks:
         if b.kind == "heading":
@@ -185,22 +207,133 @@ def _blocks(doc, blocks: list[Block]) -> None:
         elif b.kind == "quote":
             _write_runs(doc.add_paragraph(style="Quote"), b.runs)
         elif b.kind == "rule":
-            doc.add_paragraph("_" * 40)
+            _rule(doc)
         elif b.kind == "math":
             _math(doc, b)
         elif b.kind == "rich":
             _rich(doc, b)
 
 
+def _style_font(style, face: str) -> None:
+    """Name the face on the style itself: the stock styles point at the theme's fonts, and a theme name beats ``w:ascii``."""
+    fonts = style.element.get_or_add_rPr().get_or_add_rFonts()
+    for attr in ("asciiTheme", "hAnsiTheme"):
+        fonts.attrib.pop(qn(f"w:{attr}"), None)
+    fonts.set(qn("w:ascii"), face)
+    fonts.set(qn("w:hAnsi"), face)
+
+
+def _apply_theme(document, theme: Theme) -> None:
+    """The theme's colour scheme and fonts in the theme part, and its fonts and colours on the styles Word shows."""
+    part = document.part.part_related_by(RT.THEME)
+    part._blob = restyle_theme_xml(part.blob, theme)
+    styles = document.styles
+    _style_font(styles["Normal"], theme.body_font)
+    for name, color in (("Title", theme.ink), ("Heading 1", theme.ink), ("Heading 2", theme.accent),
+                        ("Heading 3", theme.ink), ("Heading 4", theme.muted)):
+        try:
+            style = styles[name]
+        except KeyError:
+            continue
+        _style_font(style, theme.heading_font)
+        style.font.color.rgb = RGBColor.from_string(color)
+    border = styles["Title"].element.find(f".//{qn('w:bottom')}")
+    if border is not None:
+        border.set(qn("w:color"), theme.accent)
+        border.attrib.pop(qn("w:themeColor"), None)
+    styles["Quote"].font.color.rgb = RGBColor.from_string(theme.muted)
+
+
+def _field_runs(paragraph, instruction: str, shown: str = "", size: float | None = None, color: str | None = None):
+    """A complex field (begin, instruction, separate, the text shown until Word updates it, end) at the end of the paragraph."""
+    def run(child):
+        r = paragraph.add_run()
+        r.font.size = Pt(size) if size else None
+        if color:
+            r.font.color.rgb = RGBColor.from_string(color)
+        r._r.append(child)
+        return r
+
+    def mark(kind):
+        el = OxmlElement("w:fldChar")
+        el.set(qn("w:fldCharType"), kind)
+        return el
+
+    instr = OxmlElement("w:instrText")
+    instr.set(qn("xml:space"), "preserve")
+    instr.text = f" {instruction} "
+    run(mark("begin"))
+    run(instr)
+    run(mark("separate"))
+    paragraph.add_run(shown)
+    if size or color:
+        shown_run = paragraph.runs[-1]
+        shown_run.font.size = Pt(size) if size else None
+        if color:
+            shown_run.font.color.rgb = RGBColor.from_string(color)
+    run(mark("end"))
+
+
+def _footer(document, theme: Theme) -> None:
+    """``Page N of M`` centred in the footer, as fields Word and LibreOffice fill in."""
+    p = document.sections[0].footer.paragraphs[0]
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    style = dict(size=9, color=theme.muted)
+    r = p.add_run("Page ")
+    r.font.size, r.font.color.rgb = Pt(9), RGBColor.from_string(theme.muted)
+    _field_runs(p, "PAGE", "1", **style)
+    r = p.add_run(" of ")
+    r.font.size, r.font.color.rgb = Pt(9), RGBColor.from_string(theme.muted)
+    _field_runs(p, "NUMPAGES", "1", **style)
+
+
+def _contents(document, titles: list[str]) -> None:
+    """A table-of-contents field for the section headings, with the headings listed as what it shows until it is updated."""
+    document.add_paragraph("Contents", style="TOC Heading")
+    for i, name in enumerate(titles):
+        p = document.add_paragraph()
+        p.paragraph_format.space_after = Pt(2)
+        if i == 0:
+            for kind in ("begin", "instr", "separate"):
+                r = p.add_run()
+                if kind == "instr":
+                    el = OxmlElement("w:instrText")
+                    el.set(qn("xml:space"), "preserve")
+                    el.text = ' TOC \\o "1-2" \\h \\z \\u '
+                else:
+                    el = OxmlElement("w:fldChar")
+                    el.set(qn("w:fldCharType"), kind)
+                r._r.append(el)
+        p.add_run(name)
+        if i == len(titles) - 1:
+            r = p.add_run()
+            end = OxmlElement("w:fldChar")
+            end.set(qn("w:fldCharType"), "end")
+            r._r.append(end)
+
+
 def build_docx(doc: ParsedDoc, title: str) -> bytes:
-    document = Document()
-    document.core_properties.title = title
-    document.core_properties.author = "Harvis"
-    document.add_paragraph(title, style="Title")
-    for section in doc.sections:
-        if section.title:
-            _write_runs(document.add_heading(level=1), inline_runs(section.title))
-        _blocks(document, parse_blocks(section.body))
-    out = io.BytesIO()
-    document.save(out)
-    return out.getvalue()
+    theme = get_theme(getattr(doc, "theme", ""))
+    token = _theme.set(theme)
+    try:
+        document = Document()
+        document.core_properties.title = title
+        document.core_properties.author = "Harvis"
+        _apply_theme(document, theme)
+        _footer(document, theme)
+        package_rels = document.part.package.rels
+        for rid in [rid for rid, rel in package_rels.items() if rel.reltype == RT.THUMBNAIL]:
+            package_rels.pop(rid)                      # the stock template's picture of an empty page
+        document.add_paragraph(title, style="Title")
+        titles = [plain_text(inline_runs(s.title)) for s in doc.sections if s.title]
+        if len(titles) >= TOC_MIN_SECTIONS:
+            _contents(document, titles)
+        for section in doc.sections:
+            if section.title:
+                _write_runs(document.add_heading(level=1), inline_runs(section.title))
+            _blocks(document, parse_blocks(section.body))
+        out = io.BytesIO()
+        document.save(out)
+        return out.getvalue()
+    finally:
+        _theme.reset(token)

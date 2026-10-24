@@ -1372,8 +1372,9 @@ async def list_models(
             except Exception:
                 pass
 
-        # Merge user-specific models into cached list
-        existing_names = {m["name"] for m in cached.get("models", [])}
+        # Merge user-specific models into a copy: the cached list is shared by every user.
+        cached = {**cached, "models": list(cached.get("models", []))}
+        existing_names = {m["name"] for m in cached["models"]}
         for um in user_models:
             if um["name"] not in existing_names:
                 if um["provider"] == "moonshot":
@@ -1402,6 +1403,41 @@ async def list_models(
 
     formatted_models = []
 
+    # Every source is probed at once and each block below awaits its own result, so a
+    # cold list costs the slowest source rather than the sum. Unplugged hosts never
+    # answer a SYN, and closed ports behind the Docker bridge are dropped, not refused —
+    # in series each dead one cost its whole timeout (14 s on a laptop with three).
+    from owui_compat import ollama_hosts as _oh
+    from plugins.inference_nodes import snapshot as _nodes_snapshot
+
+    async def _probe_get(url, timeout=httpx.Timeout(5.0, connect=1.5), **kw):
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            return await client.get(url, **kw)
+
+    # llama-server and vLLM are asked only when configured; nothing listens on the
+    # old host.docker.internal:8080 / :8001 defaults on a stock install.
+    llama_url = os.getenv("LLAMA_URL", "").rstrip("/")
+    vllm_url = os.getenv("VLLM_URL", "").rstrip("/")
+    ext_headers = {
+        "Authorization": f"Bearer {EXTERNAL_OLLAMA_API_KEY}",
+        "ngrok-skip-browser-warning": "true",
+        "User-Agent": "Harvis-Backend",
+    }
+    _t_hosts = asyncio.create_task(_oh.snapshot())
+    _t_nodes = asyncio.create_task(_nodes_snapshot())
+    _t_llama = asyncio.create_task(_probe_get(f"{llama_url}/models")) if llama_url else None
+    _t_vllm = asyncio.create_task(_probe_get(f"{vllm_url}/models")) if vllm_url else None
+    _t_ext = (
+        asyncio.create_task(_probe_get(f"{EXTERNAL_OLLAMA_URL}/api/tags", headers=ext_headers,
+                                       timeout=httpx.Timeout(10.0, connect=2.0)))
+        if EXTERNAL_OLLAMA_URL and EXTERNAL_OLLAMA_API_KEY else None
+    )
+    for _t in (_t_hosts, _t_nodes, _t_llama, _t_vllm, _t_ext):
+        # A source whose block fails early is still awaited by nobody; keep its
+        # exception from being logged as never retrieved.
+        if _t is not None:
+            _t.add_done_callback(lambda t: t.cancelled() or t.exception())
+
     # ── Ollama hosts (this machine + any others configured), probed live ────
     # One probe per host through owui_compat.ollama_hosts, which is also what the CAD
     # lane and model routing use — so a model cannot be "installed" for one lane and
@@ -1415,9 +1451,7 @@ async def list_models(
     #     picker reads to a user as Harvis losing it, and they go looking in the wrong
     #     place. Only tags that host previously served and no live host has are listed.
     try:
-        from owui_compat import ollama_hosts as _oh
-
-        _snap = await _oh.snapshot()
+        _snap = await _t_hosts
         for _st in _snap.values():
             if not _st.reachable:
                 logger.warning(
@@ -1472,10 +1506,9 @@ async def list_models(
     # registered by env or through the admin API. Same honesty as the Ollama hosts above:
     # a node that is down keeps its models listed, greyed out, rather than losing them.
     try:
-        from plugins.inference_nodes import snapshot as _nodes_snapshot
         from plugins.inference_nodes import unreachable_models as _nodes_unreachable
 
-        for _ns in (await _nodes_snapshot()).values():
+        for _ns in (await _t_nodes).values():
             if not _ns.reachable:
                 logger.warning("Inference node %s (%s) unreachable: %s",
                                _ns.spec.name, _ns.spec.base_url, _ns.error)
@@ -1517,11 +1550,9 @@ async def list_models(
 
     # Fetch from llama-server (local GPU via llama.cpp)
     try:
-        llama_url = os.getenv("LLAMA_URL", "http://host.docker.internal:8080/v1")
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(f"{llama_url}/models", timeout=5.0)
+        resp = await _t_llama if _t_llama else None
 
-        if resp.status_code == 200:
+        if resp is not None and resp.status_code == 200:
             data = resp.json()
             for m in data.get("data", []):
                 model_id = m.get("id", "unknown")
@@ -1543,11 +1574,9 @@ async def list_models(
 
     # Fetch from vLLM (fast local inference)
     try:
-        vllm_url = os.getenv("VLLM_URL", "http://host.docker.internal:8001/v1")
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(f"{vllm_url}/models", timeout=5.0)
+        resp = await _t_vllm if _t_vllm else None
 
-        if resp.status_code == 200:
+        if resp is not None and resp.status_code == 200:
             data = resp.json()
             for m in data.get("data", []):
                 model_id = m.get("id", "unknown")
@@ -1573,16 +1602,9 @@ async def list_models(
     # before, still reported when the rig is asleep.)
 
     # Fetch from external Ollama (if configured) - runs in parallel with above
-    if EXTERNAL_OLLAMA_URL and EXTERNAL_OLLAMA_API_KEY:
+    if _t_ext is not None:
         try:
-            ext_url = f"{EXTERNAL_OLLAMA_URL}/api/tags"
-            ext_headers = {
-                "Authorization": f"Bearer {EXTERNAL_OLLAMA_API_KEY}",
-                "ngrok-skip-browser-warning": "true",
-                "User-Agent": "Harvis-Backend",
-            }
-            async with httpx.AsyncClient() as client:
-                ext_resp = await client.get(ext_url, headers=ext_headers, timeout=10.0)
+            ext_resp = await _t_ext
 
             if ext_resp.status_code == 200:
                 ext_data = ext_resp.json()
@@ -1606,6 +1628,14 @@ async def list_models(
                 logger.info(f"Added external Ollama models")
         except Exception as e:
             logger.warning(f"Could not connect to external Ollama: {e}")
+
+    # Cache the shared list before this user's own cloud models are added to it.
+    formatted_models.sort(key=lambda x: x["name"])
+    _set_cached_models(
+        {"models": formatted_models.copy()},
+        ttl=_MODELS_DEGRADED_TTL if any(m.get("status") != "available" for m in formatted_models)
+        else _MODELS_CACHE_TTL,
+    )
 
     # Check if user has Moonshot API key configured
     pool = getattr(request.app.state, "pg_pool", None)
@@ -1655,13 +1685,7 @@ async def list_models(
         except Exception as e:
             logger.error(f"Error checking NVIDIA API key: {e}")
 
-    # Sort by name
     formatted_models.sort(key=lambda x: x["name"])
-
-    # Cache the result (without user-specific models)
-    cache_data = {"models": formatted_models.copy()}
-    _set_cached_models(cache_data)
-
     return {"models": formatted_models}
 
 
@@ -1669,8 +1693,10 @@ async def list_models(
 @app.post("/api/models/clear-cache", tags=["models"])
 async def clear_models_cache(current_user: UserResponse = Depends(get_current_user)):
     """Clear the models cache (useful after adding/removing models)"""
-    global _models_cache
+    global _models_cache, _RESOLVED_DEFAULT_MODEL, _DEFAULT_MODEL_PROBED_AT
     _models_cache = {"data": None, "timestamp": 0}
+    _RESOLVED_DEFAULT_MODEL = DEFAULT_MODEL or None
+    _DEFAULT_MODEL_PROBED_AT = float("-inf")
     logger.info("Models cache cleared")
     return {"status": "cached", "message": "Models cache cleared"}
 
@@ -2010,32 +2036,45 @@ API_KEY = os.getenv("OLLAMA_API_KEY", "key")
 # asked the provider for a model it did not have. The default is now whatever the
 # deployment actually serves, discovered from /api/tags at first use.
 #
-#   HARVIS_DEFAULT_MODEL   pin one explicitly (any provider, any tag)
-#   unset                  first model the configured provider reports
-#   no provider yet        "" — the caller must name a model, and the error says so
-DEFAULT_MODEL = os.getenv("HARVIS_DEFAULT_MODEL", "").strip()
+#   HARVIS_DEFAULT_MODEL        pin one explicitly (any provider, any tag)
+#   HARVIS_DEFAULT_LOCAL_MODEL  the same pin under the name compose already passes
+#   unset                       first chat model the configured provider reports
+#   no provider yet             "" — the caller must name a model, and the error says so
+DEFAULT_MODEL = (os.getenv("HARVIS_DEFAULT_MODEL") or "").strip() or (os.getenv("HARVIS_DEFAULT_LOCAL_MODEL") or "").strip()
 _RESOLVED_DEFAULT_MODEL: Optional[str] = DEFAULT_MODEL or None
-_DEFAULT_MODEL_PROBED = False
+_DEFAULT_MODEL_PROBED_AT = float("-inf")
+_DEFAULT_MODEL_RETRY_S = 30.0
+
+
+def _chat_candidates(names) -> list[str]:
+    """``names`` without embedders and hidden models: tags that cannot hold a chat."""
+    from notebooks.embedder_status import is_embedder
+    from plugins.hermes_ui.models import is_hidden_model
+
+    return [n for n in names if n and not is_embedder(n) and not is_hidden_model(n)]
 
 
 def resolve_default_model() -> str:
     """The model to use when the caller named none.
 
-    Resolution order: explicit pin, then the provider's own first tag, then "".
-    Probed once and cached; a deployment that pulls its first model after boot picks it
-    up on the next cache clear (``/api/models/clear-cache``), not on every request.
+    Resolution order: explicit pin, then the provider's own first chat tag, then "".
+    Blocking (up to two 3 s probes): async callers run it in a thread. A probe that finds
+    nothing is retried after 30 s, so a model pulled after boot is picked up without a
+    restart; a found model is cached until ``/api/models/clear-cache``.
     """
-    global _RESOLVED_DEFAULT_MODEL, _DEFAULT_MODEL_PROBED
+    global _RESOLVED_DEFAULT_MODEL, _DEFAULT_MODEL_PROBED_AT
     if _RESOLVED_DEFAULT_MODEL:
         return _RESOLVED_DEFAULT_MODEL
-    if _DEFAULT_MODEL_PROBED:
+    now = time.monotonic()
+    if now - _DEFAULT_MODEL_PROBED_AT < _DEFAULT_MODEL_RETRY_S:
         return ""
-    _DEFAULT_MODEL_PROBED = True
+    _DEFAULT_MODEL_PROBED_AT = now
     import httpx  # imported per-function throughout this module, not at top level
 
     # Whatever the local cache already learned beats an HTTP round-trip.
-    if LOCAL_OLLAMA_MODELS_CACHE:
-        _RESOLVED_DEFAULT_MODEL = sorted(LOCAL_OLLAMA_MODELS_CACHE)[0]
+    local = _chat_candidates(sorted(LOCAL_OLLAMA_MODELS_CACHE))
+    if local:
+        _RESOLVED_DEFAULT_MODEL = local[0]
         return _RESOLVED_DEFAULT_MODEL
     base = HARVIS_LLM_BASE_URL[:-3] if HARVIS_LLM_BASE_URL.endswith("/v1") else HARVIS_LLM_BASE_URL
     for url, pick in (
@@ -2049,7 +2088,7 @@ def resolve_default_model() -> str:
                 continue
             from owui_compat.ollama_hosts import drop_cloud
 
-            names = drop_cloud([n for n in pick(r.json()) if n])
+            names = _chat_candidates(drop_cloud([n for n in pick(r.json()) if n]))
             if names:
                 _RESOLVED_DEFAULT_MODEL = names[0]
                 logger.info("default model resolved from %s: %s", url, _RESOLVED_DEFAULT_MODEL)
@@ -2092,22 +2131,27 @@ import time
 
 _models_cache = {"data": None, "timestamp": 0}
 _MODELS_CACHE_TTL = 60  # Cache models list for 60 seconds
+# While any host is down, rebuild as often as hosts are re-probed, so one that comes
+# back reappears within seconds instead of a minute.
+_MODELS_DEGRADED_TTL = 10
 
 
 def _get_cached_models():
     """Return cached models if still valid, otherwise None"""
     if (
         _models_cache["data"]
-        and (time.time() - _models_cache["timestamp"]) < _MODELS_CACHE_TTL
+        and (time.time() - _models_cache["timestamp"])
+        < _models_cache.get("ttl", _MODELS_CACHE_TTL)
     ):
         return _models_cache["data"]
     return None
 
 
-def _set_cached_models(models):
+def _set_cached_models(models, ttl=_MODELS_CACHE_TTL):
     """Cache the models list"""
     _models_cache["data"] = models
     _models_cache["timestamp"] = time.time()
+    _models_cache["ttl"] = ttl
 
 
 def _parse_model_size(size_value):
@@ -2310,7 +2354,7 @@ async def stream_ollama_chunks(endpoint, payload, timeout=3600):
     # ── 3. Local backend: vLLM or llama-server (OpenAI SSE format) ────────────────
     # Translate Ollama /api/chat payload → OpenAI /v1/chat/completions payload
     openai_payload = {
-        "model": model_name or resolve_default_model(),
+        "model": model_name or await asyncio.to_thread(resolve_default_model),
         "messages": payload.get("messages", []),
         "stream": True,
         "temperature": payload.get("options", {}).get("temperature", 0.7),
@@ -2827,7 +2871,7 @@ async def health_check():
 @app.get("/api/health/services", tags=["health"])
 async def health_services():
     """Check reachability of backend services (model provider, pgsql, openclaw,
-    browser-runner, tts-service).
+    browser-runner, tts-service, voice-onnx, sandbox).
 
     The model provider is NOT a compose service any more (plug-and-play: the
     user brings their own server, reached via HARVIS_LLM_BASE_URL). It is
@@ -2917,12 +2961,17 @@ async def health_services():
     _openclaw_http = _openclaw_ws.replace("ws://", "http://").replace("wss://", "https://")
 
     _tts_base = os.getenv("TTS_SERVICE_URL", "http://tts-service:8001").rstrip("/")
+    _sandbox_base = os.getenv("CODE_EXECUTOR_URL", "http://sandbox:8080").rstrip("/")
 
     await asyncio.gather(
         _check_model_provider(),
         _check("openclaw", f"{_openclaw_http}/health"),
         _check("browser-runner", "http://browser-runner:8765/health", timeout=8.0),
         _check("tts-service", f"{_tts_base}/health"),
+        # The service by name, not HARVIS_TTS_URL: speech pointed at an outside
+        # OpenAI-compatible server has no /health, and the installer gates on this report.
+        _check("voice-onnx", "http://voice-onnx:8000/health"),
+        _check("sandbox", f"{_sandbox_base}/health"),
     )
 
     # Database check — use the existing connection pool (not HTTP)
@@ -6781,7 +6830,7 @@ async def mic_chat(
     model = await require_turn(getattr(app.state, "pg_pool", None), int(current_user.id), model)
     # The form default is empty, not a guessed tag — resolve it against what this
     # deployment actually serves.
-    model = model or resolve_default_model()
+    model = model or await asyncio.to_thread(resolve_default_model)
     tmp_path = None
 
     try:
@@ -8076,7 +8125,7 @@ async def get_user_ollama_settings_from_db(user_id: int) -> dict:
                         )
 
                 return {
-                    "cloud_url": result["cloud_url"] or CLOUD_OLLAMA_URL,
+                    "cloud_url": result["cloud_url"] or EXTERNAL_OLLAMA_URL,
                     "local_url": result["local_url"] or LOCAL_OLLAMA_URL,
                     "api_key": api_key,
                     "preferred_endpoint": result["preferred_endpoint"] or "auto",
@@ -8086,7 +8135,7 @@ async def get_user_ollama_settings_from_db(user_id: int) -> dict:
 
     # Fall back to global env vars
     return {
-        "cloud_url": CLOUD_OLLAMA_URL,
+        "cloud_url": EXTERNAL_OLLAMA_URL,
         "local_url": LOCAL_OLLAMA_URL,
         "api_key": API_KEY,
         "preferred_endpoint": "auto",

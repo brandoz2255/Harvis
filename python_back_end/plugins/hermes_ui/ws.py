@@ -178,7 +178,11 @@ class Connection(SettingsMethods, SessionMethods, SlashMethods, ApprovalMethods,
         return _ok(rid, {"mode": mode})
 
     async def m_model_options(self, rid, params):
-        return _ok(rid, await build_model_options(self.pool, self.user_id, self.token))
+        options = await build_model_options(self.pool, self.user_id, self.token,
+                                            refresh=bool((params or {}).get("refresh")))
+        if options["degraded"]:
+            return _err(rid, ERR_INTERNAL, "model list unavailable")
+        return _ok(rid, options)
 
     async def m_process_list(self, rid, params):
         return _ok(rid, {"processes": []})
@@ -312,6 +316,8 @@ class Connection(SettingsMethods, SessionMethods, SlashMethods, ApprovalMethods,
                 extra = {**extra, "files": files}
                 if endpoint and attachments.latest_turn_has_files(msgs):
                     await self._relay(s, "text", attachments.CUSTOM_ENDPOINT_NOTE, parts, thoughts)
+                if mode == "auto" and attachments.latest_turn_has_files(msgs):
+                    mode = "chat"  # the workspace detector never sees file text, and a run is not handed the file
             # Only thinking models get a level: Ollama rejects one on any other model.
             effort = (("none" if plain else ollama_effort(s.effort or DEFAULT_EFFORT))
                       if model and not endpoint and model in await thinking_models() else "")

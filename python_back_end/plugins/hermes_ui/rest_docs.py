@@ -23,6 +23,7 @@ from auth_optimized import get_current_user_optimized
 
 from . import docs_limits, docs_preview
 from .docs_check import check_pages, check_source, page_label, sort_issues
+from .docs_check_pixels import check_pixels
 from .docs_export import FORMATS, MAX_SOURCE_BYTES, ExportError, content_disposition, export_doc, parse_for_export
 from .docs_parse import parse_harvis_doc
 from .docs_preview import RenderUnavailable, cache, cache_key, primary_format, renderable, user_key
@@ -231,6 +232,11 @@ async def check_document(request: Request, user=Depends(get_current_user_optimiz
     if item is not None:
         checked["render"] = True
         issues += check_pages(doc, [p["text"] for p in item.pages], fmt)
+        try:                                          # pixel checks read the cached images; they never fail a check
+            issues += await asyncio.to_thread(check_pixels, [p["png"] for p in item.pages], page_label(fmt),
+                                              last_may_be_short=fmt != "pptx")
+        except Exception:  # noqa: BLE001
+            log.warning("hermes_ui: pixel check failed", exc_info=True)
         if body.get("vision") is True:                # opt in: a missing key means no, as the UI's unticked box sends
             await _look(item, fmt, body, issues, checked, started + RENDER_TIMEOUT_S)
     return {"issues": sort_issues(issues), "checked": checked}

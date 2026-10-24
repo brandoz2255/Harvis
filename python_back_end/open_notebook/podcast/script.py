@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
-CLOUD_OLLAMA_URL = os.getenv("OLLAMA_CLOUD_URL", "https://coyotegpt.ngrok.app/ollama")
+CLOUD_OLLAMA_URL = os.getenv("OLLAMA_CLOUD_URL", "").rstrip("/")
 # Use gpt-oss:latest as default (available locally, 20.9B model good for conversation)
 DEFAULT_MODEL = os.getenv("PODCAST_MODEL", "gpt-oss:latest")
 
@@ -223,7 +223,11 @@ SCRIPT (JSON only, no markdown):"""
         except Exception as e:
             logger.warning(f"Local Ollama failed: {e}")
         
-        # Try cloud fallback (also off the event loop — see local Ollama note above).
+        # The prompt carries source text, so a remote fallback is opt-in.
+        if not CLOUD_OLLAMA_URL:
+            raise Exception("All LLM providers failed for script generation")
+
+        # Cloud fallback (also off the event loop — see local Ollama note above).
         try:
             response = await asyncio.to_thread(
                 lambda: requests.post(

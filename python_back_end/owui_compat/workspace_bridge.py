@@ -14,6 +14,7 @@ immediately). No new backend plumbing: it reuses ``_start_workspace`` etc.
 
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import logging
@@ -183,6 +184,8 @@ def _openai_sse_lines(workspace_id: str, content: str) -> list[str]:
 # Models that aren't a concrete pick — never sync these (they ARE the auto-route).
 _MODEL_SENTINELS = {"", "auto", "default", "user-pref", "dynamic", "harvis-workspace"}
 
+_NON_OLLAMA_PREFIXES = ("anthropic/", "openai/", "moonshot/", "kimi-code/")
+
 # A cloud model only takes the (slower) workspace lane for tasks that genuinely need live
 # tools — web search, current info, fetching, code execution. Simple generation a model can
 # do from its own knowledge stays in fast plain chat.
@@ -284,6 +287,42 @@ def _needs_reach(message: str) -> bool:
     return bool(_FRESHNESS_RE.search(m) and _QUESTION_RE.search(m))
 
 
+# A plain-chat model asked to run something would otherwise say it ran the code.
+_RUN_ASK = re.compile(r"\b(?:run|execute|exec)\b(?:\W+\w+){0,4}?\W+(?:code|script|program|it|this|that|python|tests?)\b", re.I)
+NO_RUN_NOTE = "You cannot run code in this chat. Show the code and say plainly that you did not run it."
+
+
+def _add_no_run_note(owui_body: dict) -> None:
+    """Append the note to the turn's system prompt, or start one with the house persona
+    so the note does not stand in for it."""
+    messages = owui_body.get("messages")
+    if not isinstance(messages, list):
+        return
+    for m in messages:
+        if isinstance(m, dict) and m.get("role") == "system" and isinstance(m.get("content"), str):
+            m["content"] += "\n\n" + NO_RUN_NOTE
+            return
+    from .chat_completion import _DEFAULT_PERSONA
+    messages.insert(0, {"role": "system", "content": _DEFAULT_PERSONA + "\n\n" + NO_RUN_NOTE})
+
+
+async def _cannot_call_tools(model_id: str) -> bool:
+    """True when Ollama reports capabilities for this tag and "tools" is not one of them.
+
+    An empty capability list means unknown (a remote node, a non-Ollama provider), so the
+    launch is not blocked. The lookup is synchronous HTTP and cached by the connector.
+    """
+    m = (model_id or "").strip()
+    if m.lower() in _MODEL_SENTINELS or m == "hermes-agent" or m.startswith(_NON_OLLAMA_PREFIXES):
+        return False
+    try:
+        from vison_models.llm_connector import model_capabilities
+        caps = await asyncio.to_thread(model_capabilities, m)
+    except Exception:
+        return False
+    return bool(caps) and "tools" not in caps
+
+
 async def _sync_workspace_model(pool, model_name: str) -> None:
     """Make the OpenClaw workspace follow the model picked in the OWUI dropdown.
 
@@ -361,6 +400,25 @@ async def maybe_handle_workspace(
     # other cloud providers — see cloud_chat._MOONSHOT_MODELS. Prefix-matching (not an id list)
     # keeps new K-versions routing correctly without touching this file.
     _is_moonshot = _model_id.startswith("moonshot/")
+
+    # The tool-loop needs a model that can call tools; Ollama answers 400 otherwise (gemma3).
+    # Auto launches quietly fall back to plain chat; an explicit Agent pick says why it can't run.
+    # Orchestrate without the uniform toggle runs its sub-agents on pool models, not this pick.
+    _runs_on_pick = mode != "orchestrate" or bool(owui_body.get("harvis_orchestrate_uniform"))
+    if _runs_on_pick and await _cannot_call_tools(_model_id):
+        if launch_mode == "auto":
+            logger.info("owui workspace_bridge: %s cannot call tools -> plain chat", _model_id)
+            if _RUN_ASK.search(message):
+                _add_no_run_note(owui_body)
+            return None
+        logger.info("owui workspace_bridge: %s cannot call tools -> refusing %s mode", _model_id, mode)
+        return StreamingResponse(
+            iter(_openai_sse_lines(uuid.uuid4().hex[:8], (
+                f"{_model_id} cannot call tools, so it cannot run as an Agent. "
+                "Pick a different model from the model menu, or switch to Chat mode."))),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     # OpenAI/GPT used to be forced back to plain chat here, because the only lane the
     # else-branch could reach was OpenClaw (an Ollama-backed loop a cloud model can't
@@ -467,7 +525,10 @@ async def maybe_handle_workspace(
     # model the chat dropdown selected, so the workspace runs on it (model_proxy's
     # `auto` path resolves to it; the node is auto-discovered downstream). Previously
     # the workspace ignored the dropdown and used the static config.
-    await _sync_workspace_model(pool, model_name)
+    # Only an explicit Agent/Orchestrate pick moves the shared row: it is one global
+    # config, so an auto-detected launch must not change the model for everyone else.
+    if launch_mode == "user":
+        await _sync_workspace_model(pool, model_name)
     # Use the RAW user message as the brief — it carries the literal challenge
     # data (hashes, ciphertext, encoded blobs) that the hash/decode/crypto skill
     # detection in openclaw_client needs to fire its CodeAct flow. The detector's

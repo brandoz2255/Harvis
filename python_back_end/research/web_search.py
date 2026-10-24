@@ -31,6 +31,9 @@ class WebSearchAgent:
     def __init__(self, max_results: int = 5, max_workers: int = 3):
         self.max_results = max_results
         self.max_workers = max_workers
+        # Why the last search_web call came back empty, for callers that need to
+        # tell "no hits" from "the engines did not answer".
+        self.last_error = ""
 
         # Set a default User-Agent if not set
         if not os.getenv("USER_AGENT"):
@@ -57,6 +60,7 @@ class WebSearchAgent:
             List of search results with title, url, and snippet
         """
         max_results = num_results or self.max_results
+        self.last_error = ""
 
         try:
             # Smart query optimization based on topic analysis
@@ -85,13 +89,14 @@ class WebSearchAgent:
                         ddgs.text(
                             query,
                             max_results=max_results * 2,
-                            backend="api",  # Force API backend to avoid redirects
+                            backend="auto",
                             region="us-en",
                             safesearch="moderate",
                         )
                     )
                     search_results.extend(original_results)
                 except Exception as e:
+                    self.last_error = f"{type(e).__name__}: {e}"
                     logger.warning(f"Original query failed: {e}")
 
                 # If we don't have enough results, try improved query
@@ -101,7 +106,7 @@ class WebSearchAgent:
                             ddgs.text(
                                 improved_query,
                                 max_results=max_results * 2,
-                                backend="api",
+                                backend="auto",
                                 region="us-en",
                                 safesearch="moderate",
                             )
@@ -112,8 +117,29 @@ class WebSearchAgent:
                             if result.get("href", "") not in existing_urls:
                                 search_results.append(result)
                     except Exception as e:
+                        self.last_error = f"{type(e).__name__}: {e}"
                         logger.warning(f"Improved query failed: {e}")
 
+                # The engines rotate, so a second try on the original query often
+                # lands on one that answers.
+                if not search_results:
+                    time.sleep(1.5)
+                    try:
+                        search_results.extend(
+                            ddgs.text(
+                                query,
+                                max_results=max_results * 2,
+                                backend="auto",
+                                region="us-en",
+                                safesearch="moderate",
+                            )
+                        )
+                    except Exception as e:
+                        self.last_error = f"{type(e).__name__}: {e}"
+                        logger.warning(f"Retry of original query failed: {e}")
+
+            if search_results:
+                self.last_error = ""
             logger.info(f"DDGS returned {len(search_results)} raw results")
 
             # Debug: Log first few raw results to see what we're getting
@@ -168,6 +194,7 @@ class WebSearchAgent:
             return formatted_results
 
         except Exception as e:
+            self.last_error = f"{type(e).__name__}: {e}"
             logger.error(f"DDGS search failed for query '{query}': {e}")
             logger.exception("Full traceback:")
 

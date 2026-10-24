@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { listeners, notify, notifyError, setSkillEnabled } = vi.hoisted(() => ({
+const { listeners, notify, notifyError, openSkillReview } = vi.hoisted(() => ({
   listeners: new Map<string, (event: unknown) => void>(),
   notify: vi.fn(),
   notifyError: vi.fn(),
-  setSkillEnabled: vi.fn()
+  openSkillReview: vi.fn()
 }))
 
 vi.mock('@hermes/plugin-sdk', () => ({
@@ -18,18 +18,18 @@ vi.mock('@hermes/plugin-sdk', () => ({
     }
   }
 }))
-vi.mock('@/api/skills', () => ({ setSkillEnabled }))
+vi.mock('./skill-review', () => ({ openSkillReview }))
 
 const { watchLearnedSkills } = await import('./learned-skill')
 
 beforeEach(() => {
   listeners.clear()
   notify.mockReset()
-  setSkillEnabled.mockReset()
+  openSkillReview.mockReset()
 })
 
 describe('watchLearnedSkills', () => {
-  it('offers to enable a skill Harvis just drafted, and enabling it switches it on', async () => {
+  it('offers Review, not Enable, for a skill Harvis just drafted, and Review opens the panel', () => {
     const stop = watchLearnedSkills()
     listeners.get('harvis.skill.drafted')?.({
       type: 'harvis.skill.drafted',
@@ -39,16 +39,29 @@ describe('watchLearnedSkills', () => {
     const toast = notify.mock.calls[0][0]
     expect(toast.title).toBe('Harvis learned a skill')
     expect(toast.message).toBe('docker-compose-debug — When compose will not start.')
-    expect(toast.action.label).toBe('Enable')
+    expect(toast.action.label).toBe('Review')
+    expect(toast.action.label).not.toBe('Enable')
 
-    setSkillEnabled.mockResolvedValue({ ok: true, name: 'docker-compose-debug', enabled: true })
+    // Nothing is approved by the toast itself; the button only opens the review panel.
+    expect(openSkillReview).not.toHaveBeenCalled()
     toast.action.onClick()
-    await vi.waitFor(() => expect(notify).toHaveBeenCalledTimes(2))
-    expect(setSkillEnabled).toHaveBeenCalledWith('docker-compose-debug', true)
-    expect(notify.mock.calls[1][0]).toMatchObject({ id: toast.id, kind: 'success' })
+    expect(openSkillReview).toHaveBeenCalledWith('docker-compose-debug')
+    expect(notify).toHaveBeenCalledTimes(1)
 
     stop()
     expect(listeners.has('harvis.skill.drafted')).toBe(false)
+  })
+
+  it('says it is an update when the model proposed a revision', () => {
+    watchLearnedSkills()
+    listeners.get('harvis.skill.drafted')?.({
+      type: 'harvis.skill.drafted',
+      payload: { name: 'docker-compose-debug', kind: 'update' }
+    })
+
+    const toast = notify.mock.calls[0][0]
+    expect(toast.title).toBe('Harvis proposed a skill update')
+    expect(toast.action.label).toBe('Review')
   })
 
   it('ignores an event without a skill name', () => {

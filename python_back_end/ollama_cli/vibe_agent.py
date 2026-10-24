@@ -30,7 +30,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ─── Ollama Configuration with Cloud/Local Fallback ──────────────────────────
-CLOUD_OLLAMA_URL = os.getenv("EXTERNAL_OLLAMA_URL", "https://coyotedev.ngrok.app")
+CLOUD_OLLAMA_URL = os.getenv("EXTERNAL_OLLAMA_URL", "").rstrip("/")
 LOCAL_OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
 def make_ollama_request(endpoint, payload, timeout=90):
     """Make a POST request to Ollama with automatic fallback from cloud to local.
@@ -47,18 +47,19 @@ def make_ollama_request(endpoint, payload, timeout=90):
         "User-Agent": "Harvis-Backend"
     }
     
-    # Try cloud first
-    try:
-        logger.info("🌐 Trying cloud Ollama: %s", CLOUD_OLLAMA_URL)
-        response = requests.post(f"{CLOUD_OLLAMA_URL}{endpoint}", json=payload, headers=external_headers, timeout=timeout)
-        if response.status_code == 200:
-            logger.info("✅ Cloud Ollama request successful")
-            return response
-        else:
-            logger.warning("⚠️ Cloud Ollama returned status %s", response.status_code)
-    except Exception as e:
-        logger.warning("⚠️ Cloud Ollama request failed: %s", e)
-    
+    # Cloud is opt-in: no default remote host
+    if CLOUD_OLLAMA_URL:
+        try:
+            logger.info("🌐 Trying cloud Ollama: %s", CLOUD_OLLAMA_URL)
+            response = requests.post(f"{CLOUD_OLLAMA_URL}{endpoint}", json=payload, headers=external_headers, timeout=timeout)
+            if response.status_code == 200:
+                logger.info("✅ Cloud Ollama request successful")
+                return response
+            else:
+                logger.warning("⚠️ Cloud Ollama returned status %s", response.status_code)
+        except Exception as e:
+            logger.warning("⚠️ Cloud Ollama request failed: %s", e)
+
     # Fallback to local
     try:
         logger.info("🏠 Falling back to local Ollama: %s", LOCAL_OLLAMA_URL)

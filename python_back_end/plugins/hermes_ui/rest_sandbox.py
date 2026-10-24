@@ -158,16 +158,28 @@ async def _warm(user_id: int, sid: str) -> None:
 
 
 async def _enabled_skills(request: Request, user_id: int) -> list[dict]:
+    """The skills the sandbox mirrors: switched on, human-approved, and whose text
+    (and script files) still match the approval. Anything else would hand the agent
+    in the sandbox what chat itself refuses to inject."""
+    from owui_compat.skill_pending import meta_dict, sha_ok
+
     pool = getattr(request.app.state, "pg_pool", None)
     if pool is None:
         return []
     try:
         rows = await pool.fetch(
-            "SELECT name, description, content FROM owui_skills WHERE user_id = $1 AND enabled ORDER BY name",
+            "SELECT name, description, content, meta FROM owui_skills WHERE user_id = $1 AND enabled "
+            "AND meta->'audit'->>'verdict'='supported' ORDER BY name",
             user_id)
     except Exception:  # noqa: BLE001 — no skills table yet
         return []
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        meta = meta_dict(r["meta"])
+        if sha_ok(r["content"], meta):
+            out.append({"name": r["name"], "description": r["description"], "content": r["content"],
+                        "files": meta.get("files") or {}})
+    return out
 
 
 async def _core_sources(request: Request, user_id: int) -> tuple[str, list[str]]:

@@ -1,10 +1,16 @@
-"""Page images and text for an office file, from the document sandbox's /render."""
+"""Page images and text for an office file, from the document sandbox's /render, and a workbook with its
+formulas calculated, from its /recalc."""
 import base64
+import hashlib
 import json
+import logging
 import os
+import threading
+import time
 import urllib.error
 import urllib.request
-from typing import Any, Dict
+from collections import OrderedDict
+from typing import Any, Dict, Optional
 
 DEFAULT_URL = "http://sandbox:8080"
 # Server side of /render: up to 30 s queued for the one job slot (SLOT_WAIT_S), 90 s of
@@ -15,24 +21,39 @@ FORMATS = ("pptx", "docx", "xlsx", "pdf")
 BUSY = "the document sandbox is busy or took too long to answer; try again shortly"
 
 
+log = logging.getLogger(__name__)
+
+
 class RenderUnavailable(Exception):
-    """The sandbox could not produce page images; the message is fit to show a user."""
+    """The sandbox could not produce page images; the message is fit to show a user. ``code`` is the HTTP
+    status the sandbox answered with, when it answered."""
+    code: Optional[int] = None
 
 
-def _post(url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    req = urllib.request.Request(f"{url}/render", data=json.dumps(payload).encode(),
+def _unavailable(message: str, code: Optional[int] = None) -> RenderUnavailable:
+    err = RenderUnavailable(message)
+    err.code = code
+    return err
+
+
+def _send(url: str, path: str, payload: Dict[str, Any], timeout: float) -> Dict[str, Any]:
+    req = urllib.request.Request(f"{url}{path}", data=json.dumps(payload).encode(),
                                  headers={"Content-Type": "application/json"}, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read())
     except urllib.error.HTTPError as exc:
         if exc.code == 429:
-            raise RenderUnavailable(BUSY) from None
-        raise RenderUnavailable(f"the document sandbox refused the render (HTTP {exc.code})") from None
+            raise _unavailable(BUSY, 429) from None
+        raise _unavailable(f"the document sandbox refused the render (HTTP {exc.code})", exc.code) from None
     except (urllib.error.URLError, OSError, ValueError) as exc:
         if isinstance(exc, TimeoutError) or isinstance(getattr(exc, "reason", None), TimeoutError):
-            raise RenderUnavailable(BUSY) from None
-        raise RenderUnavailable("the document sandbox is not running") from None
+            raise _unavailable(BUSY) from None
+        raise _unavailable("the document sandbox is not running") from None
+
+
+def _post(url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    return _send(url, "/render", payload, TIMEOUT_S)
 
 
 async def render_pages(data: bytes, ext: str, max_pages: int = 20) -> dict:
@@ -50,3 +71,59 @@ async def render_pages(data: bytes, ext: str, max_pages: int = 20) -> dict:
     if not reply.get("ok"):
         raise RenderUnavailable(reply.get("error") or "the document sandbox could not render the file")
     return reply
+
+
+# ---- /recalc: the same workbook with every formula calculated and its value saved --------------------------
+
+# An export waits for this inline (it runs on a build thread with a 60 s limit), so it gives up well before
+# that; the sandbox may carry on and finish, which only costs it the work.
+RECALC_TIMEOUT_S = 25
+RECALC_RETRY_S = 30             # after a failure to reach the sandbox, do not try again for this long
+RECALC_MISSING_S = 300          # after a 404: an older sandbox image without /recalc; it needs a rebuild
+_CACHE_ENTRIES = 8
+_BAD_ENTRIES = 64
+_MAX_CACHED_BYTES = 8 * 1024 * 1024
+_lock = threading.Lock()
+_cache: "OrderedDict[str, bytes]" = OrderedDict()     # sha256 of the workbook sent -> the recalculated bytes
+_bad: "OrderedDict[str, None]" = OrderedDict()        # workbooks the sandbox answered "no" for; not asked twice
+_skip_until = 0.0
+
+
+def recalc_xlsx(data: bytes) -> Optional[bytes]:
+    """``data`` with every formula calculated, from the sandbox's /recalc; None when that is not possible.
+
+    Never raises: a sandbox that is down, busy, slow, too old to have /recalc (404) or unable to open the file
+    all give None, and the caller keeps the bytes it has. Results are kept by content hash, and a failure to
+    reach the sandbox is remembered for a while so a dead sandbox costs one attempt, not one per export."""
+    global _skip_until
+    key = hashlib.sha256(data).hexdigest()
+    with _lock:
+        if key in _cache:
+            _cache.move_to_end(key)
+            return _cache[key]
+        if key in _bad or time.monotonic() < _skip_until:
+            return None
+    url = (os.environ.get("CODE_EXECUTOR_URL") or DEFAULT_URL).rstrip("/")
+    try:
+        reply = _send(url, "/recalc", {"b64": base64.b64encode(data).decode()}, RECALC_TIMEOUT_S)
+    except RenderUnavailable as exc:
+        with _lock:
+            _skip_until = time.monotonic() + (RECALC_MISSING_S if exc.code == 404 else RECALC_RETRY_S)
+        log.info("xlsx recalculation skipped: %s", exc)
+        return None
+    try:
+        out = base64.b64decode(str(reply.get("b64") or ""), validate=True) if reply.get("ok") else b""
+    except ValueError:
+        out = b""
+    with _lock:
+        if not out.startswith(b"PK"):
+            _bad[key] = None
+            while len(_bad) > _BAD_ENTRIES:
+                _bad.popitem(last=False)
+            log.info("xlsx recalculation refused: %s", reply.get("error") or "no workbook returned")
+            return None
+        if len(out) <= _MAX_CACHED_BYTES:
+            _cache[key] = out
+            while len(_cache) > _CACHE_ENTRIES:
+                _cache.popitem(last=False)
+    return out

@@ -172,6 +172,13 @@ def _formula_problems(doc) -> list[str]:
     return out
 
 
+def _placeholder_problems(doc) -> list[str]:
+    """Stand-in text (lorem ipsum, TBD, [Company Name]) the author has to replace; the same scan docs_check runs."""
+    from plugins.hermes_ui.docs_check import check_placeholders
+
+    return [f"{i['where']}: {i['message']}." for i in check_placeholders(doc)]
+
+
 def validate_source(source) -> dict:
     """{ok, kind, title, parts, problems}. ``ok`` means no problems at all."""
     if not isinstance(source, str) or not source.strip():
@@ -192,6 +199,7 @@ def validate_source(source) -> dict:
         problems += _rich_problems(body)
         if doc.kind == "sheet":
             problems += _formula_problems(doc)
+        problems += _placeholder_problems(doc)
     parts = len(doc.sheets) if doc.kind == "sheet" else len(doc.sections)
     return {"ok": not problems, "kind": doc.kind, "title": doc.title, "parts": parts,
             "problems": problems[:_MAX_PROBLEMS]}

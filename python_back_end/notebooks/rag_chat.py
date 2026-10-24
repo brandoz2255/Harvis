@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
-CLOUD_OLLAMA_URL = os.getenv("OLLAMA_CLOUD_URL", "https://coyotegpt.ngrok.app/ollama")
+CLOUD_OLLAMA_URL = os.getenv("OLLAMA_CLOUD_URL", "").rstrip("/")
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "llama3.1:8b")
 
 # Models to try in order of preference. These must be INSTALLED + reliable
@@ -41,7 +41,7 @@ FALLBACK_MODELS = [
 
 # Reasoning models put their tokens in a separate `thinking` channel and can leave
 # `response` blank, so they go last among discovered models rather than never.
-_REASONING_HINTS = ("gpt-oss", "deepseek-r1", "qwq", "-r1")
+_REASONING_HINTS = ("gpt-oss", "deepseek-r1", "qwq", "-r1", "qwen3")
 
 # Performance settings
 MAX_CONTEXT_CHARS = 8000  # Limit context to prevent slow processing
@@ -311,6 +311,7 @@ Please provide a helpful answer based on the sources above. Remember to cite sou
                         "model": try_model,
                         "prompt": full_prompt,
                         "stream": False,
+                        "think": False,
                         "options": {
                             "temperature": 0.7,
                             "top_p": 0.9,
@@ -360,8 +361,8 @@ Please provide a helpful answer based on the sources above. Remember to cite sou
                 logger.warning(f"Error with model {try_model}: {e}")
                 continue
 
-        # Try cloud Ollama as final fallback
-        for try_model in models_to_try:
+        # Cloud fallback only when an operator configured one; the prompt carries source text.
+        for try_model in (models_to_try if CLOUD_OLLAMA_URL else []):
             try:
                 logger.info(f"Trying cloud Ollama with model: {try_model}")
                 response = await asyncio.to_thread(
@@ -371,6 +372,7 @@ Please provide a helpful answer based on the sources above. Remember to cite sou
                         "model": try_model,
                         "prompt": full_prompt,
                         "stream": False,
+                        "think": False,
                         "options": {
                             "num_predict": 512,
                             "num_ctx": 4096,
@@ -496,7 +498,8 @@ If they're asking about their sources, suggest they try again or check if their 
                     json={
                         "model": try_model,
                         "prompt": f"{system_prompt}\n\nUser: {request.message}",
-                        "stream": False
+                        "stream": False,
+                        "think": False,
                     },
                     timeout=60
                 )

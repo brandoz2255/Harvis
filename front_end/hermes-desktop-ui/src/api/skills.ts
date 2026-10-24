@@ -56,6 +56,83 @@ export function createSkill(
   })
 }
 
+// ---------------------------------------------------------------------------
+// Revisions a model proposed (python_back_end/plugins/hermes_ui/rest_skills.py).
+// A proposal waits in `meta.pending` until a person approves it here; nothing a
+// model writes changes a skill's text, switch or approval on its own.
+// ---------------------------------------------------------------------------
+
+export interface PendingSkillFile {
+  /** Full proposed text; null when the proposal removes the file. */
+  content: null | string
+  /** Unified diff against the stored file ('' when unchanged). */
+  diff: string
+  path: string
+  status: 'added' | 'changed' | 'removed' | 'unchanged'
+}
+
+export interface PendingSkill {
+  at?: null | string
+  /** Full proposed SKILL.md text. */
+  content: string
+  current_content: string
+  current_description: string
+  description: string
+  /** Unified diff of the proposed text against the stored text. */
+  diff: string
+  enabled: boolean
+  files: PendingSkillFile[]
+  /** True when this proposal would create the skill (nothing stored yet). */
+  is_new: boolean
+  name: string
+  /** Hash an approval must quote back; a proposal that changed since is refused. */
+  pending_sha: string
+  proposed_by?: null | string
+  session_id?: null | string
+  /** The stored skill changed after this proposal was written. */
+  stale: boolean
+}
+
+export function getPending(profile?: ProfileScope): Promise<{ items: PendingSkill[] }> {
+  return window.hermesDesktop.api<{ items: PendingSkill[] }>({
+    ...capabilityScoped(profile),
+    path: '/api/skills/pending'
+  })
+}
+
+/** Approve the proposal the person reviewed. `pendingSha` (from getPending) makes the
+ *  backend refuse a proposal that changed after it was opened, instead of approving it unseen. */
+export function approvePending(
+  name: string,
+  pendingSha?: string,
+  profile?: ProfileScope
+): Promise<{ content_sha?: string; enabled?: boolean; message?: string; name: string; ok: boolean }> {
+  return window.hermesDesktop.api<{
+    content_sha?: string
+    enabled?: boolean
+    message?: string
+    name: string
+    ok: boolean
+  }>({
+    ...capabilityScoped(profile),
+    path: '/api/skills/pending/approve',
+    method: 'POST',
+    body: { name, pending_sha: pendingSha || undefined }
+  })
+}
+
+export function rejectPending(
+  name: string,
+  profile?: ProfileScope
+): Promise<{ message?: string; name: string; ok: boolean; removed_row?: boolean }> {
+  return window.hermesDesktop.api<{ message?: string; name: string; ok: boolean; removed_row?: boolean }>({
+    ...capabilityScoped(profile),
+    path: '/api/skills/pending/reject',
+    method: 'POST',
+    body: { name }
+  })
+}
+
 export function getStarmapGraph(): Promise<StarmapGraph> {
   return hermesApi<StarmapGraph>({
     ...profileScoped(),

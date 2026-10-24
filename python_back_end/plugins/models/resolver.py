@@ -68,7 +68,7 @@ def _normalize_ollama_base(url: Optional[str]) -> str:
 
 
 async def list_ollama_models(*, ollama_url: Optional[str] = None) -> list[str]:
-    """Return tag names from Ollama's /api/tags. Empty list on any failure."""
+    """Return chat tag names from Ollama's /api/tags (embedders left out). Empty list on any failure."""
     base = _normalize_ollama_base(ollama_url)
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -79,12 +79,13 @@ async def list_ollama_models(*, ollama_url: Optional[str] = None) -> list[str]:
         logger.warning("model_resolver: list_ollama_models failed against %s", base)
         return []
 
+    from notebooks.embedder_status import is_embedder
     from owui_compat.ollama_hosts import drop_cloud
 
     names: list[str] = []
     for entry in drop_cloud(data.get("models") or []):
         name = (entry.get("name") or "").strip()
-        if name and name not in _NON_MODEL_TAGS:
+        if name and name not in _NON_MODEL_TAGS and not is_embedder(name):
             names.append(name)
     return names
 

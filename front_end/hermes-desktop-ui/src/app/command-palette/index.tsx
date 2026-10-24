@@ -25,7 +25,6 @@ import {
   Activity,
   AppWindow,
   Archive,
-  BarChart3,
   Box,
   Check,
   ChevronLeft,
@@ -886,13 +885,6 @@ function CommandPaletteBody({ onExited }: { onExited: () => void }) {
             keywords: ['command center', 'system', 'status', 'logs'],
             label: cc.sections.system,
             run: go(`${COMMAND_CENTER_ROUTE}?section=system`)
-          },
-          {
-            icon: BarChart3,
-            id: 'cc-usage',
-            keywords: ['command center', 'usage', 'tokens', 'cost'],
-            label: cc.sections.usage,
-            run: go(`${COMMAND_CENTER_ROUTE}?section=usage`)
           },
           ...(canRestart
             ? [

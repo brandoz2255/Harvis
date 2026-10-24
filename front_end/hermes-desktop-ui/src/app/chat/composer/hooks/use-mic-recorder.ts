@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 
+import { INSECURE_CONTEXT_MESSAGE } from '@/lib/wake-client-capture'
+
 type BrowserAudioContext = typeof AudioContext
 
 export interface MicRecorderOptions {
@@ -172,6 +174,10 @@ export function useMicRecorder(copy: MicRecorderErrorCopy): {
     }
 
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      if (!window.isSecureContext) {
+        throw new Error(INSECURE_CONTEXT_MESSAGE)
+      }
+
       throw new Error(copy.microphoneUnsupported)
     }
 

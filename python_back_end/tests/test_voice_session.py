@@ -19,7 +19,7 @@ def _request(body):
 def _fake_turn(monkeypatch, seen, gate=None):
     live = sessions.Live(id="voice-1", user_id=7, persisted=True, title=rest_voice.VOICE_TITLE)
 
-    async def open_session(pool, uid):
+    async def open_session(pool, uid, token=""):
         return live, []
 
     async def append(pool, s, role, content, reasoning=""):
@@ -71,7 +71,7 @@ def test_warmup_opens_the_voice_session_before_choosing_a_model(monkeypatch):
     seen = {}
     live = sessions.Live(id="voice-1", user_id=7, model="hermes3:3b", persisted=True)
 
-    async def open_session(pool, uid):
+    async def open_session(pool, uid, token=""):
         seen["opened"] = (pool, uid)
         return live, []
 
@@ -161,3 +161,116 @@ def test_core_files_never_write_through_a_link(monkeypatch, tmp_path):
     assert "SOUL.md" not in names and "MEMORY.md" not in names
     assert outside.read_text() == "untouched"
     assert not (tmp_path / "made.md").exists()
+
+
+def test_a_new_voice_session_skips_a_remembered_model_no_longer_offered(monkeypatch):
+    seen = {}
+
+    async def find_session(pool, uid):
+        return None
+
+    async def resolve_model(pool, uid):
+        return "gone:1b"
+
+    async def model_error(pool, uid, token, model):
+        seen["checked"] = (model, token)
+        return "I don't know a model called 'gone:1b'."
+
+    async def create(pool, uid, skip_saved=False):
+        seen["skip_saved"] = skip_saved
+        return sessions.Live(id="v", user_id=uid)
+
+    monkeypatch.setattr(rest_voice, "find_session", find_session)
+    monkeypatch.setattr(rest_voice.store, "resolve_model", resolve_model)
+    monkeypatch.setattr(rest_voice.session_ops, "model_error", model_error)
+    monkeypatch.setattr(rest_voice.sessions, "create", create)
+    monkeypatch.setattr(rest_voice.models, "voice_model", _same_model)
+    asyncio.run(rest_voice.open_session(object(), 7, "tok"))
+    assert seen == {"checked": ("gone:1b", "tok"), "skip_saved": True}
+
+
+async def _same_model(model):
+    return model
+
+
+def _ollama(monkeypatch, only, by_size):
+    from plugins.hermes_ui import models
+
+    async def thinking_models():
+        return frozenset(only)
+
+    monkeypatch.setattr(models, "thinking_models", thinking_models)
+    monkeypatch.setattr(models, "_thinking_only", frozenset(only))
+    monkeypatch.setattr(models, "_by_size", tuple(by_size))
+    monkeypatch.delenv("HARVIS_VOICE_MODEL", raising=False)
+    return models
+
+
+def test_voice_never_runs_on_a_model_that_can_only_think(monkeypatch):
+    models = _ollama(monkeypatch, {"qwen3:4b"}, ["nomic-embed-text:latest", "qwen3:4b", "hermes3:3b", "gemma3:4b"])
+    assert asyncio.run(models.voice_model("qwen3:4b")) == "hermes3:3b"
+
+
+def test_voice_keeps_a_model_that_answers_directly(monkeypatch):
+    models = _ollama(monkeypatch, {"qwen3:4b"}, ["qwen3:4b", "hermes3:3b"])
+    assert asyncio.run(models.voice_model("gemma4:e4b")) == "gemma4:e4b"
+
+
+def test_a_pinned_voice_model_replaces_a_thinking_only_one(monkeypatch):
+    models = _ollama(monkeypatch, {"qwen3:4b"}, ["hermes3:3b"])
+    monkeypatch.setenv("HARVIS_VOICE_MODEL", "llama3.1:8b")
+    assert asyncio.run(models.voice_model("qwen3:4b")) == "llama3.1:8b"
+
+
+def test_with_nothing_else_installed_the_thinking_model_is_kept(monkeypatch):
+    models = _ollama(monkeypatch, {"qwen3:4b"}, ["qwen3:4b"])
+    assert asyncio.run(models.voice_model("qwen3:4b")) == "qwen3:4b"
+
+
+def test_an_existing_voice_session_moves_off_a_thinking_only_model(monkeypatch):
+    live = sessions.Live(id="v", user_id=7, model="qwen3:4b", persisted=True)
+
+    async def find_session(pool, uid):
+        return "v"
+
+    async def open_(pool, uid, sid):
+        return live, []
+
+    async def voice_model(model):
+        return "hermes3:3b" if model == "qwen3:4b" else model
+
+    monkeypatch.setattr(rest_voice, "find_session", find_session)
+    monkeypatch.setattr(rest_voice.sessions, "open", open_)
+    monkeypatch.setattr(rest_voice.models, "voice_model", voice_model)
+    s, _ = asyncio.run(rest_voice.open_session(object(), 7, "tok"))
+    assert s.model == "hermes3:3b"
+
+
+def test_the_unsaved_draft_keeps_one_id_across_opens(monkeypatch):
+    made = []
+
+    async def find_session(pool, uid):
+        return None
+
+    async def resolve_model(pool, uid):
+        return None
+
+    async def create(pool, uid, skip_saved=False):
+        s = sessions.Live(id=f"draft-{len(made)}", user_id=uid)
+        made.append(s)
+        sessions._LIVE[s.id] = s
+        return s
+
+    monkeypatch.setattr(rest_voice, "find_session", find_session)
+    monkeypatch.setattr(rest_voice.store, "resolve_model", resolve_model)
+    monkeypatch.setattr(rest_voice.sessions, "create", create)
+    monkeypatch.setattr(rest_voice.models, "voice_model", _same_model)
+    monkeypatch.setattr(rest_voice, "_DRAFTS", {})
+    monkeypatch.setattr(rest_voice, "_DRAFT_LOCKS", {})
+
+    async def both():
+        return await asyncio.gather(*(rest_voice.open_session(object(), 9) for _ in range(3)))
+
+    ids = {s.id for s, _ in asyncio.run(both())}
+    assert ids == {"draft-0"} and len(made) == 1
+    sessions.forget("draft-0")

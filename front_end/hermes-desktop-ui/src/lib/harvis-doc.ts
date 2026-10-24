@@ -8,6 +8,7 @@
  *   ---
  *   kind: deck            (deck | doc | sheet | pdf)
  *   title: Q3 Security Review
+ *   theme: paper          (optional: harvis | paper | slate | ember | forest | mono; unknown = harvis)
  *   outline:
  *     - Title
  *     - Threat landscape
@@ -48,6 +49,9 @@ export interface HarvisDoc {
   sections: HarvisDocSection[]
   /** Sheet kind only; empty otherwise. */
   sheets: HarvisDocSheet[]
+  /** The header's `theme:` value, lowercased; '' when absent. The exporters pick the preset (docs_theme.py) and
+   *  treat a name they do not know as the default, so this is not validated here. */
+  theme: string
   title: string
 }
 
@@ -88,6 +92,7 @@ interface Header {
   kind: HarvisDocKind
   outline: string[]
   rest: string
+  theme: string
   title: string
 }
 
@@ -103,16 +108,17 @@ function parseHeader(source: string): Header {
 
   // Nothing yet, or the first one or two dashes of the opening fence.
   if (i >= lines.length || (i === lines.length - 1 && tailOpen && /^\s*-{1,2}\s*$/.test(lines[i]))) {
-    return { closed: false, kind: 'doc', outline: [], rest: '', title: '' }
+    return { closed: false, kind: 'doc', outline: [], rest: '', theme: '', title: '' }
   }
 
   // No front matter at all: the whole block is body.
   if (!FENCE_RE.test(lines[i])) {
-    return { closed: true, kind: 'doc', outline: [], rest: lines.slice(i).join('\n'), title: '' }
+    return { closed: true, kind: 'doc', outline: [], rest: lines.slice(i).join('\n'), theme: '', title: '' }
   }
 
   let kind: HarvisDocKind = 'doc'
   let title = ''
+  let theme = ''
   const outline: string[] = []
   let inOutline = false
 
@@ -123,7 +129,7 @@ function parseHeader(source: string): Header {
       // Small models copy a "<body>" placeholder from the prompt; it is never content.
       const rest = lines.slice(i + 1).filter(l => !BODY_TAG_RE.test(l))
 
-      return { closed: true, kind, outline, rest: rest.join('\n'), title }
+      return { closed: true, kind, outline, rest: rest.join('\n'), theme, title }
     }
 
     // A half-typed title, kind or outline label must not leak into the
@@ -159,6 +165,8 @@ function parseHeader(source: string): Header {
       kind = normalizeKind(unquote(value.split(' #')[0]))
     } else if (key === 'title') {
       title = unquote(value)
+    } else if (key === 'theme') {
+      theme = unquote(value.split(' #')[0]).trim().toLowerCase()
     } else if (key === 'outline' || key === 'sections' || key === 'slides' || key === 'sheets') {
       const inline = /^\[(.*?)\]?\s*$/.exec(value.trim())
 
@@ -170,7 +178,7 @@ function parseHeader(source: string): Header {
     }
   }
 
-  return { closed: false, kind, outline, rest: '', title }
+  return { closed: false, kind, outline, rest: '', theme, title }
 }
 
 /** Drop a final line that is only the first characters of a heading or `---`
@@ -275,7 +283,7 @@ function splitRow(line: string): string[] {
   return row.split(/(?<!\\)\|/).map(cell => cell.trim().replace(/\\\|/g, '|'))
 }
 
-const DIVIDER_RE = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/
+const DIVIDER_RE = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/
 
 export function parseSheetTable(body: string): string[][] {
   const rows: string[][] = []
@@ -303,6 +311,7 @@ export function parseHarvisDoc(source: string): HarvisDoc {
       outline: header.outline,
       sections: [],
       sheets: [],
+      theme: header.theme,
       title: header.title
     }
   }
@@ -328,7 +337,7 @@ export function parseHarvisDoc(source: string): HarvisDoc {
           .map((s, i) => ({ name: s.title || header.outline[i] || `Sheet${i + 1}`, rows: parseSheetTable(s.body) }))
       : []
 
-  return { headerComplete: true, kind: header.kind, outline: header.outline, sections, sheets, title }
+  return { headerComplete: true, kind: header.kind, outline: header.outline, sections, sheets, theme: header.theme, title }
 }
 
 /** Parts written so far: slides, sheets, or titled sections (a leading intro is not counted). */

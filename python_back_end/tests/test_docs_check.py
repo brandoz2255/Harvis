@@ -441,3 +441,155 @@ def test_content_on_the_title_slide_is_flagged():
     assert any(i["where"] == "slide 1" and "title slide" in i["message"] for i in issues)
     clean = "---\nkind: deck\ntitle: T\n---\n# T\nsub\n---\n## One\n- a"
     assert not any(i["where"] == "slide 1" for i in check_source(clean)[0])
+
+
+def test_a_slide_listed_in_the_outline_but_never_written_is_flagged():
+    from plugins.hermes_ui.docs_check import check_source
+    src = ("---\nkind: deck\ntitle: Backups: Why You Need Them\noutline:\n  - The Risk of Data Loss\n"
+           "  - Types of Backups\n  - Regular Testing is Key\n---\n# Backups: Why You Need Them\nsub\n---\n"
+           "## The Risk of Data Loss\n- a\n---\n## Regular Testing is Key\n- b")
+    issues = check_source(src)[0]
+    outline = [i for i in issues if i["where"] == "outline"]
+    assert len(outline) == 1 and "Types of Backups" in outline[0]["message"]
+    assert "Risk" not in outline[0]["message"]
+
+
+def test_an_outline_that_matches_the_body_or_names_the_title_slide_is_clean():
+    from plugins.hermes_ui.docs_check import check_source
+    with_title = ("---\nkind: deck\ntitle: Status\noutline:\n  - Title\n  - Plan\n---\n# Status\nsub\n---\n"
+                  "## Plan\n- Ship it")
+    lengthened = ("---\nkind: deck\ntitle: Status\noutline:\n  - Risk\n---\n# Status\nsub\n---\n"
+                  "## The Risk of Data Loss\n- a")
+    assert not [i for i in check_source(with_title)[0] if i["where"] == "outline"]
+    assert not [i for i in check_source(lengthened)[0] if i["where"] == "outline"]
+    assert not [i for i in check_source(DECK)[0] if i["where"] == "outline"]
+    assert not [i for i in check_source(SHEET)[0] if i["where"] == "outline"]
+
+
+# ---- placeholder text -------------------------------------------------------------------------
+
+def _deck_with(bullet: str, *, title: str = "Plan", notes: str = "") -> str:
+    tail = f"\nNotes: {notes}" if notes else ""
+    return (f"---\nkind: deck\ntitle: Status\n---\n# Status\nA short deck\n---\n## {title}\n- {bullet}\n"
+            f"- A second point that is written out in full{tail}")
+
+
+def _placeholder_issues(source: str) -> list:
+    return [i for i in docs_check.check_source(source)[0] if "Placeholder" in i["message"]]
+
+
+@pytest.mark.parametrize("text", [
+    "Lorem ipsum dolor sit amet", "Owner: TBD", "Date: tba", "TODO: write this", "Insert image here",
+    "Click to add text", "[Company Name] Inc", "[insert date]", "Call xxx-xxx-xxxx", "Your name here",
+    "Description goes here", "**Insert logo here**", "(insert date here)", "Insert chart here.",
+    "Insert your company name here"])
+def test_each_placeholder_is_an_error_with_its_location(text):
+    hits = _placeholder_issues(_deck_with(text))
+    assert len(hits) == 1, messages(hits)
+    assert hits[0]["severity"] == "error" and hits[0]["where"] == "slide 2"
+
+
+def test_a_placeholder_is_found_in_titles_notes_cells_and_the_outline():
+    in_title = _placeholder_issues(_deck_with("Real content here for the plan", title="TBD"))
+    assert [i["where"] for i in in_title] == ["slide 2"] and "title" in in_title[0]["message"]
+    in_notes = _placeholder_issues(_deck_with("Real content for the plan", notes="TBD, say something"))
+    assert in_notes and "speaker notes" in in_notes[0]["message"]
+    in_cell = _placeholder_issues(SHEET.replace("| Cable | 10 | 50 |", "| Cable | TBD | 50 |"))
+    assert in_cell[0]["where"] == "sheet Items" and "cell B3" in in_cell[0]["message"]
+    in_outline = _placeholder_issues(DECK.replace("  - Plan\n", "  - Plan\n  - Lorem ipsum\n"))
+    assert [i["where"] for i in in_outline] == ["outline"]
+    in_doc = _placeholder_issues(DOC.replace("Plain words about the week.", "Lorem ipsum dolor sit amet."))
+    assert in_doc[0]["where"] == "section 'Summary'"
+
+
+def test_a_header_title_that_is_a_placeholder_is_reported_once():
+    assert len(_placeholder_issues(DECK.replace("title: Status", "title: TBD").replace("# Status", "# TBD"))) == 1
+    assert _placeholder_issues(DECK.replace("title: Status", "title: TBD"))[0]["where"] == "document"
+
+
+@pytest.mark.parametrize("source", [DECK, SHEET, DOC])
+def test_the_clean_fixtures_have_no_placeholders(source):
+    assert _placeholder_issues(source) == []
+
+
+def test_ordinary_words_that_look_like_placeholders_are_left_alone():
+    fine = [
+        "A TODO list app for teams", "Build a TODO app", "Read the [docs](https://example.com/x) first",
+        "- [ ] ship it", "See note [1] for sources", "Set `api_key = insert key here` in the file",
+        "The tbdx module", "Revenue grew XXL sizes", "An outbound link", "Use the ![chart](x.png) image",
+        "Insert the SD card into the slot here", "Click Insert > Table and the new table appears here",
+        "To add a row, insert it here and press Enter", "Then insert the second card here, next to the first",
+    ]
+    for text in fine:
+        assert _placeholder_issues(_deck_with(text)) == [], text
+    assert _placeholder_issues(_deck_with("A real point", title="TODO list design")) == []
+    code = "```bash\nexport TOKEN=xxx   # TBD\n```"
+    assert _placeholder_issues(DOC.replace("Plain words about the week.", code)) == []
+    cards = "```cards\nTitle\nLorem ipsum | one\n```"
+    assert _placeholder_issues(DOC.replace("Plain words about the week.", cards))
+
+
+def test_the_placeholder_report_is_capped():
+    many = "\n".join(f"- TBD item {i}" for i in range(40))
+    assert len(docs_check.check_placeholders(parse_harvis_doc(f"---\nkind: doc\ntitle: T\n---\n## S\n{many}"))) == 1
+    sections = "\n".join(f"## S{i}\nTBD" for i in range(40))
+    assert len(docs_check.check_placeholders(parse_harvis_doc(f"---\nkind: doc\ntitle: T\n---\n{sections}"))) == 20
+
+
+def _deck_with_table(table: str) -> str:
+    return f"---\nkind: deck\ntitle: Status\n---\n# Status\nA short deck\n---\n## Plan\n{table}\n"
+
+
+TRACKER = """---
+kind: sheet
+title: Tasks
+---
+## Tasks
+| Task | Owner | Status |
+| --- | --- | --- |
+| Wire the rack | Sam | TODO |
+| Label cables | Ana | TODO |
+| Order switch | Lee | Done |
+"""
+
+
+def test_a_todo_status_in_a_task_sheet_is_not_a_placeholder():
+    from owui_compat.docs_tools_checks import validate_source
+
+    assert _placeholder_issues(TRACKER) == []
+    out = validate_source(TRACKER)
+    assert out["ok"], out["problems"]
+    table = "| Task | Status |\n| --- | --- |\n| Wire the rack | TODO |\n| Label cables |TODO|"
+    assert _placeholder_issues(_deck_with_table(table)) == []
+
+
+def test_a_todo_note_in_a_sheet_cell_or_table_is_still_a_placeholder():
+    note = TRACKER.replace("| TODO |\n| Label", "| TODO: ask Sam |\n| Label")
+    assert [i["where"] for i in _placeholder_issues(note)] == ["sheet Tasks"]
+    prose = TRACKER.replace("| Done |", "| TODO wire it up |")
+    assert "cell C4" in _placeholder_issues(prose)[0]["message"]
+    in_table = "| Task | Status |\n| --- | --- |\n| Wire the rack | TODO: later |"
+    assert _placeholder_issues(_deck_with_table(in_table))
+
+
+def test_validate_source_reports_placeholders_too():
+    from owui_compat.docs_tools_checks import validate_source
+
+    out = validate_source(_deck_with("Lorem ipsum dolor sit amet"))
+    assert not out["ok"] and any("slide 2" in p and "Placeholder" in p for p in out["problems"])
+    assert validate_source(DECK)["ok"] and validate_source(SHEET)["ok"]
+
+
+# ---- error values in rendered pages -----------------------------------------------------------
+
+@pytest.mark.parametrize("shown", ["#NUM!", "#NULL!", "#SPILL!", "#CALC!", "#REF!", "#N/A"])
+def test_every_spreadsheet_error_in_rendered_text_is_flagged(shown):
+    issues = docs_check.check_pages(parse_harvis_doc(SHEET), [f"Item Cost\nTotal {shown}"], "xlsx")
+    assert errors(issues) and shown in issues[0]["message"] and issues[0]["where"] == "page 1"
+
+
+def test_a_libreoffice_error_code_in_rendered_text_is_flagged():
+    issues = docs_check.check_pages(parse_harvis_doc(SHEET), ["Total Err:502", "ok", "Err:508 and Err:502"], "xlsx")
+    assert [i["where"] for i in issues] == ["page 1", "page 3"]
+    assert "Err:502" in issues[0]["message"] and "Err:508" in issues[1]["message"]
+    assert docs_check.check_pages(parse_harvis_doc(SHEET), ["Total 2150", "Error 5025"], "xlsx") == []

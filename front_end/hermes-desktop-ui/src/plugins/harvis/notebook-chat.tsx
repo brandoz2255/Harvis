@@ -171,6 +171,9 @@ export function NotebookChat({
                     ))}
                   </ol>
                 )}
+                {m.model_used && m.model_used !== chosen && (
+                  <p className="mt-1 text-xs text-(--ui-text-tertiary)">Answered by {m.model_used}</p>
+                )}
                 <div className="mt-1">
                   <SaveAnswer
                     message={m}

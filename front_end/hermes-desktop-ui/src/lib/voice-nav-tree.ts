@@ -118,7 +118,6 @@ const SKILLS: VoiceNavChild[] = [
 const COMMAND_CENTER: VoiceNavChild[] = [
   { id: 'sessions', label: 'Sessions', query: 'section=sessions', names: ['sessions'] },
   { id: 'system', label: 'System', query: 'section=system', names: ['system', 'system status', 'health'] },
-  { id: 'usage', label: 'Usage', query: 'section=usage', names: ['usage', 'token usage', 'costs'] },
   { id: 'maintenance', label: 'Maintenance', query: 'section=maintenance', names: ['maintenance'] }
 ]
 

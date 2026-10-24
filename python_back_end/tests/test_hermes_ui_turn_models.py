@@ -210,7 +210,7 @@ def test_ready_presets_show_up_as_a_mixture_of_agents_group(monkeypatch, section
     async def resolve_model(pool, uid):
         return "gemma4:e2b"
 
-    async def harvis_models(token):
+    async def harvis_models(token, refresh=False):
         return [{"id": "gemma4:e2b", "owned_by": "ollama"}]
 
     async def list_endpoints(pool, uid):

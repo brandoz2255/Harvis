@@ -6,6 +6,11 @@ Harvis drafts skills itself (learn.draft_skill) and saves them OFF, and the
 "Harvis learned a skill ▸ Enable" toast or the Skills tab switch is where a
 person vouches for one. Without this an agent-written skill could never apply.
 
+A model never edits a skill it did not create: it proposes a revision, which waits
+in ``meta.pending`` until a person approves it here (``/skills/pending``). Every
+approval records a hash of the exact text approved (owui_compat.skill_pending),
+so text changed afterwards drops the skill out of use until it is approved again.
+
 ``/learning/node`` is the skill editor's read/save/delete door (the desktop app
 names skills by node id; here that is the skill name, optionally ``skill:``-prefixed).
 """
@@ -15,11 +20,11 @@ import json
 import logging
 import re
 import uuid
-from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from auth_optimized import get_current_user_optimized
+from owui_compat import skill_pending
 
 log = logging.getLogger("hermes_ui.rest")
 
@@ -41,10 +46,9 @@ def _node_name(raw: str) -> str:
     return name[len("skill:"):] if name.startswith("skill:") else name
 
 
-def approval(user_id: int, via: str) -> dict:
+def approval(user_id: int, via: str, sha: str = "") -> dict:
     """The audit record a person switching a skill on leaves behind."""
-    return {"verdict": "supported", "approved_by": user_id, "via": via,
-            "approved_at": datetime.now(timezone.utc).isoformat()}
+    return skill_pending.approval_record(user_id, via, sha or None)
 
 
 # The desktop Capabilities screen sends PUT (src/api/skills.ts setSkillEnabled);
@@ -55,18 +59,10 @@ async def skill_toggle(request: Request, user=Depends(get_current_user_optimized
     name, enabled = str(body.get("name") or ""), bool(body.get("enabled"))
     uid = _uid(user)
     async with _pool(request).acquire() as conn:
-        # ON also approves (unless already approved), and a draft graduates out
-        # of the "drafts" category; OFF leaves the audit alone.
-        tag = await conn.execute(
-            "UPDATE owui_skills SET enabled=$3, updated_at=NOW(), meta = CASE WHEN $3 THEN "
-            "  (CASE WHEN COALESCE(meta->'audit'->>'verdict','') = 'supported' THEN meta "
-            "        ELSE jsonb_set(meta, '{audit}', $4::jsonb) END)"
-            "  || (CASE WHEN meta->>'category' = 'drafts' THEN '{\"category\":\"learned\"}'::jsonb "
-            "           ELSE '{}'::jsonb END) "
-            "ELSE meta END "
-            "WHERE user_id=$1 AND name=$2",
-            uid, name, enabled, json.dumps(approval(uid, "hermes-toggle")))
-    return {"ok": tag.endswith("1"), "name": name, "enabled": enabled}
+        # ON also approves (unless already approved) and stamps the hash of the text
+        # approved; a draft graduates out of the "drafts" category. OFF leaves the audit alone.
+        ok = await skill_pending.set_enabled(conn, uid, name=name, enabled=enabled, via="hermes-toggle")
+    return {"ok": ok, "name": name, "enabled": enabled}
 
 
 _NAME_OK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}$")
@@ -106,7 +102,7 @@ async def skill_create(request: Request, user=Depends(get_current_user_optimized
         raise HTTPException(400, "Use letters, numbers, spaces, dots, dashes or underscores (up to 64).")
     description, _body, emoji = _parse_skill_md(content)
     uid = _uid(user)
-    meta = {"category": "custom", "audit": approval(uid, "hermes-add")}
+    meta = {"category": "custom", "audit": approval(uid, "hermes-add", skill_pending.content_sha(content))}
     async with _pool(request).acquire() as conn:
         if await conn.fetchval("SELECT 1 FROM owui_skills WHERE user_id=$1 AND name=$2", uid, name):
             raise HTTPException(409, f"You already have a skill called {name}.")
@@ -140,6 +136,9 @@ async def learning_node_edit(request: Request, user=Depends(get_current_user_opt
     # The person editing is the person vouching for it, so the verdict stays
     # (OWUI's editor clears it because there an edit can come from anyone with access).
     async with _pool(request).acquire() as conn:
+        # The new text's hash goes on first: until the write lands, the old text no
+        # longer matches it, so a chat never sees a half-changed skill as approved.
+        await skill_pending.stamp_new_content(conn, _uid(user), name, content)
         tag = await conn.execute(
             "UPDATE owui_skills SET content=$3, updated_at=NOW() WHERE user_id=$1 AND name=$2",
             _uid(user), name, content)
@@ -157,3 +156,46 @@ async def learning_node_delete(request: Request, user=Depends(get_current_user_o
     if not tag.endswith("1"):
         raise HTTPException(404, f"skill not found: {name}")
     return {"ok": True, "message": f"Deleted {name}."}
+
+
+# ── revisions a model proposed, waiting for a person ─────────────────────────
+
+_REFUSALS = {"invalid": 400, "not_found": 404, "no_pending": 409, "stale": 409, "unchanged": 409}
+
+
+@router.get("/skills/pending")
+async def skills_pending(request: Request, user=Depends(get_current_user_optimized)):
+    """Every skill with a proposed revision: the full new text, a diff against the
+    stored text and the ``pending_sha`` an approval has to quote back."""
+    async with _pool(request).acquire() as conn:
+        return {"items": await skill_pending.list_pending(conn, _uid(user))}
+
+
+async def _pending_action(request: Request, user, act: str) -> dict:
+    body = await request.json()
+    name = _node_name(str(body.get("name") or ""))
+    if not name:
+        raise HTTPException(400, "Say which skill.")
+    uid = _uid(user)
+    try:
+        async with _pool(request).acquire() as conn:
+            if act == "approve":
+                done = await skill_pending.approve(
+                    conn, uid, name, uid, expected_sha=str(body.get("pending_sha") or "") or None)
+                return {"ok": True, **done, "message": f"Approved {name}. Harvis will use this version."}
+            done = await skill_pending.reject(conn, uid, name)
+            return {"ok": True, **done, "message": f"Rejected the proposal for {name}."}
+    except skill_pending.SkillPendingError as e:
+        raise HTTPException(_REFUSALS.get(e.code, 400), str(e)) from e
+
+
+@router.post("/skills/pending/approve")
+async def skills_pending_approve(request: Request, user=Depends(get_current_user_optimized)):
+    """Approve the revision the person reviewed. Send ``pending_sha`` from the
+    listing and a revision that changed since is refused rather than approved unseen."""
+    return await _pending_action(request, user, "approve")
+
+
+@router.post("/skills/pending/reject")
+async def skills_pending_reject(request: Request, user=Depends(get_current_user_optimized)):
+    return await _pending_action(request, user, "reject")

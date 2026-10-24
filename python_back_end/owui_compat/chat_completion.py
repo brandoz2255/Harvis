@@ -590,6 +590,9 @@ async def _apply_default_model(request, owui_body: dict, user_id: int | None) ->
 # This is the house default: it only lands when the turn has no system message of
 # its own, so a project instruction, an attached skill or a user-set prompt always
 # wins. Kept deliberately short — it rides on every turn.
+# NOTE: dead today. _inject_canvas_contract always adds a system message first, so
+# _inject_default_persona never finds a turn without one. Making it live changes
+# every chat turn's tone and needs its own decision; chat_abilities does not depend on it.
 _DEFAULT_PERSONA = (
     "You are Harvis, a direct assistant.\n"
     "Match the length of your answer to the question. A greeting or a one-line "
@@ -639,6 +642,9 @@ _BLOCK_VOCABULARY = (
     "well. Never invent a type that is not on this list, and never describe how a "
     "block should look."
 )
+
+
+BLOCK_VOCABULARY = _BLOCK_VOCABULARY  # public name: doc_guard cuts exactly this text back out
 
 
 def _inject_block_vocabulary(owui_body: dict) -> None:
@@ -746,6 +752,7 @@ async def run_chat_completion(request, owui_body: dict, user_id: int | None = No
     # injected as text the same way; writes are left to a workspace run. Costs a
     # turn that names no connector nothing — see chat_tools.
     from .chat_tools import append_connector_trailer, maybe_inject_connectors
+    from .doc_guard import append_doc_guard  # outermost: a refusal to make a file gets the real file
     await maybe_inject_connectors(request, owui_body, user_id=user_id, user_text=user_text)
     await _inject_files(request, owui_body, user_id=user_id)
     await _inject_knowledge(request, owui_body, user_id=user_id)
@@ -758,6 +765,8 @@ async def run_chat_completion(request, owui_body: dict, user_id: int | None = No
     _inject_canvas_contract(owui_body)  # typed ```canvas panels (opt-in, compact)
     _inject_default_persona(owui_body)  # house tone: answer length tracks the question
     _inject_block_vocabulary(owui_body)  # terminal / search / file / writing renderers
+    from .chat_abilities import inject_abilities
+    inject_abilities(owui_body)  # what this install can do, so a missed doc request is not "I can't"
     # LAST prompt mutation on purpose: the house ground rules must sit at the FRONT
     # of whatever system message the turn ended up with, above any persona, project
     # instruction or skill injected above. Unlike the persona this one does not bow
@@ -782,12 +791,11 @@ async def run_chat_completion(request, owui_body: dict, user_id: int | None = No
         # that turn is to search and ask THIS SAME LANE again with the results in
         # context. Each lane supplies its own, because only the lane knows how to
         # call itself.
-        return await append_connector_trailer(request, await append_reach_sources(
+        lane = lambda b: proxy_cloud_chat(b, pool, user_id)  # noqa: E731
+        return await append_doc_guard(request, await append_connector_trailer(request, await append_reach_sources(
             request, await proxy_cloud_chat(owui_body, pool, user_id),
-            retry=_grounded_retry(
-                owui_body, lambda b: proxy_cloud_chat(b, pool, user_id)
-            ),
-        ))
+            retry=_grounded_retry(owui_body, lane),
+        )), owui_body, lane, user_text=user_text)
     # H2: Hermes Agent as a Chat "Agent Mode" — the request carries harvis_agent_mode='hermes'
     # (the user's picked model does NOT drive Hermes; its own runtime model does). The legacy
     # sentinel-model path is kept for back-compat. Routed to the real app's API server (sidecar),
@@ -795,17 +803,14 @@ async def run_chat_completion(request, owui_body: dict, user_id: int | None = No
     from .hermes_chat import is_hermes_chat_model, proxy_hermes_chat
     if (owui_body.get("harvis_agent_mode") == "hermes") or is_hermes_chat_model(owui_body.get("model")):
         pool = getattr(request.app.state, "pg_pool", None)
-        return await append_connector_trailer(request, await append_reach_sources(
+        lane = lambda b: proxy_hermes_chat(b, pool, user_id)  # noqa: E731
+        return await append_doc_guard(request, await append_connector_trailer(request, await append_reach_sources(
             request, await proxy_hermes_chat(owui_body, pool, user_id),
-            retry=_grounded_retry(
-                owui_body, lambda b: proxy_hermes_chat(b, pool, user_id)
-            ),
-        ))
+            retry=_grounded_retry(owui_body, lane),
+        )), owui_body, lane, user_text=user_text)
     proxy_body = owui_body_to_proxy(owui_body)
-    return await append_connector_trailer(request, await append_reach_sources(
+    lane = lambda b: execute_chat_completion(request, owui_body_to_proxy(b))  # noqa: E731
+    return await append_doc_guard(request, await append_connector_trailer(request, await append_reach_sources(
         request, await execute_chat_completion(request, proxy_body),
-        retry=_grounded_retry(
-            owui_body,
-            lambda b: execute_chat_completion(request, owui_body_to_proxy(b)),
-        ),
-    ))
+        retry=_grounded_retry(owui_body, lane),
+    )), owui_body, lane, user_text=user_text)

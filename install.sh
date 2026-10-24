@@ -1100,8 +1100,8 @@ poll_health() {
              echo "  fresh install, the first account you sign up with becomes the admin."
            fi ;;
   esac
-  # tunnel visitors already arrive over Cloudflare's HTTPS, and enable-https.sh
-  # drives the Docker nginx, not Kubernetes. Port 9000 counts as shared when it is
+  # tunnel visitors already arrive over Cloudflare's HTTPS; enable-https.sh also
+  # drives the Kubernetes nginx. Port 9000 counts as shared when it is
   # bound to every address, recorded mode or not (an upgrade can keep it open).
   local reach
   reach="$(current_exposure)"
@@ -1138,13 +1138,32 @@ poll_health() {
       echo "  turning it on while anyone still uses :9000 locks them out." ;;
     lan+tunnel)
       echo ""
-      echo "  Your network reaches Harvis on port 9000; sign-up is closed, so add people"
-      echo "  in Settings. For the microphone from other devices here, turn on HTTPS:"
+      # --public-access harvis turns on HARVIS_OWUI_ENABLE_SIGNUP, which is not per-port.
+      if [ "$(tunnel_auth_choice)" = harvis ]; then
+        echo "  Your network reaches Harvis on port 9000. Sign-up is open there and through"
+        echo "  the tunnel (--public-access harvis); new accounts wait in Settings → People."
+        echo "  For the microphone from other devices here, turn on HTTPS:"
+      else
+        echo "  Your network reaches Harvis on port 9000; sign-up is closed, so add people"
+        echo "  in Settings. For the microphone from other devices here, turn on HTTPS:"
+      fi
       echo ""
       echo "      ./scripts/enable-https.sh"
       echo ""
       echo "  Leave HARVIS_COOKIE_SECURE unset: the tunnel port marks the cookie Secure"
       echo "  itself, and the http lane on :9000 needs it plain." ;;
+    k8s)
+      local https_port="${HARVIS_HTTPS_PORT:-$(env_value HARVIS_HTTPS_PORT)}"
+      echo ""
+      echo "  Using Harvis from a phone, tablet or another computer? Turn on HTTPS:"
+      echo ""
+      echo "      ./scripts/enable-https.sh"
+      echo ""
+      echo "  Browsers hand out the microphone only over https (or on this machine at"
+      echo "  localhost), so voice will not work from other devices until you do. The"
+      echo "  script makes its own certificate and restarts the nginx pod, then HTTPS"
+      echo "  answers on port ${https_port:-9443}. The first visit shows a warning you click past"
+      echo "  once. Plain http on :9000 keeps working either way." ;;
   esac
   # Provider status is informational, never pass/fail: with none configured,
   # report_models below says what to do. Configured-but-unreachable gets its own

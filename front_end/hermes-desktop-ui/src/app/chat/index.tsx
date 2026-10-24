@@ -542,7 +542,9 @@ const ChatViewContent = memo(function ChatViewContent({
   const modelOptionsQuery = useQuery<ModelOptionsResponse>({
     queryKey: modelOptionsQueryKey(activeGatewayProfile, activeSessionId),
     queryFn: () => requestModelOptions({ gateway: gateway || undefined, sessionId: activeSessionId }),
-    enabled: gatewayOpen
+    enabled: gatewayOpen,
+    // Hosts come and go; a list older than this is re-read the next time it is shown.
+    staleTime: 10_000
   })
 
   const quickModels = useMemo(

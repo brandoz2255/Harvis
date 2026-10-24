@@ -33,12 +33,14 @@ def _entry(ready: bool, reason: str = "", **extra: Any) -> Dict[str, Any]:
 def _embedder() -> Dict[str, Any]:
     from .ingestion import EMBEDDING_MODEL, IngestionService
 
-    installed = IngestionService._installed_models()
-    if not installed:
-        return _entry(False, "No model is installed for reading sources. Run: ollama pull nomic-embed-text")
+    from .embedder_status import is_embedder
+
+    embedders = [n for n in IngestionService._installed_models() if is_embedder(n)]
+    if not embedders:
+        return _entry(False, "No embedding model is installed. Open Notebooks and install nomic-embed-text.")
     wanted = EMBEDDING_MODEL.split(":")[0]
-    dedicated = any(n.split(":")[0] == wanted for n in installed)
-    return _entry(True, model=EMBEDDING_MODEL if dedicated else installed[0], dedicated=dedicated)
+    dedicated = any(n.split(":")[0] == wanted for n in embedders)
+    return _entry(True, model=EMBEDDING_MODEL if dedicated else embedders[0], dedicated=dedicated)
 
 
 def _speech_to_text() -> Dict[str, Any]:

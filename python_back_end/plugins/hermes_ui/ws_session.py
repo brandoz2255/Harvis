@@ -70,7 +70,13 @@ class SessionMethods:
             seed = _seed_rows(params.get("messages"))
         except ValueError as exc:
             return _err(rid, ERR_PARAMS, str(exc))
-        s = await sessions.create(self.pool, self.user_id, model=model, bot=bot)
+        stale = False
+        if not model:
+            # A remembered default the picker no longer offers would start the chat on a dead model.
+            remembered = await store.resolve_model(self.pool, self.user_id)
+            stale = bool(remembered) and bool(
+                await session_ops.model_error(self.pool, self.user_id, self.token, remembered))
+        s = await sessions.create(self.pool, self.user_id, model=model, bot=bot, skip_saved=stale)
         title = str(params.get("title") or "").strip()
         if title:
             s.title = title  # written into the row when the first message creates it

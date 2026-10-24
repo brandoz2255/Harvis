@@ -30,6 +30,7 @@ export interface ChatMessage {
   role: string
   content: string
   citations: Citation[]
+  model_used?: null | string
 }
 
 export interface Note {
@@ -176,14 +177,20 @@ export function useChatModels() {
   })
 }
 
+// Reasoning models spend the notebook chat's small token budget on thinking and
+// answer with nothing, so they are only chosen when nothing else is online.
+const REASONING_MODEL_RE = /gpt-oss|deepseek-r1|qwq|-r1|heretic/i
+
+export function pickDefaultModel(available: readonly string[]): string | undefined {
+  return available.find(m => !REASONING_MODEL_RE.test(m)) ?? available[0]
+}
+
 /** The remembered model when it is online, otherwise a sensible one that is. */
 export function useChosenModel() {
   const models = useChatModels()
   const [model, setModel] = useState(readStoredModel)
   const available = models.data ?? []
-  const chosen = available.includes(model)
-    ? model
-    : (available.find(m => /gpt-oss|llama3|qwen/.test(m)) ?? available[0])
+  const chosen = available.includes(model) ? model : pickDefaultModel(available)
 
   const choose = (value: string) => {
     setModel(value)

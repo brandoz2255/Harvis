@@ -13,6 +13,9 @@
 #   ./scripts/enable-https.sh harvis.local    # plus an extra hostname or IP
 #   ./scripts/enable-https.sh 192.168.1.50 harvis.local
 #
+# On a Kubernetes install (./install.sh --k8s) the same command works: the
+# certificate lands in the directory the nginx pod mounts and the pod is restarted.
+#
 # The certificate is self-signed, so the first visit shows a browser warning.
 # That is expected and it is not a failure: click through once ("Advanced" ->
 # "Proceed"), and the connection is encrypted and counts as secure from then on.
@@ -40,10 +43,38 @@ HTTPS_PORT="${HARVIS_HTTPS_PORT:-9443}"
 say()  { printf '%s\n' "$*"; }
 fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
+# ── Kubernetes install? ─────────────────────────────────────────────────────
+# There the Docker containers are stopped, and `docker compose up -d nginx` would
+# start a second nginx on the same ports. The nginx pod instead reads
+# /etc/nginx/tls from a hostPath, so the files go there and the pod restarts.
+NS="${HARVIS_K8S_NAMESPACE:-harvis}"
+K8S_MODE_FILE="${HARVIS_K8S_MODE_FILE:-/var/lib/harvis/k8s/mode}"
+SUDO=""
+[ "$(id -u)" -eq 0 ] || SUDO="sudo"
+kc() { $SUDO k3s kubectl "$@"; }
+K8S=0
+PUBLIC_BIND=""
+if [ "$(cat "$K8S_MODE_FILE" 2>/dev/null || true)" = "k8s" ]; then
+    K8S=1
+    command -v k3s >/dev/null 2>&1 || fail "this machine runs Harvis on Kubernetes but k3s was not found."
+    # The directory the pod really mounts, which is another checkout's if Harvis
+    # was installed from a different folder than this one.
+    mount_name="$(kc -n "$NS" get deploy nginx -o jsonpath='{.spec.template.spec.containers[0].volumeMounts[?(@.mountPath=="/etc/nginx/tls")].name}' 2>/dev/null || true)"
+    if [ -n "$mount_name" ]; then
+        host_tls="$(kc -n "$NS" get deploy nginx -o jsonpath="{.spec.template.spec.volumes[?(@.name==\"$mount_name\")].hostPath.path}" 2>/dev/null || true)"
+        [ -n "$host_tls" ] && TLS_DIR="$host_tls"
+    fi
+    CERT_DIR="$TLS_DIR"
+    CRT="$CERT_DIR/harvis.crt"
+    KEY="$CERT_DIR/harvis.key"
+    ACTIVE="$TLS_DIR/harvis-tls.conf"
+fi
+
 command -v openssl >/dev/null 2>&1 || fail "openssl is not installed. Install it and run this again."
 [ -f "$TEMPLATE" ] || fail "missing $TEMPLATE — is this the Harvis repository root?"
 
-mkdir -p "$CERT_DIR" "$TLS_DIR"
+mkdir -p "$CERT_DIR" "$TLS_DIR" 2>/dev/null || true
+[ -d "$TLS_DIR" ] && [ -w "$TLS_DIR" ] || fail "cannot write to $TLS_DIR. Run this script as the user who owns that folder."
 
 # ── Work out what names the certificate should cover ────────────────────────
 # A certificate is only accepted for the exact name typed into the address bar,
@@ -62,7 +93,7 @@ IPS=(127.0.0.1)
 detected=""
 if command -v ip >/dev/null 2>&1; then
     detected="$(ip -o -4 addr show scope global 2>/dev/null | awk '
-        $2 ~ /^(docker|br-|veth|virbr|tailscale|tun|wg|lo)/ { next }
+        $2 ~ /^(docker|br-|veth|virbr|tailscale|tun|wg|lo|cni|flannel)/ { next }
         { split($4, a, "/"); print a[1] }
     ')"
 elif command -v hostname >/dev/null 2>&1; then
@@ -155,7 +186,24 @@ say ""
 # ── Bring it up ─────────────────────────────────────────────────────────────
 # `restart` is not enough: this adds a published port and two bind mounts, and
 # neither reaches a container that is only restarted.
-if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+if [ "$K8S" = "1" ]; then
+    # The running pod already sees the new files through its hostPath, and every
+    # Deployment here uses Recreate: a config nginx rejects would take :9000 down too.
+    if ! check="$(kc -n "$NS" exec deploy/nginx -- nginx -t 2>&1)"; then
+        rm -f "$ACTIVE"
+        say "nginx rejected the new configuration, or its pod is not running. Details:"
+        say "$check"
+        fail "HTTPS was not enabled; the listener file was removed so nginx keeps starting."
+    fi
+    say "Restarting the nginx pod (namespace $NS)..."
+    kc -n "$NS" rollout restart deploy/nginx >/dev/null || fail "could not restart the nginx pod. HTTPS was not enabled."
+    kc -n "$NS" rollout status deploy/nginx --timeout=120s >/dev/null 2>&1 \
+        || fail "the nginx pod did not become ready. See: sudo k3s kubectl -n $NS logs deploy/nginx"
+    say ""
+    say "HTTPS is on."
+    # Kubernetes publishes the front door on every address (./install.sh --k8s sets it).
+    PUBLIC_BIND=0.0.0.0
+elif command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
     say "Applying to the running stack..."
     if docker compose up -d nginx; then
         # `up -d` alone is not enough either. On a stack whose nginx container
@@ -187,7 +235,7 @@ fi
 
 # Ports 9000/9443 leave this machine only when .env binds them to every address
 # (./install.sh --expose lan); compose defaults them to 127.0.0.1.
-PUBLIC_BIND="$( { grep '^HARVIS_BIND_ADDR_PUBLIC=' .env 2>/dev/null || true; } | tail -1 | cut -d= -f2- | tr -d "\"' \r")"
+PUBLIC_BIND="${PUBLIC_BIND:-$( { grep '^HARVIS_BIND_ADDR_PUBLIC=' .env 2>/dev/null || true; } | tail -1 | cut -d= -f2- | tr -d "\"' \r")}"
 EXPOSURE="$( { grep '^HARVIS_EXPOSURE=' .env 2>/dev/null || true; } | tail -1 | cut -d= -f2- | tr -d "\"' \r")"
 
 say ""

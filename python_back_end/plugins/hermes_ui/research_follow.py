@@ -40,7 +40,7 @@ def progress_line(p: dict) -> str:
         return "Planning the research"
     if phase == "searching":
         queries = p.get("queries")
-        latest = queries[-1] if isinstance(queries, list) and queries else ""
+        latest = str(p.get("query_preview") or (queries[-1] if isinstance(queries, list) and queries else ""))
         return f"{rnd}searching" + (f" “{latest}”" if latest else "") + (f" ({total} sources so far)" if total else "")
     if phase == "reading" and p.get("url"):
         return f"Reading {p.get('title') or p['url']}"

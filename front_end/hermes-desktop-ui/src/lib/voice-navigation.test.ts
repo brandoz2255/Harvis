@@ -112,7 +112,7 @@ describe('voice navigation', () => {
     expect(await open('open voice settings')).toBe('/settings?tab=config:voice')
     expect(await open('take me to fallback models')).toBe('/settings?tab=config:model&mview=fallback')
     expect(await open('open mcp servers')).toBe('/skills?tab=mcp')
-    expect(await open('show me usage')).toBe('/command-center?section=usage')
+    expect(await open('show me system status')).toBe('/command-center?section=system')
     expect(await open('open messaging')).toBe('/messaging')
     expect(fetch).not.toHaveBeenCalled()
   })

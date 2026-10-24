@@ -20,7 +20,7 @@ from moonshot_api import MoonshotClient, is_moonshot_model, get_moonshot_model_i
 logger = logging.getLogger(__name__)
 
 # ─── Ollama Configuration with Cloud/Local Fallback ──────────────────────────
-CLOUD_OLLAMA_URL = os.getenv("EXTERNAL_OLLAMA_URL", "https://coyotedev.ngrok.app")
+CLOUD_OLLAMA_URL = os.getenv("EXTERNAL_OLLAMA_URL", "").rstrip("/")
 LOCAL_OLLAMA_URL = os.getenv(
     "OLLAMA_URL", "http://ollama:11434"
 )  # Use environment variable for merged deployment
@@ -45,22 +45,23 @@ def make_ollama_request(endpoint, payload, timeout=90):
         else {"ngrok-skip-browser-warning": "true", "User-Agent": "Harvis-Backend"}
     )
 
-    # Try cloud first
-    try:
-        logger.info("🌐 Trying cloud Ollama: %s", CLOUD_OLLAMA_URL)
-        response = requests.post(
-            f"{CLOUD_OLLAMA_URL}{endpoint}",
-            json=payload,
-            headers=external_headers,
-            timeout=timeout,
-        )
-        if response.status_code == 200:
-            logger.info("✅ Cloud Ollama request successful")
-            return response
-        else:
-            logger.warning("⚠️ Cloud Ollama returned status %s", response.status_code)
-    except Exception as e:
-        logger.warning("⚠️ Cloud Ollama request failed: %s", e)
+    # Cloud is opt-in: no default remote host
+    if CLOUD_OLLAMA_URL:
+        try:
+            logger.info("🌐 Trying cloud Ollama: %s", CLOUD_OLLAMA_URL)
+            response = requests.post(
+                f"{CLOUD_OLLAMA_URL}{endpoint}",
+                json=payload,
+                headers=external_headers,
+                timeout=timeout,
+            )
+            if response.status_code == 200:
+                logger.info("✅ Cloud Ollama request successful")
+                return response
+            else:
+                logger.warning("⚠️ Cloud Ollama returned status %s", response.status_code)
+        except Exception as e:
+            logger.warning("⚠️ Cloud Ollama request failed: %s", e)
 
     # Fallback to local
     try:
@@ -104,22 +105,23 @@ async def async_make_ollama_request(endpoint, payload, timeout=90):
         else {"ngrok-skip-browser-warning": "true", "User-Agent": "Harvis-Backend"}
     )
 
-    # Try cloud first
-    try:
-        logger.info("🌐 Trying async cloud Ollama: %s", CLOUD_OLLAMA_URL)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                f"{CLOUD_OLLAMA_URL}{endpoint}", json=payload, headers=external_headers
-            )
-            if response.status_code == 200:
-                logger.info("✅ Async cloud Ollama request successful")
-                return response.json()
-            else:
-                logger.warning(
-                    "⚠️ Async cloud Ollama returned status %s", response.status_code
+    # Cloud is opt-in: no default remote host
+    if CLOUD_OLLAMA_URL:
+        try:
+            logger.info("🌐 Trying async cloud Ollama: %s", CLOUD_OLLAMA_URL)
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(
+                    f"{CLOUD_OLLAMA_URL}{endpoint}", json=payload, headers=external_headers
                 )
-    except Exception as e:
-        logger.warning("⚠️ Async cloud Ollama request failed: %s", e)
+                if response.status_code == 200:
+                    logger.info("✅ Async cloud Ollama request successful")
+                    return response.json()
+                else:
+                    logger.warning(
+                        "⚠️ Async cloud Ollama returned status %s", response.status_code
+                    )
+        except Exception as e:
+            logger.warning("⚠️ Async cloud Ollama request failed: %s", e)
 
     # Fallback to local
     try:

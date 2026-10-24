@@ -84,7 +84,7 @@ RECENT_YEARS = ["2025", "2024", "2023"]
 @dataclass
 class Settings:
     # endpoints
-    cloud_ollama_url: str = os.getenv("CLOUD_OLLAMA_URL", "https://coyotegpt.ngrok.app/ollama")
+    cloud_ollama_url: str = os.getenv("CLOUD_OLLAMA_URL", "").rstrip("/")
     local_ollama_url: str = os.getenv("OLLAMA_URL", "http://ollama:11434")  # Use OLLAMA_URL for consistency with main chat
 
     # keys

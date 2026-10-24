@@ -7,6 +7,7 @@ shapes rows into the Hermes protocol's SessionInfo / SessionRuntimeInfo.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from dataclasses import dataclass
@@ -45,12 +46,21 @@ class Live:
 _LIVE: dict[str, Live] = {}
 
 
-def harvis_default_model() -> str:
+async def harvis_default_model() -> str:
     """The model Harvis itself falls back to; an empty name reaches the
-    workspace runner as 'model is required', so sessions always name one."""
+    workspace runner as 'model is required', so sessions always name one.
+
+    main's resolver blocks on HTTP, so it runs in a thread. When it finds nothing
+    (on k8s its provider is the empty in-cluster Ollama) the other Ollama hosts
+    are asked; cloud rows are never candidates."""
     try:
-        from main import resolve_default_model  # lazy: main imports this plugin at boot
-        return resolve_default_model() or ""
+        from main import _chat_candidates, resolve_default_model  # lazy: main imports this plugin at boot
+        name = await asyncio.to_thread(resolve_default_model)
+        if not name:
+            from owui_compat.ollama_hosts import available
+            names = _chat_candidates(sorted(await available() or ()))
+            name = names[0] if names else ""
+        return name or ""
     except Exception:  # noqa: BLE001
         return ""
 
@@ -72,32 +82,34 @@ def _remember(s: Live) -> Live:
     return s
 
 
-async def create(pool, user_id: int, model: str = "", bot: Optional[dict] = None) -> Live:
+async def create(pool, user_id: int, model: str = "", bot: Optional[dict] = None,
+                 skip_saved: bool = False) -> Live:
     """A draft: the UI holds the id now, the row appears with the first message.
 
     A bot chat starts on the bot's model without touching the user's saved
-    default — picking a bot is not the same as picking a model."""
+    default — picking a bot is not the same as picking a model. ``skip_saved``
+    ignores the remembered model (the caller found it is no longer offered)."""
     if model == "harvis-default" or is_hidden_model(model):
         model = ""
     if bot:
         model = model or str(bot.get("model") or "")
         if is_hidden_model(model):
             model = ""
-        if not model:
+        if not model and not skip_saved:
             model = await store.resolve_model(pool, user_id)
             if is_hidden_model(model):
                 model = ""
-        return _remember(Live(id=str(uuid.uuid4()), user_id=user_id, model=model or harvis_default_model(),
+        return _remember(Live(id=str(uuid.uuid4()), user_id=user_id, model=model or await harvis_default_model(),
                               bot_id=str(bot["id"])))
     if model:
         # The composer picker's explicit choice becomes the saved default, so
         # "whatever's recent" holds across devices and for model.options.
         await store.set_default_model(pool, user_id, model)
     else:
-        model = await store.resolve_model(pool, user_id)
+        model = "" if skip_saved else await store.resolve_model(pool, user_id)
         if is_hidden_model(model):
             model = ""
-    return _remember(Live(id=str(uuid.uuid4()), user_id=user_id, model=model or harvis_default_model()))
+    return _remember(Live(id=str(uuid.uuid4()), user_id=user_id, model=model or await harvis_default_model()))
 
 
 async def open(pool, user_id: int, sid: str) -> tuple[Optional[Live], list[dict]]:

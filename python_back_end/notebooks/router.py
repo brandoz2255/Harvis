@@ -269,6 +269,23 @@ async def autoname_notebook(
     return AutonameResponse(title=final_title, emoji=final_emoji)
 
 
+async def purge_notebook(manager: NotebookManager, notebook_id: UUID, user_id: int) -> bool:
+    """Hard-delete a notebook and its uploaded files; child tables cascade.
+
+    manager.delete_notebook is only the soft archive (is_active = FALSE) that the
+    onb_compat archived=true path relies on, so the DELETE routes use this instead.
+    """
+    async with manager.db_pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM notebooks WHERE id = $1 AND user_id = $2", notebook_id, user_id
+        )
+    if result != "DELETE 1":
+        return False
+    folder = os.path.join(NOTEBOOK_STORAGE_PATH, str(user_id), str(notebook_id))
+    await asyncio.to_thread(shutil.rmtree, folder, ignore_errors=True)
+    return True
+
+
 @router.delete("/{notebook_id}")
 async def delete_notebook(
     notebook_id: UUID,
@@ -278,12 +295,14 @@ async def delete_notebook(
 ):
     """Delete a notebook and all its contents"""
     try:
-        deleted = await manager.delete_notebook(notebook_id, current_user["id"])
+        deleted = await purge_notebook(manager, notebook_id, current_user["id"])
         if not deleted:
             raise HTTPException(status_code=404, detail="Notebook not found")
         return {"message": "Notebook deleted successfully"}
     except NotebookNotFoundError:
         raise HTTPException(status_code=404, detail="Notebook not found")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to delete notebook: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -329,7 +348,7 @@ async def upload_source(
 
         filename = file.filename or "unknown"
         content = await file.read()
-        max_bytes = int(os.getenv("NOTEBOOK_MAX_UPLOAD_MB", "100")) * 1024 * 1024
+        max_bytes = int(os.getenv("NOTEBOOK_MAX_UPLOAD_MB", "50")) * 1024 * 1024
         if len(content) > max_bytes:
             raise HTTPException(status_code=413, detail=f"That file is larger than {max_bytes // (1024 * 1024)} MB.")
         if not content:
@@ -378,6 +397,8 @@ async def upload_source(
 
     except NotebookNotFoundError:
         raise HTTPException(status_code=404, detail="Notebook not found")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to upload source: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -634,6 +655,8 @@ async def delete_source(
 
     except SourceNotFoundError:
         raise HTTPException(status_code=404, detail="Source not found")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to delete source: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -773,6 +796,8 @@ async def delete_note(
         return {"message": "Note deleted successfully"}
     except NoteNotFoundError:
         raise HTTPException(status_code=404, detail="Note not found")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to delete note: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -923,7 +948,7 @@ async def check_embedding_status():
     import os
     
     ollama_url = os.getenv("OLLAMA_URL", "http://ollama:11434")
-    cloud_ollama_url = os.getenv("OLLAMA_CLOUD_URL", "https://coyotegpt.ngrok.app/ollama")
+    cloud_ollama_url = os.getenv("OLLAMA_CLOUD_URL", "").rstrip("/")
     
     result = {
         "local_ollama": {"url": ollama_url, "status": "unknown", "models": []},
@@ -947,22 +972,25 @@ async def check_embedding_status():
     except Exception as e:
         result["local_ollama"]["status"] = f"error: {str(e)}"
     
-    # Check cloud Ollama
-    try:
-        response = requests.get(f"{cloud_ollama_url}/api/tags", timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            result["cloud_ollama"]["status"] = "connected"
-            from owui_compat.ollama_hosts import drop_cloud
+    # Check cloud Ollama (only when an operator configured one)
+    if cloud_ollama_url:
+        try:
+            response = requests.get(f"{cloud_ollama_url}/api/tags", timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                result["cloud_ollama"]["status"] = "connected"
+                from owui_compat.ollama_hosts import drop_cloud
 
-            result["cloud_ollama"]["models"] = [m["name"] for m in drop_cloud(data.get("models", []))]
-        else:
-            result["cloud_ollama"]["status"] = f"error: {response.status_code}"
-    except requests.exceptions.ConnectionError:
-        result["cloud_ollama"]["status"] = "connection_refused"
-    except Exception as e:
-        result["cloud_ollama"]["status"] = f"error: {str(e)}"
-    
+                result["cloud_ollama"]["models"] = [m["name"] for m in drop_cloud(data.get("models", []))]
+            else:
+                result["cloud_ollama"]["status"] = f"error: {response.status_code}"
+        except requests.exceptions.ConnectionError:
+            result["cloud_ollama"]["status"] = "connection_refused"
+        except Exception as e:
+            result["cloud_ollama"]["status"] = f"error: {str(e)}"
+    else:
+        result["cloud_ollama"]["status"] = "not_configured"
+
     # Determine which embedding models are available
     all_models = set(result["local_ollama"]["models"] + result["cloud_ollama"]["models"])
     
@@ -1124,6 +1152,8 @@ async def transform_source(
     except httpx.HTTPError as e:
         logger.error(f"Ollama request failed: {e}")
         raise HTTPException(status_code=502, detail=f"Model request failed: {e}")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Transformation failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2005,6 +2035,8 @@ async def get_podcast(
         
     except NotebookNotFoundError:
         raise HTTPException(status_code=404, detail="Notebook not found")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to get podcast: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2088,7 +2120,7 @@ async def search_knowledge_base(
                       LEFT(COALESCE(s.content_text, ''), 300) as snippet
                     FROM notebook_sources s
                     JOIN notebooks n ON n.id = s.notebook_id
-                    WHERE n.user_id = $1
+                    WHERE n.user_id = $1 AND n.is_active = TRUE
                       AND (
                         COALESCE(s.title,'') ILIKE '%' || $2 || '%'
                         OR COALESCE(s.original_filename,'') ILIKE '%' || $2 || '%'
@@ -2125,7 +2157,7 @@ async def search_knowledge_base(
                       LEFT(COALESCE(nn.content, ''), 300) as snippet
                     FROM notebook_notes nn
                     JOIN notebooks n ON n.id = nn.notebook_id
-                    WHERE n.user_id = $1
+                    WHERE n.user_id = $1 AND n.is_active = TRUE
                       AND (
                         COALESCE(nn.title,'') ILIKE '%' || $2 || '%'
                         OR COALESCE(nn.content,'') ILIKE '%' || $2 || '%'
@@ -2176,7 +2208,7 @@ async def search_knowledge_base(
                 FROM notebook_chunks c
                 JOIN notebook_sources s ON s.id = c.source_id
                 JOIN notebooks n ON n.id = c.notebook_id
-                WHERE n.user_id = $2
+                WHERE n.user_id = $2 AND n.is_active = TRUE
                   AND c.embedding IS NOT NULL
                 ORDER BY c.embedding <=> $1::vector
                 LIMIT $3

@@ -24,6 +24,8 @@
 #   HARVIS_K8S_BUILD_SPACE   1 = give the backend the Docker socket (Build Space). Default off:
 #                            with it, a taken-over backend controls this machine
 #   HARVIS_K8S_REUSE_HOST_OLLAMA  0 = do not offer the Ollama already on this machine to Harvis
+#   HARVIS_PULL_MODELS       comma-separated models to download into the cluster's Ollama after install
+#   HARVIS_SKIP_EMBEDDER     1 = do not download nomic-embed-text (the Notebooks embedder)
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HERE="$REPO/scripts/k8s"
@@ -37,6 +39,7 @@ SUDO=""
 [ "$(id -u)" -eq 0 ] || SUDO="sudo"
 TUNNEL=0
 BUILD_SPACE=0
+NO_CHAT_MODEL=0
 kc() { $SUDO k3s kubectl "$@"; }
 # The last assignment in .env wins, as it does for compose.
 env_get() { grep "^$1=" .env 2>/dev/null | tail -1 | cut -d= -f2- | tr -d "\"' \r" || true; }
@@ -317,6 +320,55 @@ wait_rollout() {
   [ -z "$failed" ] || { say "✗ Not ready:$failed — see: sudo k3s kubectl -n $NS describe pod -l app.kubernetes.io/name=<name>"; return 1; }
 }
 
+# ── models and first-run checks ─────────────────────────────────────────────
+# Nothing here is fatal: offline or blocked DNS costs the downloads only, and
+# Settings → Models and the Notebooks page still offer them.
+ollama_exec() { kc -n "$NS" exec deploy/ollama -- "$@"; }
+# Same marks as the backend's notebooks.embedder_status.is_embedder.
+EMBEDDER_MARKS='embed|minilm|bge-'
+
+pull_model() { # $1 name
+  case "$1" in
+    "" | -* | *[!A-Za-z0-9._:/@-]*) say "  ⚠ skipped '$1': not a model name"; return 0 ;;
+  esac
+  say "  pulling $1 ..."
+  if ollama_exec ollama pull "$1" >/dev/null 2>&1; then say "  ✓ $1"
+  else say "  ⚠ could not download $1 (offline, or DNS blocked?)"; fi
+}
+
+post_install_checks() {
+  local m listing names pull_list skip_embedder vh
+  local -a pulls=()
+  if [ "${HARVIS_K8S_OLLAMA:-1}" = "1" ]; then
+    pull_list="${HARVIS_PULL_MODELS-$(env_get HARVIS_PULL_MODELS)}"
+    IFS=', ' read -r -a pulls <<< "$pull_list" || true
+    for m in ${pulls[@]+"${pulls[@]}"}; do pull_model "$m"; done
+    if listing="$(ollama_exec ollama list 2>/dev/null)"; then
+      names="$(printf '%s\n' "$listing" | awk 'NR > 1 { print $1 }')"
+      skip_embedder="${HARVIS_SKIP_EMBEDDER-$(env_get HARVIS_SKIP_EMBEDDER)}"
+      if [ "$skip_embedder" != "1" ] && [ -z "$(printf '%s\n' "$names" | grep -iE "$EMBEDDER_MARKS" || true)" ]; then
+        pull_model nomic-embed-text
+      fi
+      # Models on a reused host Ollama count as models too.
+      if [ -z "$HOST_OLLAMA_ENTRY" ] && [ -z "$(printf '%s\n' "$names" | grep -viE "$EMBEDDER_MARKS" | grep . || true)" ]; then
+        NO_CHAT_MODEL=1
+      fi
+    fi
+    if [ "$GPU" = "1" ] && ! ollama_exec sh -c 'ls /dev/nvidia[0-9]* >/dev/null 2>&1 || nvidia-smi -L >/dev/null 2>&1' >/dev/null 2>&1; then
+      say "  ⚠ The Ollama pod cannot see the GPU, so models run on the CPU — check: sudo k3s kubectl -n $NS describe pod -l app.kubernetes.io/name=ollama"
+    fi
+  fi
+  # /health answers while the models are still downloading, so ask for their state.
+  if kc -n "$NS" get deploy voice-onnx >/dev/null 2>&1; then
+    vh="$(kc -n "$NS" exec deploy/voice-onnx -- curl -s --max-time 5 http://localhost:8000/health 2>/dev/null || true)"
+    case "$(printf '%s' "$vh" | python3 -c 'import json, sys; print(json.load(sys.stdin).get("prefetch", {}).get("status", ""))' 2>/dev/null || true)" in
+      ready | disabled) ;;
+      *) say "  ⚠ Voice models are not ready yet (still downloading, or blocked); speech fails until they are — check: sudo k3s kubectl -n $NS exec deploy/voice-onnx -- curl -s localhost:8000/health" ;;
+    esac
+  fi
+  return 0
+}
+
 # Same reason as install.sh's sync_db_password: an old data directory keeps the
 # password it was created with. The backend opens its pool once, so if it
 # already failed against the old password it is restarted.
@@ -408,6 +460,7 @@ cmd_up() {
   say "Waiting for Harvis to start in Kubernetes:"
   wait_rollout
   report_tunnel
+  post_install_checks
   say ""
   say "✓ Harvis runs on Kubernetes → http://$ip:9000  (and http://localhost:9000)"
   if [ "$TUNNEL" = "1" ]; then
@@ -417,9 +470,13 @@ cmd_up() {
       say "  From the internet: your Cloudflare hostname, behind Cloudflare Access"
     fi
   fi
-  if [ "${HARVIS_K8S_OLLAMA:-1}" = "1" ] && [ "$LAN_PORT" != "0" ]; then
-    say "  Models shared on your network at http://$ip:$LAN_PORT (chat and model listing only)"
-    say "  Add a model:  sudo k3s kubectl -n $NS exec deploy/ollama -- ollama pull gemma4:e2b"
+  if [ "${HARVIS_K8S_OLLAMA:-1}" = "1" ]; then
+    [ "$LAN_PORT" = "0" ] || say "  Models shared on your network at http://$ip:$LAN_PORT (chat and model listing only)"
+    if [ "$NO_CHAT_MODEL" = "1" ]; then
+      say "  ⚠ No chat model is installed yet, so chat has nothing to answer with. Add one:  sudo k3s kubectl -n $NS exec deploy/ollama -- ollama pull gemma4:e2b"
+    else
+      say "  Add a model:  sudo k3s kubectl -n $NS exec deploy/ollama -- ollama pull gemma4:e2b"
+    fi
   fi
 }
 

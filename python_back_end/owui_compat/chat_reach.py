@@ -607,7 +607,8 @@ def _compose(st: _State) -> dict:
         "appended under your answer automatically, so [1] resolves. Do not "
         "invent any other citation style — 【1】, a footnote, or the phrase 'the "
         "first result' render as nothing and make the answer look cut off "
-        "mid-thought. Never wrap a citation in 【 】.",
+        "mid-thought. Never wrap a citation in 【 】. Do not write a Sources or "
+        "References list yourself; the appended one is the only one.",
         "",
         "These sources are ranked by a search engine, not vetted. Where they "
         "disagree, prefer the official project or vendor site over blogs and "
@@ -737,10 +738,14 @@ async def maybe_inject_reach(request, owui_body: dict, user_id: int | None = Non
             # Answer ungrounded rather than leave the user watching a dead composer.
             # Losing the grounding is a worse answer; losing the turn is a broken app.
             logger.warning("chat_reach: budget exceeded for %r; answering ungrounded", message[:80])
+            if forced:
+                _note_search_failed(messages, idx)
             _remember_turn(request, message, previous, model_name, user_id)
             return
         if not found["context"]:
             logger.info("chat_reach: nothing found for %r", query[:80])
+            if forced:
+                _note_search_failed(messages, idx)
             _remember_turn(request, message, previous, model_name, user_id)
             return
 
@@ -759,6 +764,23 @@ async def maybe_inject_reach(request, owui_body: dict, user_id: int | None = Non
         )
     except Exception:
         logger.warning("chat_reach: injection failed; answering ungrounded", exc_info=True)
+
+
+_SEARCH_FAILED_NOTE = (
+    "\n\n<web_results>\nThe user asked for a live web search but it returned nothing "
+    "(the search engines did not answer). Say so in your first sentence, then answer "
+    "from what you know and say it may be out of date. Do not write tool calls.\n</web_results>"
+)
+
+
+def _note_search_failed(messages: list, idx: int) -> None:
+    """Tell the model a search the user explicitly asked for came back empty, so the
+    reply says so instead of passing off an ungrounded answer (or a fake tool call)."""
+    content = messages[idx].get("content")
+    if isinstance(content, list):
+        content.append({"type": "text", "text": _SEARCH_FAILED_NOTE})
+    else:
+        messages[idx]["content"] = f"{content or ''}{_SEARCH_FAILED_NOTE}"
 
 
 async def _reach_toolset_on(pool, user_id: int | None) -> bool:

@@ -255,6 +255,11 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
                 ollama_hosts.invalidate()
             except Exception:
                 logger.warning("owui /api/models refresh: host probe reset failed", exc_info=True)
+            try:
+                from plugins.inference_nodes import invalidate as _invalidate_nodes
+                _invalidate_nodes()
+            except Exception:
+                logger.warning("owui /api/models refresh: inference node probe reset failed", exc_info=True)
         native = await deps.list_models(request, user)
         data = harvis_models_to_owui(native)
         # Phase E4B: surface the Hermes-Agent chat model when its engine flag is on AND a Hermes
@@ -393,6 +398,13 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
 
             if await is_connector_read_turn(request, owui_body, user.id):
                 return await run_chat_completion(request, owui_body, user_id=user.id)
+        # What no lane above claimed but still names a Harvis action ("remind me every
+        # morning at 8 to …", "forget that …", "my class needs a presentation"): chat_actions.
+        from .chat_actions import maybe_handle_action
+
+        action = await maybe_handle_action(request, owui_body, user)
+        if action is not None:
+            return action
         # Auto-detect workspace tasks → launch a run + return a WorkspaceRunCard
         # marker (the OWUI card attaches to /api/workspace/stream/{id}). Falls
         # through to a normal chat completion when it's not a workspace task.

@@ -1,5 +1,5 @@
-"""Layout checks for a harvis-doc that need no model and no sandbox: text that does not fit the slide, and
-characters no installed font can draw.
+"""Layout checks for a harvis-doc that need no model and no sandbox: text that does not fit the slide, slides
+that are nearly empty, and characters no installed font can draw.
 
 The pptx writer fits text with a rough width guess (``docs_metrics``). That guess runs wide for ordinary
 lower-case prose and narrow for capitals, wide scripts and symbols, so a slide can still overflow. This module
@@ -40,6 +40,14 @@ _MONO = ("Consolas", "Liberation Mono", "Cousine")
 # Without one of those installed, DejaVu is measured and scaled down to Arial-like widths (measured 0.80-1.0).
 _DEJAVU_SANS, _DEJAVU_MONO = 0.85, 0.92
 _AVG_EM = {(False, False): 0.50, (True, False): 0.54, (False, True): 0.55, (True, True): 0.55}
+# A content slide is 'mostly empty' when it uses less than SPARSE_USED of the area under its title and holds
+# next to no words and no figure. Measured on the writer's own output, an ordinary model-written bullet slide
+# uses about a quarter of that area, so use alone would flag every slide; the word limit keeps this to slides
+# with a title and (almost) nothing else.
+SPARSE_USED = 0.45
+SPARSE_MAX_WORDS = 3
+BODY_TOP_FRAC, BODY_BOTTOM_FRAC = 1.75 / 7.5, 6.95 / 7.5       # the writer's body area, as fractions of the slide height
+FIGURE_MIN_PT = 0.5 * 72                                         # a shape this big in both directions is a drawing, not an accent
 
 
 # ---- measuring text ---------------------------------------------------------------------------
@@ -219,6 +227,48 @@ def _known(issues: Sequence[dict], where: str, name: str) -> bool:
     return any(i["where"] == where and f"'{name}'" in i["message"] for i in issues)
 
 
+def _union_length(spans: list[tuple[float, float]]) -> float:
+    total, end = 0.0, float("-inf")
+    for lo, hi in sorted(spans):
+        if hi > max(lo, end):
+            total += hi - max(lo, end)
+            end = hi
+    return total
+
+
+def _slide_use(slide, slide_h: float) -> Optional[tuple[float, int]]:
+    """(share of the body area that holds something, words) for a content slide.
+
+    None when the slide has a subtitle placeholder (the title slide, or a section divider: the writer draws a
+    title-only slide as a divider on purpose) or holds a table, chart, picture or drawing: those fill their own
+    space and are not 'empty'."""
+    top, bottom = slide_h * BODY_TOP_FRAC, slide_h * BODY_BOTTOM_FRAC
+    spans: list[tuple[float, float]] = []
+    words = 0
+    for shape in slide.shapes:
+        role = _role(shape)
+        if role == "subtitle":
+            return None
+        if role == "title":
+            continue
+        if None in (shape.left, shape.top, shape.width, shape.height):
+            continue
+        text = shape.text_frame.text if shape.has_text_frame else ""
+        if getattr(shape, "has_table", False) or getattr(shape, "has_chart", False):
+            return None
+        if not text.strip():
+            if shape.width >= FIGURE_MIN_PT * 12700 and shape.height >= FIGURE_MIN_PT * 12700:
+                return None
+            continue
+        words += len(text.split())
+        if _measurable(shape):
+            lo, hi = _vertical_extent(shape, _text_need(shape))
+        else:
+            lo, hi = shape.top / 12700, (shape.top + shape.height) / 12700
+        spans.append((max(lo, top), min(hi, bottom)))
+    return _union_length(spans) / max(bottom - top, 1.0), words
+
+
 def deck_issues(data: bytes, known: Sequence[dict] = ()) -> list[dict]:
     """Overflow findings for every slide of a .pptx; ``known`` are issues already found, so a shape is not reported twice."""
     from pptx import Presentation
@@ -249,6 +299,10 @@ def deck_issues(data: bytes, known: Sequence[dict] = ()) -> list[dict]:
         if boxes:
             out.append(issue("warn", where, first if boxes == 1 else
                              f"{boxes} text boxes on this slide hold more text than fits; the first: {first[0].lower()}{first[1:]}"))
+        use = _slide_use(slide, slide_h) if n else None             # slide 1 is the title slide
+        if use and use[0] < SPARSE_USED and use[1] <= SPARSE_MAX_WORDS:
+            out.append(issue("warn", where, f"The slide is mostly empty: only {use[0]:.0%} of the space under the title "
+                                            "is used. Add its content, or fold it into the next slide"))
     return out
 
 

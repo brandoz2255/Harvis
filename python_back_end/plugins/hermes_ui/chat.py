@@ -104,8 +104,19 @@ def requested_mode(text: str) -> str | None:
     """The mode the user explicitly asked for in this message, if any."""
     for mode, asks in _MODE_REQUESTS:
         if asks(text or ""):
+            # "set up a slideshow for the standup" opens with the install/set-up
+            # wording but asks for a file, which the document lane makes; agent
+            # mode would skip that lane. Real installs ("install comfyui") stay.
+            if mode == "agent" and _is_doc_request(text or ""):
+                return None
             return mode
     return None
+
+
+def _is_doc_request(text: str) -> bool:
+    from owui_compat.doc_bridge import detect_doc_kind  # lazy: keeps startup coupling out of import time
+
+    return detect_doc_kind(text) is not None
 
 
 async def stream_turn(token: str, messages: list[dict], model: str = "",
@@ -202,7 +213,7 @@ async def _stream_completion(token: str, messages: list[dict], model: str, endpo
                     continue
                 if chunk.get("error"):
                     log.warning("hermes_ui: chat stream error chunk: %s", str(chunk["error"])[:400])
-                    raise ChatError(errors.friendly(ChatError(chunk["error"])))
+                    raise ChatError(errors.from_chunk(chunk["error"]))
                 for choice in chunk.get("choices") or []:
                     delta = choice.get("delta") or {}
                     reasoning = _reasoning_of(delta)

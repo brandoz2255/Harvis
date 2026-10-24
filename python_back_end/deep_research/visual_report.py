@@ -1630,32 +1630,23 @@ _GENERIC_HEADINGS = {
 
 
 def _extract_report_title(markdown_text: str, fallback: str):
-    """Pull a real title from the report's first heading rather than reusing
-    the raw user query. Returns (title, markdown_with_title_stripped).
+    """Pull a real title from the report's own H1 rather than reusing the raw
+    user query. Returns (title, markdown_with_title_stripped).
 
-    Falls back to the query when no heading is present. Skips generic
-    placeholders ("Executive Summary", "Introduction", etc.) and tries the
-    next heading. If the chosen title was the report's own top heading, that
-    heading is removed from the markdown so it doesn't duplicate the hero h1.
+    Skips generic placeholders ("Executive Summary", "Introduction", etc.) and
+    tries the next H1. The chosen H1 is removed from the markdown so it doesn't
+    duplicate the hero h1. An H2 is never used: it is a section of the body, and
+    lifting it out would delete that section. With no usable H1 the title is the
+    query and the markdown is returned unchanged.
     """
     if not markdown_text:
         return fallback, markdown_text
 
-    # Walk through headings (h1 first, then h2 anywhere) and use the first
-    # non-generic one. Track the chosen match so we can strip it from the body.
-    candidates = []
-    for level, pattern in ((1, r'^# +(.+?)\s*$'), (2, r'^## +(.+?)\s*$')):
-        for m in re.finditer(pattern, markdown_text, re.MULTILINE):
-            cand = m.group(1).strip().rstrip('#').strip()
-            if cand and cand.lower() not in _GENERIC_HEADINGS:
-                candidates.append((level, m, cand))
-
-    # Prefer h1 over h2; among same-level, prefer the earliest.
-    candidates.sort(key=lambda t: (t[0], t[1].start()))
-    if candidates:
-        _level, match, title = candidates[0]
-        stripped = markdown_text[:match.start()] + markdown_text[match.end():]
-        return title, stripped.lstrip()
+    for m in re.finditer(r'^# +(.+?)\s*$', markdown_text, re.MULTILINE):
+        cand = m.group(1).strip().rstrip('#').strip()
+        if cand and cand.lower() not in _GENERIC_HEADINGS:
+            stripped = markdown_text[:m.start()] + markdown_text[m.end():]
+            return cand, stripped.lstrip()
     return fallback, markdown_text
 
 

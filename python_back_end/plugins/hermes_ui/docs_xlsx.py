@@ -1,16 +1,24 @@
-"""A sheet block to .xlsx and .csv: real numbers, live formulas, a bold frozen header."""
+"""A sheet block to .xlsx and .csv: real numbers, live formulas, a bold frozen header.
+
+An xlsx with formulas is sent through the document sandbox's /recalc (docs_render_client.recalc_xlsx) so the
+file carries each formula's value, not only its text: a viewer that does not calculate (a phone preview, a
+parser, python's openpyxl) then shows numbers. When the sandbox is down the unrecalculated bytes are returned.
+"""
 from __future__ import annotations
 
 import csv
 import io
+import logging
+import os
 import re
+from typing import Optional
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from .docs_blocks import inline_runs, plain_text
-from .docs_formula import FormulaError, evaluate, is_safe_formula, parse_number
+from .docs_formula import FormulaError, Unknowable, evaluate_any, is_safe_formula, parse_number
 from .docs_parse import ParsedDoc, Sheet
 
 _BAD_NAME = re.compile(r"[\[\]:*?/\\]")
@@ -18,6 +26,8 @@ _HEADER_FILL = PatternFill("solid", fgColor="DDE7F3")
 _RULE = Border(bottom=Side(style="thin", color="8AA4C8"))
 # Models bold whole total cells (**=SUM(B2:B4)**, **2700**): still a formula or a number, shown bold.
 _WHOLE_BOLD = re.compile(r"^\s*(\*\*|__)(.+)\1\s*$")
+_COUNTING = re.compile(r"^=\s*COUNT(?:A|IF|IFS)?\s*\(", re.I)     # a count is a plain number, whatever the column shows
+log = logging.getLogger(__name__)
 
 
 def _unwrap(raw: str) -> tuple[str, bool]:
@@ -48,13 +58,51 @@ def _is_formula(raw: str) -> bool:
     return raw.strip().startswith("=") and len(raw.strip()) > 1
 
 
+def _carry_formats(ws, typed: dict[int, list[tuple[int, Optional[str]]]], formulas: list[tuple[int, int, str]]) -> None:
+    """A formula cell shows its result the way the column shows its numbers: the format of the nearest typed number
+    above it (or below, when none is above), so a currency column's total is currency and not 1234.5."""
+    for ri, ci, text in formulas:
+        near = typed.get(ci)
+        if not near or _COUNTING.match(text):
+            continue
+        _row, fmt = min(near, key=lambda t: (abs(t[0] - ri), t[0] > ri))
+        if fmt:
+            ws.cell(row=ri, column=ci).number_format = fmt
+
+
+def _recalc_enabled() -> bool:
+    return os.environ.get("DOCS_XLSX_RECALC", "1").strip().lower() not in ("0", "off", "false", "no")
+
+
+def _recalculated(plain: bytes) -> bytes:
+    """``plain`` after the sandbox calculated every formula, or ``plain`` itself when it cannot."""
+    if not _recalc_enabled():
+        return plain
+    try:
+        from .docs_render_client import recalc_xlsx     # not at the top: it reads the environment and opens sockets
+        fresh = recalc_xlsx(plain)
+        if not fresh:
+            return plain
+        names = [load_workbook(io.BytesIO(b), read_only=True).sheetnames for b in (plain, fresh)]
+        if names[0] != names[1]:                        # a recalculation that renamed or dropped a sheet is not ours
+            log.warning("recalculated workbook has different sheets; keeping the original")
+            return plain
+        return fresh
+    except Exception:                                   # noqa: BLE001 - values are a nicety; the export must succeed
+        log.warning("xlsx recalculation failed; exporting without cached values", exc_info=True)
+        return plain
+
+
 def build_xlsx(doc: ParsedDoc) -> bytes:
     wb = Workbook()
     wb.remove(wb.active)
     used: set[str] = set()
+    live = False
     for n, sheet in enumerate(doc.sheets, 1):
         ws = wb.create_sheet(_sheet_name(sheet.name, n, used))
         widths: dict[int, int] = {}
+        typed: dict[int, list[tuple[int, Optional[str]]]] = {}      # column -> (row, number format) of typed numbers
+        formulas: list[tuple[int, int, str]] = []                   # (row, column, text) of live formulas
         for ri, row in enumerate(sheet.rows, 1):
             for ci, original in enumerate(row, 1):
                 cell = ws.cell(row=ri, column=ci)
@@ -67,12 +115,15 @@ def build_xlsx(doc: ParsedDoc) -> bytes:
                 if _is_formula(raw) and ri > 1:
                     text = raw.strip()
                     cell.value = text
-                    if not is_safe_formula(text):          # unknown function or an external reference
+                    if is_safe_formula(text):
+                        formulas.append((ri, ci, text))
+                    else:                                  # unknown function or an external reference
                         cell.data_type = "s"
                 else:
                     number = parse_number(raw) if ri > 1 else None
                     if number:
                         cell.value, fmt = number
+                        typed.setdefault(ci, []).append((ri, fmt))
                         if fmt:
                             cell.number_format = fmt
                         shown = len(str(raw)) + 2
@@ -93,13 +144,27 @@ def build_xlsx(doc: ParsedDoc) -> bytes:
         for ci, w in widths.items():
             ws.column_dimensions[get_column_letter(ci)].width = min(max(w, 8), 60)
         ws.freeze_panes = "A2"
+        _carry_formats(ws, typed, formulas)
+        live = live or bool(formulas)
     out = io.BytesIO()
     wb.save(out)
-    return out.getvalue()
+    return _recalculated(out.getvalue()) if live else out.getvalue()
 
 
 def _number_text(value: float) -> str:
     return str(int(value)) if value == int(value) else repr(round(value, 10))
+
+
+def _result_text(v) -> str:
+    """A formula's result as the cell would show it: a number, TRUE/FALSE, or its text."""
+    if isinstance(v, bool):
+        return "TRUE" if v else "FALSE"
+    return v if isinstance(v, str) else _number_text(v)
+
+
+def _csv_text(text: str) -> str:
+    """A text cell that opens like a formula is quoted so a spreadsheet shows it as text."""
+    return "'" + text if text[:1] in ("=", "+", "-", "@", "\t", "\r") and not parse_number(text) else text
 
 
 def build_csv(sheet: Sheet) -> bytes:
@@ -110,20 +175,20 @@ def build_csv(sheet: Sheet) -> bytes:
     busy: set[tuple[int, int]] = set()
 
     def value(r: int, c: int):
-        """The cell as a number (formulas evaluated), or None when empty or text."""
+        """What a formula reads from the cell: a number (formulas evaluated), its text, or None when empty."""
         key = (r, c)
         if key in cache:
             return cache[key]
         raw = _unwrap(rows[r][c])[0] if r < len(rows) and c < len(rows[r]) else ""
         if key in busy:
-            raise FormulaError("circular")
+            raise Unknowable("circular")
         busy.add(key)
         try:
             if r > 0 and _is_formula(raw):
-                result = evaluate(raw, value)
+                result = evaluate_any(raw, value)
             else:
                 parsed = parse_number(raw) if r > 0 else None
-                result = parsed[0] if parsed else None
+                result = parsed[0] if parsed else (clean_text(raw)[0] or None)
         finally:
             busy.discard(key)
         cache[key] = result
@@ -136,12 +201,11 @@ def build_csv(sheet: Sheet) -> bytes:
         for c, raw in enumerate(row):
             if r > 0 and _is_formula(_unwrap(raw)[0]):
                 try:
-                    line.append(_number_text(value(r, c)))
-                except (FormulaError, ZeroDivisionError, TypeError):
+                    result = value(r, c)
+                    line.append(_csv_text(result) if isinstance(result, str) else _result_text(result))
+                except (FormulaError, ZeroDivisionError, TypeError, OverflowError, ValueError):
                     line.append("#VALUE!")
                 continue
-            text = clean_text(raw)[0]
-            # A text cell that opens like a formula is quoted so a spreadsheet shows it as text.
-            line.append("'" + text if text[:1] in ("=", "+", "-", "@", "\t", "\r") and not parse_number(text) else text)
+            line.append(_csv_text(clean_text(raw)[0]))
         writer.writerow(line)
     return b"\xef\xbb\xbf" + out.getvalue().encode("utf-8")
