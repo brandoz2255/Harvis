@@ -133,6 +133,23 @@ describe('parseHarvisDoc', () => {
     expect(parseHarvisDoc('---\nkind: deck\ntitle: T\noutline:\n  - Intro\n  - Thre').outline).toEqual(['Intro'])
   })
 
+  it('reads the theme header, lowercased, unquoted and without a trailing comment', () => {
+    expect(parseHarvisDoc('---\nkind: deck\ntitle: T\ntheme: Paper\n---\n# T').theme).toBe('paper')
+    expect(parseHarvisDoc('---\nkind: deck\ntheme: "slate"\n---\n# T').theme).toBe('slate')
+    expect(parseHarvisDoc('---\nkind: deck\ntheme: ember   # harvis | paper | slate\n---\n# T').theme).toBe('ember')
+  })
+
+  it('has no theme when the header does not name one, and keeps an unknown name for the exporter to default', () => {
+    expect(parseHarvisDoc('---\nkind: deck\ntitle: T\n---\n# T').theme).toBe('')
+    expect(parseHarvisDoc('# Plain').theme).toBe('')
+    expect(parseHarvisDoc('---\nkind: doc\ntheme: neon\n---\n## A\nx').theme).toBe('neon')
+  })
+
+  it('reads the theme before the header closes, but not a half-typed name', () => {
+    expect(parseHarvisDoc('---\nkind: deck\ntheme: paper\n').theme).toBe('paper')
+    expect(parseHarvisDoc('---\nkind: deck\ntheme: pap').theme).toBe('')
+  })
+
   it('reads an inline outline without its closing bracket yet', () => {
     expect(parseHarvisDoc('---\ntitle: T\noutline: [A, B\n').outline).toEqual(['A', 'B'])
     expect(parseHarvisDoc('---\ntitle: T\noutline: [A, B]\n').outline).toEqual(['A', 'B'])
@@ -226,6 +243,15 @@ describe('parseSheetTable', () => {
     expect(parseSheetTable('| A | B |\n|:--|--:|\n| a\\|b | 2 |')).toEqual([
       ['A', 'B'],
       ['a|b', '2']
+    ])
+  })
+})
+
+describe('parseSheetTable single-hyphen divider', () => {
+  it('drops a `| - | - |` divider row like the export does', () => {
+    expect(parseSheetTable('| A | B |\n| - | - |\n| 1 | 2 |')).toEqual([
+      ['A', 'B'],
+      ['1', '2']
     ])
   })
 })

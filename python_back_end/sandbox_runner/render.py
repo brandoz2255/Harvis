@@ -1,4 +1,5 @@
-"""Office file or PDF -> page images and text, using headless LibreOffice and pdfium."""
+"""Office file or PDF -> page images and text, and xlsx -> xlsx with calculated values, using headless
+LibreOffice and pdfium."""
 import base64
 import binascii
 import json
@@ -20,28 +21,36 @@ FORMATS = ("pptx", "docx", "xlsx", "pdf")
 MAX_PNG_BYTES = 40 * 1024 * 1024  # all pages together; later pages are dropped past this
 
 
-def to_pdf(data, ext, tmp):
-    """Convert with soffice in a profile of its own; returns the PDF bytes."""
-    src = os.path.join(tmp, f"input.{ext}")
-    with open(src, "wb") as fh:
-        fh.write(data)
+def _soffice(src, outdir, target, tmp):
+    """Convert src with soffice in a profile of its own; the result lands in outdir.
+
+    Returns the last line soffice wrote to stderr, for the caller's message when no file came out."""
     profile = os.path.join(tmp, "lo")
     env = {"PATH": SAFE_PATH, "HOME": tmp, "TMPDIR": os.path.join(tmp, "tmp"), "LANG": "C.UTF-8"}
     os.mkdir(env["TMPDIR"])
     # No RLIMIT_AS: LibreOffice maps far more address space than it ever touches.
     cmd = [sys.executable, "-I", CHILD, "exec", "0", str(CONVERT_TIMEOUT + 10), str(200 * 1024 * 1024), "1024", "--",
            "soffice", "--headless", "--norestore", "--nologo", f"-env:UserInstallation=file://{profile}",
-           "--convert-to", "pdf", "--outdir", tmp, src]
+           "--convert-to", target, "--outdir", outdir, src]
     rc, reason = supervise(cmd, tmp, env, CONVERT_TIMEOUT, tmp,
                            os.path.join(tmp, "so.txt"), os.path.join(tmp, "se.txt"))
     if rc == HARDEN_FAILED:
         raise JobError("sandbox hardening failed; the file was not converted")
     if reason == "timeout":
         raise JobError(f"converting the file took longer than {CONVERT_TIMEOUT} seconds")
+    detail = scrub(read_capped(os.path.join(tmp, "se.txt")), tmp).strip().splitlines()
+    return rc, (f": {detail[-1][:200]}" if detail else "")
+
+
+def to_pdf(data, ext, tmp):
+    """Convert with soffice in a profile of its own; returns the PDF bytes."""
+    src = os.path.join(tmp, f"input.{ext}")
+    with open(src, "wb") as fh:
+        fh.write(data)
+    rc, detail = _soffice(src, tmp, "pdf", tmp)
     pdf = os.path.join(tmp, "input.pdf")
     if rc != 0 or not os.path.isfile(pdf):
-        detail = scrub(read_capped(os.path.join(tmp, "se.txt")), tmp).strip().splitlines()
-        raise JobError("could not convert the file to PDF" + (f": {detail[-1][:200]}" if detail else ""))
+        raise JobError("could not convert the file to PDF" + detail)
     with open(pdf, "rb") as fh:
         return fh.read()
 
@@ -105,5 +114,37 @@ def render(b64, ext, max_pages=20, scale=1.0, want_pdf=False):
         if want_pdf:
             out["pdf_b64"] = base64.b64encode(pdf).decode()
         return out
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def recalc(b64):
+    """An .xlsx with every formula calculated and its value stored, for viewers that do not calculate.
+
+    LibreOffice computes cells that carry no stored value when it loads them, and saving writes the values
+    beside the formulas. Returns {"ok": True, "b64": <xlsx>}."""
+    try:
+        data = base64.b64decode(str(b64 or ""), validate=True)
+    except (binascii.Error, ValueError):
+        raise JobError("b64 is not valid base64") from None
+    if not data.startswith(b"PK"):
+        raise JobError("the file is not a valid .xlsx file")
+    tmp = tempfile.mkdtemp(prefix="recalc-")
+    try:
+        indir, outdir = os.path.join(tmp, "in"), os.path.join(tmp, "out")
+        os.mkdir(indir)
+        os.mkdir(outdir)
+        src = os.path.join(indir, "input.xlsx")
+        with open(src, "wb") as fh:
+            fh.write(data)
+        rc, detail = _soffice(src, outdir, "xlsx", tmp)
+        result = os.path.join(outdir, "input.xlsx")
+        if rc != 0 or not os.path.isfile(result):
+            raise JobError("could not recalculate the file" + detail)
+        with open(result, "rb") as fh:
+            fresh = fh.read()
+        if not fresh.startswith(b"PK"):
+            raise JobError("could not recalculate the file")
+        return {"ok": True, "b64": base64.b64encode(fresh).decode()}
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

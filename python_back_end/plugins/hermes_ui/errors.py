@@ -6,6 +6,7 @@ person reading the chat needs to know what to do next.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Optional
 
 import httpx
@@ -19,6 +20,8 @@ _BY_STATUS = {
     413: "That message or its attachments are too large for this model. Shorten it and retry.",
     429: "The model is busy or you hit a usage limit. Wait a moment, then retry.",
 }
+# A 401 from the model's provider is a bad API key, not an expired Harvis session.
+_PROVIDER_401 = "The model provider rejected the API key. Check the key for this provider, then retry."
 _SERVER_DOWN = "The model server is not responding. Check that it is running, then retry."
 _FALLBACK = "Something went wrong while answering. Retry, and check the Harvis logs if it keeps happening."
 
@@ -55,15 +58,31 @@ class TurnError(RuntimeError):
         self.status = status
 
 
-def from_http(status: int, body: Any) -> TurnError:
+def from_http(status: int, body: Any, *, upstream: bool = False) -> TurnError:
+    """``upstream``: the status came from the model provider, not from Harvis itself."""
     detail = detail_text(body)
-    sentence = _BY_STATUS.get(status)
+    sentence = _PROVIDER_401 if upstream and status == 401 else _BY_STATUS.get(status)
     if sentence is None:
         sentence = _SERVER_DOWN if status >= 500 else _FALLBACK
     # A 4xx body often names the real reason in a short sentence ("model 'x' not found").
     if status in (400, 404) and detail and len(detail) <= 160 and "{" not in detail and "Traceback" not in detail:
         sentence = f"{sentence} ({detail.rstrip('.')})"
     return TurnError(sentence, raw=f"HTTP {status}: {str(body)[:400]}", status=status)
+
+
+_UPSTREAM = re.compile(r"^Upstream error (\d{3}): (.*)$", re.S)
+
+
+def from_chunk(err: Any) -> str:
+    """The sentence for an ``error`` chunk in the chat stream; the proxy wraps a failed
+    upstream call as "Upstream error <status>: <body>"."""
+    if not err:
+        return _FALLBACK
+    msg = str(err.get("message") or "") if isinstance(err, dict) else str(err)
+    m = _UPSTREAM.match(msg.strip())
+    if m:
+        return str(from_http(int(m.group(1)), m.group(2), upstream=True))
+    return friendly(RuntimeError(err))
 
 
 def friendly(exc: BaseException) -> str:

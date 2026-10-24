@@ -27,8 +27,9 @@ def deck(*slides: str, title: str = "Status") -> str:
 
 
 def layout_issues(source: str) -> list:
+    """Overflow and glyph findings; 'mostly empty' has its own tests below."""
     _issues, files, doc = docs_check.check_source(source)
-    return layout.check_layout(doc, files["pptx"])
+    return [i for i in layout.check_layout(doc, files["pptx"]) if "mostly empty" not in i["message"]]
 
 
 def blank_deck(build) -> bytes:
@@ -285,3 +286,43 @@ def test_an_overflowing_body_placeholder_is_named_the_body_text():
     prs.save(out)
     msgs = [i["message"] for i in layout.deck_issues(out.getvalue())]
     assert msgs and msgs[0].startswith("The body text")
+
+
+# ---- slides that are nearly empty -------------------------------------------------------------
+
+def sparse(source: str) -> list:
+    _issues, files, doc = docs_check.check_source(source)
+    return [i for i in layout.check_layout(doc, files["pptx"]) if "mostly empty" in i["message"]]
+
+
+def test_a_slide_with_only_a_title_is_a_section_divider_not_an_empty_slide():
+    # The writer draws a title-only slide as a divider (large title, running number in a subtitle placeholder),
+    # which is a deliberate layout, so it is not reported.
+    source = deck("## Next steps", "## Real content\n- One full point about the work\n- Another full point about it")
+    _issues, files, _doc = docs_check.check_source(source)
+    prs = Presentation(io.BytesIO(files["pptx"]))
+    assert prs.slides[1].slide_layout.name == "Section Header"
+    assert sparse(source) == []
+
+
+def test_a_content_slide_with_a_title_and_two_words_is_mostly_empty():
+    hits = sparse(deck("## Next steps\n- Ship it", "## Real content\n- One full point about the work\n- Another full point"))
+    assert [i["where"] for i in hits] == ["slide 2"] and hits[0]["severity"] == "warn"
+    assert "mostly empty" in hits[0]["message"]
+
+
+def test_a_slide_with_one_short_bullet_is_mostly_empty():
+    assert [i["where"] for i in sparse(deck("## Plan\n- point"))] == ["slide 2"]
+
+
+def test_slides_with_real_content_are_not_mostly_empty():
+    ordinary = "## Why\n- Local AI assistant\n- Runs on a 4090\n- Open source and self hosted"
+    assert sparse(deck(ordinary)) == []
+    assert sparse(deck("## Plan\n- Ship it\n- Test it")) == []
+    assert sparse(rich_deck(*ALL_SLIDES)) == []
+    assert sparse(deck("## Costs\n| Item | Cost |\n| --- | --- |\n| Switch | 300 |")) == []
+    assert sparse(CHECK_DECK) == [] and sparse(EXPORT_DECK) == []
+
+
+def test_the_title_slide_is_never_mostly_empty():
+    assert sparse("---\nkind: deck\ntitle: Status\n---\n# Status\n") == []

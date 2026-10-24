@@ -25,13 +25,22 @@ COMMANDS: tuple[tuple[str, str, str, Optional[str]], ...] = (
     ("/model", "Show or switch the model for this chat", "<name>", "mixed"),
     ("/web", "Turn live web search on or off for this chat", "on|off", "options"),
     ("/research", "Run deep research on a question", "<question>", "text"),
+    ("/deck", "Make a slide deck (.pptx) about a topic", "<topic>", "text"),
+    ("/doc", "Make a Word document (.docx) about a topic", "<topic>", "text"),
+    ("/sheet", "Make a spreadsheet (.xlsx) about a topic", "<topic>", "text"),
+    ("/pdf", "Make a PDF about a topic", "<topic>", "text"),
     ("/help", "List the slash commands", "", None),
 )
 ALIASES = {"/reset": "/new", "/clear": "/new", "/fork": "/branch", "/aside": "/btw", "/compact": "/compress", "/commands": "/help",
-           "/deep-research": "/research", "/deepresearch": "/research"}
+           "/deep-research": "/research", "/deepresearch": "/research",
+           "/slides": "/deck", "/ppt": "/deck", "/powerpoint": "/deck", "/excel": "/sheet", "/word": "/doc"}
 SECTIONS = (("Chat", ("/new", "/title", "/branch", "/btw", "/compress", "/save")),
             ("Info", ("/status", "/usage", "/help")),
-            ("Model and search", ("/model", "/web", "/research")))
+            ("Model and search", ("/model", "/web", "/research")),
+            ("Make a file", ("/deck", "/doc", "/sheet", "/pdf")))
+# Each file command sends a plain request the doc detector is proven to match
+# (tests/test_hermes_doc_routing.py), so a missed wording can still be forced.
+FILE_COMMANDS = {"/deck": "slide deck", "/doc": "Word document", "/sheet": "spreadsheet", "/pdf": "PDF"}
 WEB_OPTIONS = (("on", "Search the web on every message"), ("off", "Answer without searching the web"))
 
 
@@ -139,6 +148,11 @@ class SlashMethods:
             if not arg:
                 return {"output": "Usage: /research <question>"}
             return {"type": "send", "message": f"Deep research: {arg}", "notice": "Starting deep research."}
+        if cmd in FILE_COMMANDS:
+            if not arg:
+                return {"output": f"Usage: {cmd} <topic>"}
+            kind = FILE_COMMANDS[cmd]
+            return {"type": "send", "message": f"Make a {kind} about: {arg}", "notice": f"Making a {kind}."}
         if cmd == "/web":
             return await self._web_command(s, arg)
         if cmd == "/title":

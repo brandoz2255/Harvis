@@ -237,19 +237,20 @@ class IngestionService:
             IngestionService._working_model = None
 
         # nomic-embed-text (the default) is the dedicated embedder; the rest are
-        # preferred fallbacks. llama3.1:8b DOES support /api/embeddings (native
-        # 4096-dim = our target_dim). A hardcoded list only works on a deploy
-        # that happens to have one of these pulled, so after the preferred
-        # names we try whatever Ollama actually reports as installed.
+        # preferred fallbacks. A hardcoded list only works on a deploy that happens
+        # to have one of these pulled, so after the preferred names we try whatever
+        # embedding model Ollama actually reports as installed. A chat model is
+        # never used: its vectors live in a different space, so installing nomic
+        # later would leave every earlier chunk unfindable.
+        from .embedder_status import is_embedder
+
         embedding_models = [
             EMBEDDING_MODEL,          # nomic-embed-text (dedicated, default)
             "qwen3-embedding:4b",
             "mxbai-embed-large",
-            "llama3.1:8b",
-            "mistral",
         ]
         for model in await asyncio.to_thread(self._installed_models):
-            if model not in embedding_models:
+            if model not in embedding_models and is_embedder(model):
                 embedding_models.append(model)
 
         for model in embedding_models:

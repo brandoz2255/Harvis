@@ -69,17 +69,17 @@ def draw_timeline(slide, t: Timeline, area: Area) -> None:
             xb = max(bx0 + b * (bx1 - bx0), xa + 0.08)
             box(slide, xa, mid - bar_h / 2, xb - xa, bar_h, fill=color, shape=MSO_SHAPE.ROUNDED_RECTANGLE, radius=0.3)
             lo, hi = xa, xb
-        tw = text_width(item.when, 11, bold=item.key) / 72 + 0.12
+        tw = text_width(item.when, 11, bold=item.key) / 72 + 0.2
         x, side = side_label(lo, hi, tw, x0, left + width, 0.06)
         if side == "inside":
             text(slide, lo, mid - row_h / 2, hi - lo, row_h, item.when, 11, color="FFFFFF", bold=item.key,
                  anchor=MIDDLE, min_size=8)
         elif side == "start":
             text(slide, x, mid - row_h / 2, tw, row_h, item.when, 11, color=color if item.key else MUTED,
-                 bold=item.key, anchor=MIDDLE, min_size=8)
+                 bold=item.key, anchor=MIDDLE, min_size=8, wrap=False)
         else:
             text(slide, x - tw, mid - row_h / 2, tw, row_h, item.when, 11, color=color if item.key else MUTED,
-                 bold=item.key, anchor=MIDDLE, align=RIGHT, min_size=8)
+                 bold=item.key, anchor=MIDDLE, align=RIGHT, min_size=8, wrap=False)
     if len(t.items) > len(items):
         muted(slide, left, grid_bottom + 0.02, width, 0.28, f"… {len(t.items) - len(items)} more", 11, min_size=8)
 

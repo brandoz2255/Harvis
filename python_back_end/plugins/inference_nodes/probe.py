@@ -28,6 +28,9 @@ logger = logging.getLogger(__name__)
 
 PROBE_TTL_S = float(os.getenv("HARVIS_NODE_PROBE_TTL_S", "10"))
 PROBE_TIMEOUT_S = float(os.getenv("HARVIS_NODE_PROBE_TIMEOUT_S", "4"))
+# A reachable host finishes the handshake in milliseconds; one that is unplugged or off
+# the network never answers, so it should not hold the whole read budget.
+CONNECT_TIMEOUT_S = float(os.getenv("HARVIS_PROBE_CONNECT_TIMEOUT_S", "1.5"))
 
 _cache: dict[str, NodeState] = {}
 _cache_at: float = 0.0
@@ -83,7 +86,7 @@ def _visible(model_id: str, entry: dict | None = None) -> bool:
 
 
 async def _probe_openai(spec: NodeSpec, timeout: float, st: NodeState) -> None:
-    async with httpx.AsyncClient(timeout=httpx.Timeout(timeout), headers=spec.headers()) as hc:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=min(timeout, CONNECT_TIMEOUT_S)), headers=spec.headers()) as hc:
         try:
             r = await hc.get(f"{spec.base_url}/v1/models")
         except Exception as e:
@@ -129,7 +132,7 @@ async def _probe_openai(spec: NodeSpec, timeout: float, st: NodeState) -> None:
 
 
 async def _probe_ollama(spec: NodeSpec, timeout: float, st: NodeState) -> None:
-    async with httpx.AsyncClient(timeout=httpx.Timeout(timeout), headers=spec.headers()) as hc:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=min(timeout, CONNECT_TIMEOUT_S)), headers=spec.headers()) as hc:
         try:
             r = await hc.get(f"{spec.base_url}/api/tags")
         except Exception as e:
@@ -298,7 +301,7 @@ async def live_stats(name: str, *, timeout: float = PROBE_TIMEOUT_S) -> dict | N
         return None
     out: dict = {"name": spec.name, "label": spec.label, "reachable": False, "error": None,
                  "health": {}, "stats": {}}
-    async with httpx.AsyncClient(timeout=httpx.Timeout(timeout), headers=spec.headers()) as hc:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=min(timeout, CONNECT_TIMEOUT_S)), headers=spec.headers()) as hc:
         for path, slot in (("/health", "health"), ("/v1/stats", "stats")):
             try:
                 r = await hc.get(f"{spec.base_url}{path}")

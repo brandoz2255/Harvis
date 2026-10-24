@@ -21,6 +21,10 @@ from owui_compat.doc_bridge import detect_doc_kind, doc_system_prompt, maybe_pre
     ("Make me a deck about our Q3 security review", "deck"),
     ("create a 10 slide presentation on zero trust", "deck"),
     ("Can you put together a slideshow for the board?", "deck"),
+    ("make me a slide show", "deck"),
+    ("make me a slide show about cats", "deck"),
+    ("create a slide-show on k3s", "deck"),
+    ("build me a power point about phishing", "deck"),
     ("could you please build a PowerPoint about phishing", "deck"),
     ("I need a pitch deck for my startup", "deck"),
     ("generate 8 slides on cloud costs", "deck"),
@@ -61,6 +65,60 @@ from owui_compat.doc_bridge import detect_doc_kind, doc_system_prompt, maybe_pre
     ("summarize this article and turn it into a one-pager", "doc"),
     ("extract the tables from this pdf and make a spreadsheet", "sheet"),
     ("make a pdf deck of the roadmap", "deck"),
+    ("slide deck on k3s", "deck"),
+    ("a powerpoint about dogs", "deck"),
+    ("powerpoint about dogs please", "deck"),
+    ("can i get slides for class", "deck"),
+    ("could I have a presentation on dna", "deck"),
+    ("get me a pdf of the notes", "pdf"),
+    ("get me a pdf", "pdf"),
+    ("send me a presentation about dna", "deck"),
+    ("gimme a deck on the market", "deck"),
+    ("make me a python cheat sheet", "doc"),
+    ("make a docker cheat sheet", "doc"),
+    ("write a python tutorial document", "doc"),
+    ("i need to present on climate change tomorrow", "deck"),
+    ("I have to present about phishing on Monday", "deck"),
+    ("i'm presenting on zero trust friday", "deck"),
+    ("make me a sildeshow", "deck"),
+    ("make a powerpint", "deck"),
+    ("make a pwerpoint about dogs", "deck"),
+    ("make a presentaion about cats", "deck"),
+    ("make me a speadsheet of expenses", "sheet"),
+    ("make a spreedsheet", "sheet"),
+    ("make a spredsheet", "sheet"),
+    ("make a presention on dogs", "deck"),
+    ("make a presentaton on dogs", "deck"),
+    ("make a slide about dogs", "deck"),
+    ("make a title slide for my talk", "deck"),
+    ("write the outline, then make the slides", "deck"),
+    ("write the report and then build a spreadsheet of the costs", "sheet"),
+    ("explain k3s, then make a deck about it", "deck"),
+    ("set up a slideshow for the standup", "deck"),
+    ("whip me up a presentation", "deck"),
+    ("I need to make a deck", "deck"),
+    ("can you help me make a slideshow", "deck"),
+    ("make this into slides", "deck"),
+    ("write a report as a pdf", "pdf"),
+    ("presentation on k3s", "deck"),
+    ("pptx please", "deck"),
+    ("a pdf of the onboarding checklist", "pdf"),
+    ("hazme una presentacion", "deck"),
+    ("hazme una presentación sobre el cambio climático", "deck"),
+    ("fais-moi un diaporama sur les chats", "deck"),
+    ("erstelle eine Präsentation über Katzen", "deck"),
+    ("crea una hoja de cálculo de gastos", "sheet"),
+    ("做一个关于猫的幻灯片", "deck"),
+    ("写一份关于网络安全的报告", "doc"),
+    ("帮我做一个ppt", "deck"),
+    ("make a deck on the pool party", "deck"),
+    ("make slides on the pool safety rules", "deck"),
+    ("build a deck on my house renovation", "deck"),
+    ("make a deck for our home buyers", "deck"),
+    ("make me a python cheat sheet", "doc"),
+    ("write a python guide", "doc"),
+    ("I need to present on climate change tomorrow", "deck"),
+    ("get me a pdf of the notes", "pdf"),
 ])
 def test_a_request_to_make_a_document_is_detected(text, kind):
     assert detect_doc_kind(text) == kind
@@ -105,10 +163,133 @@ def test_a_request_to_make_a_document_is_detected(text, kind):
     "write a unit test for the report generator",
     "create a table of the ports",
     "hello",
+    "build a deck for my house",
+    "build a deck for my backyard",
+    "make a patio deck",
+    "make a deck of cards",
+    "shuffle a deck of cards",
+    "give me an outline of the french revolution",
+    "draft an outline",
+    "make an outline for my presentation",
+    "write a python script that makes a pdf",
+    "write a function that parses a pdf",
+    "write a javascript function that builds a deck",
+    "create a pdf parser in rust",
+    "how do I make slides in google",
+    "a slide on the playground",
+    "slide on over here",
+    "pdf reader for linux",
+    "excel in college",
+    "csv or xlsx for this?",
+    "is the presentation ready",
+    "slides are blurry when i export",
+    "i need to finish my report",
+    "i want to know how to make a pdf",
+    "cómo hago una presentación",
+    "how do I make a presentation in powerpoint",
+    "explica la diferencia entre un pdf y un docx",
+    "crea un script que genere un pdf",
+    "怎么做ppt",
+    # a request to do something with a file that exists, in another language
+    "帮我总结一下这份报告",
+    "请把这个pdf翻译成中文",
+    "帮我打开这个pdf",
+    "给我解释一下这个表格",
+    "我想要学习excel",
+    "请问ppt",
+    "帮我检查简历",
+    "fais un resume de ce pdf",
+    "haz que el pdf sea mas pequeno",
+    "mach das pdf kleiner",
+    "haz una pregunta sobre el excel",
+    "quiero hacer mi tarea sobre el pdf",
+    # software that happens to name a format
+    "write a javascript slideshow",
+    "build a javascript slideshow for my website",
+    "write a bash pdf merger",
+    "make a typescript excel exporter",
+    "create a python excel automation",
+    "build a python spreadsheet",
+    "write a sql spreadsheet importer",
+    # presenting is logistics, advice or a question, not a request for a deck
+    "I have to present on zoom tomorrow, how do I share my screen",
+    "I'm presenting on Friday and I'm nervous, any tips for calming down?",
+    "I need to present on Monday, how should I prepare?",
+    "we're presenting on stage at 3",
+    # a file that exists, with something to do to it
+    "I'm trying to make a pdf smaller",
+    "I'm trying to make a pdf searchable",
+    "I gotta get the slides printed",
+    "can I get the report by friday",
+    "get me the report from yesterday",
+    "I've got to have the slides done by tomorrow",
     "",
 ])
 def test_questions_and_code_requests_are_left_alone(text):
     assert detect_doc_kind(text) is None
+
+
+def test_a_named_format_beats_a_generic_document_in_a_multi_clause_request():
+    assert detect_doc_kind("write the outline, then make the slides") == "deck"
+    assert detect_doc_kind("make the slides, then write a report") == "deck"
+    assert detect_doc_kind("write a report, then make a memo") == "doc"
+
+
+def test_a_bare_format_noun_needs_a_short_message_and_a_subject_word_next():
+    assert detect_doc_kind("deck on k3s") == "deck"
+    assert detect_doc_kind("a deck " + "about the history of everything " * 5) is None
+    assert detect_doc_kind("pdf reader") is None
+    assert detect_doc_kind("slides on k3s?") is None
+
+
+def test_a_foreign_request_needs_the_file_to_be_the_direct_object():
+    assert detect_doc_kind("hazme una presentacion corta") == "deck"
+    assert detect_doc_kind("hazme 10 diapositivas sobre gatos") == "deck"
+    assert detect_doc_kind("erstelle mir eine Präsentation über Katzen") == "deck"
+    assert detect_doc_kind("hazme una pregunta sobre la presentacion") is None
+    assert detect_doc_kind("mach mir ein pdf") == "pdf"
+    assert detect_doc_kind("mach dieses pdf kleiner") is None
+    assert detect_doc_kind("帮我做一份简短的报告") == "doc"
+    assert detect_doc_kind("请做一个关于猫的ppt") == "deck"
+
+
+def test_a_language_name_vetoes_a_software_phrase_unless_a_document_noun_ends_it():
+    assert detect_doc_kind("make me a docker cheat sheet") == "doc"
+    assert detect_doc_kind("write a bash handout") == "doc"
+    assert detect_doc_kind("make a python slideshow") is None
+    assert detect_doc_kind("make a deck about python") == "deck"
+    assert detect_doc_kind("a slide deck on docker") == "deck"
+
+
+def test_presenting_logistics_stay_chat_even_with_a_document_already_in_the_chat():
+    prior_deck = "Here.\n\n````harvis-doc\n---\nkind: deck\ntitle: Fire Drill\n---\n# Fire Drill\n````\n"
+
+    for text in ("I'm presenting on Friday, any tips?", "I need to present on Monday",
+                 "I'm presenting on zoom at 3"):
+        body = {"messages": [{"role": "user", "content": "make a deck"},
+                             {"role": "assistant", "content": prior_deck},
+                             {"role": "user", "content": text}]}
+        assert detect_doc_kind(text) is None
+        assert maybe_prepare_doc_turn(body) is None
+
+
+def test_a_definite_file_after_a_get_or_want_lead_is_not_a_make_request_but_make_still_is():
+    assert detect_doc_kind("can I get a pdf of this") == "pdf"
+    assert detect_doc_kind("I need a resume") == "doc"
+    assert detect_doc_kind("give me the pdf") == "pdf"
+    assert detect_doc_kind("make the slides") == "deck"
+    assert detect_doc_kind("get me the slides") is None
+    assert detect_doc_kind("I'm trying to make a deck") == "deck"
+
+
+def test_typos_and_phrases_are_rewritten_to_the_words_the_detector_knows():
+    from owui_compat import doc_words
+
+    assert doc_words.normalize("A SILDESHOW and a Power Point") == "a slideshow and a powerpoint"
+    assert doc_words.normalize("make a slide-show") == "make a slideshow"
+    assert doc_words.normalize("a python cheat sheet") == "a python handout"
+    for typo, word in doc_words.TYPOS.items():
+        assert doc_words.normalize(f"make a {typo}") == f"make a {word}"
 
 
 def test_a_long_paste_is_judged_by_its_ends_not_its_middle():

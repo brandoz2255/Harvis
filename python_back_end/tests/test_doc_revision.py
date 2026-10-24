@@ -343,3 +343,104 @@ def test_an_edit_to_someone_elses_document_is_plain_chat(text):
 ])
 def test_a_possessive_that_points_at_the_document_still_revises(text):
     assert maybe_prepare_doc_turn(_chat(text)) == "deck"
+
+
+# ---- format changes worded the way people type them ----------------------------------------------
+
+DOC = DECK.replace("kind: deck", "kind: doc")
+
+
+@pytest.mark.parametrize("text", [
+    "turn it into a slide show",
+    "make it a power point",
+    "can you make that a slide show",
+    "make it a powerpint",
+    "turn it into a sildeshow",
+    "export it as a Power Point",
+])
+def test_after_a_document_slide_show_wording_converts_it_to_a_deck(text):
+    body = _chat(text, doc=DOC)
+    assert maybe_prepare_doc_turn(body) == "deck"
+    [prompt] = _system(body)
+    assert "CONVERSION" in prompt and "kind: deck" in prompt
+    assert "Fire Drill Results (Deck)" in prompt
+
+
+@pytest.mark.parametrize("text,kind", [
+    ("convert to pdf", "pdf"),
+    ("Convert to PDF", "pdf"),
+    ("export to excel", "sheet"),
+    ("download as pdf", "pdf"),
+    ("save as a word doc", "doc"),
+    ("give me this as a pdf", "pdf"),
+    ("send me that in word", "doc"),
+])
+def test_a_format_change_with_no_pronoun_converts_instead_of_revising(text, kind):
+    body = _chat(text)
+    assert maybe_prepare_doc_turn(body) == kind
+    [prompt] = _system(body)
+    assert "CONVERSION" in prompt and f"kind: {kind}" in prompt and "REVISION" not in prompt
+
+
+def test_a_deck_asked_to_become_a_slide_show_is_edited_in_place_not_copied():
+    body = _chat("turn it into a slide show")
+    assert maybe_prepare_doc_turn(body) == "deck"
+    [prompt] = _system(body)
+    assert "REVISION" in prompt and "CONVERSION" not in prompt
+
+
+@pytest.mark.parametrize("doc", [DECK, DOC])
+def test_make_it_shorter_still_revises_whatever_the_document_is(doc):
+    body = _chat("make it shorter", doc=doc)
+    assert maybe_prepare_doc_turn(body) == ("deck" if doc is DECK else "doc")
+    assert "REVISION" in _system(body)[0]
+
+
+@pytest.mark.parametrize("text,kind", [("convert to pdf", "pdf"), ("export to excel", "sheet")])
+def test_a_bare_format_change_with_no_document_in_the_chat_is_only_a_new_request(text, kind):
+    body = {"messages": [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"},
+                         {"role": "user", "content": text}]}
+    assert maybe_prepare_doc_turn(body) == kind
+    assert "CONVERSION" not in "".join(_system(body))
+
+
+@pytest.mark.parametrize("text", [
+    "save to my documents folder",
+    "put it in the fridge",
+    "convert to celsius",
+    "export to the cloud",
+    "turn to page 4",
+    "make it a table",
+    "save to the document folder",
+    "turn to the report section",
+    "export to the excel folder",
+    "convert to the pdf page",
+])
+def test_a_place_or_unit_after_a_convert_verb_is_not_a_format_change(text):
+    assert doc_revision.conversion_target(text) is None
+
+
+@pytest.mark.parametrize("text", ["convert to pdf please", "export to excel", "download as a pdf file",
+                                  "save as the word format", "convert to pdf."])
+def test_a_target_that_closes_the_clause_is_still_a_format_change(text):
+    assert doc_revision.conversion_target(text) is not None
+
+
+@pytest.mark.parametrize("text", ["save to the document folder", "turn to the report section"])
+def test_a_place_or_section_after_a_deck_is_not_a_conversion_in_the_chat(text):
+    body = _chat(text)
+    maybe_prepare_doc_turn(body)
+    assert "CONVERSION" not in "".join(_system(body))
+
+
+@pytest.mark.parametrize("text", ["add a slide on the pool party", "add a slide on the playground safety rules",
+                                  "add a slide at the park cleanup"])
+def test_a_slide_about_a_place_topic_is_still_an_edit_of_the_deck(text):
+    body = _chat(text)
+    assert maybe_prepare_doc_turn(body) == "deck"
+    assert "REVISION" in _system(body)[0]
+
+
+def test_conversion_names_part_sees_a_slide_show_by_name():
+    assert doc_revision.conversion_names_part("turn the power point into a pdf")
+    assert not doc_revision.conversion_names_part("convert to pdf")

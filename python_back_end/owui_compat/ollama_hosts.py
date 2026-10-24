@@ -57,6 +57,9 @@ logger = logging.getLogger(__name__)
 # burst of callers in one request from firing the same probe several times over.
 PROBE_TTL_S = float(os.getenv("HARVIS_OLLAMA_PROBE_TTL_S", "10"))
 PROBE_TIMEOUT_S = float(os.getenv("HARVIS_OLLAMA_PROBE_TIMEOUT_S", "4"))
+# A reachable host finishes the handshake in milliseconds; one that is unplugged or off
+# the network never answers, so it should not hold the whole read budget.
+CONNECT_TIMEOUT_S = float(os.getenv("HARVIS_PROBE_CONNECT_TIMEOUT_S", "1.5"))
 
 # The name of this install's own Ollama. Callers compare against it rather than
 # assuming what kind of machine Harvis runs on.
@@ -326,7 +329,7 @@ async def _probe(spec: HostSpec, timeout: float) -> HostState:
         st.last_good_tags = prev.last_good_tags
         st.last_good_at = prev.last_good_at
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as hc:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=min(timeout, CONNECT_TIMEOUT_S))) as hc:
             r = await hc.get(f"{base_url}/api/tags")
     except Exception as e:
         # The class name only. A connection error can carry the host, the port and the

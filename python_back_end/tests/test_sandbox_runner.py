@@ -342,6 +342,13 @@ def test_bad_requests_are_refused_without_a_traceback(base):
     assert status == 200 and not body["ok"] and "Traceback" not in json.dumps(body)
 
 
+def test_recalc_is_routed_and_refuses_bad_input_cleanly(base):
+    status, body = call(base, "/recalc", {"b64": "%%%"})
+    assert status == 200 and body == {"ok": False, "error": "b64 is not valid base64"}
+    status, body = call(base, "/recalc", {"b64": base64.b64encode(b"not a zip").decode()})
+    assert status == 200 and body == {"ok": False, "error": "the file is not a valid .xlsx file"}
+
+
 def test_oversized_body_is_refused_before_it_is_read(base):
     status, body = call(base, "/run", raw=b"{}", headers={"Content-Type": "application/json",
                                                            "Content-Length": str(server.MAX_BODY + 1)})

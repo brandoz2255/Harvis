@@ -1,10 +1,11 @@
 import { useStore } from '@nanostores/react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { requestComposerSubmit } from '@/app/chat/composer/focus'
 import { useSessionView } from '@/app/chat/session-view'
 import { useIsDark } from '@/components/assistant-ui/embeds/use-is-dark'
 import { PreviewAttachment } from '@/components/chat/preview-attachment'
+import { useArtifactBridge, withArtifactBridge } from '@/lib/artifact-bridge'
 import { readDesktopFileText } from '@/lib/desktop-fs'
 import { localPreviewTarget } from '@/lib/local-preview'
 
@@ -39,6 +40,11 @@ import { localPreviewTarget } from '@/lib/local-preview'
  * wakes and the durable row exists (context, resume, audit via the DB), but
  * no bubble renders — the widget updating is the visible response. Token-
  * gated, length-capped, throttled to human speed.
+ *
+ * SMART WIDGETS. `window.harvis.askModel(prompt)`, `saveData(key, value)` and
+ * `loadData(key)` (lib/artifact-bridge) let the page ask Harvis a plain
+ * question and keep a little data, over the same token-gated postMessage door
+ * and still with no `allow-same-origin`. Capped, rate-limited, tool-free.
  *
  * Non-HTML targets and remote gateways (no local file access) fall back to
  * the standard preview-attachment card rather than a broken frame.
@@ -196,11 +202,16 @@ export function measurementScript(token: string): string {
 
 /** Assemble the srcdoc: theme prelude first (so the page's own styles win),
  *  then the measuring + intent scripts before `</body>` when present so they
- *  run after the page's own markup, appended otherwise. */
+ *  run after the page's own markup, appended otherwise. The `window.harvis`
+ *  bridge goes in first (stub early, transport last) so the page can call it. */
 export function withInlineChrome(doc: string, token: string, prelude: string): string {
   const script = measurementScript(token) + intentScript(token)
-  const bodyClose = /<\/body\s*>/i.exec(doc)
-  const framed = bodyClose ? doc.slice(0, bodyClose.index) + script + doc.slice(bodyClose.index) : doc + script
+  const bridged = withArtifactBridge(doc, token)
+  const bodyClose = /<\/body\s*>/i.exec(bridged)
+
+  const framed = bodyClose
+    ? bridged.slice(0, bodyClose.index) + script + bridged.slice(bodyClose.index)
+    : bridged + script
 
   return prelude + framed
 }
@@ -281,6 +292,7 @@ function InlineHtmlFrame({
   const [failed, setFailed] = useState(false)
   const [measured, setMeasured] = useState<number | null>(null)
   const [contentWidth, setContentWidth] = useState<number | null>(null)
+  const frameRef = useRef<HTMLIFrameElement | null>(null)
 
   // One token per mount: the message listener only trusts reports from the
   // document THIS mount injected, so two previews in one transcript (or a
@@ -381,6 +393,9 @@ function InlineHtmlFrame({
     return withInlineChrome(doc, token, themePrelude(vars, font))
   }, [doc, token])
 
+  // Answers the page's window.harvis calls (ask / save / load) for THIS frame only.
+  useArtifactBridge(frameRef, token, doc)
+
   if (!path || failed) {
     return <PreviewAttachment source="explicit-link" target={file} />
   }
@@ -406,6 +421,7 @@ function InlineHtmlFrame({
           <iframe
             className="absolute inset-0 size-full border-0 bg-transparent"
             loading="lazy"
+            ref={frameRef}
             sandbox="allow-scripts"
             srcDoc={framedDoc}
             style={{ colorScheme: isDark ? 'dark' : 'light' }}

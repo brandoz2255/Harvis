@@ -2,6 +2,7 @@
 titles, usage, slash commands, and the session RPCs that need no database."""
 
 import asyncio
+import json
 import os
 import sys
 
@@ -10,7 +11,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from plugins.hermes_ui import errors, rewind, session_ops, sessions, store, titles, usage, ws_slash  # noqa: E402
+from plugins.hermes_ui import chat, errors, rewind, session_ops, sessions, store, titles, usage, ws_slash  # noqa: E402
 from plugins.hermes_ui.ws import Connection  # noqa: E402
 
 
@@ -142,6 +143,73 @@ def test_friendly_never_shows_a_payload(exc):
 def test_a_short_plain_message_we_raised_ourselves_survives():
     assert errors.friendly(RuntimeError("You have used your 20 daily messages")) == \
         "You have used your 20 daily messages."
+
+
+def test_a_missing_model_in_a_stream_error_chunk_gets_the_model_sentence():
+    err = {"message": 'Upstream error 404: {"error":"model \'ghost:1b\' not found"}', "type": "upstream_error"}
+    text = errors.from_chunk(err)
+    assert text.startswith("That model is not available") and "model 'ghost:1b' not found" in text
+    assert "{" not in text and "Upstream" not in text
+
+
+def test_other_upstream_statuses_map_to_their_own_sentence():
+    assert "usage limit" in errors.from_chunk({"message": "Upstream error 429: slow down"})
+    assert "not responding" in errors.from_chunk({"message": "Upstream error 502: bad gateway"})
+    # A truncated JSON body still yields the status sentence without leaking the payload.
+    assert "{" not in errors.from_chunk({"message": 'Upstream error 404: {"error":"model \'ghost:1b\' not f'})
+
+
+def test_an_upstream_401_is_the_providers_key_not_the_harvis_session():
+    assert "API key" in errors.from_chunk({"message": "Upstream error 401: invalid api key"})
+    assert "session expired" in str(errors.from_http(401, ""))
+
+
+def test_a_stream_error_that_is_not_an_upstream_wrapper_stays_friendly():
+    assert errors.from_chunk({"message": "You have used your 20 daily messages"}) == \
+        "You have used your 20 daily messages."
+    assert errors.from_chunk("Traceback (most recent call last)") == errors._FALLBACK
+    assert errors.from_chunk(None) == errors._FALLBACK
+
+
+def test_stream_error_chunk_from_the_proxy_reaches_the_chat_as_a_sentence(monkeypatch):
+    chunk = {"error": {"message": 'Upstream error 404: {"error":"model \'ghost:1b\' not found"}'}}
+
+    class Resp:
+        status_code = 200
+        headers = {"content-type": "text/event-stream"}
+
+        async def aiter_lines(self):
+            yield "data: " + json.dumps(chunk)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class Client:
+        def __init__(self, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def stream(self, method, url, json, headers):
+            return Resp()
+
+    monkeypatch.setattr(chat.httpx, "AsyncClient", Client)
+
+    async def run():
+        async for _ in chat._stream_completion("t", [], "ghost:1b", None, "chat", "", {}):
+            pass
+
+    with pytest.raises(chat.ChatError) as caught:
+        asyncio.run(run())
+    assert str(caught.value).startswith("That model is not available")
+    assert "model 'ghost:1b' not found" in str(caught.value)
 
 
 # ---- titles -------------------------------------------------------------------------------------

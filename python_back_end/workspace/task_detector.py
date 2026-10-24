@@ -207,7 +207,8 @@ async def _detect_workspace_task_ollama(conversation_text: str) -> WorkspaceSugg
         )
         return suggestion
     except Exception as e:
-        logger.error(f"Ollama Workspace detection error: {e}")
+        # A read timeout stringifies to "", which left this line blank.
+        logger.error(f"Ollama Workspace detection error: {type(e).__name__}: {e!r}")
         return WorkspaceSuggestion({"should_suggest": False, "reason": f"Ollama fallback error: {e}"})
 
 

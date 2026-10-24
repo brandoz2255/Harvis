@@ -771,6 +771,28 @@ export async function playSpeechText(text: string, options: VoicePlaybackOptions
       return false
     }
 
+    // No speak-stream socket (the browser UI): one sentence at a time over
+    // POST /api/audio/speak, so sound starts after the first sentence.
+    if (!streamUrl) {
+      const session = openSentenceSpeechSession(relaySynth, options)
+      session.append(speakableText)
+      session.finish()
+
+      if ((await session.done) === 'done') {
+        if (!isCurrent()) {
+          return false
+        }
+
+        setVoicePlaybackState(currentState('idle'))
+
+        return true
+      }
+
+      if (!isCurrent()) {
+        return false
+      }
+    }
+
     const played = await playSpeechDataUrl(speakableText, options, isCurrent)
 
     if (played) {

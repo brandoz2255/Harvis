@@ -7,6 +7,7 @@ import { HermesGateway } from '@/hermes'
 import { translateNow } from '@/i18n'
 import { desktopDefaultCwd } from '@/lib/desktop-fs'
 import { decideLivenessForceClose, LIVENESS_REPROBE_DELAY_MS } from '@/lib/gateway-liveness-policy'
+import { queryClient } from '@/lib/query-client'
 import { reconnectBackoffDelayMs } from '@/lib/reconnect-backoff'
 import { BACKEND_BOOT_WAIT_TIMEOUT_MS, RECONNECT_ATTEMPT_TIMEOUT_MS, withTimeout } from '@/lib/with-timeout'
 import {
@@ -385,6 +386,9 @@ export function useGatewayBoot({
         // Resync state that may have moved on the backend while we were asleep.
         await callbacksRef.current.refreshHermesConfig().catch(() => undefined)
         await callbacksRef.current.refreshSessions().catch(() => undefined)
+        // The backend may have restarted or moved networks: a model list read
+        // before the drop can name hosts that are gone (or miss ones now up).
+        void queryClient.invalidateQueries({ queryKey: ['model-options'] })
       } catch (err) {
         // OAuth session expired mid-reconnect: surface the actionable "sign in
         // again" recovery overlay once instead of silently looping the backoff

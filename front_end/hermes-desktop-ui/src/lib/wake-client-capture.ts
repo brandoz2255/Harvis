@@ -10,6 +10,10 @@
 const TARGET_RATE = 16_000
 const DEFAULT_FRAME = 1280 // 80 ms @ 16 kHz — matches tools/wake_word.py
 
+/** Browsers hide `navigator.mediaDevices` on plain http, which looks like "no microphone support". */
+export const INSECURE_CONTEXT_MESSAGE =
+  'The microphone needs HTTPS. Open Harvis over https:// (run ./scripts/enable-https.sh on the host) or on the host itself at http://localhost.'
+
 export type WakeFeedRequester = (method: string, params?: Record<string, unknown>) => Promise<unknown>
 
 export interface ClientWakeCaptureOptions {
@@ -92,6 +96,10 @@ export async function startClientWakeCapture(options: ClientWakeCaptureOptions):
   }
 
   if (!navigator.mediaDevices?.getUserMedia) {
+    if (!window.isSecureContext) {
+      throw new Error(INSECURE_CONTEXT_MESSAGE)
+    }
+
     throw new Error('getUserMedia unavailable for client wake capture')
   }
 

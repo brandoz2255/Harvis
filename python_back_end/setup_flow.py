@@ -740,7 +740,10 @@ def create_setup_router(
             "services": list(_NOTEBOOKS_SERVICES),
             "download_mb": _NOTEBOOKS_DOWNLOAD_MB,
             "enable": {
-                "command": _NOTEBOOKS_ENABLE_COMMAND,
+                "command": (
+                    "add 'notebooks' to COMPOSE_PROFILES in .env, then ./install.sh --k8s"
+                    if hosting_mode()[0] == MODE_KUBERNETES else _NOTEBOOKS_ENABLE_COMMAND
+                ),
                 # The backend cannot run this itself: harvis-backend has the docker
                 # CLI but no compose plugin, and the repo root is not bind-mounted.
                 # Handing the operator the exact command is the honest option —

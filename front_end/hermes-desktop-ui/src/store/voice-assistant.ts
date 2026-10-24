@@ -53,9 +53,19 @@ export function spokenVoiceText(text: string): string {
   return out
 }
 
-/** The pieces of a finished reply meant for the chat box. */
+/** The pieces of a finished reply meant for the chat box. A draft whose closing
+ *  tag never came (the reply hit its length cap) still counts: a cut-off draft
+ *  in the chat box beats one that silently vanishes. */
 export function voiceChatDrafts(text: string): string[] {
-  return [...text.matchAll(DRAFT_RE)].map(m => m[1].trim()).filter(Boolean)
+  const drafts = [...text.matchAll(DRAFT_RE)].map(m => m[1])
+  const rest = text.replace(DRAFT_RE, ' ')
+  const open = rest.toLowerCase().indexOf(OPEN_TAG)
+
+  if (open >= 0) {
+    drafts.push(rest.slice(open + OPEN_TAG.length).replace('[interrupted]', ''))
+  }
+
+  return drafts.map(d => d.trim()).filter(Boolean)
 }
 
 // "type milk and eggs", "type hello team in the chat": dictation into the chat

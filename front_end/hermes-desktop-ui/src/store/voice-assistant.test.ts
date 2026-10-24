@@ -71,6 +71,14 @@ describe('voiceChatDrafts', () => {
       voiceChatDrafts('<chat-draft> one </chat-draft> and <CHAT-DRAFT>two</CHAT-DRAFT><chat-draft> </chat-draft>')
     ).toEqual(['one', 'two'])
   })
+
+  it('keeps a draft the reply was cut off in the middle of', () => {
+    expect(voiceChatDrafts("It's in your chat box. <chat-draft>Hi team, the deploy is")).toEqual([
+      'Hi team, the deploy is'
+    ])
+    expect(voiceChatDrafts('<chat-draft>a</chat-draft> then <chat-draft>b, c')).toEqual(['a', 'b, c'])
+    expect(voiceChatDrafts('No draft here.')).toEqual([])
+  })
 })
 
 describe('sendVoiceTurn', () => {

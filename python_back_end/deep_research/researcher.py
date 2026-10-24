@@ -9,6 +9,7 @@ when to stop.  Inspired by Alibaba's IterResearch approach.
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 from typing import Callable, Dict, List, Optional, Set
@@ -18,6 +19,13 @@ from .research_utils import strip_thinking, is_low_quality
 from .goal_based_extractor import EXTRACTOR_PROMPT
 
 logger = logging.getLogger(__name__)
+
+
+def _bounded_timeout(name: str, default: int) -> int:
+    try:
+        return max(30, min(3600, int(os.getenv(name, str(default)))))
+    except ValueError:
+        return default
 
 # ---------------------------------------------------------------------------
 # Prompts
@@ -208,7 +216,8 @@ class DeepResearcher:
         self._progress = progress_callback
         self._cancelled = False
         self._start_time: float = 0
-        self.queries_used: Set[str] = set()
+        # A dict, not a set: insertion order lets progress events name the latest query.
+        self.queries_used: Dict[str, None] = {}
         self.urls_fetched: Set[str] = set()
         self.round_count: int = 0
         # Track which search providers actually returned results during the
@@ -218,6 +227,8 @@ class DeepResearcher:
         self.findings: List[Dict] = []
         self.evolving_report: str = ""
         self.research_plan: str = ""
+        # The last model failure, so "found nothing" can blame the model instead of the internet.
+        self._last_llm_error: str = ""
 
     def cancel(self):
         """Request cooperative cancellation of the research loop."""
@@ -302,18 +313,27 @@ class DeepResearcher:
                 logger.info(f"Round {round_num}: no new findings ({consecutive_empty_rounds} consecutive empty)")
                 if consecutive_empty_rounds >= self.max_empty_rounds:
                     logger.warning(f"Search appears to be down — {self.max_empty_rounds} consecutive rounds with no results")
-                    err_detail = getattr(self, '_last_search_error', 'unknown error')
+                    err_detail = getattr(self, '_last_search_error', '')
+                    if not err_detail and self._last_llm_error:
+                        # Pages were found but the model could not read any of them.
+                        msg = (f"Model '{self.llm_model}' could not read the pages it found "
+                               f"({self._last_llm_error}). Pick another model and run it again.")
+                        self._emit(phase="error", message=msg)
+                        if not findings:
+                            return f"**Research failed**: {msg}"
+                        break
+                    err_detail = err_detail or 'unknown error'
                     self._emit(phase="error", message=f"Search engine unavailable: {err_detail}")
                     if not findings:
                         return (
-                            f"**Search unavailable** — Web search failed after "
-                            f"{round_num} rounds. Error: {err_detail}\n\n"
-                            "Please check your search provider settings and ensure the service is running."
+                            f"**Search unavailable** — Harvis could not get results from the web "
+                            f"search engines: {err_detail}. Check that this machine has internet "
+                            "access, then run it again."
                         )
                     break
 
-            # SYNTHESIZE
-            if findings:
+            # SYNTHESIZE (only when this round added something; re-synthesising the same findings wastes a model call)
+            if round_findings:
                 self._emit(phase="analyzing", round=round_num,
                            total_sources=len(self.urls_fetched),
                            total_findings=len(findings))
@@ -329,6 +349,8 @@ class DeepResearcher:
         # FINAL REPORT
         self._emit(phase="writing", total_sources=len(self.urls_fetched),
                    total_findings=len(findings))
+        if not report and findings:
+            report = self._format_findings(findings[-self.synthesis_window:])
         if not report:
             return "No information could be gathered for this question."
 
@@ -353,7 +375,6 @@ class DeepResearcher:
         only falls back to local — that round-trip per call dominated wall-clock in
         the first E2E. Deep research is local-only, so hit ollama directly.
         """
-        import os
         import httpx
         base = os.getenv("DEEP_RESEARCH_OLLAMA_URL",
                          os.getenv("OLLAMA_URL", "http://ollama:11434")).rstrip("/")
@@ -361,12 +382,20 @@ class DeepResearcher:
             "model": self.llm_model,
             "messages": messages,
             "stream": False,
+            # Hybrid thinkers (qwen3) answer directly with this; gpt-oss ignores it and
+            # the empty-content guard below still catches it.
+            "think": False,
             "options": {"temperature": temperature, "num_predict": max_tokens},
         }
         async with httpx.AsyncClient(timeout=timeout) as cli:
             r = await cli.post(f"{base}/api/chat", json=payload)
         r.raise_for_status()
-        text = ((r.json() or {}).get("message", {}) or {}).get("content", "") or ""
+        msg = (r.json() or {}).get("message") or {}
+        text = msg.get("content") or ""
+        if not text.strip() and msg.get("thinking"):
+            # A thinking model that spent its whole num_predict reasoning. An empty
+            # string would be taken for an answer, so let each caller's own failure path run.
+            raise RuntimeError("model used its whole token budget thinking")
         return strip_thinking(text)
 
     # ------------------------------------------------------------------
@@ -395,7 +424,8 @@ class DeepResearcher:
                 return "\n".join(parts) if parts else response
             return response
         except Exception as e:
-            logger.warning(f"Research planning failed: {e}")
+            self._last_llm_error = f"{type(e).__name__}: {e}"
+            logger.warning(f"Research planning failed: {e!r}")
             self._emit(phase="warning", message="Planning step failed, proceeding with direct search")
             return ""
 
@@ -427,7 +457,7 @@ class DeepResearcher:
                     return c
             return None
         except Exception as e:
-            logger.warning(f"Category classification failed: {e}")
+            logger.warning(f"Category classification failed: {e!r}")
             return None
 
     # ------------------------------------------------------------------
@@ -463,16 +493,18 @@ class DeepResearcher:
                 [{"role": "user", "content": prompt}],
                 temperature=0.5,
                 max_tokens=4096,
+                timeout=_bounded_timeout("DEEP_RESEARCH_QUERY_TIMEOUT", 180),
             )
             queries = self._parse_json_array(response)
             # Deduplicate
             new_queries = [q for q in queries if q not in self.queries_used]
-            self.queries_used.update(new_queries)
+            self.queries_used.update(dict.fromkeys(new_queries))
             logger.info(f"Round {round_num} queries: {new_queries}")
             return new_queries
         except Exception as e:
-            logger.error(f"Query generation failed: {e}")
-            self._emit(phase="warning", message=f"Query generation failed: {e}")
+            self._last_llm_error = f"{type(e).__name__}: {e}"
+            logger.error(f"Query generation failed: {e!r}")
+            self._emit(phase="warning", message=f"Query generation failed: {self._last_llm_error}")
             return []
 
     # ------------------------------------------------------------------
@@ -486,6 +518,9 @@ class DeepResearcher:
         # Search all queries in parallel
         search_tasks = [self._search(q) for q in queries]
         search_results = await asyncio.gather(*search_tasks, return_exceptions=True)
+
+        if self._cancelled or self._time_exceeded():
+            return all_findings
 
         # Collect URLs to fetch from all search results
         urls_to_fetch = []
@@ -502,9 +537,6 @@ class DeepResearcher:
                     self.urls_fetched.add(url)
                 if len(urls_to_fetch) >= self.max_urls_per_round * len(queries):
                     break
-
-        if self._cancelled or self._time_exceeded():
-            return all_findings
 
         # Fetch and extract URLs with backpressure. Local model servers often
         # serialize requests behind one GPU; flooding them makes every request
@@ -534,6 +566,8 @@ class DeepResearcher:
 
             agent = WebSearchAgent(max_results=10)
             results = await asyncio.to_thread(agent.search_web, query)
+            if not results and getattr(agent, "last_error", ""):
+                self._last_search_error = agent.last_error
             if results:
                 logger.info(f"Research search: harvis-web returned {len(results)} results")
                 if "harvis-web" not in self.providers_used:
@@ -560,7 +594,7 @@ class DeepResearcher:
             from research.extract.router import extract_url
             doc = await asyncio.to_thread(extract_url, url)
         except Exception as e:
-            logger.warning(f"Failed to fetch {url}: {e}")
+            logger.warning(f"Failed to fetch {url}: {e!r}")
             return None
 
         if not getattr(doc, "success", False) or not getattr(doc, "text", ""):
@@ -607,7 +641,8 @@ class DeepResearcher:
                 "summary": response[:500],
             }
         except Exception as e:
-            logger.warning(f"LLM extraction failed for {url}: {e}")
+            self._last_llm_error = f"{type(e).__name__}: {e}"
+            logger.warning(f"LLM extraction failed for {url}: {e!r}")
             return None
 
     # ------------------------------------------------------------------
@@ -629,12 +664,13 @@ class DeepResearcher:
         )
 
         try:
-            return await self._llm(
+            updated = await self._llm(
                 [{"role": "user", "content": prompt}],
                 temperature=0.3,
                 max_tokens=self.max_report_tokens,
-                timeout=60,
+                timeout=_bounded_timeout("DEEP_RESEARCH_SYNTH_TIMEOUT", 300),
             )
+            return updated if updated.strip() else current_report
         except Exception as e:
             logger.error(f"Synthesis failed: {e}")
             self._emit(phase="warning", message="Synthesis failed, keeping previous report")
@@ -657,6 +693,7 @@ class DeepResearcher:
                 [{"role": "user", "content": prompt}],
                 temperature=0.1,
                 max_tokens=128,
+                timeout=_bounded_timeout("DEEP_RESEARCH_STOP_TIMEOUT", 120),
             )
             # Reasoning models prepend a <think>...</think> block — strip it
             # before checking for YES/NO, otherwise the answer always looks
@@ -691,29 +728,15 @@ class DeepResearcher:
                 max_tokens=self.max_report_tokens,
                 timeout=180,
             )
+            if not (result or "").strip():
+                return report
 
-            # If report is too short, ask the LLM to expand it
-            if len(result.split()) < 400:
+            # If report is too short, ask the LLM to expand it. Past the time
+            # limit the user already waited, so ship what we have.
+            if len(result.split()) < 400 and not self._time_exceeded():
                 logger.info(f"Final report too short ({len(result.split())} words), requesting expansion")
                 self._emit(phase="writing", message="Expanding report...")
-                expanded = await self._llm(
-                    [
-                        {"role": "user", "content": prompt},
-                        {"role": "assistant", "content": result},
-                        {"role": "user", "content":
-                            "This report is too brief. Please expand it significantly:\n"
-                            "- Add detailed paragraphs for each section (not just bullet points)\n"
-                            "- Include specific data, numbers, and comparisons from the evidence\n"
-                            "- Explain context and significance — don't just list facts\n"
-                            "- Use ## headings and ### subheadings\n"
-                            "- Target at least 1000 words\n"
-                            "Write the full expanded report now."
-                        },
-                    ],
-                    temperature=0.4,
-                    max_tokens=self.max_report_tokens,
-                    timeout=180,
-                )
+                expanded = await self._expand_report(prompt, result)
                 if len(expanded.split()) > len(result.split()):
                     return expanded
 
@@ -721,6 +744,31 @@ class DeepResearcher:
         except Exception as e:
             logger.error(f"Final report generation failed: {e}")
             return report  # return the evolving report as-is
+
+    async def _expand_report(self, prompt: str, result: str) -> str:
+        """Second pass on a short final report; "" on failure so the first pass is kept."""
+        try:
+            return await self._llm(
+                [
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": result},
+                    {"role": "user", "content":
+                        "This report is too brief. Please expand it significantly:\n"
+                        "- Add detailed paragraphs for each section (not just bullet points)\n"
+                        "- Include specific data, numbers, and comparisons from the evidence\n"
+                        "- Explain context and significance — don't just list facts\n"
+                        "- Use ## headings and ### subheadings\n"
+                        "- Target at least 1000 words\n"
+                        "Write the full expanded report now."
+                    },
+                ],
+                temperature=0.4,
+                max_tokens=self.max_report_tokens,
+                timeout=180,
+            )
+        except Exception as e:
+            logger.warning(f"Report expansion failed, keeping the first pass: {e}")
+            return ""
 
     # ------------------------------------------------------------------
     # Helpers

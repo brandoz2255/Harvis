@@ -42,7 +42,8 @@ import { MaintenancePanel } from './maintenance'
 
 export type CommandCenterSection = 'maintenance' | 'sessions' | 'system' | 'usage'
 
-const SECTIONS = ['sessions', 'system', 'usage', 'maintenance'] as const satisfies readonly CommandCenterSection[]
+// Harvis: no usage analytics endpoint behind it, so the Usage tab is not offered.
+const SECTIONS = ['sessions', 'system', 'maintenance'] as const satisfies readonly CommandCenterSection[]
 
 const LOG_FILES = ['agent', 'errors', 'gateway', 'desktop'] as const
 const LOG_LEVELS = ['ALL', 'INFO', 'WARNING', 'ERROR'] as const

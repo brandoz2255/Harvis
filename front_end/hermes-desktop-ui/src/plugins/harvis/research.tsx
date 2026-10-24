@@ -64,9 +64,9 @@ interface ResearchDetail {
 }
 
 const DEPTHS = [
-  { id: 'quick', label: 'Quick', hint: 'About 2 minutes, 2 rounds', rounds: 2, time: 150 },
-  { id: 'standard', label: 'Standard', hint: 'About 5 minutes, Harvis decides the rounds', rounds: 0, time: 300 },
-  { id: 'deep', label: 'Deep', hint: 'Up to 15 minutes, more sources', rounds: 0, time: 900 }
+  { id: 'quick', label: 'Quick', hint: 'A few minutes, 2 rounds', rounds: 2, time: 150 },
+  { id: 'standard', label: 'Standard', hint: '5 to 10 minutes, Harvis decides the rounds', rounds: 0, time: 300 },
+  { id: 'deep', label: 'Deep', hint: '15 minutes or more, more sources', rounds: 0, time: 900 }
 ] as const
 
 const PHASE_LABEL: Record<string, string> = {

@@ -7,6 +7,7 @@ import type { HarvisDocKind } from '@/lib/harvis-doc'
 import { $docFixSender, type DocIssue, docFixMessage, primaryExt } from '@/lib/harvis-doc-files'
 import { type DocCheckResult, fetchDocCheck } from '@/lib/harvis-doc-preview-api'
 import { AlertCircle, Check, Loader2, X } from '@/lib/icons'
+import { Codecs, persistentAtom } from '@/lib/persisted'
 import { cn } from '@/lib/utils'
 
 type CheckState =
@@ -14,6 +15,24 @@ type CheckState =
   | { phase: 'done'; result: DocCheckResult }
   | { message: string; phase: 'error' }
   | { phase: 'idle' }
+
+/**
+ * Per-user switch for the one automatic fix a document gets. Off by default: sending the fix
+ * request spends a model turn the user did not ask for. The strip reads it when a check ends,
+ * so flipping it takes effect on the next document with no remount.
+ */
+export const $autoFixDocs = persistentAtom('hermes.desktop.docs.autoFix', false, Codecs.bool)
+
+/**
+ * Documents (by kind and title) that already had their automatic fix. Module-level so a
+ * remount or a revision that still fails its check cannot trigger a second one: a model that
+ * cannot satisfy the checker would otherwise loop forever on the user's GPU.
+ */
+const autoFixed = new Set<string>()
+
+export function clearAutoFixed(): void {
+  autoFixed.clear()
+}
 
 const SEVERITY_CLASS: Record<DocIssue['severity'], string> = {
   error: 'text-destructive',
@@ -33,6 +52,10 @@ interface DocCheckStripProps {
  * what it found, grouped by where. "Fix it" sends the list back to the chat as
  * a revision request. Results belong to the source they were run on, so an
  * edit clears them.
+ *
+ * The check also runs once on its own when a document it watched stream finishes (a
+ * document that was already complete when the panel opened is left for the Check button).
+ * With the auto-fix setting on, error-severity findings are sent back once per document.
  */
 export function DocCheckStrip({ complete, kind, source, title }: DocCheckStripProps) {
   const { t } = useI18n()
@@ -42,6 +65,9 @@ export function DocCheckStrip({ complete, kind, source, title }: DocCheckStripPr
   const [vision, setVision] = useState(false)
   const [sent, setSent] = useState(false)
   const controller = useRef<AbortController | null>(null)
+  const latestRun = useRef<(auto: boolean) => Promise<void>>(async () => undefined)
+  // Armed while the document streams; the first finish after that runs one automatic check.
+  const armed = useRef(!complete)
 
   useEffect(() => {
     setState({ phase: 'idle' })
@@ -62,7 +88,7 @@ export function DocCheckStrip({ complete, kind, source, title }: DocCheckStripPr
     return [...byWhere]
   }, [issues])
 
-  const run = async () => {
+  const run = async (auto = false) => {
     controller.current?.abort()
 
     const own = new AbortController()
@@ -75,7 +101,13 @@ export function DocCheckStrip({ complete, kind, source, title }: DocCheckStripPr
       const result = await fetchDocCheck({ format: primaryExt(kind), signal: own.signal, source, title, vision })
 
       if (!own.signal.aborted) {
-        setState({ phase: 'done', result: { ...result, issues: result.issues ?? [] } })
+        const found = result.issues ?? []
+
+        setState({ phase: 'done', result: { ...result, issues: found } })
+
+        if (auto) {
+          await autoFix(found)
+        }
       }
     } catch (error) {
       if (!own.signal.aborted) {
@@ -84,20 +116,62 @@ export function DocCheckStrip({ complete, kind, source, title }: DocCheckStripPr
     }
   }
 
+  const send = async (list: DocIssue[], send: NonNullable<typeof sender>) => {
+    setSent(true)
+
+    try {
+      await send(docFixMessage(list))
+
+      return true
+    } catch (error) {
+      setSent(false)
+      setState({ message: error instanceof Error ? error.message : String(error), phase: 'error' })
+
+      return false
+    }
+  }
+
   const fix = async () => {
     if (!sender || !issues.length) {
       return
     }
 
-    setSent(true)
+    await send(issues, sender)
+  }
 
-    try {
-      await sender(docFixMessage(issues))
-    } catch (error) {
-      setSent(false)
-      setState({ message: error instanceof Error ? error.message : String(error), phase: 'error' })
+  /** One automatic fix per document, only errors, only with the setting on. */
+  const autoFix = async (found: DocIssue[]) => {
+    const errors = found.filter(issue => issue.severity === 'error')
+    const target = $docFixSender.get()
+    const key = `${kind}:${title}`
+
+    if (!$autoFixDocs.get() || !errors.length || !target || autoFixed.has(key)) {
+      return
+    }
+
+    autoFixed.add(key)
+
+    if (!(await send(errors, target))) {
+      autoFixed.delete(key)
     }
   }
+
+  useEffect(() => {
+    latestRun.current = run
+  })
+
+  useEffect(() => {
+    if (!complete) {
+      armed.current = true
+
+      return
+    }
+
+    if (armed.current) {
+      armed.current = false
+      void latestRun.current(true)
+    }
+  }, [complete])
 
   const checking = state.phase === 'checking'
   const checked = state.phase === 'done' ? state.result.checked : null
@@ -181,7 +255,8 @@ export function DocCheckStrip({ complete, kind, source, title }: DocCheckStripPr
                   onClick={() => void fix()}
                   size="sm"
                 >
-                  {sent ? copy.fixSent : copy.fix}
+                  <span>{sent ? copy.fixSent : copy.fix}</span>
+                  {!sent && <span data-slot="doc-fix-count">{issues.length}</span>}
                 </Button>
               </span>
             )}

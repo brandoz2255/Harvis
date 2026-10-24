@@ -101,16 +101,20 @@ async def test_branch_links_the_child_to_its_parent(conn):
     assert [r["content"] for r in rows] == ["what is k3s?"] and conn.parents[child.id] == "main"
 
 
-async def _create(conn, monkeypatch, params, refuse=False):
-    from plugins.hermes_ui import bots, session_ops
+async def _create(conn, monkeypatch, params, refuse=False, remembered="", offered=True):
+    from plugins.hermes_ui import bots, session_ops, store
 
     async def get_bot(pool, user_id, bot_id):
         return None
 
     async def model_error(pool, user_id, token, model):
-        return None
+        return None if offered or not model else f"I don't know a model called '{model}'."
 
-    async def create(pool, user_id, model="", bot=None):
+    async def resolve_model(pool, user_id):
+        return remembered
+
+    async def create(pool, user_id, model="", bot=None, skip_saved=False):
+        conn.skip_saved = skip_saved
         return sessions.Live(id="child", user_id=user_id, model=model)
 
     async def set_parent(pool, s, parent_id):
@@ -120,6 +124,7 @@ async def _create(conn, monkeypatch, params, refuse=False):
 
     monkeypatch.setattr(bots, "get_bot", get_bot)
     monkeypatch.setattr(session_ops, "model_error", model_error)
+    monkeypatch.setattr(store, "resolve_model", resolve_model)
     monkeypatch.setattr(sessions, "create", create)
     monkeypatch.setattr(sessions, "set_parent", set_parent, raising=False)
     conn._announce = lambda s: {}
@@ -136,3 +141,15 @@ async def test_session_create_links_a_right_click_branch_to_its_source(conn, mon
 async def test_session_create_with_a_foreign_parent_still_creates_a_top_level_chat(conn, monkeypatch):
     out = await _create(conn, monkeypatch, {"parent_session_id": "not-mine"}, refuse=True)
     assert out["result"]["session_id"] == "child" and conn.parents == {}
+
+
+@pytest.mark.asyncio
+async def test_session_create_skips_a_remembered_model_the_picker_no_longer_offers(conn, monkeypatch):
+    await _create(conn, monkeypatch, {}, remembered="gone:1b", offered=False)
+    assert conn.skip_saved is True
+
+
+@pytest.mark.asyncio
+async def test_session_create_keeps_a_remembered_model_that_is_still_offered(conn, monkeypatch):
+    await _create(conn, monkeypatch, {}, remembered="qwen3:4b")
+    assert conn.skip_saved is False

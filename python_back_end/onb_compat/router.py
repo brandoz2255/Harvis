@@ -29,6 +29,7 @@ from notebooks.router import (
     get_notebook_manager,
     get_current_user_from_request,
     NOTEBOOK_STORAGE_PATH,
+    purge_notebook,
 )
 from notebooks.manager import (
     NotebookManager,
@@ -412,9 +413,11 @@ async def update_notebook(
     try:
         # archived=true → soft-delete (Harvis is_active=FALSE). name/description → update.
         if body.get("archived") is True:
-            await manager.delete_notebook(UUID(notebook_id), current_user["id"])
-            nb = await manager.get_notebook(UUID(notebook_id), current_user["id"])  # may 404
-            return nb_to_onb(nb)
+            # get_notebook only sees active rows, so read it before the soft delete.
+            nb = await manager.get_notebook(UUID(notebook_id), current_user["id"])
+            if not await manager.delete_notebook(UUID(notebook_id), current_user["id"]):
+                raise NotebookNotFoundError(notebook_id)
+            return {**nb_to_onb(nb), "archived": True}
         nb = await manager.update_notebook(
             UUID(notebook_id), current_user["id"],
             UpdateNotebookRequest(title=body.get("name"), description=body.get("description")),
@@ -453,10 +456,19 @@ async def delete_notebook(
     current_user: Dict = Depends(get_current_user_from_request),
     manager: NotebookManager = Depends(get_notebook_manager),
 ):
-    ok = await manager.delete_notebook(UUID(notebook_id), current_user["id"])
+    # Counted before the purge and without the is_active filter, so archived notebooks count too.
+    async with manager.db_pool.acquire() as conn:
+        counts = await conn.fetchrow(
+            "SELECT (SELECT COUNT(*) FROM notebook_notes WHERE notebook_id = $1) AS notes, "
+            "(SELECT COUNT(*) FROM notebook_sources WHERE notebook_id = $1) AS sources "
+            "FROM notebooks WHERE id = $1 AND user_id = $2",
+            UUID(notebook_id), current_user["id"],
+        )
+    ok = await purge_notebook(manager, UUID(notebook_id), current_user["id"])
     if not ok:
         raise HTTPException(status_code=404, detail="Notebook not found")
-    return {"message": "deleted", "deleted_notes": 0, "deleted_sources": 0, "unlinked_sources": 0}
+    return {"message": "deleted", "deleted_notes": counts["notes"] if counts else 0,
+            "deleted_sources": counts["sources"] if counts else 0, "unlinked_sources": 0}
 
 
 # Link / unlink a source to a notebook. Harvis sources are single-notebook, so

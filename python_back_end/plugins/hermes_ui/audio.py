@@ -13,6 +13,7 @@ import base64
 import binascii
 import logging
 import os
+import re
 import tempfile
 import uuid
 
@@ -30,6 +31,11 @@ router = APIRouter(prefix="/hermes-api/api/audio")
 # A minute of 48 kHz webm/opus is well under 1 MB; this only stops a runaway upload.
 MAX_AUDIO_BYTES = 25 * 1024 * 1024
 MAX_SPEAK_CHARS = 4000
+
+# whisper-tiny/base hear the made-up product name as "Harvest". Only the addressed forms
+# ("hey Harvest", a leading "Harvest,") are corrected so the ordinary word survives.
+_NAME_AFTER_GREETING = re.compile(r"\b(hey|hi|ok|okay|thanks|thank you)(,?\s+)harvest\b", re.I)
+_NAME_LEADING = re.compile(r"^(\s*)harvest\b(?=\s*,)", re.I)
 
 _EXT = {"webm": ".webm", "ogg": ".ogg", "wav": ".wav", "mpeg": ".mp3", "mp3": ".mp3", "mp4": ".m4a", "m4a": ".m4a"}
 
@@ -67,6 +73,8 @@ async def transcribe(request: Request, user=Depends(get_current_user_optimized))
         with open(path, "wb") as f:
             f.write(raw)
         result = await run_in_threadpool(transcription.transcribe, path, True, None)
+    except transcription.InvalidAudio:
+        raise HTTPException(422, "That recording could not be read. Try again.")
     except transcription.TranscriptionUnavailable as e:
         raise HTTPException(503, str(e))
     except HTTPException:
@@ -80,6 +88,7 @@ async def transcribe(request: Request, user=Depends(get_current_user_optimized))
         except OSError:
             pass
     text = result.get("text", "") if isinstance(result, dict) else str(result or "")
+    text = _NAME_LEADING.sub(r"\1Harvis", _NAME_AFTER_GREETING.sub(r"\1\2Harvis", text))
     return {"ok": True, "provider": transcription.get_provider(), "transcript": text.strip()}
 
 

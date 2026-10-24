@@ -50,6 +50,10 @@ class TranscriptionUnavailable(RuntimeError):
     """
 
 
+class InvalidAudio(TranscriptionUnavailable):
+    """The sidecar could not decode the clip itself, so the recording is the problem."""
+
+
 def get_provider() -> str:
     """Configured provider, falling back to `local` on an unknown value."""
     raw = (os.getenv("HARVIS_STT_PROVIDER") or LOCAL).strip().lower()
@@ -194,6 +198,8 @@ def _transcribe_sidecar(
             f"Could not reach the STT sidecar at {url}: {e}"
         ) from e
 
+    if res.status_code == 400 and "could not decode audio" in res.text:
+        raise InvalidAudio("The recording could not be decoded")
     if res.status_code >= 400:
         # A 4xx here is the sidecar rejecting our request (bad model id, no
         # such route), not a transient outage — surface its own words.

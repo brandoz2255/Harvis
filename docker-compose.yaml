@@ -237,6 +237,10 @@ services:
       # was read by the code but never declared here, so setting it in .env did
       # nothing. Empty = resolver uses the first model Ollama actually reports.
       HARVIS_DEFAULT_LOCAL_MODEL: "${HARVIS_DEFAULT_LOCAL_MODEL:-}"
+      # Pins what "Harvis default" resolves to in chat, new sessions and the voice call
+      # (main.resolve_default_model). Empty = HARVIS_DEFAULT_LOCAL_MODEL, then the first
+      # chat model the provider reports.
+      HARVIS_DEFAULT_MODEL: "${HARVIS_DEFAULT_MODEL:-}"
       # Safety net for OpenClaw's `model=auto` when the saved pick can't be served.
       # Empty = the resolver names a real installed model instead of a fixed guess.
       HARVIS_AUTO_MODEL_FALLBACK: "${HARVIS_AUTO_MODEL_FALLBACK:-}"

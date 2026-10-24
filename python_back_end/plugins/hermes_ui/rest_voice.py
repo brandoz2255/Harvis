@@ -27,7 +27,7 @@ from fastapi.responses import StreamingResponse
 
 from auth_optimized import get_current_user_optimized
 
-from . import sessions, store, voice_warm
+from . import models, session_ops, sessions, store, voice_warm
 from .rest import _token
 from .ws import Connection
 
@@ -80,16 +80,32 @@ async def find_session(pool, user_id: int) -> Optional[str]:
     return str(sid) if sid else None
 
 
-async def open_session(pool, user_id: int) -> tuple[sessions.Live, list[dict]]:
+# One unsaved draft per user until its first turn persists, so every GET, warm and
+# first turn share a session id instead of each making its own.
+_DRAFTS: dict[int, str] = {}
+_DRAFT_LOCKS: dict[int, asyncio.Lock] = {}
+
+
+async def open_session(pool, user_id: int, token: str = "") -> tuple[sessions.Live, list[dict]]:
     """The user's voice session and its transcript, a fresh draft when there is none."""
     sid = await find_session(pool, user_id)
     if sid:
+        _DRAFTS.pop(user_id, None)
         s, msgs = await sessions.open(pool, user_id, sid)
         if s:
+            s.model = await models.voice_model(s.model)
             return s, msgs
-    s = await sessions.create(pool, user_id)
-    s.title = VOICE_TITLE
-    return s, []
+    async with _DRAFT_LOCKS.setdefault(user_id, asyncio.Lock()):
+        draft = sessions.live(user_id, _DRAFTS.get(user_id, ""))
+        if draft:
+            return draft, []
+        remembered = await store.resolve_model(pool, user_id)
+        stale = bool(remembered) and bool(await session_ops.model_error(pool, user_id, token, remembered))
+        s = await sessions.create(pool, user_id, skip_saved=stale)
+        s.title = VOICE_TITLE
+        s.model = await models.voice_model(s.model)
+        _DRAFTS[user_id] = s.id
+        return s, []
 
 
 class VoiceConnection(Connection):
@@ -141,7 +157,7 @@ def _shown(msgs: list[dict]) -> list[dict]:
 
 @router.get(f"{API}/voice/session")
 async def voice_session(request: Request, user=Depends(get_current_user_optimized)):
-    s, msgs = await open_session(request.app.state.pg_pool, _uid(user))
+    s, msgs = await open_session(request.app.state.pg_pool, _uid(user), _token(request))
     return {"session_id": s.id, "running": s.running, "messages": _shown(msgs)}
 
 
@@ -152,7 +168,7 @@ async def voice_warm_model(request: Request, user=Depends(get_current_user_optim
     # The browser loads the transcript and asks for warm-up independently.
     # Opening the session here avoids racing that load and warming a saved
     # default while the persisted Voice session runs a different model.
-    s, _ = await open_session(pool, uid)
+    s, _ = await open_session(pool, uid, _token(request))
     voice_warm.schedule(pool, uid, s.model)
     return {"ok": True}
 
@@ -161,6 +177,9 @@ async def voice_warm_model(request: Request, user=Depends(get_current_user_optim
 async def voice_session_reset(request: Request, user=Depends(get_current_user_optimized)):
     """Start the voice conversation over. The old one keeps a ``Voice:`` title, so it stays hidden."""
     pool, uid = request.app.state.pg_pool, _uid(user)
+    draft = _DRAFTS.pop(uid, None)
+    if draft:
+        sessions.forget(draft)
     sid = await find_session(pool, uid)
     if sid:
         s = sessions.live(uid, sid)
@@ -180,7 +199,7 @@ async def voice_turn(request: Request, user=Depends(get_current_user_optimized))
         raise HTTPException(400, "say something first")
     uid = _uid(user)
     conn = VoiceConnection(request, uid, _token(request))
-    s, _ = await open_session(conn.pool, uid)
+    s, _ = await open_session(conn.pool, uid, _token(request))
     if s.running:
         raise HTTPException(409, "Harvis is still answering")
     msgs = await sessions.append(conn.pool, s, "user", text[:4000])

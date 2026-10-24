@@ -22,6 +22,8 @@ from typing import Callable, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from .skill_pending import set_enabled, sha_ok
+
 logger = logging.getLogger(__name__)
 
 # Bundled filesystem skills that seed into owui_skills with a server-side
@@ -302,7 +304,10 @@ async def gated_skill_blocks(
         audit = meta.get("audit") if isinstance(meta.get("audit"), dict) else {}
         verdict = audit.get("verdict")
         verdict_ok = verdict == "supported"
-        if missing_caps or not lane_ok or not verdict_ok:
+        # An approval is bound to the exact text it approved (skill_pending): text that
+        # changed since makes the skill unavailable. No stored hash = legacy approval.
+        text_ok = sha_ok(r["content"], meta)
+        if missing_caps or not lane_ok or not verdict_ok or not text_ok:
             reason = []
             if missing_caps:
                 reason.append("needs capabilities not ready: " + ", ".join(missing_caps))
@@ -318,6 +323,8 @@ async def gated_skill_blocks(
                     reason.append(
                         "not audited — a human must mark it 'supported' in Customize -> Skills before it applies"
                     )
+            elif not text_ok:
+                reason.append("its text changed after a human approved it — approve it again in Customize -> Skills")
             body = f"### {r['name']}\n_Skill unavailable — {'; '.join(reason)}. Do not attempt the steps it would describe._"
         else:
             c = (r["content"] or "").strip()
@@ -391,7 +398,7 @@ def register_skill_routes(router: APIRouter, get_current_user: Callable) -> None
         # forged at creation, bypassing the human verdict gate that _inject_skills and
         # mcp_wizard rely on. Strip them; a freshly created skill is always unaudited.
         meta = form.meta if isinstance(form.meta, dict) else {}
-        meta = {k: v for k, v in meta.items() if k not in ("audit", "revisions")}
+        meta = {k: v for k, v in meta.items() if k not in ("audit", "revisions", "files", "pending")}
         meta["audit"] = {}
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -440,17 +447,21 @@ def register_skill_routes(router: APIRouter, get_current_user: Callable) -> None
                 # unchanged content) would forge the human verdict. Always carry them over from the
                 # stored row, never from the request body.
                 _cur = cur_meta if isinstance(cur_meta, dict) else {}
-                new_meta = {k: v for k, v in new_meta.items() if k not in ("audit", "revisions")}
+                # files + pending are server-managed too (skill_pending): script files and a
+                # proposed revision enter only through a person's approval, never through CRUD.
+                new_meta = {k: v for k, v in new_meta.items() if k not in ("audit", "revisions", "files", "pending")}
                 if isinstance(_cur.get("audit"), dict):
                     new_meta["audit"] = _cur["audit"]
-                if "revisions" in _cur:
-                    new_meta["revisions"] = _cur["revisions"]
+                for k in ("revisions", "files", "pending"):
+                    if k in _cur:
+                        new_meta[k] = _cur[k]
                 # Governance (C1): if the BODY changed, the old human audit no longer applies —
                 # invalidate the 'supported' verdict so the skill must be RE-audited before it can
                 # inject (chat_completion._inject_skills gate) or publish (mcp_wizard) again.
                 content_changed = form.content is not None and form.content != (cur["content"] or "")
                 if content_changed and isinstance(new_meta.get("audit"), dict) and new_meta["audit"].get("verdict"):
-                    new_meta = {**new_meta, "audit": {**new_meta["audit"], "verdict": None, "stale_after_edit": True}}
+                    new_meta = {**new_meta, "audit": {**{k: v for k, v in new_meta["audit"].items() if k != "content_sha"},
+                                                      "verdict": None, "stale_after_edit": True}}
                 row = await conn.fetchrow(
                     "UPDATE owui_skills SET "
                     "name = COALESCE($3, name), "
@@ -469,13 +480,16 @@ def register_skill_routes(router: APIRouter, get_current_user: Callable) -> None
     async def skills_toggle(skill_id: str, request: Request, user=Depends(get_current_user)):
         pool = _pool(request)
         async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "UPDATE owui_skills SET enabled = NOT enabled, updated_at = NOW() "
-                "WHERE id=$1 AND user_id=$2 RETURNING *",
-                skill_id, int(user.id),
-            )
-        if not row:
-            raise HTTPException(status_code=404, detail="Skill not found")
+            async with conn.transaction():
+                cur = await conn.fetchrow(
+                    "SELECT enabled FROM owui_skills WHERE id=$1 AND user_id=$2 FOR UPDATE", skill_id, int(user.id))
+                if not cur:
+                    raise HTTPException(status_code=404, detail="Skill not found")
+                # Switching ON is the person's approval, stamped with the text approved
+                # (same as the Hermes toggle); OFF leaves the audit alone.
+                await set_enabled(conn, int(user.id), skill_id=skill_id, enabled=not cur["enabled"], via="owui-toggle")
+                row = await conn.fetchrow(
+                    "SELECT * FROM owui_skills WHERE id=$1 AND user_id=$2", skill_id, int(user.id))
         return _skill_to_owui(row)
 
     @router.delete("/api/v1/skills/id/{skill_id}/delete")

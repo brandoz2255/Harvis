@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   type Note,
   parseSseBlock,
+  pickDefaultModel,
   podcastAudioUrl,
   readSse,
   sortNotes,
@@ -111,5 +112,20 @@ describe('sortNotes', () => {
     ])
 
     expect(sorted.map(n => n.id)).toEqual(['pinned', 'new', 'old'])
+  })
+})
+
+describe('pickDefaultModel', () => {
+  it('prefers a non-reasoning model over a newer reasoning one', () => {
+    expect(pickDefaultModel(['qwen3.8-heretic:9b', 'gpt-oss:20b', 'deepseek-r1:8b', 'llama3.1:8b'])).toBe('llama3.1:8b')
+  })
+
+  it('takes any non-reasoning model, not just llama3 or qwen', () => {
+    expect(pickDefaultModel(['qwen3.8-heretic:9b', 'granite4.1:8b'])).toBe('granite4.1:8b')
+  })
+
+  it('falls back to the first model when every one reasons, and to nothing when none is online', () => {
+    expect(pickDefaultModel(['gpt-oss:20b', 'qwq:32b'])).toBe('gpt-oss:20b')
+    expect(pickDefaultModel([])).toBeUndefined()
   })
 })

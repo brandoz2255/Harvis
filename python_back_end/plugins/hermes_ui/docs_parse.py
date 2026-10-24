@@ -15,7 +15,7 @@ KINDS = ("deck", "doc", "pdf", "sheet")
 
 _FENCE_RE = re.compile(r"^\s*-{3,}\s*$")
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
-_DIVIDER_RE = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$")
+_DIVIDER_RE = re.compile(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$")
 _CODE_FENCE_OPEN = re.compile(r"^\s*(`{3,}|~{3,})")
 
 
@@ -39,6 +39,7 @@ class ParsedDoc:
     sections: list[Section] = field(default_factory=list)
     sheets: list[Sheet] = field(default_factory=list)
     header_complete: bool = True
+    theme: str = ""             # the ``theme:`` header value, lowercased; "" when absent (docs_theme falls back to default)
 
 
 def _normalize_kind(value: str) -> str:
@@ -72,21 +73,22 @@ def strip_fence(source: str) -> str:
 
 
 def _parse_header(source: str):
-    """(closed, kind, outline, rest, title)"""
+    """(closed, kind, outline, rest, title, theme)"""
     lines = source.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     i = 0
     while i < len(lines) and not lines[i].strip():
         i += 1
     if i >= len(lines) or not _FENCE_RE.match(lines[i]):
-        return True, "doc", [], "\n".join(lines[i:]), ""
+        return True, "doc", [], "\n".join(lines[i:]), "", ""
 
-    kind, title, outline, in_outline = "doc", "", [], False
+    kind, title, theme, outline, in_outline = "doc", "", "", [], False
+    theme_at = -1
     for j in range(i + 1, len(lines)):
         line = lines[j]
         if _FENCE_RE.match(line):
             # Small models copy a "<body>" placeholder from the prompt; it is never content.
             rest = [ln for ln in lines[j + 1:] if not _BODY_TAG_RE.match(ln)]
-            return True, kind, outline, "\n".join(rest), title
+            return True, kind, outline, "\n".join(rest), title, theme
         item = re.match(r"^\s*[-*]\s+(.*)$", line)
         if in_outline and item:
             label = _unquote(item.group(1))
@@ -103,6 +105,8 @@ def _parse_header(source: str):
             kind = _normalize_kind(_unquote(value.split(" #")[0]))
         elif key == "title":
             title = _unquote(value)
+        elif key == "theme":
+            theme, theme_at = _unquote(value.split(" #")[0]).strip().lower(), j
         elif key in ("outline", "sections", "slides", "sheets"):
             inline = re.match(r"^\[(.*?)\]?\s*$", value.strip())
             if inline and value.strip():
@@ -113,7 +117,9 @@ def _parse_header(source: str):
     # item with no newline after it yet is not counted.
     if not source.endswith("\n") and in_outline and outline:
         outline.pop()
-    return False, kind, outline, "", title
+    if not source.endswith("\n") and theme_at == len(lines) - 1:      # "theme: pap" so far: not a name yet
+        theme = ""
+    return False, kind, outline, "", title, theme
 
 
 def _split_slides(body: str) -> list[Section]:
@@ -186,9 +192,9 @@ def parse_sheet_table(body: str) -> list[list[str]]:
 
 def parse_harvis_doc(source: str) -> ParsedDoc:
     """Parse a whole or partial block body. Never raises."""
-    closed, kind, outline, body, title = _parse_header(strip_fence(source or ""))
+    closed, kind, outline, body, title, theme = _parse_header(strip_fence(source or ""))
     if not closed:
-        return ParsedDoc(kind=kind, title=title, outline=outline, header_complete=False)
+        return ParsedDoc(kind=kind, title=title, outline=outline, header_complete=False, theme=theme)
 
     sections = _split_slides(body) if kind == "deck" else _split_sections(body)
     if not title:
@@ -201,4 +207,4 @@ def parse_harvis_doc(source: str) -> ParsedDoc:
         for i, s in enumerate(x for x in sections if x.title or "|" in x.body):
             sheets.append(Sheet(s.title or (outline[i] if i < len(outline) else f"Sheet{i + 1}"),
                                 parse_sheet_table(s.body)))
-    return ParsedDoc(kind=kind, title=title, outline=outline, sections=sections, sheets=sheets)
+    return ParsedDoc(kind=kind, title=title, outline=outline, sections=sections, sheets=sheets, theme=theme)

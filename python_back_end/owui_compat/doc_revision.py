@@ -19,7 +19,7 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
-from . import doc_revision_i18n
+from . import doc_revision_i18n, doc_words
 
 MAX_DOC_CHARS = 12_000   # of the doc kept in the history the model sees
 MAX_EDIT_CHARS = 400     # a longer message brings its own material: it is not an edit of the last doc
@@ -111,13 +111,15 @@ _NOUNS = (r"slides?|sections?|bullets?|titles?|subtitles?|headings?|tables?|shee
           r"formulas?|charts?|graphs?|timelines?|quadrants?|cards?|flows?|diagrams?|paragraphs?|intro|introduction|"
           r"summary|conclusion|document|doc|deck|report|memo|pdf|page|pages|outline|tone|numbers?|figures?|totals?|"
           r"budget|notes|typos?|wording|text|content|examples?|checklist|status|dates?|issues|spreadsheet|"
-          r"presentation|handout|runbook|steps?|items?|lines?|colou?rs?|font|layout|order")
+          r"presentation|handout|runbook|steps?|items?|lines?|colou?rs?|font|layout|order|docx|slideshow|powerpoint|"
+          r"onepager|writeup")
 _DOC_NOUN = re.compile(rf"\b(?:{_NOUNS})\b")
 # Names a part of a document, so an edit may reach back past newer chat to an older document.
 _PART_NOUN = re.compile(
     r"\b(?:slides?|sections?|bullets?|subtitles?|headings?|tables?|sheets?|columns?|rows?|cells?|formulas?|"
     r"charts?|timelines?|quadrants?|cards?|diagrams?|paragraphs?|intro|introduction|summary|conclusion|"
-    r"document|doc|deck|report|memo|pdf|outline|checklist|spreadsheet|presentation|handout|runbook)\b")
+    r"document|doc|deck|report|memo|pdf|outline|checklist|spreadsheet|presentation|handout|runbook|docx|"
+    r"slideshow|powerpoint)\b")
 _PRONOUN = re.compile(r"\b(?:it|this|that|these|those|them)\b")
 # "this slide" points at the document; "this list" or "this sentence" points at whatever is pasted after it.
 _BARE_PRONOUN = re.compile(rf"\b(?:it|this|that|these|those|them)\b(?!\s+(?:{_NOUNS})\b)")
@@ -163,8 +165,19 @@ _FIX_PREFIX = re.compile(r"^\s*fix\s+these\s+issues\s+in\s+the\s+document\s*:", 
 _CONVERT = re.compile(
     r"^(?:turn|convert|transform|export|save|put|make|rewrite|reformat|present|print|redo|download)\s+"
     r"(?:(?:it|this|that|them|the\s+above|the\s+(?:doc|document|deck|report|memo|sheet|spreadsheet|table|pdf|"
-    r"slides|presentation|handout|one))\s+)"
+    r"slides|presentation|slideshow|powerpoint|handout|one))\s+)"
     r"(?:(?:right\s+)?(?:now\s+)?(?:into|as|to|in)\b|an?\b)")
+
+
+# A format change with no pronoun: "convert to pdf", "export to excel", "download as pdf".
+# The target has to close the clause: "save to the document folder" and "turn to the report section" name a
+# place or a part, where "convert to pdf", "export to excel please" and "download as a pdf file" name a format.
+_CONVERT_BARE_SRC = (
+    r"^(?:convert|export|save|print|download|turn|put|make|transform|reformat|redo)\s+(?:(?:right\s+)?now\s+)?"
+    r"(?:into|as|to|in)\s+(?:an?\s+|the\s+)?"
+    r"(?=(?:{targets})(?:\s+(?:file|format|instead|please|pls|now|asap|thanks|for\s+me))*\s*[.!]*\s*$)")
+# "give me this as a pdf", "send me that in word".
+_CONVERT_GIVE = re.compile(r"^(?:give|send|get)\s+me\s+(?:this|that|it|the\s+above)\s+(?:as|in|into)\s+(?:an?\s+)?")
 
 
 # "Thanks!", "Looks good.", "Perfect.": praise that opens a message ahead of the actual request.
@@ -181,8 +194,13 @@ def _pleasantry(sentence: str) -> bool:
 
 
 def _clause(text: str) -> str:
-    """The first sentence that is a request: leading praise and empty filler are skipped."""
-    text = (text or "").lower().replace("\u2019", "'").strip()
+    """The first sentence that is a request: leading praise and empty filler are skipped.
+
+    Read through ``doc_words.normalize``, so "power point", "slide show" and a mistyped
+    "sildeshow" are the words the rest of this module knows. "balance sheet" and "tracker
+    table" stay as written: they name a spreadsheet, which this module's nouns already know.
+    """
+    text = doc_words.normalize(text, sheets=False).strip()
     for sentence in _SENTENCE_SPLIT.split(text) if text else []:
         stripped = _FILLER_RE.sub("", sentence.strip()).strip()
         if stripped and not _pleasantry(stripped):
@@ -198,11 +216,15 @@ _TARGET_WORDS = (
 )
 
 
+_TARGET_ALT = "|".join(sorted({w for _, words in _TARGET_WORDS for w in words}, key=len, reverse=True))
+_CONVERT_BARE = re.compile(_CONVERT_BARE_SRC.format(targets=_TARGET_ALT))
+
+
 def _convert_match(text: str):
     if len(text or "") > MAX_EDIT_CHARS:
         return None, None
     clause = _clause(text)
-    return clause, _CONVERT.match(clause)
+    return clause, _CONVERT.match(clause) or _CONVERT_GIVE.match(clause) or _CONVERT_BARE.match(clause)
 
 
 def conversion_target(text: str) -> Optional[str]:

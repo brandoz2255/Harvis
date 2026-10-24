@@ -1,19 +1,21 @@
 import { host } from '@hermes/plugin-sdk'
 
-import { setSkillEnabled } from '@/api/skills'
+import { openSkillReview } from './skill-review'
 
 interface Drafted {
-  name?: string
   description?: string
+  /** 'update' when the model proposed a revision to a skill that already exists. */
+  kind?: 'new' | 'update'
+  name?: string
 }
 
 /**
- * After a hard job (a workspace run, or "save this as a skill") Harvis writes
- * itself a skill — a playbook for next time — and saves it switched OFF
- * (python_back_end/plugins/hermes_ui/learn.py draft_skill). The backend then
- * sends `harvis.skill.drafted`; this turns it into a toast whose Enable is the
- * one click that switches the skill on and marks it trusted (rest_skills.py),
- * after which chats that match it carry it (skill_select.py).
+ * After a hard job (a workspace run, or "save this as a skill") Harvis proposes
+ * itself a skill, or a revision to one it has (python_back_end/plugins/hermes_ui/learn.py
+ * draft_skill). The backend then sends `harvis.skill.drafted`; this turns it into
+ * a toast whose Review button opens the full text and diff (skill-review.tsx).
+ * Nothing applies until the person approves there: the toast alone can't switch a
+ * skill on, so a one-line summary is never the thing someone vouches for.
  */
 export function watchLearnedSkills(): () => void {
   if (typeof host.onEvent !== 'function') {
@@ -21,7 +23,7 @@ export function watchLearnedSkills(): () => void {
   }
 
   return host.onEvent('harvis.skill.drafted', event => {
-    const { description, name } = (event?.payload || {}) as Drafted
+    const { description, kind, name } = (event?.payload || {}) as Drafted
 
     if (!name) {
       return
@@ -33,22 +35,14 @@ export function watchLearnedSkills(): () => void {
       id,
       kind: 'info',
       icon: 'lightbulb',
-      title: 'Harvis learned a skill',
+      title: kind === 'update' ? 'Harvis proposed a skill update' : 'Harvis learned a skill',
       message: description ? `${name} — ${description}` : name,
-      detail: 'It stays off until you enable it. You can read or edit it in Skills.',
+      detail: 'Nothing changes until you review the full text and approve it.',
       durationMs: 0,
       action: {
-        label: 'Enable',
+        label: 'Review',
         onClick: () => {
-          setSkillEnabled(name, true)
-            .then(res =>
-              host.notify({
-                id,
-                kind: res.ok ? 'success' : 'error',
-                message: res.ok ? `${name} is on. Harvis will use it when a chat matches.` : `Couldn't enable ${name}.`
-              })
-            )
-            .catch((err: unknown) => host.notifyError(err, `Couldn't enable ${name}`))
+          openSkillReview(name)
         }
       }
     })

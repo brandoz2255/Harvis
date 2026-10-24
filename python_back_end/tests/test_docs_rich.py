@@ -435,3 +435,13 @@ def test_parsers_match_the_panel_on_dots_spaces_and_arrows():
     assert parse_date("Oct. 26")[0].month == 10
     assert parse_csv('Name, Note, N\nA, "b, c", 1').rows[1] == ["A", "b, c", "1"]
     assert [e for e in parse_flow("A => B\nB ---> C\nC ⟶ D").edges] == [("A", "B"), ("B", "C"), ("C", "D")]
+
+
+def test_timeline_date_labels_beside_a_bar_or_diamond_never_wrap():
+    tl = "Build | Oct 26 | Nov 1\n*Launch | Nov 24\nKickoff | Oct 28"
+    slide = _prs(deck("## Plan\n" + fence("timeline", tl))).slides[1]
+    labels = {"Oct 26 to Nov 1", "Nov 24", "Oct 28"}               # none of these is a gridline label
+    found = [s for s in slide.shapes if s.has_text_frame and s.text_frame.text.strip() in labels
+             and s.shape_type == 17]
+    assert {s.text_frame.text.strip() for s in found} == labels
+    assert all(s.text_frame.word_wrap is False for s in found)

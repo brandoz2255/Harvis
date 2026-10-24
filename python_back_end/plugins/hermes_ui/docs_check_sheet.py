@@ -2,7 +2,10 @@
 
 Reads the workbook the exporter wrote with openpyxl and evaluates formulas with the same
 small evaluator the CSV export uses, so no spreadsheet program is needed. Where the
-evaluator does not know a function the formula is left alone rather than guessed at.
+evaluator does not know a function the formula is left alone rather than guessed at, unless the workbook
+went through the sandbox's recalculation: then it carries every formula's value, those values stand in for
+the evaluator's, and any cell that came out as an error (#DIV/0!, #REF!, Err:...) is reported with its address
+and formula.
 """
 from __future__ import annotations
 
@@ -13,7 +16,7 @@ from typing import Optional
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
-from .docs_formula import _FUNCS, FormulaError, evaluate
+from .docs_formula import SUPPORTED, FormulaError, Unknowable, evaluate_any
 
 # Functions whose arguments are meant to be numbers: a range of text there is a mistake. IF, SUMIF, lookups and
 # text functions legitimately read text, so formulas using them are only checked for reaching outside the table.
@@ -42,12 +45,12 @@ _UNKNOWN = object()
 
 
 class _Grid:
-    """One worksheet read into numbers, formulas evaluated lazily with cycle detection."""
+    """One worksheet read into numbers and text, formulas evaluated lazily with cycle detection."""
 
-    def __init__(self, ws) -> None:
-        self.ws = ws
+    def __init__(self, ws, cached=None) -> None:
+        self.ws, self.cached = ws, cached        # cached: the same sheet read with data_only=True, or None
         self.rows, self.cols = ws.max_row, ws.max_column
-        self._cache: dict[tuple[int, int], Optional[float]] = {}
+        self._cache: dict[tuple[int, int], object] = {}
         self._busy: set[tuple[int, int]] = set()
 
     def raw(self, r: int, c: int):
@@ -55,35 +58,53 @@ class _Grid:
             return None
         return self.ws.cell(row=r + 1, column=c + 1).value
 
+    def saved(self, r: int, c: int):
+        """The value the workbook has stored for a formula cell (None when it was never calculated)."""
+        if self.cached is None:
+            return None
+        return self.cached.cell(row=r + 1, column=c + 1).value
+
     def is_formula(self, r: int, c: int) -> bool:
         cell = self.ws.cell(row=r + 1, column=c + 1)
         return isinstance(cell.value, str) and cell.value.startswith("=") and cell.data_type == "f"
 
-    def value(self, r: int, c: int) -> Optional[float]:
-        """The cell as a number, or None when it is empty or text. Raises FormulaError on a cycle or a bad formula."""
+    def cell(self, r: int, c: int):
+        """What a formula reads from the cell: a number, text, a bool, or None when it is empty. Raises
+        FormulaError on a cycle, a bad formula, or a value we cannot know."""
         key = (r, c)
         if key in self._cache:
             if self._cache[key] is _UNKNOWN:
-                raise FormulaError("unknown")
+                raise Unknowable("unknown")
             return self._cache[key]
         if key in self._busy:
-            raise FormulaError("circular")
+            raise Unknowable("circular")
         raw = self.raw(r, c)
         self._busy.add(key)
         try:
             if self.is_formula(r, c):
-                if not _evaluable(raw):
-                    # A function the evaluator lacks: the cell has a value we cannot know, and so does every
-                    # formula that reads it. Raising keeps that from being mistaken for text or zero.
-                    self._cache[key] = _UNKNOWN
-                    raise FormulaError("unknown")
-                result = evaluate(raw, self.value)
+                if _evaluable(raw):
+                    result = evaluate_any(raw, self.cell)
+                else:
+                    result = self.saved(r, c)
+                    if result is None or (isinstance(result, str) and _error_name(result)):
+                        # A function the evaluator lacks and no stored value: the cell has a value we cannot
+                        # know, and so does every formula that reads it. Raising keeps that from being
+                        # mistaken for text or zero.
+                        self._cache[key] = _UNKNOWN
+                        raise Unknowable("unknown")
+            elif isinstance(raw, (str, bool)):
+                result = raw
             else:
-                result = float(raw) if isinstance(raw, (int, float)) and not isinstance(raw, bool) else None
+                result = float(raw) if isinstance(raw, (int, float)) else None
         finally:
             self._busy.discard(key)
         self._cache[key] = result
         return result
+
+    def value(self, r: int, c: int) -> Optional[float]:
+        """The cell as a number, or None when it is empty or text. Raises FormulaError on a cycle or a bad formula."""
+        v = self.cell(r, c)
+        return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
 
     def maybe_number(self, r: int, c: int) -> bool:
         """True for a number, and for a formula, whose result we may not be able to work out."""
@@ -96,12 +117,41 @@ class _Grid:
             return None
 
 
+_ERRORS = {
+    "#DIV/0!": "divides by zero",
+    "#REF!": "points at a cell that does not exist",
+    "#NAME?": "uses a name or function the spreadsheet does not know",
+    "#VALUE!": "does arithmetic on text",
+    "#N/A": "found no match",
+    "#NUM!": "does not give a valid number",
+    "#NULL!": "uses a range that does not exist",
+}
+_ERROR_SHAPE = re.compile(r"^#[A-Z0-9/]+[!?]$|^#N/A$")
+
+
+def _error_name(value: str) -> Optional[str]:
+    """The error a stored cell value stands for (``#DIV/0!``, ``Err:502``), or None for ordinary text."""
+    if _ERROR_SHAPE.match(value) or value.startswith("Err:"):
+        return value
+    return None
+
+
+def _stored_error(grid: _Grid, r: int, c: int, where: str) -> Optional[dict]:
+    """The error the recalculated workbook stored in a formula cell, with the cell and its formula."""
+    value = grid.saved(r, c)
+    error = _error_name(value) if isinstance(value, str) else None
+    if not error:
+        return None
+    name = f"{get_column_letter(c + 1)}{r + 1}"
+    return _issue("error", where, f"{name} {grid.raw(r, c)} shows {error}: it {_ERRORS.get(error, 'could not be calculated')}")
+
+
 def _functions(formula: str) -> set[str]:
     return {m.upper() for m in _FUNC.findall(re.sub(r'"[^"]*"', '""', formula))}
 
 
 def _evaluable(formula: str) -> bool:
-    return _functions(formula) <= set(_FUNCS)
+    return _functions(formula) <= SUPPORTED
 
 
 def _formula_issues(grid: _Grid, r: int, c: int, where: str) -> list[dict]:
@@ -219,10 +269,15 @@ def check_xlsx(data: bytes, title: str = "", outline: Optional[list[str]] = None
         wb = load_workbook(io.BytesIO(data))
     except Exception as exc:                                            # noqa: BLE001 - any unreadable file is a finding
         return [_issue("error", "document", f"The spreadsheet could not be opened ({type(exc).__name__})")]
+    try:
+        stored = load_workbook(io.BytesIO(data), data_only=True)      # the values a recalculation saved, if any
+    except Exception:                                                   # noqa: BLE001 - only the formulas are then checked
+        stored = None
     issues: list[dict] = []
     grids: list[_Grid] = []
     for ws in wb.worksheets:
-        where, grid = f"sheet {ws.title}", _Grid(ws)
+        where = f"sheet {ws.title}"
+        grid = _Grid(ws, stored[ws.title] if stored is not None and ws.title in stored.sheetnames else None)
         grids.append(grid)
         for r in range(1, grid.rows):
             for c in range(grid.cols):
@@ -233,5 +288,6 @@ def check_xlsx(data: bytes, title: str = "", outline: Optional[list[str]] = None
                 elif grid.is_formula(r, c):
                     found = _evaluation_issue(grid, r, c, where)
                     issues += [found] if found else _formula_issues(grid, r, c, where)
+                    stuck = None if found else _stored_error(grid, r, c, where)
+                    issues += [stuck] if stuck else []
     return issues + _limit_issues(grids, limits_in([title or "", *(outline or [])]))
-

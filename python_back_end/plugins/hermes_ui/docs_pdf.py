@@ -17,76 +17,119 @@ try:                                    # WeasyPrint 68+
 except ImportError:                     # older: a plain function is the fetcher
     URLFetcher = None
 
-from .docs_blocks import Block, ListItem, Run, csv_table, inline_runs, parse_blocks, split_notes
-from .docs_chips import ACCENT, DARK, INK, MUTED, TONE_COLORS, TONE_TINTS
+from .docs_blocks import Block, ListItem, Run, csv_table, inline_runs, parse_blocks, plain_text, split_notes
+from .docs_chips import TONE_COLORS, TONE_TINTS
 from .docs_fonts import font_stack, has_real_italic, has_real_mono_italic
 from .docs_parse import ParsedDoc
 from .docs_rich import rich_as_rows
 from .docs_svg import svg_markup, svg_size
+from .docs_theme import (
+    DEFAULT_THEME, Theme, body_size, classify_slide, font_candidates, font_generic, get_theme, text_stats)
 
 DOC_FIT = (640, 880, 640)           # layout width, tallest figure, shown width: an A4 page holds about 950px of it
 DECK_FIT = (860, 430, 1120)
 _CHECK = {True: "\u2611", False: "\u2610"}
 
-def _fonts() -> tuple[str, str]:
-    """(body, code) font-family lists; a CJK font is added when the image has one, so asked for on first use."""
-    return (font_stack("DejaVu Sans", "Helvetica Neue", "Helvetica", "Arial", "sans-serif"),
+def _fonts(theme: Theme = DEFAULT_THEME) -> tuple[str, str]:
+    """(body, code) font-family lists; a CJK font is added when the image has one, so asked for on first use.
+
+    The theme's body face comes first, then the faces that can stand in for it, then the old DejaVu defaults, so
+    a document on a host without the theme's font still draws (as DejaVu) rather than failing."""
+    return (font_stack(*font_candidates(theme.body_font), "DejaVu Sans", "Helvetica Neue", "Helvetica", "Arial",
+                       font_generic(theme.body_font)),
             font_stack("DejaVu Sans Mono", "Consolas", "monospace"))
 
 
-def _base_css() -> str:
-    body_font, mono_font = _fonts()
+def _heading_font(theme: Theme) -> str:
+    return font_stack(*font_candidates(theme.heading_font), "DejaVu Sans", "Helvetica Neue", "Helvetica", "Arial",
+                      font_generic(theme.heading_font))
+
+
+def _base_css(theme: Theme = DEFAULT_THEME) -> str:
+    body_font, mono_font = _fonts(theme)
     return f"""
-body {{ font-family: {body_font}; color: #1f2937; line-height: 1.5; margin: 0; }}
-a {{ color: #1d4ed8; text-decoration: none; }}
-code {{ font-family: {mono_font}; font-size: 0.9em; background: #f1f5f9; padding: 0 2px; }}
-pre {{ font-family: {mono_font}; font-size: 8.5pt; background: #f1f5f9; padding: 8px 10px; border-radius: 3px;
+body {{ font-family: {body_font}; color: #{theme.ink}; line-height: 1.5; margin: 0; }}
+h1, h2, h3, h4 {{ font-family: {_heading_font(theme)}; color: #{theme.ink}; }}
+a {{ color: #{theme.accent2}; text-decoration: none; }}
+code {{ font-family: {mono_font}; font-size: 0.9em; background: #{theme.card}; padding: 0 2px; }}
+pre {{ font-family: {mono_font}; font-size: 8.5pt; background: #{theme.card}; padding: 8px 10px; border-radius: 3px;
        white-space: pre-wrap; word-wrap: break-word; page-break-inside: avoid; }}
 pre code {{ background: none; padding: 0; }}
 table {{ border-collapse: collapse; width: 100%; margin: 0.6em 0; }}
-th, td {{ border: 1px solid #cbd5e1; padding: 4px 8px; text-align: left; vertical-align: top; }}
-th {{ background: #dde7f3; }}
+th, td {{ border: 1px solid #{theme.line}; padding: 4px 8px; text-align: left; vertical-align: top; }}
+th {{ background: #{theme.tint}; }}
 tr {{ page-break-inside: avoid; }}
-blockquote {{ margin: 0.6em 0; padding-left: 12px; border-left: 3px solid #94a3b8; color: #475569; }}
-hr {{ border: 0; border-top: 1px solid #cbd5e1; }}
+blockquote {{ margin: 0.6em 0; padding-left: 12px; border-left: 3px solid #{theme.accent}; color: #{theme.muted}; }}
+hr {{ border: 0; border-top: 1px solid #{theme.line}; }}
 h1, h2, h3, h4 {{ page-break-after: avoid; line-height: 1.25; }}
 li.task {{ list-style: none; margin-left: -1.3em; }}
 .chip {{ display: inline-block; padding: 0 7px; border-radius: 9px; font-size: 0.85em; font-weight: bold; }}
 .math {{ font-family: {mono_font}; text-align: center; white-space: pre-wrap; margin: 0.7em 0; padding: 6px;
-         background: #f1f5f9; border-radius: 3px; }}
+         background: #{theme.card}; border-radius: 3px; }}
 figure.rich {{ margin: 0.8em 0; page-break-inside: avoid; }}
 figure.rich svg {{ display: block; }}
 {"".join(f".chip-{t} {{ color: #{c}; background: #{TONE_TINTS[t]}; }}" for t, c in TONE_COLORS.items())}
 """
 
-def _doc_css() -> str:
-    body_font, _ = _fonts()
+def _doc_css(theme: Theme = DEFAULT_THEME) -> str:
+    body_font, _ = _fonts(theme)
     return f"""
 @page {{ size: A4; margin: 22mm 20mm 24mm;
-         @bottom-center {{ content: counter(page) " / " counter(pages); font: 8pt {body_font}; color: #64748b; }} }}
+         @bottom-center {{ content: counter(page) " / " counter(pages); font: 8pt {body_font}; color: #{theme.muted}; }} }}
 body {{ font-size: 10.5pt; }}
 h1 {{ font-size: 24pt; margin: 0 0 0.5em; }}
-h2 {{ font-size: 16pt; margin: 1.3em 0 0.4em; padding-bottom: 3px; border-bottom: 1px solid #cbd5e1; }}
+h2 {{ font-size: 16pt; margin: 1.3em 0 0.4em; padding-bottom: 3px; border-bottom: 1px solid #{theme.line}; }}
 h3 {{ font-size: 13pt; margin: 1em 0 0.3em; }}
 h4 {{ font-size: 11pt; margin: 0.9em 0 0.3em; }}
 p {{ margin: 0.5em 0; }}
 """
 
-def _deck_css() -> str:
-    body_font, _ = _fonts()
+# The deck page, in inches: the same margins the slides' placeholders use, so a PDF page is the pptx slide.
+_PAGE_MARGIN = "0.6in 0.8in 0.7in"
+
+
+def _deck_css(theme: Theme = DEFAULT_THEME) -> str:
+    """One page per slide, 16:9. The title and section pages sit on ``theme.dark`` (or on the ground for a light theme),
+    like the pptx; the accent bar under slide titles is a theme option, off unless the theme asks for it."""
+    body_font, _ = _fonts(theme)
+    dark = theme.title_style == "dark"
+    cover_bg = theme.dark if dark else theme.ground
+    fg, sub = (theme.ground, theme.accent_on_dark) if dark else (theme.ink, theme.accent)
+    meta = theme.on_dark if dark else theme.muted
+    bar = f"border-bottom: 4px solid #{theme.accent}; padding-bottom: 0.2em;" if theme.decor else ""
+    squares = "".join(f".sq{i} {{ left: {9.75 + (i % 2) * 1.6 - 0.8:.2f}in; top: {2.15 + (i // 2) * 1.6 - 0.6:.2f}in; "
+                      f"background: #{c}; }}"
+                      for i, c in enumerate((theme.accent, theme.accent2, theme.muted, theme.accent)))
     return f"""
-@page {{ size: 13.333in 7.5in; margin: 0.6in 0.8in 0.7in;
-         @bottom-right {{ content: counter(page); font: 10pt {body_font}; color: #64748b; }} }}
-body {{ font-size: 18pt; }}
+@page {{ size: 13.333in 7.5in; margin: {_PAGE_MARGIN}; background: #{theme.ground};
+         @bottom-right {{ content: counter(page); font: 10pt {body_font}; color: #{theme.muted}; }} }}
+@page cover {{ margin: {_PAGE_MARGIN}; background: #{cover_bg}; @bottom-right {{ content: none; }} }}
+body {{ font-size: 20pt; }}
 .slide {{ page-break-after: always; }}
 .slide:last-child {{ page-break-after: auto; }}
-.slide h1 {{ font-size: 30pt; margin: 0 0 0.5em; padding-bottom: 0.2em; border-bottom: 4px solid #{ACCENT}; color: #{INK}; }}
-@page first {{ margin: 0.6in 0.8in 0.7in; background: #{DARK}; @bottom-right {{ content: none; }} }}
-.slide.first {{ page: first; padding-top: 1.7in; width: 8.3in; }}
-.slide.first h1 {{ font-size: 44pt; border: 0; margin-bottom: 0.2em; color: #fff; }}
-.slide.first p, .slide.first li {{ font-size: 22pt; color: #{MUTED}; }}
-.slide.first p:first-of-type {{ color: #{ACCENT}; }}
+.slide h1 {{ font-size: 32pt; margin: 0 0 0.5em; {bar} }}
+.slide.first, .slide.section {{ page: cover; }}
+.slide.first h1, .slide.section h1 {{ color: #{fg}; border: 0; padding: 0; line-height: 1.1; }}
+.slide.first {{ padding-top: 2.8in; }}
+.slide.first h1 {{ font-size: 48pt; margin-bottom: 0.3in; }}
+.slide.first p, .slide.first li {{ font-size: 14pt; color: #{meta}; margin: 0.1em 0; }}
+.slide.first p:first-of-type {{ font-size: 24pt; color: #{sub}; margin-top: 0.1in; }}
+.slide.section {{ padding-top: 1.2in; }}
+.slide.section h1 {{ font-size: 44pt; margin: 0 0 0.4in; }}
+.kicker {{ font-size: 28pt; font-weight: bold; color: #{sub}; margin-bottom: 1.15in; }}
+.rule {{ width: 1.2in; height: 0.07in; background: #{sub}; }}
+.sq {{ position: absolute; width: 1.45in; height: 1.45in; }}
+{squares}
 .slide h2, .slide h3 {{ font-size: 20pt; margin: 0.6em 0 0.2em; }}
+.cols {{ display: flex; gap: 0.5in; }}
+.cols .col {{ flex: 1; min-width: 0; }}
+.cols h3 {{ margin: 0 0 0.3em; padding-bottom: 0.1em; color: #{theme.accent}; font-size: 22pt; border-bottom: 1px solid #{theme.line}; }}
+.stats {{ display: flex; gap: 0.4in; margin-top: 0.3in; }}
+.stat {{ flex: 1; min-width: 0; background: #{theme.card}; border: 1px solid #{theme.line}; border-radius: 0.12in;
+         padding: 0.3in; min-height: 3.2in; }}
+.stat .num {{ font-weight: bold; color: #{theme.accent}; line-height: 1.1; white-space: nowrap; margin-bottom: 0.2in; }}
+.stat .num strong {{ font-weight: bold; }}
+.stat .cap {{ font-size: 24pt; color: #{theme.ink}; line-height: 1.3; }}
 li {{ margin: 0.25em 0; }}
 p {{ margin: 0.4em 0; }}
 th, td {{ font-size: 14pt; }}
@@ -205,24 +248,72 @@ def blocks_html(blocks: list[Block], *, min_heading: int = 2,
     return "\n".join(out)
 
 
+_STAT_WIDTH_PT = {1: 560.0, 2: 300.0, 3: 190.0}      # room for a big number on a card, by how many cards share the row
+
+
+def _stat_size(text: str, count: int) -> float:
+    """pt size for a big number: 72 when it fits the card, smaller (not below 32) for a long figure."""
+    return max(32.0, min(72.0, _STAT_WIDTH_PT.get(count, 190.0) / (0.6 * max(len(text), 1))))
+
+
+def _slide_size(blocks: list[Block]) -> Optional[int]:
+    """The body size a slide of text alone is set at (docs_theme.body_size, as the pptx), None to keep the page default.
+
+    Dense slides keep the page default: the PDF does not shrink text to fit, so a larger size could spill a page."""
+    if any(b.kind in ("table", "rich") for b in blocks):
+        return None
+    size = body_size(*text_stats(blocks))
+    return size if size > 22 else None
+
+
+def _deck_slide(i: int, s, title: str, theme: Theme, dividers: int) -> tuple[str, int]:
+    """(html, dividers so far) of one slide; the same layout choices as the pptx writer (docs_theme.classify_slide)."""
+    body = parse_blocks(split_notes(s.body)[0])
+    heading = escape(s.title or (title if i == 0 else ""))
+    h1 = f"<h1>{heading}</h1>" if heading else ""
+    if i == 0:
+        squares = "".join(f'<div class="sq sq{k}"></div>' for k in range(4)) if theme.decor else ""
+        rule = '<div class="rule"></div>'
+        return (f'<section class="slide first">{squares}{h1}{rule}{blocks_html(body, min_heading=2, fit=DECK_FIT)}</section>',
+                dividers)
+    kind = classify_slide(body, bool(s.title))
+    if kind.kind == "section":
+        dividers += 1
+        return (f'<section class="slide section"><div class="kicker">{dividers:02d}</div>{h1}<div class="rule"></div></section>',
+                dividers)
+    if kind.kind == "columns":
+        size = min(max(body_size(*text_stats(body)), 20), 24)
+        cols = "".join(f'<div class="col"><h3>{_runs(head)}</h3>{blocks_html(blocks, min_heading=3, fit=DECK_FIT)}</div>'
+                       for head, blocks in kind.groups)
+        return f'<section class="slide">{h1}<div class="cols" style="font-size:{size}pt">{cols}</div></section>', dividers
+    if kind.kind == "stats":
+        n = len(kind.groups)
+        cards = "".join(
+            f'<div class="stat"><div class="num" style="font-size:{_stat_size(plain_text(num), n):.0f}pt">{_runs(num)}</div>'
+            f'{f"<div class=cap>{_runs(cap)}</div>" if cap else ""}</div>' for num, cap in kind.groups)
+        return f'<section class="slide">{h1}<div class="stats">{cards}</div></section>', dividers
+    size = _slide_size(body)
+    style = f' style="font-size:{size}pt"' if size else ""
+    return f'<section class="slide"{style}>{h1}{blocks_html(body, min_heading=2, fit=DECK_FIT)}</section>', dividers
+
+
 def build_html(doc: ParsedDoc, title: str) -> str:
+    theme = get_theme(getattr(doc, "theme", ""))
     if doc.kind == "deck":
-        slides = []
+        slides, dividers = [], 0
         for i, s in enumerate(doc.sections):
-            body = parse_blocks(split_notes(s.body)[0])
-            heading = escape(s.title or (title if i == 0 else ""))
-            slides.append(f'<section class="slide{" first" if i == 0 else ""}">'
-                          f"{f'<h1>{heading}</h1>' if heading else ''}{blocks_html(body, min_heading=2, fit=DECK_FIT)}</section>")
-        css, content = _deck_css(), "\n".join(slides)
+            html, dividers = _deck_slide(i, s, title, theme, dividers)
+            slides.append(html)
+        css, content = _deck_css(theme), "\n".join(slides)
     else:
         parts = [f"<h1>{escape(title)}</h1>"]
         for s in doc.sections:
             if s.title:
                 parts.append(f"<h2>{_runs(inline_runs(s.title))}</h2>")
             parts.append(blocks_html(parse_blocks(s.body), min_heading=3))
-        css, content = _doc_css(), "\n".join(parts)
+        css, content = _doc_css(theme), "\n".join(parts)
     return (f'<!doctype html><html><head><meta charset="utf-8"><title>{escape(title)}</title>'
-            f"<style>{_base_css()}{css}{_ITALIC_FALLBACK if not (has_real_italic() and has_real_mono_italic()) else ''}</style></head><body>{content}</body></html>")
+            f"<style>{_base_css(theme)}{css}{_ITALIC_FALLBACK if not (has_real_italic() and has_real_mono_italic()) else ''}</style></head><body>{content}</body></html>")
 
 
 def build_pdf(doc: ParsedDoc, title: str) -> bytes:

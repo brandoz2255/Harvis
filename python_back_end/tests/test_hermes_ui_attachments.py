@@ -215,7 +215,7 @@ def _stub_turn(monkeypatch, calls):
         return []
 
     async def stream_turn(token, turn, model, ep, mode, effort, origin, extra=None):
-        calls.update(turn=turn, extra=extra)
+        calls.update(turn=turn, extra=extra, mode=mode)
         yield "text", "ok"
 
     monkeypatch.setattr(providers, "resolve_active_endpoint", endpoint)
@@ -272,6 +272,38 @@ async def test_run_turn_without_files_adds_no_files_key(monkeypatch):
     live = sessions.Live(id="s1", user_id=1, model="gemma4:e2b", running=True)
     await Connection._run_turn(_TurnConn(), live, [{"role": "user", "content": "hello"}])
     assert "files" not in calls["extra"]
+
+
+@pytest.mark.asyncio
+async def test_run_turn_with_a_file_in_the_latest_message_answers_in_chat_mode(monkeypatch):
+    calls = {}
+    _stub_turn(monkeypatch, calls)
+    live = sessions.Live(id="s1", user_id=1, model="gemma4:e2b", running=True)
+    msgs = [{"role": "user", "content": "what is in the sheet?",
+             "attachments": [attachments.reference(ROWS["f1"])]}]
+    await Connection._run_turn(_TurnConn(), live, msgs)
+    assert calls["mode"] == "chat"
+
+
+@pytest.mark.asyncio
+async def test_run_turn_keeps_auto_when_only_an_earlier_message_had_the_file(monkeypatch):
+    calls = {}
+    _stub_turn(monkeypatch, calls)
+    live = sessions.Live(id="s1", user_id=1, model="gemma4:e2b", running=True)
+    msgs = [{"role": "user", "content": "here", "attachments": [attachments.reference(ROWS["f1"])]},
+            {"role": "assistant", "content": "ok"},
+            {"role": "user", "content": "now build me a website"}]
+    await Connection._run_turn(_TurnConn(), live, msgs)
+    assert calls["extra"]["files"] and calls["mode"] == "auto"
+
+
+@pytest.mark.asyncio
+async def test_run_turn_without_files_stays_auto(monkeypatch):
+    calls = {}
+    _stub_turn(monkeypatch, calls)
+    live = sessions.Live(id="s1", user_id=1, model="gemma4:e2b", running=True)
+    await Connection._run_turn(_TurnConn(), live, [{"role": "user", "content": "hello"}])
+    assert calls["mode"] == "auto"
 
 
 # ─── review fixes: limits, custom endpoints, upload names ───────────────────

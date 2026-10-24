@@ -1,6 +1,7 @@
 """REST half of the Hermes UI facade (shapes from front_end/hermes-desktop-ui/src/types/hermes.ts)."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -74,11 +75,11 @@ def _token(request: Request) -> str:
     return request.cookies.get("access_token") or ""
 
 
-async def _harvis_models(token: str) -> list[dict]:
+async def _harvis_models(token: str, refresh: bool = False) -> list[dict]:
     """Harvis's own model list (same one the main chat picker shows)."""
     headers = {"Authorization": f"Bearer {token}", "Cookie": f"access_token={token}"}
     async with httpx.AsyncClient(timeout=20.0) as client:
-        r = await client.get(MODELS_URL, headers=headers)
+        r = await client.get(MODELS_URL, headers=headers, params={"refresh": "true"} if refresh else None)
     r.raise_for_status()
     body = r.json()
     rows = body.get("data") if isinstance(body, dict) else body
@@ -100,6 +101,7 @@ async def status(user=Depends(get_current_user_optimized)):
         "latest_config_version": 1,
         "profile": PROFILE_NAME,
         "gateway_running": True,
+        "active_sessions": sum(1 for live in sessions._LIVE.values() if live.running and live.user_id == _uid(user)),
         "backend": "harvis",
         "capabilities": ops.capabilities(user),
         "ts": time.time(),
@@ -224,18 +226,38 @@ async def get_session_messages(sid: str, request: Request, user=Depends(get_curr
     return {"messages": msgs, "message_count": len(msgs)}
 
 
-async def build_model_options(pool, uid: int, token: str) -> dict:
-    """Model picker payload (REST /model/options and WS model.options share it)."""
+# The last list each user was shown. A slow or failed rebuild serves it instead of an
+# empty picker that looks like every model is gone.
+_last_rows: dict[int, list[dict]] = {}
+
+
+async def build_model_options(pool, uid: int, token: str, refresh: bool = False) -> dict:
+    """Model picker payload (REST /model/options and WS model.options share it).
+
+    ``degraded`` is True when the backend list could not be read this time; the
+    rows are then the last good ones, or none."""
     current = await store.resolve_model(pool, uid)
     if is_hidden_model(current):
         current = ""
-    try:
-        rows = await _harvis_models(token)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("hermes_ui: model list unavailable: %s", exc)
-        rows = []
+    # Effort is offered only where it does something: local Ollama models that
+    # report the `thinking` capability (gpt-oss, qwen3, gemma4). Everything else
+    # says reasoning False, or the UI assumes every model takes a level.
+    listed, thinking = await asyncio.gather(_harvis_models(token, refresh), thinking_models(),
+                                            return_exceptions=True)
+    if isinstance(thinking, BaseException):
+        thinking = frozenset()
+    degraded = isinstance(listed, BaseException)
+    if degraded:
+        log.warning("hermes_ui: model list unavailable: %s", listed)
+        rows = _last_rows.get(uid, [])
+    else:
+        rows = _last_rows[uid] = listed
     groups: dict[str, list[str]] = {}
     for m in rows:
+        # A model whose host is down is not a choice: a chat started on it fails at
+        # routing. It returns on its own once the host answers a probe again.
+        if (m.get("harvis") or {}).get("status", "available") != "available":
+            continue
         groups.setdefault(_provider_of(m), []).append(str(m["id"]))
     custom_endpoints, active_endpoint_id = await providers.list_endpoints(pool, uid)
     custom_names: dict[str, str] = {}
@@ -258,12 +280,11 @@ async def build_model_options(pool, uid: int, token: str) -> dict:
     if moa_ids:
         groups["moa"] = moa_ids
         custom_names["moa"] = "Mixture of agents"
+    offered = {mid for ids in groups.values() for mid in ids}
+    if current and rows and current not in offered:
+        current = ""  # a saved or recent model that is gone: show Harvis default
     cur_provider = (active_endpoint_id if active_endpoint_id in groups else
                     next((p for p, ids in groups.items() if current in ids), "harvis"))
-    # Effort is offered only where it does something: local Ollama models that
-    # report the `thinking` capability (gpt-oss, qwen3, gemma4). Everything else
-    # says reasoning False, or the UI assumes every model takes a level.
-    thinking = await thinking_models()
     provider_rows = [{
         "name": slug, "slug": slug, "models": ids, "total_models": len(ids),
         "is_current": slug == cur_provider, "authenticated": True, "auth_type": "harvis",
@@ -278,12 +299,17 @@ async def build_model_options(pool, uid: int, token: str) -> dict:
         provider_rows.insert(0, {"name": "Harvis default", "slug": "harvis", "models": ["harvis-default"],
                                  "total_models": 1, "is_current": True, "authenticated": True,
                                  "capabilities": {"harvis-default": {"reasoning": False, "fast": False}}})
-    return {"model": current or "harvis-default", "provider": cur_provider, "providers": provider_rows}
+    return {"model": current or "harvis-default", "provider": cur_provider, "providers": provider_rows,
+            "degraded": degraded and not groups}
 
 
 @router.get("/model/options")
-async def model_options(request: Request, user=Depends(get_current_user_optimized)):
-    return await build_model_options(_pool(request), _uid(user), _token(request))
+async def model_options(request: Request, refresh: bool = False, user=Depends(get_current_user_optimized)):
+    options = await build_model_options(_pool(request), _uid(user), _token(request), refresh=refresh)
+    if options["degraded"]:
+        # An error the picker retries, not a lone "Harvis default" that reads as success.
+        raise HTTPException(503, "model list unavailable")
+    return options
 
 
 @router.get("/model/info")

@@ -2,7 +2,8 @@
 
 When an OWUI chat-completion request asks for an image — either the explicit
 ``harvis_image_generate`` flag from the composer's "+ → Create Image" item, or a
-conservative natural-language match ("generate an image of X") — run the
+conservative natural-language match ("generate an image of X", "draw a cat"; questions,
+code/tech context and an explicit Agent/Orchestrate pick are never matched) — run the
 VERIFIED v0 generation path (``image.harvis_image._run_generation``: provider
 txt2img → binary artifact → 'artifact' trace event) as a background WORKSPACE
 run and return the same ``<details type="workspace_run">`` marker SSE that
@@ -11,9 +12,9 @@ attaches to ``GET /api/workspace/stream/{id}`` and the Artifacts rail previews
 the PNG — no new frontend plumbing.
 
 Gating is HONEST and never hijacks a normal chat: flag off / provider not ready
-→ the explicit trigger gets a short plain-text SSE saying why; the NL trigger
-falls through to normal chat (return ``None``). Never raises — any failure on
-the NL path → ``None`` → normal chat.
+→ BOTH triggers get a short plain-text SSE saying why (a matched image request
+that silently reached a model made the model guess). Never raises — any other
+failure on the NL path → ``None`` → normal chat.
 """
 
 from __future__ import annotations
@@ -44,6 +45,30 @@ _IMAGE_NL_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+# "draw a cat" names no image-noun, so it gets its own anchored trigger. The veto scans the
+# first four words after the article, so "draw a network diagram", "draw a bar chart" and
+# "draw an ascii art cat" keep reaching the model, as do "draw a conclusion" and "draw a box".
+_DRAW_RE = re.compile(
+    r"^\s*(?:please\s+)?draw\s+(?:me\s+)?(?:a|an)\s+"
+    r"(?!(?:\S+\s+){0,3}?(?:conclusion|comparison|parallel|distinction|diagram|chart|graph|"
+    r"flow\s*chart|flowchart|table|uml|mermaid|ascii|box|circle|square|rectangle|triangle|"
+    r"polygon|grid|spiral|fractal|histogram|plot|heatmap|timeline|wireframe|mockup|layout|"
+    r"line|border|blank|picture|image|photo|drawing|svg|canvas|curve|arrow|shape|pattern|"
+    # idioms and extraction senses: "draw a card", "draw a breath", "draw a random sample"
+    r"inference|inferences|sample|samples|lesson|lessons|card|cards|number|numbers|breath|"
+    r"crowd|crowds|salary|wage|herring|bath|attention|random|raffle|lottery|ticket|"
+    r"audience|customers|visitors|analogy|moral|check|cheque|winner|straw|bead|paycheck)\b)"
+    r"\w+",
+    re.IGNORECASE,
+)
+_DRAW_LEAD_RE = re.compile(r"^\s*(?:please\s+)?draw\s+(?:me\s+)?", re.IGNORECASE)
+# "draw a X from/between/out of ..." is the extraction sense (a sample, a card, a number), and
+# a long message is a sentence about drawing, not a picture request. Neither claims the image lane.
+_DRAW_VETO_RE = re.compile(
+    r"\b(?:from|between|among|amongst|out\s+of|at\s+random|randomly)\b|\bof\s+\d", re.IGNORECASE
+)
+_DRAW_MAX_WORDS = 20
+
 # Subject lead-ins after the image-noun: "of a fox", "showing a fox", ": a fox".
 _SUBJECT_LEAD_RE = re.compile(r"^\s*(?:(?:of|showing|depicting)\b|[:,\-])\s*", re.IGNORECASE)
 
@@ -66,10 +91,59 @@ def _extract_prompt(message: str) -> str:
     msg = (message or "").strip()
     m = _IMAGE_NL_RE.search(msg)
     if not m:
+        if _DRAW_RE.match(msg):
+            return _DRAW_LEAD_RE.sub("", msg, count=1).strip() or msg
         return msg
     rest = msg[m.end():].strip()
     rest = _SUBJECT_LEAD_RE.sub("", rest, count=1).strip()
     return rest or msg
+
+
+# A matched request now gets a hard notice instead of a model answer, so the loose verb+noun
+# match alone is not enough: the noun must be followed by a subject ("image OF a fox"), and
+# questions or code/tech context ("how do I make an image smaller in css", "create a photo
+# gallery website") stay with the model.
+_SUBJECT_GATE_RE = re.compile(r"\s*(?:(?:of|showing|depicting)\b|:)", re.IGNORECASE)
+_QUESTION_LEAD_RE = re.compile(
+    r"^\s*(?:how|what|why|which|where|when|who|explain|is|are|does|do|should|could\s+i|can\s+i|"
+    r"tell\s+me|show\s+me\s+how|teach\s+me|walk\s+me\s+through|help\s+me\s+(?:learn|understand)|"
+    r"i\s+(?:want|need|would\s+like|'d\s+like|wanna)\s+to\s+(?:learn|understand|know)|"
+    r"i(?:'m|\s+am)\s+(?:trying|learning|curious)|(?:learn|guide|tutorial|instructions)\b)",
+    re.IGNORECASE,
+)
+# A how-to or tutorial question phrased as an instruction ("tell me how to generate an image of a
+# fox in stable diffusion") is about the technique, not a request to make the picture.
+_HOWTO_RE = re.compile(
+    r"\bhow\s+(?:to|do|can|could|would|should|does|did|about)\b|\b(?:tutorial|instructions|"
+    r"step[- ]by[- ]step|steps\s+to|way\s+to|ways\s+to|learn\s+to|learn\s+how)\b",
+    re.IGNORECASE,
+)
+_TECH_CONTEXT_RE = re.compile(
+    r"\b(?:docker|dockerfile|kubernetes|k8s|container|containers|css|html|react|vue|angular|"
+    r"website|webpage|web\s+page|app|apps|gallery|upload|thumbnail|thumbnails|frame|function|"
+    r"script|code|python|javascript|typescript|flask|django|api|sql|database|schema|diagram|"
+    r"chart|graph|flowchart|uml|mermaid|ascii|svg|homelab|network|architecture|pipeline|"
+    r"library|package|npm|pip|css3|canvas|turtle|matplotlib|csv|dataset|spreadsheet|excel|json|"
+    r"rows|deck|gimp|photoshop|illustrator|blender|inkscape|figma|canva)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_image_request(message: str) -> bool:
+    """The strict natural-language image trigger: verb + image-noun + subject, or anchored
+    'draw a X'. Questions and code/tech context never count."""
+    if (
+        not message
+        or _QUESTION_LEAD_RE.match(message)
+        or _HOWTO_RE.search(message)
+        or _TECH_CONTEXT_RE.search(message)
+    ):
+        return False
+    if _DRAW_RE.match(message):
+        return not _DRAW_VETO_RE.search(message) and len(message.split()) <= _DRAW_MAX_WORDS
+    return any(
+        _SUBJECT_GATE_RE.match(message[m.end():]) for m in _IMAGE_NL_RE.finditer(message)
+    )
 
 
 def _sse_response(lines: list[str]) -> StreamingResponse:
@@ -127,8 +201,10 @@ async def _handle(request: Request, owui_body: dict, user) -> Optional[Streaming
         if not forced_prompt:
             return None  # just the marker, no description yet — don't generate
         explicit = True
-    if not explicit and not _IMAGE_NL_RE.search(message):  # Trigger B: strict NL match
-        return None
+    if not explicit:  # Trigger B: strict NL match; an explicit Agent/Orchestrate pick is never taken
+        mode = str(owui_body.get("harvis_mode") or "auto").strip().lower()
+        if mode in ("agent", "orchestrate") or not _is_image_request(message):
+            return None
 
     # Lazy imports — same idiom as workspace_bridge; keep the facade decoupled.
     try:
@@ -138,17 +214,20 @@ async def _handle(request: Request, owui_body: dict, user) -> Optional[Streaming
         logger.exception("owui image_bridge: image module import failed")
         return _notice_sse("Image generation is unavailable on this deployment.") if explicit else None
 
-    # GATING — honest, never a hijack: the NL path falls through to normal chat.
+    # GATING — honest for both triggers: say why and how to fix it, with no model call.
     if not _image_gen_enabled():
-        if explicit:
-            return _notice_sse("Image generation is disabled on this deployment (enable_image_generation flag off).")
-        return None
+        return _notice_sse(
+            "Image generation is disabled on this install, so I can't make that picture. "
+            "To turn it on, set HARVIS_OWUI_IMAGE_GENERATION=true and run an image provider "
+            "(A1111 or ComfyUI), then restart the backend."
+        )
     provider = await resolve_provider()
     if provider.id == "none":
         reason = (await provider.readiness()).get("reason") or "no image provider ready"
-        if explicit:
-            return _notice_sse(f"Image generation isn't ready: {reason}")
-        return None
+        return _notice_sse(
+            f"Image generation isn't ready, so I can't make that picture: {reason}. "
+            "Start an image provider (A1111 or ComfyUI) and try again."
+        )
 
     try:
         spec = GenSpec(prompt=(forced_prompt if forced_prompt is not None else _extract_prompt(message)))

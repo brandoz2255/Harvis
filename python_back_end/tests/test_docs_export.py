@@ -449,3 +449,20 @@ def test_small_model_habits_body_tag_and_bold_formula_cells():
     assert ws["B4"].data_type == "f" and ws["B4"].value == "=SUM(B2:B3)" and ws["B4"].font.bold
     assert export_doc("---\nkind: sheet\ntitle: B\n---\n## S\n| Item | Cost |\n| --- | --- |\n"
                       "| A | 2 |\n| **Total** | **=SUM(B2:B2)** |\n", "csv").data.decode("utf-8-sig").splitlines()[-1] == "Total,2"
+
+
+@pytest.mark.parametrize("divider", ["| - | - |", "|-|-|", "| :-: | -: |", "| --- | --- |"])
+def test_a_table_divider_may_have_one_hyphen_per_cell(divider):
+    from docx import Document
+
+    src = f"---\nkind: doc\ntitle: T\n---\n## S\n| a | b |\n{divider}\n| 1 | 2 |\n"
+    tables = Document(io.BytesIO(export_doc(src, "docx").data)).tables
+
+    assert len(tables) == 1 and tables[0].cell(1, 0).text == "1"
+
+
+def test_a_single_hyphen_line_is_not_a_table_divider():
+    from plugins.hermes_ui.docs_parse import is_divider
+
+    assert is_divider("| - | - |") and is_divider("|---|---|")
+    assert not is_divider("- item") and not is_divider("a | b")

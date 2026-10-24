@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Dict, Optional
@@ -26,6 +27,16 @@ logger = logging.getLogger(__name__)
 # Persist under the existing writable+persistent artifact volume (the backend
 # runs as uid 1001 and can't write /data root, but /data/artifacts is chowned to it).
 RESEARCH_DATA_DIR = Path(os.getenv("DEEP_RESEARCH_DATA_DIR", "/data/artifacts/deep_research"))
+
+
+_TITLE_LINE = re.compile(r"\A\s*(?:\*\*)?Title:(?:\*\*)?[ \t]*(.+?)[ \t]*$", re.M)
+_LABEL_LINE = re.compile(r"^(?:\*\*)?(Executive Summary|Conclusion|Key Findings):(?:\*\*)?[ \t]*(.*)$", re.M | re.I)
+
+
+def _tidy_report(text: str) -> str:
+    """Turn a model's raw 'Title:' / 'Executive Summary:' lines into markdown headings."""
+    text = _TITLE_LINE.sub(lambda m: f"# {m.group(1).strip('* ')}", text, count=1)
+    return _LABEL_LINE.sub(lambda m: f"## {m.group(1)}" + (f"\n\n{m.group(2)}" if m.group(2) else ""), text)
 
 
 def _bounded_int(value, *, default: int, minimum: int, maximum: int) -> int:
@@ -105,7 +116,8 @@ class ResearchHandler:
                 researcher = entry.get("researcher")
                 if researcher and researcher.evolving_report:
                     entry["result"] = self._format_research_report(
-                        query, researcher.evolving_report, researcher.get_stats(), hard_timeout)
+                        query, researcher.evolving_report, researcher.get_stats(), hard_timeout,
+                        researcher.findings)
                     entry["status"] = "done"
                     self._save_result(session_id, entry)
                 else:
@@ -173,11 +185,25 @@ class ResearchHandler:
             prior_findings=prior_findings, prior_urls=prior_urls,
         )
         elapsed = time.time() - start
+        if report.startswith("**Search unavailable**"):
+            raise RuntimeError(report.replace("**", ""))
+        if report.startswith("**Research failed**"):
+            raise RuntimeError(report.replace("**", ""))
+        if not researcher.findings and not researcher.queries_used and researcher._last_llm_error:
+            raise RuntimeError(
+                f"Model '{llm_model}' could not plan any searches ({researcher._last_llm_error}). "
+                "Pick another model and run it again."
+            )
+        if report.startswith("No information could be gathered") and not researcher.findings:
+            raise RuntimeError(
+                "Research found nothing: no page could be read and summarised. "
+                "Check the model and this machine's internet access."
+            )
         stats = researcher.get_stats()
         if _task_entry is not None:
             _task_entry["raw_report"] = strip_thinking(report)
             _task_entry["stats"] = stats
-        return self._format_research_report(query, report, stats, elapsed)
+        return self._format_research_report(query, report, stats, elapsed, researcher.findings)
 
     @staticmethod
     async def _probe_model(llm_model: str):
@@ -198,6 +224,16 @@ class ResearchHandler:
             raise RuntimeError(f"Model '{llm_model}' is not pulled in Ollama at {base}.")
         if r.status_code >= 400:
             raise RuntimeError(f"Ollama at {base} refused model '{llm_model}' ({r.status_code}: {r.text[:200]})")
+        try:
+            caps = (r.json() or {}).get("capabilities") or []
+        except ValueError:
+            caps = []
+        # Empty on an Ollama too old to report capabilities, so only judge when present.
+        if caps and "completion" not in caps:
+            raise RuntimeError(
+                f"Model '{llm_model}' is an embedding model and cannot write a report. "
+                "Pick a chat model, or set DEEP_RESEARCH_MODEL in .env."
+            )
 
     # ------------------------------------------------------------------
     # Read / control surface
@@ -317,6 +353,8 @@ class ResearchHandler:
                 sources = self._extract_sources(r.findings)
                 raw_findings = self._extract_raw_findings(r.findings)
             entry["sources"] = sources
+            if r is not None and not entry.get("category"):
+                entry["category"] = getattr(r, "category", None)
             data = {
                 "query": entry["query"], "status": entry["status"], "result": entry["result"],
                 "raw_report": entry.get("raw_report", ""), "sources": sources,
@@ -386,8 +424,15 @@ class ResearchHandler:
             logger.error("deep_research: unhide failed: %s", e)
             return False
 
-    def _format_research_report(self, query: str, full_report: str, stats: dict, elapsed: float) -> str:
-        full_report = strip_thinking(full_report) or ""
+    def _format_research_report(self, query: str, full_report: str, stats: dict, elapsed: float,
+                                findings: Optional[list] = None) -> str:
+        full_report = _tidy_report(strip_thinking(full_report) or "")
+        sources = self._extract_sources(findings or [])
+        cited = [s for s in sources if s["url"] in full_report]
+        if sources and len(cited) * 2 < len(sources):
+            # Small models drop the inline [text](url) citations the prompts ask for.
+            full_report += "\n\n### Sources\n\n" + "\n".join(
+                f"- [{s['title']}]({s['url']})" for s in sources)
         summary = " | ".join([
             f"**Duration:** {elapsed:.1f}s",
             f"**Rounds:** {stats.get('Rounds', '?')}",
