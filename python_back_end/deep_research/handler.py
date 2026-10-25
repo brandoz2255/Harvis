@@ -47,6 +47,16 @@ def _bounded_int(value, *, default: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, n))
 
 
+def run_clock(entry: dict) -> dict:
+    """Seconds a running job has taken and the time it was planned to take.
+
+    The planned time only stops new search rounds; the round in flight and the
+    report still finish, so a run can go past it. Watchers show both numbers.
+    """
+    return {"elapsed": max(0, int(time.time() - (entry.get("started_at") or time.time()))),
+            "time_budget": int(entry.get("max_time") or 0)}
+
+
 class ResearchHandler:
     """Background deep-research tasks with persistence + progress."""
 
@@ -87,7 +97,7 @@ class ResearchHandler:
 
         entry = {
             "task": None, "researcher": None, "query": query, "status": "running",
-            "progress": {}, "result": None, "started_at": time.time(),
+            "progress": {}, "result": None, "started_at": time.time(), "max_time": max_time,
             "category": category, "owner": owner or "",
         }
         self._active_tasks[session_id] = entry
@@ -242,7 +252,7 @@ class ResearchHandler:
         if session_id in self._active_tasks:
             e = self._active_tasks[session_id]
             return {"status": e["status"], "progress": e["progress"],
-                    "query": e["query"], "started_at": e["started_at"]}
+                    "query": e["query"], "started_at": e["started_at"], **run_clock(e)}
         data = self._get_session_json(session_id)
         if data and not data.get("consumed"):
             return {"status": data.get("status", "done"), "progress": {},

@@ -38,7 +38,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from .handler import RESEARCH_DATA_DIR, ResearchHandler
+from .handler import RESEARCH_DATA_DIR, ResearchHandler, run_clock
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +165,7 @@ async def research_active(current_user: Dict = Depends(get_current_user_from_req
     owner = _owner(current_user)
     active = [
         {"session_id": sid, "query": e.get("query", ""), "status": "running",
-         "progress": e.get("progress", {}), "started_at": e.get("started_at", 0)}
+         "progress": e.get("progress", {}), "started_at": e.get("started_at", 0), **run_clock(e)}
         for sid, e in _handler._active_tasks.items()
         if e.get("owner", "") == owner and e.get("status") == "running"
     ]

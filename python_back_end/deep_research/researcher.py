@@ -347,8 +347,14 @@ class DeepResearcher:
                     break
 
         # FINAL REPORT
-        self._emit(phase="writing", total_sources=len(self.urls_fetched),
-                   total_findings=len(findings))
+        if self._time_exceeded():
+            self._emit(phase="writing", total_sources=len(self.urls_fetched), total_findings=len(findings),
+                       over_time=True,
+                       message=f"Planned time is up, so no more searching. Writing the report from "
+                               f"{len(self.urls_fetched)} sources; it can take a few more minutes")
+        else:
+            self._emit(phase="writing", total_sources=len(self.urls_fetched),
+                       total_findings=len(findings))
         if not report and findings:
             report = self._format_findings(findings[-self.synthesis_window:])
         if not report:

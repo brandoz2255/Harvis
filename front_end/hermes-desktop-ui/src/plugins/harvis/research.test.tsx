@@ -9,6 +9,7 @@ import { MemoryRouter } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 
 const calls: string[] = []
+let active: object[] = []
 
 vi.mock('./api', () => ({
   harvisApi: vi.fn(async (path: string) => {
@@ -19,7 +20,7 @@ vi.mock('./api', () => ({
     }
 
     if (path.startsWith('/api/research/active')) {
-      return { active: [] }
+      return { active }
     }
 
     return { research: [] }
@@ -54,5 +55,34 @@ describe('the research page opens the run a chat link names', () => {
 
     await screen.findByText('No research yet.')
     expect(calls.some(p => p.startsWith('/api/research/detail/'))).toBe(false)
+  })
+})
+
+describe('a running research job shows its time against the plan', () => {
+  const run = (elapsed: number) => ({
+    elapsed,
+    progress: { phase: 'writing', total_sources: 12 },
+    query: 'heat pumps in cold climates',
+    session_id: 'rp-aaaaaaaaaaaa',
+    started_at: 0,
+    time_budget: 120
+  })
+
+  it('names the planned time while inside it', async () => {
+    active = [run(70)]
+    renderAt('/research?id=rp-aaaaaaaaaaaa')
+
+    expect(await screen.findByText(/Running for 1 min of a planned 2 min\./)).toBeTruthy()
+    expect(screen.getByText(/Writing the report, 12 pages read · 1 min/)).toBeTruthy()
+  })
+
+  it('says it keeps going once the plan is passed', async () => {
+    active = [run(361)]
+    renderAt('/research?id=rp-aaaaaaaaaaaa')
+
+    expect(
+      await screen.findByText(/Running for 6 min, past the planned 2 min\. Harvis keeps going until the report is written\./)
+    ).toBeTruthy()
+    active = []
   })
 })

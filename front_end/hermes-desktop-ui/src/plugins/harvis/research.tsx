@@ -31,6 +31,9 @@ interface ActiveResearch {
   query: string
   progress: Progress
   started_at: number
+  /** Seconds so far and the time the run was planned to take; it may run past the plan to finish the report. */
+  elapsed?: number
+  time_budget?: number
 }
 
 interface LibraryItem {
@@ -52,6 +55,7 @@ interface Progress {
   url?: string
   message?: string
   model?: string
+  over_time?: boolean
 }
 
 interface ResearchDetail {
@@ -96,6 +100,27 @@ function progressLine(progress: Progress) {
   ].filter(Boolean)
 
   return bits.length ? `${phase}, ${bits.join(', ')}` : phase
+}
+
+function duration(seconds: number) {
+  const s = Math.max(0, Math.floor(seconds))
+
+  return s < 60 ? `${s} s` : `${Math.floor(s / 60)} min`
+}
+
+function timeNote(item: ActiveResearch) {
+  const elapsed = item.elapsed ?? 0
+  const budget = item.time_budget ?? 0
+
+  if (!budget) {
+    return `Running for ${duration(elapsed)}.`
+  }
+
+  if (elapsed <= budget) {
+    return `Running for ${duration(elapsed)} of a planned ${duration(budget)}.`
+  }
+
+  return `Running for ${duration(elapsed)}, past the planned ${duration(budget)}. Harvis keeps going until the report is written.`
 }
 
 function NewResearch({ onStarted }: { onStarted: (id: string) => void }) {
@@ -202,7 +227,7 @@ function RunningResearch({ item, onCancelled }: { item: ActiveResearch; onCancel
       )}
       {progress.message && <p className="text-xs text-(--ui-text-tertiary)">{progress.message}</p>}
       <p className="text-xs text-(--ui-text-tertiary)">
-        Started {relativeTime(new Date(item.started_at * 1000).toISOString())}. The report appears here when it is done.
+        {timeNote(item)} The report appears here when it is done.
       </p>
     </div>
   )
@@ -339,7 +364,9 @@ export function ResearchPage() {
           {running.length > 0 && (
             <p className="px-2 pt-1 pb-1 text-xs font-medium text-(--ui-text-tertiary)">Running</p>
           )}
-          {running.map(r => row(r.session_id, r.query, progressLine(r.progress ?? {}), 'warn'))}
+          {running.map(r =>
+            row(r.session_id, r.query, `${progressLine(r.progress ?? {})} · ${duration(r.elapsed ?? 0)}`, 'warn')
+          )}
           <p className="px-2 pt-2 pb-1 text-xs font-medium text-(--ui-text-tertiary)">Finished</p>
           {library.isLoading ? (
             <p className="px-2 text-xs text-(--ui-text-tertiary)">Loading…</p>
