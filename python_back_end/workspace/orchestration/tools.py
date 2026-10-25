@@ -266,7 +266,9 @@ TOOL_SCHEMA = [
                 "review. Use ONLY when you completed a genuinely reusable, repeatable procedure worth "
                 "keeping. The draft is NOT active and grants nothing — a human must mark it 'supported' "
                 "in Customize → Skills before it can ever be applied. Give a short kebab-case name, a "
-                "one-line description of WHEN to use it, and the procedure as markdown steps."
+                "one-line description of WHEN to use it, and the procedure as markdown steps. To change a "
+                "skill that already exists, set update_of to its name and send the COMPLETE revised "
+                "content: it waits as a proposal and the current version stays in use until a human approves."
             ),
             "parameters": {
                 "type": "object",
@@ -274,8 +276,38 @@ TOOL_SCHEMA = [
                     "name": {"type": "string", "description": "kebab-case skill name, e.g. 'reset-postgres-schema'"},
                     "description": {"type": "string", "description": "One line: when should this skill be used?"},
                     "content": {"type": "string", "description": "The procedure, as markdown steps."},
+                    "update_of": {"type": "string", "description": "Name of an existing skill this revises (optional)."},
                 },
                 "required": ["name", "description", "content"],
+            },
+        },
+        "lane": LANE_UI_MOCK,
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_skills",
+            "description": (
+                "List the saved skills a human has approved and switched on: one line each with its "
+                "name and when to use it. Read-only. Check it before proposing a new skill, so you "
+                "update an existing one instead of duplicating it."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+        "lane": LANE_UI_MOCK,
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_skill",
+            "description": (
+                "Read the full text of one approved, enabled skill by name. Read-only. Skills that are "
+                "off, not yet approved, or changed since approval are not returned."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"name": {"type": "string", "description": "Skill name from list_skills."}},
+                "required": ["name"],
             },
         },
         "lane": LANE_UI_MOCK,
@@ -994,6 +1026,9 @@ def _json_objects_in(text: str) -> list[dict]:
     return out
 
 
+_CALL_AS_CODE = re.compile(r"^(\w+)\(\s*(\{.*\})\s*\)$", re.S)
+
+
 def parse_tool_calls(msg: dict, known: Iterable[str] | None = None) -> list[dict]:
     """Extract tool calls from a completion message. Primary path = the OpenAI
     `tool_calls` array; fallback = a JSON tool object embedded in content (small
@@ -1054,4 +1089,15 @@ def parse_tool_calls(msg: dict, known: Iterable[str] | None = None) -> list[dict
         if args is None:
             args = {k: v for k, v in obj.items() if k not in ("tool", "name")}
         out.append({"id": None, "name": name, "args": args})
+    if not out:
+        # Some models write the call as code, ``write_file({"path": ...})``. Only a reply
+        # that is nothing but that one call counts, and only for a tool the caller offers.
+        m = _CALL_AS_CODE.match(content.strip().strip("`").removeprefix("python").strip())
+        if m and known is not None and m.group(1) in set(known):
+            try:
+                args = json.loads(m.group(2))
+            except ValueError:
+                args = None
+            if isinstance(args, dict):
+                out.append({"id": None, "name": m.group(1), "args": args})
     return out

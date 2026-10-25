@@ -55,6 +55,8 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from . import skill_pending
+
 logger = logging.getLogger(__name__)
 
 SYNC_FLAG_ENV = "HARVIS_ENGINE_SYNC"
@@ -337,6 +339,7 @@ def _build_preview(skills, conns, mask: bool = True, require_verdict: bool = Tru
     sdir = _skills_dir()
     skill_items = []
     skipped_unverified: list[str] = []
+    skipped_changed: list[str] = []
     for s in skills:
         meta = _skill_meta_dict(s["meta"])
         # Human-gated publish: a skill reaches the live OpenClaw mount ONLY after a
@@ -344,6 +347,10 @@ def _build_preview(skills, conns, mask: bool = True, require_verdict: bool = Tru
         # override (require_verdict=False) can include un-audited skills deliberately.
         if require_verdict and _skill_verdict(s["meta"]) != "supported":
             skipped_unverified.append(s["name"])
+            continue
+        if require_verdict and not skill_pending.sha_ok(s["content"], meta):
+            # The text no longer matches what the person approved (the skill gate withholds it too).
+            skipped_changed.append(s["name"])
             continue
         slug = _slug(s["name"], str(s["id"]))
         skill_items.append(
@@ -373,6 +380,12 @@ def _build_preview(skills, conns, mask: bool = True, require_verdict: bool = Tru
             f"{len(skipped_unverified)} skill(s) skipped — no human audit verdict of 'supported': "
             + ", ".join(skipped_unverified[:8]) + ("…" if len(skipped_unverified) > 8 else "")
             + ". Audit each (POST /api/v1/skills/id/{id}/audit) then record a 'supported' verdict to publish."
+        )
+    if skipped_changed:
+        notes.append(
+            f"{len(skipped_changed)} skill(s) skipped — the text changed after it was approved: "
+            + ", ".join(skipped_changed[:8]) + ("…" if len(skipped_changed) > 8 else "")
+            + ". Review and approve each again to publish."
         )
     if mask:
         notes.append("env values are masked in this preview; apply writes the stored values.")

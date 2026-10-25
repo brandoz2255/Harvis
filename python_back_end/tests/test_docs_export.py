@@ -466,3 +466,11 @@ def test_a_single_hyphen_line_is_not_a_table_divider():
 
     assert is_divider("| - | - |") and is_divider("|---|---|")
     assert not is_divider("- item") and not is_divider("a | b")
+
+
+def test_pdf_deck_titles_render_inline_markdown_like_the_pptx():
+    src = ("---\nkind: deck\ntitle: T\n---\n# Cover\nsub\n\n---\n# Results for **Q3**\nSome text\n\n---\n# **Thank** you!")
+    html = docs_pdf.build_html(parse_harvis_doc(src), "T")
+    assert "**" not in html
+    assert "<h1>Results for <strong>Q3</strong></h1>" in html
+    assert "<h1><strong>Thank</strong> you!</h1>" in html

@@ -2,10 +2,15 @@ import { useEffect, useRef } from 'react'
 
 import { setDocFixSender } from '@/lib/harvis-doc-files'
 import { setFollowupStarter } from '@/store/followups'
+import { docSessionTarget } from '@/store/live-docs'
+import { $sessionStates } from '@/store/session-states'
 
 interface FollowupBridgeParams {
   startFreshSessionDraft: () => void
-  submitText: (text: string) => Promise<unknown> | unknown
+  submitText: (
+    text: string,
+    options?: { sessionId?: null | string; storedSessionId?: string }
+  ) => Promise<unknown> | unknown
 }
 
 /**
@@ -14,8 +19,9 @@ interface FollowupBridgeParams {
  * the same pair the Quick Entry "new session" target uses, so there is one
  * new-chat-and-send pipeline.
  *
- * The document panel's "Fix it" sends into the current chat through the
- * same submit, without a fresh draft.
+ * The document panel's "Fix it" sends through the same submit, without a fresh
+ * draft, into the chat that owns the document. A document whose chat is not live
+ * is refused (`false`) rather than sent to whichever chat is in front.
  *
  * Registered once through refs: re-registering on callback identity churn
  * would leave a null-starter window where a click does nothing.
@@ -33,7 +39,15 @@ export function useFollowupBridge({ startFreshSessionDraft, submitText }: Follow
       return submitTextRef.current(prompt)
     })
 
-    setDocFixSender(text => submitTextRef.current(text))
+    setDocFixSender((text, sessionId) => {
+      if (sessionId === undefined) {
+        return submitTextRef.current(text)
+      }
+
+      const target = docSessionTarget($sessionStates.get(), sessionId)
+
+      return target ? submitTextRef.current(text, target) : false
+    })
 
     return () => {
       setFollowupStarter(null)

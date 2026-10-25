@@ -1,8 +1,10 @@
 import { cleanup, render } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { createClientSessionState } from '@/lib/chat-runtime'
 import { $docFixSender } from '@/lib/harvis-doc-files'
 import { $followupsBySession, setSessionFollowups, startFollowup } from '@/store/followups'
+import { clearAllSessionStates, publishSessionState } from '@/store/session-states'
 
 import { useFollowupBridge } from './use-followup-bridge'
 
@@ -16,6 +18,7 @@ describe('useFollowupBridge', () => {
   afterEach(() => {
     cleanup()
     $followupsBySession.set({})
+    clearAllSessionStates()
   })
 
   it('starts a fresh draft, then submits the prompt through the normal pipeline', async () => {
@@ -67,5 +70,31 @@ describe('useFollowupBridge', () => {
     expect(startFreshSessionDraft).not.toHaveBeenCalled()
     unmount()
     expect($docFixSender.get()).toBeNull()
+  })
+
+  it('sends the document fix to the runtime chat that owns the document, not the front chat', async () => {
+    const submitText = vi.fn(async () => true)
+
+    publishSessionState('rt-A', createClientSessionState('stored-A'))
+    publishSessionState('rt-B', createClientSessionState('stored-B'))
+    render(<Bridge startFreshSessionDraft={vi.fn()} submitText={submitText} />)
+
+    await $docFixSender.get()?.('Fix it', 'stored-A')
+    expect(submitText).toHaveBeenLastCalledWith('Fix it', { sessionId: 'rt-A', storedSessionId: 'stored-A' })
+
+    // A chat not yet stored is addressed by its runtime id.
+    publishSessionState('rt-C', createClientSessionState(null))
+    await $docFixSender.get()?.('Fix it', 'rt-C')
+    expect(submitText).toHaveBeenLastCalledWith('Fix it', { sessionId: 'rt-C' })
+  })
+
+  it('refuses a document fix it cannot address instead of sending it to the front chat', async () => {
+    const submitText = vi.fn(async () => true)
+
+    publishSessionState('rt-B', createClientSessionState('stored-B'))
+    render(<Bridge startFreshSessionDraft={vi.fn()} submitText={submitText} />)
+
+    expect(await $docFixSender.get()?.('Fix it', 'stored-gone')).toBe(false)
+    expect(submitText).not.toHaveBeenCalled()
   })
 })

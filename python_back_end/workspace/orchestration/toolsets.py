@@ -36,8 +36,8 @@ TOOLSET_GROUPS = (
      "Generate images and screenshot a live preview of what was built.",
      ("generate_image", "screenshot_preview")),
     ("harvis-agent", "Agent control",
-     "How a run reports itself: proposing a new skill, and finishing.",
-     ("propose_skill", "finish")),
+     "How a run reports itself: reading and proposing skills, and finishing.",
+     ("propose_skill", "list_skills", "read_skill", "finish")),
 )
 
 TOOLSET_PREFIXES = {"harvis-browser": "computer_", "harvis-reach": "agent_reach_"}

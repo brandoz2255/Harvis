@@ -232,8 +232,36 @@ def _clause_hit(clause: str, *, allow_present: bool = True) -> Optional[_Hit]:
     return doc_words.foreign_hit(clause)
 
 
-def _bare_hit(text: str) -> Optional[_Hit]:
-    """A short message that is just a format noun and its subject, with no verb."""
+# What a bare format noun followed by one of these is talking about, not asking for: "slides on monday",
+# "powerpoint on mac", "a pdf from my professor", "deck of the ship". "from" is a request only when it points
+# at material in the message ("slides from this"); "of" only matters for a deck, which is also a ship's deck.
+# A day, date or time counts only when it is the whole tail, optionally with a part of the day or a clock
+# time after it, so "slides on monday at 9" is logistics and "slides on sunday school lessons" is a topic.
+# Month names are spelled out or followed by a word boundary, so "junit 5" and "mars 2 rover" are topics.
+_BARE_CLOCK = r"\d{1,2}(?:\s\d\d)?\s*(?:am|pm)"
+_BARE_WHEN = (r"(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|tues|wed|thu|thur|thurs|fri|sat|"
+              rf"sun|today|tomorrow|tonight|yesterday|weekend|{_BARE_CLOCK}|"
+              r"(?:jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|"
+              r"oct|october|nov|november|dec|december)\s+\d{1,2}(?:st|nd|rd|th)?(?:\s+\d{4})?)")
+_BARE_WHEN_END = (rf"(?:\s+(?:morning|afternoon|evening|night|noon|midnight|{_BARE_CLOCK}|"
+                  rf"at\s+(?:noon|midnight|\d{{1,2}}(?:\s\d\d)?\s*(?:am|pm)?)))?$")
+# A platform or device names where the file is being used. It counts only when it ends the message, so
+# "presentation on linux kernel scheduling" is still a topic.
+_BARE_WHERE = (r"(?:(?:my|the|our|your|his|her|their)\s+)?(?:mac|macbook|windows|linux|ubuntu|android|ios|iphone|ipad|"
+               r"chromebook|phone|laptop|computer|pc|tablet|desktop|screen|device|machine|usb|zoom|teams|campus)"
+               r"(?:\s+\d+(?:\.\d+)*)?$")
+_BARE_LOGISTICS = re.compile(rf"^on\s+(?:{_BARE_WHEN}{_BARE_WHEN_END}|{_BARE_WHERE})")
+_SLIDE_DECK = re.compile(r"\b(?:slide|pitch)[\s-]*decks?\b", re.I)
+_BARE_FROM = re.compile(r"^from\s+(?!(?:this|these|that|those|below|above)\b)")
+# "deck of 10 slides on X" and "deck of slides on X" are requests; only "deck of the ship" is a ship.
+_DECK_COUNT = frozenset("few some several two three four five six seven eight nine ten twelve fifteen twenty".split())
+
+
+def _bare_parts(text: str) -> Optional[tuple[str, str, list[str]]]:
+    """(kind, noun, rest) for a short message that opens with a format noun, else None.
+
+    ``rest`` is the words after the noun, with trailing "please" and the like dropped.
+    """
     if "?" in text:
         return None
     text = text.strip()
@@ -254,10 +282,36 @@ def _bare_hit(text: str) -> Optional[_Hit]:
     rest = words[1:]
     while rest and rest[-1] in _TRAILING:
         rest = rest[:-1]
+    return kind, words[0], rest
+
+
+def _bare_hit(text: str, raw: str = "") -> Optional[_Hit]:
+    """A short message that is just a format noun and its subject, with no verb.
+
+    ``raw`` is the message before ``normalize``, which turns "slide deck" into "deck".
+    """
+    parts = _bare_parts(text)
+    if not parts:
+        return None
+    kind, noun, rest = parts
     if rest and (rest[0] not in _BARE_STOPPERS or any(w in _CODE_HEADS for w in rest)
                  or any(w in _BARE_REPORT or w.endswith("n't") for w in rest)):
         return None
+    if rest:
+        tail = " ".join(rest)
+        if _BARE_LOGISTICS.match(tail) or _BARE_FROM.match(tail):
+            return None
+        if noun in ("deck", "decks") and rest[0] == "of" and not _SLIDE_DECK.search(raw):
+            after_of = rest[1] if len(rest) > 1 else ""
+            if not (after_of.isdigit() or after_of in _DECK or after_of in _DECK_COUNT):
+                return None
     return kind, True
+
+
+def _lone_format(text: str) -> Optional[str]:
+    """The kind when the whole message is one format word ("pdf", "a pdf please", "slides"), else None."""
+    parts = _bare_parts(doc_words.normalize(_window(text)))
+    return parts[0] if parts and not parts[2] else None
 
 
 def _window(text: str) -> str:
@@ -278,7 +332,7 @@ def detect_doc_kind(text: str) -> Optional[str]:
     allow_present = "?" not in text and not _ADVICE.search(norm)
     hits = [h for h in (_clause_hit(c, allow_present=allow_present) for c in _CLAUSE_SPLIT.split(norm)) if h]
     if not hits:
-        hits = [h for h in (_bare_hit(norm),) if h]
+        hits = [h for h in (_bare_hit(norm, text),) if h]
     strong = next((h for h in hits if h[1]), None)
     if strong:
         return strong[0]
@@ -345,6 +399,10 @@ def _plan(text: str, prior: Optional[PriorDoc], recent: bool) -> Optional[tuple[
     """
     if prior:
         target = conversion_target(text)
+        # A lone "pdf" or "slides" with a document in the chat answers "which format?" or asks for a
+        # conversion; it is not a new document about nothing. Only when that document is the last answer.
+        if not target and recent:
+            target = _lone_format(text)
         if target and target != prior.kind:
             if recent or conversion_names_part(text):
                 return "convert", target

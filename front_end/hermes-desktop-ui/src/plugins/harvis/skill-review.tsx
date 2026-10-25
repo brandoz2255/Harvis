@@ -112,7 +112,32 @@ type Load =
   | { kind: 'loading' }
   | { item: PendingSkill; kind: 'pending' }
 
-const messageOf = (err: unknown, fallback: string) => (err instanceof Error && err.message ? err.message : fallback)
+/**
+ * The sentence in an API error. The desktop shim throws `409 Conflict: {"detail":"..."}`
+ * (lib/desktop-shim/api.ts), which is not something to show a person: take the FastAPI `detail`
+ * out of it, or the text after the status when the body isn't JSON.
+ */
+export function messageOf(err: unknown, fallback: string): string {
+  const raw = err instanceof Error ? err.message.trim() : ''
+
+  if (!raw) {
+    return fallback
+  }
+
+  const body = raw.replace(/^\d{3}[^:{]*:\s*/, '')
+
+  try {
+    const detail = (JSON.parse(body) as { detail?: unknown } | null)?.detail
+
+    if (typeof detail === 'string' && detail.trim()) {
+      return detail.trim()
+    }
+  } catch {
+    // Not JSON: the text itself is the message.
+  }
+
+  return body || fallback
+}
 
 export interface SkillReviewResult {
   approved: boolean
@@ -173,7 +198,13 @@ export function SkillReviewDialog({ name, onClose, onResolved }: SkillReviewDial
           throw new Error(`Couldn't approve ${name}.`)
         }
 
-        finish(true, res.message || `Approved ${name}. Harvis will use this version.`)
+        // The backend's message always says Harvis will use it; only trust it when the skill is on.
+        finish(
+          true,
+          res.enabled === false
+            ? `Approved ${name}, but it is still switched off. Turn it on in the Skills tab for Harvis to use it.`
+            : res.message || `Approved ${name}. Harvis will use this version.`
+        )
       } else {
         const res = await setSkillEnabled(name, true)
 
@@ -245,6 +276,13 @@ export function SkillReviewDialog({ name, onClose, onResolved }: SkillReviewDial
               ))}
             </ul>
           </div>
+        )}
+
+        {item && !item.is_new && !item.enabled && (
+          <p className="text-xs text-amber-600 dark:text-amber-300" data-testid="skill-off-note" role="note">
+            This skill is switched off right now. Approving a draft nobody approved before turns it on; a skill you
+            switched off yourself stays off.
+          </p>
         )}
 
         {item?.stale && (

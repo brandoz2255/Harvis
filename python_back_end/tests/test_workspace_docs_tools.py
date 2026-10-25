@@ -122,6 +122,91 @@ def test_preview_returns_page_text_and_never_image_bytes(monkeypatch):
     assert big[:50] not in text and len(text) < 3000
 
 
+# ---- page images for a model that can see ------------------------------------------------
+
+PREVIEW = {
+    "ok": True, "format": "pptx", "page_count": 6, "shown": 6,
+    "pages": [{"page": n, "width": 1024, "height": 576, "text": f"Slide {n}"} for n in range(1, 7)],
+    "images": [{"data": f"PNG{n}", "mimeType": "image/png"} for n in range(1, 7)],
+}
+
+
+def _sees(monkeypatch, verdict):
+    import vision_to_code.vision_gate as gate
+
+    async def fake_verdict(name):
+        if isinstance(verdict, Exception):
+            raise verdict
+        return verdict, "test"
+
+    monkeypatch.setattr(gate, "model_can_see", fake_verdict)
+
+
+def test_a_vision_model_gets_the_page_images_and_is_told_so(monkeypatch):
+    _fake_dispatch(monkeypatch, PREVIEW)
+    _sees(monkeypatch, True)
+    sink: list = []
+    text, ok = run(dispatch_docs_tool("docs_preview", {"source": DECK}, pool=None, user_id=None,
+                                      model_name="gemma3:12b", image_sink=sink))
+    assert ok and len(sink) == docs_lane.MAX_VISION_PAGES == 4
+    assert sink[0] == {"type": "image_url", "image_url": {"url": "data:image/png;base64,PNG1"}}
+    assert "attached to the next message" in text and "you cannot see" not in text
+    assert "PNG1" not in text and "--- page 6 ---" in text
+
+
+def test_a_text_only_model_gets_text_and_no_images(monkeypatch):
+    _fake_dispatch(monkeypatch, PREVIEW)
+    _sees(monkeypatch, False)
+    sink: list = []
+    text, ok = run(dispatch_docs_tool("docs_preview", {"source": DECK}, pool=None, user_id=None,
+                                      model_name="qwen3-coder", image_sink=sink))
+    assert ok and sink == []
+    assert "Page text only" in text and "PNG" not in text and "--- page 1 ---" in text
+
+
+def test_an_unknown_model_or_a_failing_check_counts_as_text_only(monkeypatch):
+    _fake_dispatch(monkeypatch, PREVIEW)
+    for verdict in (None, RuntimeError("ollama down")):
+        _sees(monkeypatch, verdict)
+        sink: list = []
+        text, ok = run(dispatch_docs_tool("docs_preview", {"source": DECK}, pool=None, user_id=None,
+                                          model_name="mystery", image_sink=sink))
+        assert ok and sink == [] and "Page text only" in text
+    sink = []
+    _sees(monkeypatch, True)
+    run(dispatch_docs_tool("docs_preview", {"source": DECK}, pool=None, user_id=None,
+                           model_name=None, image_sink=sink))
+    assert sink == []
+
+
+def test_without_a_sink_the_result_is_unchanged_and_other_tools_add_nothing(monkeypatch):
+    _fake_dispatch(monkeypatch, PREVIEW)
+    _sees(monkeypatch, True)
+    text, ok = run(dispatch_docs_tool("docs_preview", {"source": DECK}, pool=None, user_id=None,
+                                      model_name="gemma3:12b"))
+    assert ok and "Page text only" in text
+    _fake_dispatch(monkeypatch, {"ok": True, "checked": {"code": True, "render": True}, "issues": [],
+                                 "images": [{"data": "PNG1", "mimeType": "image/png"}]})
+    sink = []
+    run(dispatch_docs_tool("docs_check", {"source": DECK}, pool=None, user_id=None,
+                           model_name="gemma3:12b", image_sink=sink))
+    assert sink == []
+
+
+def test_a_failed_preview_attaches_nothing(monkeypatch):
+    _fake_dispatch(monkeypatch, {"ok": False, "error": "renderer is down"}, ok=False)
+    _sees(monkeypatch, True)
+    sink: list = []
+    text, ok = run(dispatch_docs_tool("docs_preview", {"source": DECK}, pool=None, user_id=None,
+                                      model_name="gemma3:12b", image_sink=sink))
+    assert not ok and sink == [] and text.startswith("ERROR:")
+
+
+def test_the_module_no_longer_claims_chat_is_offered_the_tools():
+    assert "already offered to chat" not in docs_lane.__doc__
+    assert "plain chat is not" in docs_lane.__doc__
+
+
 def test_check_reports_findings(monkeypatch):
     _fake_dispatch(monkeypatch, {"ok": False, "checked": {"code": True, "render": True},
                                  "issues": [{"severity": "error", "where": "slide 2", "message": "Text overflows."}]})
@@ -190,8 +275,10 @@ class ScriptedRouter:
     def __init__(self, turns):
         self.turns = list(turns)
         self.offered: list[set[str]] = []
+        self.sent: list[list[dict]] = []
 
-    async def complete(self, *, tools, **_):
+    async def complete(self, *, tools, messages=None, **_):
+        self.sent.append([dict(m) for m in (messages or [])])
         self.offered.append({(t.get("function") or {}).get("name") for t in tools})
         if not tools or not self.turns:
             return {"role": "assistant", "content": "Done."}
@@ -236,7 +323,7 @@ def test_loop_offers_export_to_a_known_user_and_honours_a_withhold_list(tmp_path
 def test_loop_routes_a_docs_call_and_emits_the_usual_events(tmp_path, monkeypatch):
     seen = {}
 
-    async def fake(name, args, *, pool, user_id):
+    async def fake(name, args, *, pool, user_id, **_extra):
         seen.update(name=name, args=args, user_id=user_id)
         return "VALID. kind=deck title='T' parts=2. No problems.", True
 
@@ -249,6 +336,43 @@ def test_loop_routes_a_docs_call_and_emits_the_usual_events(tmp_path, monkeypatc
     results = [e for e in events if e.type == "tool_result" and e.data.get("tool") == "docs_validate"]
     assert len(calls) == 1 and len(results) == 1
     assert results[0].data["success"] is True and results[0].data["output"].startswith("VALID")
+
+
+def _preview_payload():
+    return {"format": "pdf", "page_count": 2,
+            "pages": [{"page": 1, "text": "Title"}, {"page": 2, "text": "Body"}],
+            "images": [{"mimeType": "image/png", "data": "AAAA"}, {"mimeType": "image/png", "data": "BBBB"}]}
+
+
+def _preview_run(tmp_path, monkeypatch, sees):
+    async def fake_dispatch(name, args, ctx):
+        return _preview_payload(), True
+
+    async def fake_sees(model_name):
+        assert model_name == "m"
+        return sees
+
+    monkeypatch.setattr(docs_tools, "dispatch", fake_dispatch)
+    monkeypatch.setattr(docs_lane, "model_sees_images", fake_sees)
+    return _loop(tmp_path, monkeypatch, [
+        _call("docs_preview", source=DECK), _call("finish", summary="looked")],
+        pool=object(), user_id=7)
+
+
+def test_loop_puts_a_vision_models_page_images_on_its_next_turn(tmp_path, monkeypatch):
+    events, router = _preview_run(tmp_path, monkeypatch, True)
+    result = next(e for e in events if e.type == "tool_result" and e.data.get("tool") == "docs_preview")
+    assert "attached" in result.data["output"] and "AAAA" not in result.data["output"]
+    follow = next(m for m in router.sent[-1] if isinstance(m.get("content"), list))
+    urls = [p["image_url"]["url"] for p in follow["content"] if p.get("type") == "image_url"]
+    assert urls == ["data:image/png;base64,AAAA", "data:image/png;base64,BBBB"]
+
+
+def test_loop_gives_a_text_only_model_no_image_parts(tmp_path, monkeypatch):
+    events, router = _preview_run(tmp_path, monkeypatch, False)
+    result = next(e for e in events if e.type == "tool_result" and e.data.get("tool") == "docs_preview")
+    assert "cannot see the images" in result.data["output"]
+    assert not any(isinstance(m.get("content"), list) for m in router.sent[-1])
 
 
 def test_loop_survives_a_docs_tool_that_crashes(tmp_path, monkeypatch):

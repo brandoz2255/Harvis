@@ -15,7 +15,7 @@ const notify = vi.hoisted(() => vi.fn())
 vi.mock('@hermes/plugin-sdk', () => ({ host: { notify } }))
 vi.mock('@/api/skills', () => api)
 
-const { SkillReviewDialog, openSkillReview, riskFlags } = await import('./skill-review')
+const { SkillReviewDialog, messageOf, openSkillReview, riskFlags } = await import('./skill-review')
 
 const pending = (over: Partial<PendingSkill> = {}): PendingSkill => ({
   content: '---\nname: compose-debug\n---\nRun docker compose logs first.\nThen check ports.',
@@ -80,6 +80,20 @@ describe('riskFlags', () => {
   })
 })
 
+describe('messageOf', () => {
+  it('pulls the sentence out of the shim error and falls back for anything else', () => {
+    expect(messageOf(new Error('409 Conflict: {"detail":"Changed since you opened it."}'), 'x')).toBe(
+      'Changed since you opened it.'
+    )
+    expect(messageOf(new Error('404 : {"detail":"No skill called a."}'), 'x')).toBe('No skill called a.')
+    expect(messageOf(new Error('502 Bad Gateway: upstream down'), 'x')).toBe('upstream down')
+    expect(messageOf(new Error('500 Internal Server Error: {"detail":[{"msg":"bad"}]}'), 'x')).toContain('"detail"')
+    expect(messageOf(new Error('backend down'), 'x')).toBe('backend down')
+    expect(messageOf(new Error(''), 'fallback')).toBe('fallback')
+    expect(messageOf('nope', 'fallback')).toBe('fallback')
+  })
+})
+
 describe('SkillReviewDialog', () => {
   it('renders the full body, the description and the diff for an update', async () => {
     api.getPending.mockResolvedValue({ items: [pending()] })
@@ -128,6 +142,33 @@ describe('SkillReviewDialog', () => {
     expect((screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement).disabled).toBe(false)
   })
 
+  it('says so when an approved skill is still switched off, and does not claim Harvis will use it', async () => {
+    api.getPending.mockResolvedValue({ items: [pending({ enabled: false })] })
+    api.approvePending.mockResolvedValue({ enabled: false, message: 'Approved x. Harvis will use this version.', name: 'compose-debug', ok: true })
+    const onClose = vi.fn()
+    render(<SkillReviewDialog name="compose-debug" onClose={onClose} />)
+
+    expect((await screen.findByTestId('skill-off-note')).textContent).toContain('switched off')
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }))
+
+    await waitFor(() => expect(onClose).toHaveBeenCalled())
+    const message = notify.mock.calls[0][0].message as string
+    expect(message).toContain('still switched off')
+    expect(message).not.toContain('will use this version')
+  })
+
+  it('keeps the backend message when the approval switched the skill on', async () => {
+    api.getPending.mockResolvedValue({ items: [pending({ enabled: true })] })
+    api.approvePending.mockResolvedValue({ enabled: true, message: 'Approved compose-debug.', name: 'compose-debug', ok: true })
+    const onClose = vi.fn()
+    render(<SkillReviewDialog name="compose-debug" onClose={onClose} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve' }))
+    await waitFor(() => expect(onClose).toHaveBeenCalled())
+    expect(notify.mock.calls[0][0].message).toBe('Approved compose-debug.')
+    expect(screen.queryByTestId('skill-off-note')).toBeNull()
+  })
+
   it('approves with the skill name and the hash that was shown', async () => {
     api.getPending.mockResolvedValue({ items: [pending(), pending({ name: 'other' })] })
     api.approvePending.mockResolvedValue({ message: 'Approved compose-debug.', name: 'compose-debug', ok: true })
@@ -146,13 +187,18 @@ describe('SkillReviewDialog', () => {
 
   it('keeps the panel open, shows the refusal and reloads when the proposal went stale', async () => {
     api.getPending.mockResolvedValue({ items: [pending()] })
-    api.approvePending.mockRejectedValue(new Error('This skill\'s proposal changed after you opened it.'))
+    // The shape lib/desktop-shim/api.ts really throws: status line, then the raw FastAPI body.
+    api.approvePending.mockRejectedValue(
+      new Error('409 Conflict: {"detail":"This skill\'s proposal changed after you opened it. Review it again."}')
+    )
     const onClose = vi.fn()
     render(<SkillReviewDialog name="compose-debug" onClose={onClose} />)
 
     fireEvent.click(await screen.findByRole('button', { name: 'Approve' }))
 
-    expect((await screen.findByRole('alert')).textContent).toContain('changed after you opened it')
+    expect((await screen.findByRole('alert')).textContent).toBe(
+      "This skill's proposal changed after you opened it. Review it again."
+    )
     expect(onClose).not.toHaveBeenCalled()
     expect(api.getPending).toHaveBeenCalledTimes(2)
   })

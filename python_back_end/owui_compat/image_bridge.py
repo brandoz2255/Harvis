@@ -57,7 +57,10 @@ _DRAW_RE = re.compile(
     # idioms and extraction senses: "draw a card", "draw a breath", "draw a random sample"
     r"inference|inferences|sample|samples|lesson|lessons|card|cards|number|numbers|breath|"
     r"crowd|crowds|salary|wage|herring|bath|attention|random|raffle|lottery|ticket|"
-    r"audience|customers|visitors|analogy|moral|check|cheque|winner|straw|bead|paycheck)\b)"
+    r"audience|customers|visitors|analogy|moral|check|cheque|winner|straw|bead|paycheck|"
+    # technical drawings: "draw a binary tree for [1,2,3]", "draw a state machine", "draw a schematic"
+    r"schematic|schematics|circuit|automaton|erd|dag|hierarchy|binary\s+(?:tree|search|heap)|"
+    r"state\s+machine|decision\s+tree|syntax\s+tree|parse\s+tree|linked\s+list)\b)"
     r"\w+",
     re.IGNORECASE,
 )
@@ -69,8 +72,17 @@ _DRAW_VETO_RE = re.compile(
 )
 _DRAW_MAX_WORDS = 20
 
-# Subject lead-ins after the image-noun: "of a fox", "showing a fox", ": a fox".
-_SUBJECT_LEAD_RE = re.compile(r"^\s*(?:(?:of|showing|depicting)\b|[:,\-])\s*", re.IGNORECASE)
+# Subject lead-ins after the image-noun: "of a fox", "showing a fox", "featuring a fox", ": a fox".
+# "with" counts only before a determiner, quantifier or number ("with a fox", "with two cats"): a bare
+# "with java" / "with pytorch" names a tool, not a subject, so it never claims the image lane.
+_WITH_SUBJECT = (
+    r"with(?=\s+(?:a|an|the|some|any|no|one|two|three|four|five|six|seven|eight|nine|ten|\d+|several|"
+    r"many|multiple|few|lots|plenty|his|her|its|their|my|our|your)\b(?![.\-]\w))"
+)
+_SUBJECT_LEAD_RE = re.compile(
+    rf"^\s*(?:(?:of|showing|depicting|{_WITH_SUBJECT}|featuring|that\s+shows)\b|[:,\-])\s*",
+    re.IGNORECASE,
+)
 
 # Explicit forced prefix the composer "+" → "Create image" button inserts:
 # "🖼️ create image <description>". Deterministic — forces the image lane (no NL
@@ -103,21 +115,45 @@ def _extract_prompt(message: str) -> str:
 # match alone is not enough: the noun must be followed by a subject ("image OF a fox"), and
 # questions or code/tech context ("how do I make an image smaller in css", "create a photo
 # gallery website") stay with the model.
-_SUBJECT_GATE_RE = re.compile(r"\s*(?:(?:of|showing|depicting)\b|:)", re.IGNORECASE)
+_SUBJECT_GATE_RE = re.compile(
+    rf"\s*(?:(?:of|showing|depicting|{_WITH_SUBJECT}|featuring|that\s+shows)\b|:)", re.IGNORECASE
+)
 _QUESTION_LEAD_RE = re.compile(
-    r"^\s*(?:how|what|why|which|where|when|who|explain|is|are|does|do|should|could\s+i|can\s+i|"
+    # "how about you generate an image of a fox" is a suggestion, not a question about technique
+    r"^\s*(?:how(?!\s+about\b)|what|why|which|where|when|who|explain|is|are|does|do|should|could\s+i|can\s+i|"
     r"tell\s+me|show\s+me\s+how|teach\s+me|walk\s+me\s+through|help\s+me\s+(?:learn|understand)|"
     r"i\s+(?:want|need|would\s+like|'d\s+like|wanna)\s+to\s+(?:learn|understand|know)|"
-    r"i(?:'m|\s+am)\s+(?:trying|learning|curious)|(?:learn|guide|tutorial|instructions)\b)",
+    r"i(?:'m|\s+am)\s+(?:trying|learning|curious)|learn|guide|tutorial|instructions)\b",
     re.IGNORECASE,
 )
 # A how-to or tutorial question phrased as an instruction ("tell me how to generate an image of a
 # fox in stable diffusion") is about the technique, not a request to make the picture.
 _HOWTO_RE = re.compile(
-    r"\bhow\s+(?:to|do|can|could|would|should|does|did|about)\b|\b(?:tutorial|instructions|"
-    r"step[- ]by[- ]step|steps\s+to|way\s+to|ways\s+to|learn\s+to|learn\s+how)\b",
+    r"\bhow\s+(?:to|do|can|could|would|should|does|did)\b|\b(?:tutorial|instructions|"
+    r"step[- ]by[- ]step|steps\s+to|learn\s+to|learn\s+how)\b",
     re.IGNORECASE,
 )
+# "<anything> way(s) to <verb>" is a how-to ("3 ways to", "any way to", "the cheapest way to"). It is not one
+# when it is a journey ("a fox on its way to school", "all the way to the moon") or a destination
+# ("a signpost showing the way to the beach"): a possessive or "on/along the" before it, or a determiner after.
+_WAY_TO_RE = re.compile(r"\bways?\s+to\b\s*(\w*)", re.IGNORECASE)
+_WAY_JOURNEY_RE = re.compile(
+    r"\b(?:its|his|her|their|my|our|your|on|along|on\s+the|all\s+the|long|short|whole|entire)\s+$",
+    re.IGNORECASE,
+)
+_WAY_DESTINATION_RE = re.compile(
+    r"^(?:the|a|an|my|his|her|its|their|our|your|this|that|these|those)$", re.IGNORECASE
+)
+
+
+def _asks_way_to(message: str) -> bool:
+    return any(
+        not _WAY_JOURNEY_RE.search(message[:m.start()])
+        and not _WAY_DESTINATION_RE.match(m.group(1))
+        for m in _WAY_TO_RE.finditer(message)
+    )
+
+
 _TECH_CONTEXT_RE = re.compile(
     r"\b(?:docker|dockerfile|kubernetes|k8s|container|containers|css|html|react|vue|angular|"
     r"website|webpage|web\s+page|app|apps|gallery|upload|thumbnail|thumbnails|frame|function|"
@@ -127,22 +163,68 @@ _TECH_CONTEXT_RE = re.compile(
     r"rows|deck|gimp|photoshop|illustrator|blender|inkscape|figma|canva)\b",
     re.IGNORECASE,
 )
+# The tech veto above reads the verb part only (everything up to the image-noun): "create a photo gallery
+# website" is code, but "an image of a fox in the style of a 90s app icon" only has tech words in its SUBJECT.
+# The subject gets the same list minus the words that are just as often a picture (app, network, canvas, frame,
+# gallery, turtle, rows, deck, library, package, python, container, a bare pipeline or architecture), plus the
+# infrastructure nouns people ask a model to explain or draw. Singular forms only, as before: "charts on
+# billboards" is a picture, "a chart" is not. A "style of / looks like / resembling" phrase is not the subject.
+_TECH_SUBJECT_RE = re.compile(
+    r"\b(?:docker|dockerfile|compose|kubernetes|k8s|css|css3|html|react|vue|angular|flask|django|"
+    r"website|webpage|web\s+page|function|script|code|javascript|typescript|api|sql|database|schema|diagram|"
+    r"chart|graph|flowchart|flow\s+chart|uml|mermaid|ascii|svg|homelab|npm|pip|csv|dataset|spreadsheet|excel|"
+    r"(?:for|while)\s+loops?|json|gimp|photoshop|illustrator|blender|inkscape|figma|canva|wireframe|topology|infrastructure|"
+    r"microservices?|neural\s+networks?|binary\s+tree|decision\s+tree|state\s+machine|linked\s+list|"
+    r"(?:ci(?:\s*/\s*cd)?|cd|data|build|deployment|etl|ml)\s+pipelines?|"
+    r"(?:software|system|cloud|solution|network|application|app|enterprise|data)\s+architecture|"
+    r"architecture\s+(?:of|for)\s+(?:my|our|your))\b",
+    re.IGNORECASE,
+)
+# "with/using/in <library>" is tooling, not a subject. Bare names only where they cannot be a picture
+# ("with a pillow" and "with a turtle" stay pictures; "with pillow" and "with the turtle module" do not).
+_TOOLING_SUBJECT_RE = re.compile(
+    # a bare "in pillow" is a tool only at the end of the phrase: "in pillow clouds" is a picture
+    r"\bin\s+(?:pillow|pil)\b(?!\s+(?!and\b|to\b)\w)|\b(?:using|via|through)\s+(?:the\s+)?pillow\b|"
+    # a language after a described subject: "an image with a gradient in java"
+    r"\bin\s+(?:java|c\+\+|c#|golang|bash|pytorch|tensorflow|keras|node(?:\.?js)?)(?![\w+#])|"
+    r"\b(?:in|using|with|via|through)\s+(?:(?:the\s+)?(?:python|matplotlib|opencv|cv2|numpy|pandas|scipy|pil|"
+    r"skimage|imagemagick|ffmpeg|pygame|tkinter)|"
+    r"(?:the\s+)?(?:turtle|image|imaging|graphics|drawing|python|js|rust)\s+(?:module|library|package|crate)|"
+    r"rust\s+(?:and|code))\b|\bimage\s+crate\b|"
+    # a possessive project is the user's own software: "an image of my app's home screen"
+    r"\b(?:my|our|your)\s+(?:app|apps|application|website|site|project|repo|codebase)\b",
+    re.IGNORECASE,
+)
+_STYLE_PHRASE_RE = re.compile(
+    r"\b(?:in\s+the\s+(?:style|look|aesthetic|vibe)\s+of|styled\s+(?:like|as|after)|"
+    r"(?:looks?|looking)\s+like|resembling)\b[^,.;:!?]*",
+    re.IGNORECASE,
+)
+
+
+def _technical_subject(subject: str) -> bool:
+    subject = _STYLE_PHRASE_RE.sub(" ", subject)
+    return bool(_TECH_SUBJECT_RE.search(subject) or _TOOLING_SUBJECT_RE.search(subject))
 
 
 def _is_image_request(message: str) -> bool:
     """The strict natural-language image trigger: verb + image-noun + subject, or anchored
-    'draw a X'. Questions and code/tech context never count."""
-    if (
-        not message
-        or _QUESTION_LEAD_RE.match(message)
-        or _HOWTO_RE.search(message)
-        or _TECH_CONTEXT_RE.search(message)
-    ):
+    'draw a X'. Questions, code/tech context in the request and technical subjects never count."""
+    if not message or _QUESTION_LEAD_RE.match(message):
+        return False
+    if _HOWTO_RE.search(message) or _asks_way_to(message):
         return False
     if _DRAW_RE.match(message):
-        return not _DRAW_VETO_RE.search(message) and len(message.split()) <= _DRAW_MAX_WORDS
+        return (
+            not _DRAW_VETO_RE.search(message)
+            and len(message.split()) <= _DRAW_MAX_WORDS
+            and not _technical_subject(message)
+        )
     return any(
-        _SUBJECT_GATE_RE.match(message[m.end():]) for m in _IMAGE_NL_RE.finditer(message)
+        _SUBJECT_GATE_RE.match(message[m.end():])
+        and not _TECH_CONTEXT_RE.search(message[:m.end()])
+        and not _technical_subject(message[m.end():])
+        for m in _IMAGE_NL_RE.finditer(message)
     )
 
 
@@ -159,8 +241,8 @@ def _sse_response(lines: list[str]) -> StreamingResponse:
 
 
 def _notice_sse(text: str) -> StreamingResponse:
-    """Honest short assistant message (explicit trigger only) — flag off /
-    provider not ready. Reuses the workspace bridge's OpenAI-chunk shape."""
+    """Honest short assistant message for a matched image request (natural-language or explicit)
+    that cannot run: flag off, provider not ready. Reuses the workspace bridge's OpenAI-chunk shape."""
     from .workspace_bridge import _openai_sse_lines
 
     return _sse_response(_openai_sse_lines(uuid.uuid4().hex[:8], text))

@@ -102,21 +102,81 @@ def is_group_turn(title: str | None, text: str | None) -> bool:
 
 def requested_mode(text: str) -> str | None:
     """The mode the user explicitly asked for in this message, if any."""
+    text = text or ""
+    # /deck, /doc, /sheet and /pdf force a document, so mode words in the topic
+    # ("/deck a team of agents") must not turn the turn into a workspace run.
+    if _is_file_command_message(text):
+        return None
     for mode, asks in _MODE_REQUESTS:
-        if asks(text or ""):
+        if asks(text):
             # "set up a slideshow for the standup" opens with the install/set-up
             # wording but asks for a file, which the document lane makes; agent
             # mode would skip that lane. Real installs ("install comfyui") stay.
-            if mode == "agent" and _is_doc_request(text or ""):
+            if mode == "agent" and _is_doc_request(text):
                 return None
             return mode
     return None
 
 
+# Splits a message into the parts a person strings together with "and", "then",
+# commas and semicolons. Only the first part is the object of a leading "set up".
+_CLAUSE_SPLIT = re.compile(r"\s*(?:[,;]|\b(?:and|then)\b)\s*", re.I)
+# A clause that begins by installing, cloning or downloading something is a real
+# run request, wherever it sits in the message.
+_RUN_CLAUSE = re.compile(
+    r"^(?:(?:please|pls|also|first|next|then|and|ok|okay)\s+)*(?:(?:can|could|would)\s+you\s+)?(?:please\s+)?"
+    r"(?:install|clone|git\s+clone|download\s+and\s+run)\b\s+(?!(?:steps?|instructions?|guide|sections?|notes|tips|commands?|process|basics)\b)\S",
+    re.I)  # needs a real object: a bare "install" or "clone steps" is a list item
+# "set up a google sheet integration" names a file word, but the thing being set
+# up is a connection, not a file.
+_NOT_A_FILE = re.compile(
+    r"\b(?:integrations?|connectors?|plug-?ins?|extensions?|add-?ons?|apis?|webhooks?|servers?|repos?|"
+    r"repositor(?:y|ies)|environments?|sync|syncing|mcp)\b", re.I)
+_FILE_WORD = re.compile(
+    r"\b(?:sheets?|spreadsheets?|slides?|slide[\s-]*shows?|decks?|presentations?|pdfs?|docs?|documents?|reports?|"
+    r"excel|power[\s-]*point|word|csv|xlsx?|pptx?|docx)\b", re.I)
+# Where the object of "set up" ends and the document's topic begins.
+_TOPIC_START = re.compile(r"[:\-\u2013\u2014]\s|\b(?:about|on|for|to|with|covering|comparing|including|of|in)\b", re.I)
+
+
+def _sets_up_a_connection(head: str) -> bool:
+    """True when the thing being set up is a connection ("google sheet integration", "the sheets api").
+
+    A connection word counts when it sits right after the file word or with no file word before
+    it. Before a file word it is a modifier ("server costs spreadsheet"), and further after one it is
+    the document's topic ("spreadsheet tracking server uptime", "deck that explains our api").
+    """
+    for m in _NOT_A_FILE.finditer(head):
+        if _FILE_WORD.search(head, m.end()):
+            continue
+        files = list(_FILE_WORD.finditer(head, 0, m.start()))
+        if not files or not head[files[-1].end():m.start()].strip(" -"):
+            return True
+    return False
+
+
+def _is_file_command_message(text: str) -> bool:
+    from .ws_slash import FILE_REQUEST_PREFIX  # lazy: ws_slash imports session_ops, which imports this module
+
+    return bool(FILE_REQUEST_PREFIX.match(text))
+
+
 def _is_doc_request(text: str) -> bool:
+    """True when the whole message is a file request that opens with set-up wording.
+
+    A real install, clone or download-and-run anywhere in the message keeps agent
+    mode ("install comfyui and write me a doc on it"), and so does a first clause
+    that is not itself a document or that sets up a connection rather than a file.
+    """
     from owui_compat.doc_bridge import detect_doc_kind  # lazy: keeps startup coupling out of import time
 
-    return detect_doc_kind(text) is not None
+    clauses = [c for c in _CLAUSE_SPLIT.split(text.strip()) if c and c.strip()]
+    if not clauses or any(_RUN_CLAUSE.match(c.strip()) for c in clauses):
+        return False
+    # Only what is being set up counts, not the topic after on/about/for/to/with.
+    if _sets_up_a_connection(_TOPIC_START.split(clauses[0], maxsplit=1)[0]):
+        return False
+    return detect_doc_kind(clauses[0]) is not None
 
 
 async def stream_turn(token: str, messages: list[dict], model: str = "",
@@ -168,6 +228,8 @@ async def _stream_completion(token: str, messages: list[dict], model: str, endpo
         # to the default assistant's browser, and "chat" never starts a run.
         # The run marker is followed by runs.follow_run.
         body["harvis_mode"] = mode if mode in CHAT_MODES else os.getenv("HARVIS_HERMES_UI_CHAT_MODE", "auto")
+        # Hermes renders neither ```canvas panels nor :::blocks, so it is spared those prompts.
+        body["harvis_client"] = "hermes"
         if effort:
             body["reasoning_effort"] = effort
         if extra:

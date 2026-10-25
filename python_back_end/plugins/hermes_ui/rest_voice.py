@@ -43,6 +43,27 @@ INTERRUPTED = "[interrupted]"
 # A spoken turn should be a quick back-and-forth, not a chat-sized essay. This
 # cap is a backstop for small models that ignore the prose instruction below.
 VOICE_MAX_TOKENS = 80
+# Asking for text to land in the chat box (a message, a list) needs room for the text itself.
+VOICE_DRAFT_MAX_TOKENS = 600
+# A request to produce text: an imperative at the start of a clause with an object after it
+# ("write a message", "can you draft me a list", "write Bob an email", "write me three bullet
+# points"), not the bare word ("what type of GPU", "docker compose", "the draft"); or text for the
+# chat box ("put ... in the chat", "a list in the chat box").
+_LEAD_IN = (r"(?:hey\s+harvis[,!]?|please|pls|then|also|and|help\s+me|go\s+ahead\s+and|"
+            r"(?:can|could|would|will)\s+you|i(?:'d|\s+would)?\s+(?:need|want|like)\s+you\s+to)")
+_COUNT = (r"(?:\d+|an?\s+(?:few|couple(?:\s+of)?)|several|one|two|three|four|five|six|seven|eight|nine|ten)")
+_DRAFT_ASK = re.compile(
+    rf"(?:^|[.!?;,]\s*)(?:{_LEAD_IN}\s+)*"
+    r"(?:write(?:\s+up)?|draft|compose|jot(?:\s+down)?|type(?:\s+(?:out|up))?)\s+"
+    rf"(?:me\s+(?:(?:a|an|the|my|some|something|it|them|that|this|one)\b|{_COUNT}\s)"
+    r"|[A-Za-z]+\s+(?=(?:a|an|the|some)\b)(?:a|an|the|some)\b"
+    r"|(?:a|an|the|that|this|my|some|something|it|them|one)\b)"
+    r"|\bput\b.{0,40}\b(?:chat|box)\b"
+    r"|\bin(?:to)?\s+(?:the|my)\s+chat\s*box\b|\binto\s+(?:the|my)\s+chat\b", re.I)
+
+
+def voice_max_tokens(query: str) -> int:
+    return VOICE_DRAFT_MAX_TOKENS if _DRAFT_ASK.search(query or "") else VOICE_MAX_TOKENS
 
 VOICE_NOTE = """You are Harvis on a voice call with the user. This is your own side conversation,
 not their chat: you help them get around Harvis and get things done while they work.

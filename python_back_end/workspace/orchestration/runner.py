@@ -466,6 +466,12 @@ class SubAgentRunner:
         name = str((args or {}).get("name") or "").strip().lower()
         desc = str((args or {}).get("description") or "").strip()
         content = str((args or {}).get("content") or "").strip()
+        update_of = str((args or {}).get("update_of") or "").strip()
+        if update_of and content:
+            # A revision of a skill that exists: it waits in meta.pending for a human.
+            from plugins.hermes_ui import skill_select
+
+            return await skill_select.run_propose_update(pool, user_id, update_of, desc, content)
         if not name or not content:
             return "ERROR: propose_skill needs a kebab-case name and markdown content."
         if len(name) > 40 or not _re.match(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$", name):
@@ -477,10 +483,10 @@ class SubAgentRunner:
                     "SELECT 1 FROM owui_skills WHERE user_id=$1 AND name=$2", int(user_id), name
                 )
                 if exists:
-                    return (
-                        f"A skill named '{name}' already exists — not creating a duplicate. "
-                        "Ask the human to review it in Customize → Skills."
-                    )
+                    # Never a duplicate, never an edit: propose it as a revision of the existing skill.
+                    from plugins.hermes_ui import skill_select
+
+                    return await skill_select.run_propose_update(pool, user_id, name, desc, content)
                 await conn.execute(
                     "INSERT INTO owui_skills (id, user_id, name, description, content, meta, enabled) "
                     "VALUES ($1,$2,$3,$4,$5,$6::jsonb,FALSE)",
@@ -869,7 +875,7 @@ class SubAgentRunner:
         # is uninjectable until a HUMAN 'supported' verdict (gated_skill_blocks), so the
         # agent can never self-approve.
         if launch_mode != "user" or pool is None or user_id is None:
-            disabled.add("propose_skill")
+            disabled |= {"propose_skill", "list_skills", "read_skill"}  # skills: user-launched runs only
         # generate_image rides the SAME flag as /api/harvis/image/generate (never a
         # bypass) and needs a pool to persist the PNG artifact. Unlike propose_skill
         # it is NOT restricted to launch_mode == "user" — it's a benign creative tool
@@ -1254,6 +1260,7 @@ class SubAgentRunner:
                             "reason": "withheld in auto-launched run", "source": "launch_mode",
                         })
                         yield ev("tool_result", {
+                            "tool": name,
                             "output": f"DENIED: '{name}' is not available in auto-launched runs.",
                             "success": False,
                         })
@@ -1264,7 +1271,16 @@ class SubAgentRunner:
                         # audit) the human must approve. Handled in-runner (not dispatch_tool)
                         # because it needs the pool/user context; never grants a tool or lane.
                         out = await self._propose_skill(pool, user_id, args)
-                        yield ev("tool_result", {"output": out, "success": not out.startswith("ERROR")})
+                        yield ev("tool_result", {"tool": name, "output": out, "success": not out.startswith("ERROR")})
+                        results_text.append(out)
+                        continue
+                    if name in ("list_skills", "read_skill"):
+                        # Read-only: approved, enabled skills only (skill_select applies the gate).
+                        from plugins.hermes_ui import skill_select
+
+                        out = (await skill_select.run_list_skills(pool, user_id) if name == "list_skills"
+                               else await skill_select.run_read_skill(pool, user_id, (args or {}).get("name")))
+                        yield ev("tool_result", {"tool": name, "output": out, "success": not out.startswith("ERROR")})
                         results_text.append(out)
                         continue
                     if name == "generate_image":
@@ -1276,7 +1292,7 @@ class SubAgentRunner:
                         if art:
                             # 'artifact' trace event → the Artifacts rail previews the PNG.
                             yield ev("artifact", art)
-                        yield ev("tool_result", {"output": out, "success": art is not None})
+                        yield ev("tool_result", {"tool": name, "output": out, "success": art is not None})
                         results_text.append(out)
                         continue
                     if name == "screenshot_preview":
@@ -1335,7 +1351,7 @@ class SubAgentRunner:
                         if not res.allowed and res.tier is None:
                             # Structural lane deny (lane>3 without its enabling flag) —
                             # new in Phase 2; lane<=3 tools can never take this branch.
-                            yield ev("tool_result", {"output": f"DENIED: {res.reason}", "success": False})
+                            yield ev("tool_result", {"tool": name, "output": f"DENIED: {res.reason}", "success": False})
                             results_text.append(f"{name} DENIED ({res.reason})")
                             continue
                         if not res.allowed:
@@ -1349,7 +1365,7 @@ class SubAgentRunner:
                                 "what hello.txt contains.\"). Do NOT put tool calls, function "
                                 "names, JSON, or code in the plan — describe each step in words."
                             )
-                            yield ev("tool_result", {"output": msg_b, "success": False})
+                            yield ev("tool_result", {"tool": name, "output": msg_b, "success": False})
                             results_text.append(f"{name} BLOCKED (plan mode) — finish with a plan instead")
                             continue
                         if res.needs_approval:
@@ -1399,14 +1415,16 @@ class SubAgentRunner:
                                 if timed_out:
                                     notice = TIMEOUT_NOTICE.format(
                                         minutes=max(1, round(approval_timeout_s() / 60)), tool=name)
-                                    yield ev("tool_result", {"output": notice, "success": False})
+                                    yield ev("tool_result", {"tool": name, "output": notice, "success": False})
                                     results_text.append(f"{name} DENIED (no answer: approval timed out)")
                                 else:
-                                    yield ev("tool_result", {"output": "Denied by the user.", "success": False})
+                                    yield ev("tool_result", {"tool": name, "output": "Denied by the user.", "success": False})
                                     results_text.append(f"{name} DENIED by user")
                                 continue
                     if is_docs_tool(name):
-                        result, ok = await dispatch_docs_tool(name, args, pool=pool, user_id=user_id)
+                        result, ok = await dispatch_docs_tool(
+                            name, args, pool=pool, user_id=user_id,
+                            model_name=model_name, image_sink=vision_parts)
                         if ok and call_key:
                             seen_calls[call_key] = steps
                         yield ev("tool_result", {"tool": name, "output": result, "success": ok})

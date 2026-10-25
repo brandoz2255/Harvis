@@ -126,24 +126,72 @@ def looks_like_file_request(user_text: str) -> bool:
     return bool(user_text and _FILE_RE.search(user_text) and _ASK_RE.search(user_text))
 
 
-def kind_from_text(user_text: str) -> str:
-    """The document kind whose word comes first in the user's message; ``doc`` if none."""
-    best, at = "doc", len(user_text) + 1
+# A conversion is named by its target: "convert a word doc to pdf" is a PDF, not a document.
+_CONVERT_VERB_RE = re.compile(r"\b(?:convert|converting|turn|turning|export|exporting|transform|save|saving|change)\b", re.I)
+_TARGET_RE = re.compile(r"\b(?:to|into|as)\b", re.I)
+# A file word that a topic marker directly follows ("slides on how to turn a report into a pdf", "report
+# on how we can turn ...") is the thing being asked for; the conversion is only its subject. The marker
+# must sit right after the file word (one qualifier allowed: "word doc on"), not anywhere before the verb.
+_TOPIC_GAP_RE = re.compile(
+    r"^[\w-]+(?:\s+[\w-]+)?\s+(?:on|about|covering|regarding|explaining|how|why|what)\b", re.I)
+# "convert it", "turn this": the object points back at an earlier file, so the conversion target wins.
+_PRONOUN_OBJECT_RE = re.compile(r"\s+(?:it|this|that|them|these|those)\b", re.I)
+
+
+def _first_kind(text: str) -> tuple[str, int] | None:
+    """The kind whose file word comes first in ``text`` and where it starts, or None."""
+    best: tuple[str, int] | None = None
     for kind, pattern in _KIND_WORDS:
-        m = pattern.search(user_text)
-        if m and m.start() < at:
-            best, at = kind, m.start()
+        m = pattern.search(text)
+        if m and (best is None or m.start() < best[1]):
+            best = (kind, m.start())
     return best
+
+
+def kind_from_text(user_text: str) -> str:
+    """The document kind to make for the user's message; ``doc`` if none.
+
+    Normally the file word that comes first. With a conversion verb, the file word after
+    "to", "into" or "as" wins, because that is what the user wants out of it, unless a file
+    word comes first with a topic word ("on", "about", "how") right after it and the verb's object
+    is not a pronoun ("convert it").
+    """
+    verb = _CONVERT_VERB_RE.search(user_text)
+    first = _first_kind(user_text)
+    if (verb and first and first[1] < verb.start() and _TOPIC_GAP_RE.match(user_text[first[1]:verb.start()])
+            and not _PRONOUN_OBJECT_RE.match(user_text, verb.end())):
+        verb = None
+    if verb:
+        for target in _TARGET_RE.finditer(user_text, verb.end()):
+            found = _first_kind(user_text[target.end():])
+            if found:
+                return found[0]
+    found = _first_kind(user_text)
+    return found[0] if found else "doc"
+
+
+def fire_reason(answer: str) -> str | None:
+    """``refusal`` or ``offer`` when the answer should be re-asked with the document prompt, else None.
+
+    An answer with a fenced block in a programming language is a how-to or a script, so an outline
+    offer inside it does not count, and neither does a refusal that comes after the code ("run this,
+    I can't run commands here"). A refusal that leads, with the script as its consolation ("I can't
+    create PDF files, but here's a script"), still counts: the user asked for a file and got none.
+    """
+    if not answer or "harvis-doc" in answer.lower():
+        return None
+    fence = _CODE_FENCE_RE.search(answer)
+    before = answer[:fence.start()] if fence else answer
+    if _REFUSAL_RE.search(re.sub(r"\s+", " ", before.replace("’", "'"))):
+        return "refusal"
+    if fence:
+        return None
+    return "offer" if _OFFER_RE.search(re.sub(r"\s+", " ", answer.replace("’", "'"))) else None
 
 
 def should_fire(answer: str) -> bool:
     """A refusal to make a file, or an outline offered in its place with no real document."""
-    if not answer or "harvis-doc" in answer.lower():
-        return False
-    text = re.sub(r"\s+", " ", answer.replace("’", "'"))
-    if _REFUSAL_RE.search(text):
-        return True
-    return bool(_OFFER_RE.search(text)) and not _CODE_FENCE_RE.search(answer)
+    return fire_reason(answer) is not None
 
 
 def _has_doc_prompt(messages: list) -> bool:
@@ -238,10 +286,12 @@ async def _trailer(owui_body: dict, lane, user_text: str, answer: str, complete:
 
     ``complete`` is False when ``answer`` is only the start of a longer reply, in which
     case nothing can be said about fences left open at its end."""
-    if not should_fire(answer):
+    reason = fire_reason(answer)
+    if not reason:
         return ""
     kind = kind_from_text(user_text)
-    logger.info("doc_guard fired (kind=%s): %r", kind, user_text[:200])
+    # The user's words stay out of the logs: kind, reason and length are enough to find a miss.
+    logger.info("doc_guard fired (kind=%s, reason=%s, message_chars=%d)", kind, reason, len(user_text))
     body = doc_turn_body(owui_body, kind)
     if body is None:
         return ""

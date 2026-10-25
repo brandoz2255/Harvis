@@ -11,35 +11,45 @@ kind: deck
 title: Community Garden Launch
 outline:
   - Title
-  - Why a garden
-  - Rollout plan
+  - Neighbors want it
+  - Beds ready by April
+  - Next steps
 ---
 # Community Garden Launch
 From empty lot to first harvest
 ---
-## Why a garden
-- Fresh food within walking distance
-  - Twelve neighbors already signed up
-- A reason to meet outside
+## Neighbors want it
+- 12 households signed up
+- Fresh food nearby
 Notes: Open with the empty lot photo.
 ---
-## Rollout plan
+## Beds ready by April
 ```timeline
 Build beds | Mar 1 | Mar 15
 *First planting | Apr 2
 ```
+---
+## Next steps
+- Order beds Feb 28
 ````
 
-Those are the slides; tell me which to expand.
+Tell me which slides to expand.
 
 Rules
 - The outline has one line per slide, in order; each line becomes one slide.
 - Slides are separated by a line that is exactly `---`.
-- Slide 1 is the title slide: `# Title`, then one subtitle line, no bullets.
 - Every other slide starts with `## Title`, then 3-6 short bullets (indent two spaces for a sub-bullet).
 - 6-12 slides unless the user gave a number: then exactly that many.
 - `Notes:` at the end of a slide holds speaker notes.
 - Real content only: no placeholders, no "TBD", no lorem ipsum.
+
+Design
+- Titles state the takeaway ("Rollout takes six weeks"), not a topic.
+- At most 25 words per slide; detail goes in `Notes:`.
+- Never two bullet-only slides in a row: use cards, a chart, a timeline, a quadrant or a table between.
+- Two `###` headings with text: columns. Up to three `**42%**` figures with captions: big numbers.
+- End with a next-steps slide.
+- Optional look: a `theme:` header line, one of harvis, paper, slate, ember, forest, mono. Leave it out for the default.
 
 Rich blocks: at most ONE per slide, and then it is the whole slide body (no bullets). Three backticks, one item per line.
 ```cards
@@ -76,5 +86,5 @@ A table also works as a slide body:
 
 Gotchas
 - Never write a `<body>` tag.
-- Slide 1 is a title slide with a subtitle; every slide has a title.
+- Slide 1 is a title slide (`# Title`, one subtitle line, no bullets); every slide has a title.
 - If the user asked for N slides, the outline and the slides both number N.

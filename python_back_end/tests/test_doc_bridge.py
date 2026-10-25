@@ -518,3 +518,112 @@ def test_a_skill_file_with_bad_bytes_falls_back_instead_of_raising(tmp_path, mon
     monkeypatch.setattr(doc_bridge, "_skill_cache", {})
     prompt = doc_system_prompt("sheet")
     assert "kind: sheet" in prompt and doc_bridge.DOC_PROMPT_MARKER in prompt
+
+
+@pytest.mark.parametrize("text", [
+    "slides on monday",
+    "presentation on monday",
+    "powerpoint on mac",
+    "powerpoint on my phone",
+    "slides on friday",
+    "a pdf from my professor",
+    "csv from the server",
+    "deck of the ship",
+    "presentation on windows",
+])
+def test_a_bare_format_noun_followed_by_logistics_is_conversation_not_a_request(text):
+    assert detect_doc_kind(text) is None
+
+
+@pytest.mark.parametrize("text,kind", [
+    ("pdf", "pdf"), ("slides please", "deck"), ("slides on dogs", "deck"), ("a deck on k3s", "deck"),
+    ("presentation on linux kernel scheduling", "deck"), ("pdf from this", "pdf"),
+    ("a slide deck of the roadmap", "deck"), ("a pdf of the onboarding checklist", "pdf"),
+])
+def test_the_logistics_rule_keeps_real_bare_requests(text, kind):
+    assert detect_doc_kind(text) == kind
+
+
+@pytest.mark.parametrize("text,kind", [
+    ("presentation on 1st amendment rights", "deck"), ("slides on 3rd grade fractions", "deck"),
+    ("pdf on 2nd world war", "pdf"), ("slides on sat prep", "deck"), ("slides on sun safety", "deck"),
+    ("slides on wed design", "deck"), ("slides on junit 5", "deck"), ("deck on mars 2 rover", "deck"),
+    ("presentation on decision 2", "deck"), ("presentation on sunday school lessons", "deck"),
+    ("slides on monday motivation habits", "deck"), ("presentation on tomorrow's technology", "deck"),
+    ("deck of 10 slides on climate change", "deck"), ("deck of slides on climate change", "deck"),
+])
+def test_a_day_or_date_word_that_starts_a_topic_does_not_veto_a_bare_request(text, kind):
+    assert detect_doc_kind(text) == kind
+
+
+@pytest.mark.parametrize("text", [
+    "slides on monday morning", "slides on friday at 9", "slides on monday at 9 30am", "slides on sat",
+    "presentation on may 3rd", "powerpoint on tomorrow", "slides on 3pm", "pdf on october 7",
+    "deck of the boat",
+])
+def test_a_day_date_or_time_that_is_the_whole_tail_is_still_logistics(text):
+    assert detect_doc_kind(text) is None
+
+
+LONE_DOC = ("Here is the report.\n\n````harvis-doc\n---\nkind: doc\ntitle: Fire Drill\n---\n# Fire Drill\n"
+            "Short body.\n````")
+
+
+def _chat_with_doc(follow_up, extra=()):
+    return {"messages": [
+        {"role": "user", "content": "write a report about the fire drill"},
+        {"role": "assistant", "content": LONE_DOC},
+        *extra,
+        {"role": "user", "content": follow_up},
+    ]}
+
+
+@pytest.mark.parametrize("text,kind", [("pdf", "pdf"), ("slides", "deck"), ("slideshow", "deck"), ("a pdf please", "pdf")])
+def test_a_lone_format_word_after_a_document_converts_it_instead_of_starting_a_new_one(text, kind):
+    body = _chat_with_doc(text)
+    assert maybe_prepare_doc_turn(body) == kind
+    note = next(m["content"] for m in body["messages"] if m["role"] == "system")
+    assert "CONVERSION" in note
+
+
+def test_a_lone_format_word_with_no_document_is_still_a_new_document():
+    body = {"messages": [{"role": "user", "content": "pdf"}]}
+    assert maybe_prepare_doc_turn(body) == "pdf"
+    assert not any("CONVERSION" in m["content"] for m in body["messages"] if m["role"] == "system")
+
+
+def test_a_format_word_with_a_topic_after_a_document_is_a_new_document():
+    body = _chat_with_doc("slides on dogs")
+    assert maybe_prepare_doc_turn(body) == "deck"
+    assert not any("CONVERSION" in m["content"] for m in body["messages"] if m["role"] == "system")
+
+
+def test_a_lone_format_word_after_unrelated_answers_is_not_read_as_a_conversion():
+    extra = [{"role": "user", "content": "what is a haiku?"},
+             {"role": "assistant", "content": "A haiku is a short three-line poem."}]
+    body = _chat_with_doc("pdf", extra=extra)
+    assert maybe_prepare_doc_turn(body) == "pdf"
+    assert not any("CONVERSION" in m["content"] for m in body["messages"] if m["role"] == "system")
+
+
+@pytest.mark.parametrize("text", [
+    "give me that as a list instead of a deck",
+    "turn this into a list rather than a deck",
+    "convert it to a table, not a deck",
+    "make it a list, not slides",
+    "convert it into a table, not into a deck",
+])
+def test_a_format_the_user_turned_down_is_not_the_conversion_target(text):
+    from owui_compat.doc_revision import conversion_target
+
+    assert conversion_target(text) is None
+    # It may still be read as an edit of the document, but never as a conversion to the deck.
+    assert maybe_prepare_doc_turn(_chat_with_doc(text)) != "deck"
+
+
+def test_the_accepted_format_wins_over_the_one_turned_down():
+    from owui_compat.doc_revision import conversion_target
+
+    assert conversion_target("make it a pdf instead of a deck") == "pdf"
+    assert conversion_target("turn it into a deck") == "deck"
+    assert detect_doc_kind("make a pdf not a deck") == "pdf"

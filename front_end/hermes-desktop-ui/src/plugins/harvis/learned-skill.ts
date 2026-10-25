@@ -1,6 +1,19 @@
 import { host } from '@hermes/plugin-sdk'
 
+import { queryClient } from '@/lib/query-client'
+import { invalidateSlashCompletions } from '@/lib/slash-completion-cache'
+
 import { openSkillReview } from './skill-review'
+
+// The Skills tab's cache root (app/skills/index.tsx SKILLS_QUERY_KEY); scoped keys extend it, so
+// invalidating the root refetches whichever scope is on screen.
+const SKILLS_QUERY_KEY = ['skills-list'] as const
+
+/** An approval or rejection changes the skill list and the composer's `/` list; refresh both. */
+function refreshSkills(): void {
+  void queryClient.invalidateQueries({ queryKey: SKILLS_QUERY_KEY })
+  invalidateSlashCompletions()
+}
 
 interface Drafted {
   description?: string
@@ -42,7 +55,7 @@ export function watchLearnedSkills(): () => void {
       action: {
         label: 'Review',
         onClick: () => {
-          openSkillReview(name)
+          openSkillReview(name, refreshSkills)
         }
       }
     })

@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Callable, Optional
+from decimal import ROUND_HALF_UP, Decimal, localcontext
+from typing import Callable
+
+from .docs_number import parse_number  # noqa: F401 (the tests import it from here)
 
 SAFE_FUNCTIONS = frozenset((
     "SUM SUMIF SUMIFS SUMPRODUCT AVERAGE AVERAGEIF MIN MAX COUNT COUNTA COUNTIF COUNTIFS MEDIAN PRODUCT "
@@ -49,6 +52,10 @@ class Unknowable(FormulaError):
     """The value cannot be known here: a syntax the evaluator does not read, a function only a real spreadsheet
     program can calculate, a missing stored value, or a circular reference. IFERROR must not turn these into
     its fallback, because the real value may be anything."""
+
+
+class RecursionUnknowable(Unknowable):
+    """The stack was too deep at this moment. Says nothing about the cell, so callers must not remember it."""
 
 
 class Blank(float):
@@ -217,17 +224,41 @@ def _vlookup(a: list):
     return BLANK if found[col - 1] is None else found[col - 1]
 
 
+def _round(a: list) -> float:
+    """ROUND the way a spreadsheet does: halves go away from zero (2.5 -> 3, -2.5 -> -3), and the digits of the
+    number at 15 significant digits decide it, as in a spreadsheet: 0.125 -> 0.13 (Python's round() gives 0.12), and
+    0.7 * 1.15, which is 0.8049999999999999 in a double, -> 0.81."""
+    nums = _flat(a)
+    x, digits = nums[0], int(nums[1]) if len(nums) > 1 else 0
+    if not math.isfinite(x) or digits >= 340:
+        return x                                             # a double has no digits that far out to round
+    if digits <= -340:
+        return 0.0
+    with localcontext() as ctx:
+        ctx.prec = 700
+        return float(Decimal(format(x, ".15g")).quantize(Decimal(1).scaleb(-digits), rounding=ROUND_HALF_UP)) + 0.0
+
+
+def _logical(a: list, combine: Callable[[list], bool]) -> bool:
+    """AND / OR over every logical value in the arguments. Empty cells are skipped, and with nothing left to
+    test a spreadsheet reports #VALUE! rather than answering."""
+    values = [_truth(x) for v in a for x in (v if isinstance(v, list) else [v]) if x is not None]
+    if not values:
+        raise FormulaError("value")
+    return combine(values)
+
+
 _FUNCS: dict[str, Callable[[list], object]] = {
     "SUM": lambda a: sum(_flat(a)),
     "AVERAGE": lambda a: sum(_flat(a)) / len(_flat(a)),
-    "MIN": lambda a: min(_flat(a)),
-    "MAX": lambda a: max(_flat(a)),
+    "MIN": lambda a: min(_flat(a), default=0.0),             # no numbers to compare: a spreadsheet shows 0
+    "MAX": lambda a: max(_flat(a), default=0.0),
     "COUNT": lambda a: float(len(_flat(a))),
     "PRODUCT": lambda a: math.prod(_flat(a)),
     "ABS": lambda a: abs(_flat(a)[0]),
-    "ROUND": lambda a: round(_flat(a)[0], int(_flat(a)[1]) if len(_flat(a)) > 1 else 0),
-    "AND": lambda a: all(_truth(x) for v in a for x in (v if isinstance(v, list) else [v]) if x is not None),
-    "OR": lambda a: any(_truth(x) for v in a for x in (v if isinstance(v, list) else [v]) if x is not None),
+    "ROUND": _round,
+    "AND": lambda a: _logical(a, all),
+    "OR": lambda a: _logical(a, any),
     "NOT": lambda a: not _truth(a[0]),
     "SUMIF": _sumif,
     "COUNTIF": _countif,
@@ -391,7 +422,9 @@ class _Parse:
         def run():
             try:
                 return _FUNCS[name]([read(a) for a in args])
-            except (ValueError, ZeroDivisionError, IndexError) as exc:
+            except ZeroDivisionError as exc:                  # AVERAGE of nothing
+                raise FormulaError("div0") from exc
+            except (ValueError, IndexError) as exc:
                 raise FormulaError(name) from exc
         return run
 
@@ -420,13 +453,11 @@ class _Parse:
         return v
 
 
-def evaluate_any(formula: str, cell: Callable[[int, int], object], depth: int = 0):
+def evaluate_any(formula: str, cell: Callable[[int, int], object]):
     """Value of ``=...`` as a float, text or bool, using ``cell(row, col)`` for references (a number, text,
     or None when empty).
 
     Raises FormulaError for anything outside the subset, and for an error a spreadsheet would show (``div0``)."""
-    if depth > 20:
-        raise Unknowable("circular")
     parser = _Parse(_tokenize(formula.lstrip("=")), cell)
     try:
         run = parser.compare()
@@ -436,49 +467,18 @@ def evaluate_any(formula: str, cell: Callable[[int, int], object], depth: int = 
         if isinstance(result, list):
             raise Unknowable("syntax")
         return result
-    except (TypeError, RecursionError) as exc:
+    except RecursionError as exc:
+        raise RecursionUnknowable(str(exc)) from exc
+    except TypeError as exc:
         raise Unknowable(str(exc)) from exc
     except (OverflowError, ValueError) as exc:
         raise FormulaError(str(exc)) from exc
 
 
-def evaluate(formula: str, cell: Callable[[int, int], object], depth: int = 0) -> float:
+def evaluate(formula: str, cell: Callable[[int, int], object]) -> float:
     """Value of ``=...`` as a number. Raises FormulaError for anything outside the subset, and when the
     result is text."""
-    result = evaluate_any(formula, cell, depth)
+    result = evaluate_any(formula, cell)
     if isinstance(result, str):
         raise FormulaError("text")
     return float(result)
-
-
-# ---- cell values ----
-
-_NUMBER = re.compile(
-    r"^(?P<open>\()?\s*(?P<sign>-)?\s*(?P<cur>\$)?\s*(?P<sign2>-)?(?P<num>\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?|\.\d+)"
-    r"\s*(?P<pct>%)?\s*(?P<close>\))?$")
-
-
-def parse_number(raw: str) -> Optional[tuple[float, Optional[str]]]:
-    """(value, Excel number format) for ``1,200`` / ``$40`` / ``12%`` / ``(300)`` / ``-4.5``; else None.
-
-    Digit strings that are identifiers (``007``, a 16-digit card or phone number) stay text."""
-    m = _NUMBER.match(raw.strip())
-    if not m or bool(m.group("open")) != bool(m.group("close")):
-        return None
-    num = m.group("num")
-    plain = num.replace(",", "")
-    if (re.match(r"0\d", plain) and "," not in num) or len(plain.replace(".", "")) > 15:
-        return None
-    value = float(plain)
-    if m.group("open") or m.group("sign") or m.group("sign2"):
-        value = -value
-    decimals = "." in num
-    if m.group("pct"):
-        value, fmt = value / 100, ("0.0%" if decimals else "0%")
-    elif m.group("cur"):
-        fmt = "$#,##0.00" if decimals else "$#,##0"
-    elif "," in num:
-        fmt = "#,##0.00" if decimals else "#,##0"
-    else:
-        fmt = None
-    return (int(value) if value == int(value) and not m.group("pct") else value), fmt

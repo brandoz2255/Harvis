@@ -1,4 +1,5 @@
 import { useStore } from '@nanostores/react'
+import { computed } from 'nanostores'
 import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
@@ -9,6 +10,8 @@ import { type DocCheckResult, fetchDocCheck } from '@/lib/harvis-doc-preview-api
 import { AlertCircle, Check, Loader2, X } from '@/lib/icons'
 import { Codecs, persistentAtom } from '@/lib/persisted'
 import { cn } from '@/lib/utils'
+import { docSessionTarget } from '@/store/live-docs'
+import { $sessionStates } from '@/store/session-states'
 
 type CheckState =
   | { phase: 'checking' }
@@ -24,9 +27,11 @@ type CheckState =
 export const $autoFixDocs = persistentAtom('hermes.desktop.docs.autoFix', false, Codecs.bool)
 
 /**
- * Documents (by kind and title) that already had their automatic fix. Module-level so a
+ * Documents (by chat, kind and title) that already had their automatic fix. Module-level so a
  * remount or a revision that still fails its check cannot trigger a second one: a model that
- * cannot satisfy the checker would otherwise loop forever on the user's GPU.
+ * cannot satisfy the checker would otherwise loop forever on the user's GPU. The chat is part
+ * of the key so a same-named document in a second chat still gets its own fix. A fix the chat
+ * refused is not recorded: it did not use the fix up.
  */
 const autoFixed = new Set<string>()
 
@@ -43,6 +48,14 @@ interface DocCheckStripProps {
   /** The document has finished streaming; checking half a document is noise. */
   complete: boolean
   kind: HarvisDocKind
+  /** The chat the document belongs to; scopes the one automatic fix. */
+  sessionId: string
+  /**
+   * The stream really ended: the fence closed, or the turn that was writing it finished.
+   * `complete` alone can be the 30 s staleness fallback for a card that stopped updating while
+   * the turn still runs, and that must not start the automatic check or fix. Defaults to `complete`.
+   */
+  settled?: boolean
   source: string
   title: string
 }
@@ -55,23 +68,42 @@ interface DocCheckStripProps {
  *
  * The check also runs once on its own when a document it watched stream finishes (a
  * document that was already complete when the panel opened is left for the Check button).
- * With the auto-fix setting on, error-severity findings are sent back once per document.
+ * With the auto-fix setting on, error-severity findings are sent back once per document, to the
+ * chat that owns it, once that chat is idle. A fence the turn cut off is never checked on its own.
  */
-export function DocCheckStrip({ complete, kind, source, title }: DocCheckStripProps) {
+export function DocCheckStrip({ complete, kind, sessionId, settled = complete, source, title }: DocCheckStripProps) {
   const { t } = useI18n()
   const copy = t.docPreview.check
   const sender = useStore($docFixSender)
+  const autoFixOn = useStore($autoFixDocs)
   const [state, setState] = useState<CheckState>({ phase: 'idle' })
   const [vision, setVision] = useState(false)
   const [sent, setSent] = useState(false)
   const controller = useRef<AbortController | null>(null)
   const latestRun = useRef<(auto: boolean) => Promise<void>>(async () => undefined)
-  // Armed while the document streams; the first finish after that runs one automatic check.
-  const armed = useRef(!complete)
+  const latestAutoFix = useRef<(found: DocIssue[]) => Promise<void>>(async () => undefined)
+  // Findings whose automatic fix is waiting for the owning chat to finish its turn.
+  const pendingFix = useRef<DocIssue[] | null>(null)
+  // 'interrupted' is the owning chat after Stop (cleared again by its next submit).
+  const $owner = useMemo(
+    () =>
+      computed($sessionStates, (states): 'busy' | 'idle' | 'interrupted' => {
+        const target = docSessionTarget(states, sessionId)
+        const state = target && states[target.sessionId]
+
+        return state ? (state.busy ? 'busy' : state.interrupted ? 'interrupted' : 'idle') : 'idle'
+      }),
+    [sessionId]
+  )
+  const owner = useStore($owner)
+  // Armed while the document streams; the first real finish after that runs one automatic check.
+  const ready = complete && settled
+  const armed = useRef(!ready)
 
   useEffect(() => {
     setState({ phase: 'idle' })
     setSent(false)
+    pendingFix.current = null
 
     return () => controller.current?.abort()
   }, [source, title])
@@ -116,11 +148,16 @@ export function DocCheckStrip({ complete, kind, source, title }: DocCheckStripPr
     }
   }
 
-  const send = async (list: DocIssue[], send: NonNullable<typeof sender>) => {
+  const deliver = async (list: DocIssue[], to: NonNullable<typeof sender>) => {
     setSent(true)
 
     try {
-      await send(docFixMessage(list))
+      // A send the chat refuses (busy turn, nowhere to deliver) resolves false: not sent.
+      if ((await to(docFixMessage(list), sessionId)) === false) {
+        setSent(false)
+
+        return false
+      }
 
       return true
     } catch (error) {
@@ -131,37 +168,67 @@ export function DocCheckStrip({ complete, kind, source, title }: DocCheckStripPr
     }
   }
 
+  const errorIssues = issues.filter(issue => issue.severity === 'error')
+
   const fix = async () => {
-    if (!sender || !issues.length) {
+    if (!sender || !errorIssues.length) {
       return
     }
 
-    await send(issues, sender)
+    await deliver(errorIssues, sender)
   }
 
   /** One automatic fix per document, only errors, only with the setting on. */
   const autoFix = async (found: DocIssue[]) => {
     const errors = found.filter(issue => issue.severity === 'error')
     const target = $docFixSender.get()
-    const key = `${kind}:${title}`
+    const key = `${sessionId}:${kind}:${title}`
 
-    if (!$autoFixDocs.get() || !errors.length || !target || autoFixed.has(key)) {
+    // A chat the user stopped does not get a new turn they did not ask for; a later revision still can.
+    if (!$autoFixDocs.get() || !errors.length || !target || autoFixed.has(key) || $owner.get() === 'interrupted') {
+      return
+    }
+
+    // The fence usually closes while the model is still writing after it, and a busy chat refuses
+    // the send. Hold the findings until its turn ends instead of burning the one fix.
+    if ($owner.get() === 'busy') {
+      pendingFix.current = found
+
       return
     }
 
     autoFixed.add(key)
 
-    if (!(await send(errors, target))) {
+    if (!(await deliver(errors, target))) {
       autoFixed.delete(key)
+
+      // Refused because a turn started in the meantime: try again when it ends.
+      if ($owner.get() === 'busy') {
+        pendingFix.current = found
+      }
     }
   }
 
   useEffect(() => {
     latestRun.current = run
+    latestAutoFix.current = autoFix
   })
 
   useEffect(() => {
-    if (!complete) {
+    if (owner !== 'busy' && pendingFix.current) {
+      const found = pendingFix.current
+
+      pendingFix.current = null
+
+      // Stop ends the turn too, and must not be answered with a new one.
+      if (owner === 'idle') {
+        void latestAutoFix.current(found)
+      }
+    }
+  }, [owner])
+
+  useEffect(() => {
+    if (!ready) {
       armed.current = true
 
       return
@@ -171,7 +238,7 @@ export function DocCheckStrip({ complete, kind, source, title }: DocCheckStripPr
       armed.current = false
       void latestRun.current(true)
     }
-  }, [complete])
+  }, [ready])
 
   const checking = state.phase === 'checking'
   const checked = state.phase === 'done' ? state.result.checked : null
@@ -202,6 +269,15 @@ export function DocCheckStrip({ complete, kind, source, title }: DocCheckStripPr
             type="checkbox"
           />
           <span className="truncate">{copy.vision}</span>
+        </label>
+        <label className="flex min-w-0 items-center gap-1 text-[0.625rem] text-muted-foreground">
+          <input
+            checked={autoFixOn}
+            className="size-3"
+            onChange={event => $autoFixDocs.set(event.target.checked)}
+            type="checkbox"
+          />
+          <span className="truncate">{copy.autoFix}</span>
         </label>
         {state.phase === 'done' && !issues.length && (
           <span className="ml-auto flex items-center gap-1 text-[0.6875rem] text-muted-foreground" role="status">
@@ -247,7 +323,7 @@ export function DocCheckStrip({ complete, kind, source, title }: DocCheckStripPr
             </ul>
           )}
           <div className="flex items-center gap-2">
-            {issues.length > 0 && (
+            {errorIssues.length > 0 && (
               <span title={sender ? undefined : copy.fixUnavailable}>
                 <Button
                   className="h-6 px-2 text-[0.6875rem]"
@@ -256,7 +332,7 @@ export function DocCheckStrip({ complete, kind, source, title }: DocCheckStripPr
                   size="sm"
                 >
                   <span>{sent ? copy.fixSent : copy.fix}</span>
-                  {!sent && <span data-slot="doc-fix-count">{issues.length}</span>}
+                  {!sent && <span data-slot="doc-fix-count">({errorIssues.length})</span>}
                 </Button>
               </span>
             )}

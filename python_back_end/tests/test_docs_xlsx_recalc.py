@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import sys
+import time
 import urllib.error
 import zipfile
 
@@ -514,3 +515,156 @@ def test_real_libreoffice_stores_the_values():
 
 def test_exports_still_name_the_recalculating_builder():
     assert docs_export.to_xlsx(PROBE)[:2] == b"PK"
+
+
+# ---- a failing cell read many times is worked out once ------------------------------------------------
+
+def _iferror_chain(rows: int) -> str:
+    """B2 divides by zero and each later row reads the row above through IFERROR twice, then fails again. Without
+    a memory for failed cells the work doubles with every row."""
+    body = "| r2 | =1/0 |\n"
+    for k in range(3, rows + 2):
+        body += f"| r{k} | =IFERROR(B{k - 1},1)+IFERROR(B{k - 1},1)+1/0 |\n"
+    return "---\nkind: sheet\ntitle: Chain\n---\n## S\n| Row | V |\n| --- | --- |\n" + body
+
+
+def test_a_long_iferror_chain_of_errors_is_checked_in_linear_time(monkeypatch):
+    monkeypatch.setenv("DOCS_XLSX_RECALC", "0")
+    src = _iferror_chain(40)
+    started = time.monotonic()
+    issues, _files, _doc = docs_check.check_source(src)
+    assert time.monotonic() - started < 1.0, "check_source took exponential time on an IFERROR chain"
+    assert [i for i in issues if "B2" in i["message"] and "divides by zero" in i["message"]]
+    assert [i for i in issues if "B41" in i["message"] and "divides by zero" in i["message"]]
+
+
+def test_the_csv_of_a_long_iferror_chain_of_errors_is_built_in_linear_time(monkeypatch):
+    monkeypatch.setenv("DOCS_XLSX_RECALC", "0")
+    started = time.monotonic()
+    rows = export_doc(_iferror_chain(40), "csv").data.decode("utf-8-sig").splitlines()
+    assert time.monotonic() - started < 1.0, "the CSV export took exponential time on an IFERROR chain"
+    assert rows[1] == "r2,#VALUE!" and rows[-1] == "r41,#VALUE!"
+
+
+def test_a_remembered_error_is_still_caught_by_iferror_each_time():
+    src = ("---\nkind: sheet\ntitle: T\n---\n## S\n| K | V | W |\n| --- | --- | --- |\n"
+           "| a | =1/0 | =IFERROR(B2,5)+IFERROR(B2,7) |\n")
+    rows = export_doc(src, "csv").data.decode("utf-8-sig").splitlines()
+    assert rows[1] == "a,#VALUE!,12"
+
+
+# ---- the cache recognises an unchanged workbook ------------------------------------------------------
+
+def _rewrite_save_time(xlsx: bytes) -> bytes:
+    src, out = zipfile.ZipFile(io.BytesIO(xlsx)), io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
+        for item in src.infolist():
+            data = src.read(item.filename)
+            if item.filename == "docProps/core.xml":
+                data = re.sub(rb"(<dcterms:(?:created|modified)[^>]*>)[^<]*", rb"\g<1>2031-01-01T00:00:00Z", data)
+            dst.writestr(item.filename, data)
+    return out.getvalue()
+
+
+def test_the_cache_key_ignores_the_save_time_but_not_the_content():
+    one = export_doc(PROBE, "xlsx", ).data
+    later = _rewrite_save_time(one)
+    assert later != one                                                      # the bytes differ, the sheet does not
+    key = docs_render_client._content_key
+    assert key(one) == key(later)
+    assert key(one) != key(export_doc(PROBE.replace("=B2*C2", "=B2*C2+1"), "xlsx").data)
+    assert key(b"not a zip") != key(b"not a zip either") and key(b"") == key(b"")
+
+
+def test_exporting_the_same_sheet_again_later_does_not_run_the_sandbox_again(monkeypatch):
+    seen = []
+
+    class Reply:
+        def __init__(self, body):
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return self.body
+
+    def sandbox(req, timeout):
+        import json
+        sent = base64.b64decode(json.loads(req.data)["b64"])
+        seen.append(1)
+        return Reply(json.dumps({"ok": True, "b64": base64.b64encode(_stored(sent)).decode()}).encode())
+
+    monkeypatch.setattr(docs_render_client.urllib.request, "urlopen", sandbox)
+    first = export_doc(PROBE, "xlsx").data
+    time.sleep(1.2)                                   # openpyxl stamps whole seconds into the file
+    second = export_doc(PROBE, "xlsx").data
+    third = export_doc(PROBE, "xlsx").data
+    assert len(seen) == 1, f"{len(seen)} sandbox calls for three identical exports"
+    for data in (first, second, third):
+        assert load_workbook(io.BytesIO(data), data_only=True)["Orders"]["D4"].value == 47
+
+
+def test_a_refused_workbook_is_not_sent_again_after_the_save_time_moves(monkeypatch):
+    seen = []
+
+    class Reply:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'{"ok": false, "error": "no"}'
+
+    monkeypatch.setattr(docs_render_client.urllib.request, "urlopen", lambda req, timeout: seen.append(1) or Reply())
+    plain = export_doc(PROBE, "xlsx").data
+    assert docs_render_client.recalc_xlsx(plain) is None
+    assert docs_render_client.recalc_xlsx(_rewrite_save_time(plain)) is None and len(seen) == 1
+
+
+def _counting_sandbox(monkeypatch):
+    seen = []
+
+    class Reply:
+        def __init__(self, body):
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return self.body
+
+    def sandbox(req, timeout):
+        import json
+        sent = base64.b64decode(json.loads(req.data)["b64"])
+        seen.append(1)
+        return Reply(json.dumps({"ok": True, "b64": base64.b64encode(_stored(sent)).decode()}).encode())
+
+    monkeypatch.setattr(docs_render_client.urllib.request, "urlopen", sandbox)
+    return seen
+
+
+@pytest.mark.parametrize("call", ["TODAY()", "NOW()", "today()"])
+def test_a_workbook_using_a_volatile_function_is_recalculated_on_every_export(monkeypatch, call):
+    seen = _counting_sandbox(monkeypatch)
+    src = PROBE.replace("| Pen | 2 | $3.50 | =B2*C2 |", f"| Pen | 2 | $3.50 | =B2*C2+0*YEAR({call}) |")
+    for _ in range(3):
+        export_doc(src, "xlsx")
+    assert len(seen) == 3, f"{len(seen)} sandbox calls for three exports of a volatile sheet"
+    assert not docs_render_client._cache                      # and nothing of it was kept
+
+
+def test_a_sheet_without_volatile_functions_is_still_cached(monkeypatch):
+    seen = _counting_sandbox(monkeypatch)
+    for _ in range(3):
+        export_doc(PROBE, "xlsx")
+    assert len(seen) == 1

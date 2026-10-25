@@ -62,7 +62,9 @@ export async function downloadAllDocs(
 /**
  * Bodies of the `harvis-doc` fences in a message that have a closing fence.
  * Mirrors `openHarvisDocFence` in harvis-doc.ts: a closing fence is the same
- * character, at least as long as the opener, with nothing after it.
+ * character, at least as long as the opener, with nothing after it. As in
+ * CommonMark, a fence may sit in a list item (the opener's column is its indent): the closer
+ * may be indented that far, and body lines lose that indent.
  */
 export function closedHarvisDocFences(text: string): string[] {
   if (!/harvis-?doc/i.test(text)) {
@@ -73,27 +75,29 @@ export function closedHarvisDocFences(text: string): string[] {
   let open: {
     body: string[]
     char: string
+    indent: number
     isDoc: boolean
     len: number
   } | null = null
 
   for (const line of text.split('\n')) {
     if (!open) {
-      const m = /^ {0,3}(`{3,}|~{3,})\s*(.*)$/.exec(line)
+      const m = /^( {0,3}(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)?)(`{3,}|~{3,})\s*(.*)$/.exec(line)
 
       if (m) {
         open = {
           body: [],
-          char: m[1][0],
-          isDoc: isHarvisDocLanguage(m[2].split(/\s/)[0]),
-          len: m[1].length
+          char: m[2][0],
+          indent: m[1].length,
+          isDoc: isHarvisDocLanguage(m[3].split(/\s/)[0]),
+          len: m[2].length
         }
       }
 
       continue
     }
 
-    const close = /^ {0,3}(`{3,}|~{3,})\s*$/.exec(line)
+    const close = new RegExp(`^ {0,${open.indent + 3}}(\`{3,}|~{3,})\\s*$`).exec(line)
 
     if (close && close[1][0] === open.char && close[1].length >= open.len) {
       if (open.isDoc) {
@@ -102,7 +106,7 @@ export function closedHarvisDocFences(text: string): string[] {
 
       open = null
     } else {
-      open.body.push(line)
+      open.body.push(open.indent ? line.replace(new RegExp(`^ {0,${open.indent}}`), '') : line)
     }
   }
 
@@ -120,7 +124,12 @@ export function docFixMessage(issues: readonly DocIssue[]): string {
   return `Fix these issues in the document:\n${issues.map(i => `- ${i.where}: ${i.message}`).join('\n')}`
 }
 
-type DocFixSender = (text: string) => Promise<unknown> | unknown
+/**
+ * `sessionId` is the chat that owns the document (the id its live doc was filed under). The
+ * sender resolves it to a runtime chat and resolves `false` when it cannot address that chat
+ * or the chat refuses the send; any other result counts as sent.
+ */
+type DocFixSender = (text: string, sessionId?: string) => Promise<unknown> | unknown
 
 /**
  * How the panel sends a revision turn. The app registers its normal prompt

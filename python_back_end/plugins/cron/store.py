@@ -13,8 +13,9 @@ import json
 import logging
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Optional, Union
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import asyncpg
 
@@ -48,14 +49,31 @@ def _parse_interval(expr: str) -> Optional[timedelta]:
     return None
 
 
+def zone_of(metadata: Optional[dict]) -> Optional[ZoneInfo]:
+    """The IANA zone a job's cron expression is written in (``metadata.timezone``), or None for UTC."""
+    name = (metadata or {}).get("timezone")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    try:
+        return ZoneInfo(name.strip())
+    except Exception:
+        return None
+
+
 def compute_next_run(
     schedule_type: ScheduleType,
     schedule_expr: str,
     *,
     now: Optional[datetime] = None,
     last_run_at: Optional[datetime] = None,
+    tz: Union[ZoneInfo, str, None] = None,
 ) -> Optional[datetime]:
-    """Compute the next firing time, or None if the schedule is exhausted."""
+    """Compute the next firing time (UTC), or None if the schedule is exhausted.
+
+    ``tz`` is the zone a CRON expression is written in ("0 9 * * *" with America/Los_Angeles
+    means 09:00 local, before and after a daylight-saving change). Without it the expression
+    is read in UTC, exactly as before. Other schedule types ignore it.
+    """
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
@@ -90,8 +108,12 @@ def compute_next_run(
             )
             return None
         try:
-            it = croniter(schedule_expr, now)
-            return it.get_next(datetime).astimezone(timezone.utc)
+            zone = ZoneInfo(tz) if isinstance(tz, str) and tz.strip() else (tz or None)
+            it = croniter(schedule_expr, now.astimezone(zone) if zone else now)
+            nxt = it.get_next(datetime)
+            if zone and nxt.replace(fold=0).utcoffset() != nxt.utcoffset():
+                nxt = it.get_next(datetime)  # the repeated hour when clocks fall back: fire once, not twice
+            return nxt.astimezone(timezone.utc)
         except Exception:
             logger.exception("cron: invalid cron expression %r", schedule_expr)
             return None
@@ -207,7 +229,7 @@ class PgCronJobStore(CronJobStore):
         delivery: Optional[str] = None,
         metadata: Optional[dict] = None,
     ) -> Optional[CronJob]:
-        next_run = compute_next_run(schedule_type, schedule_expr)
+        next_run = compute_next_run(schedule_type, schedule_expr, tz=zone_of(metadata))
         try:
             async with self._pool.acquire() as conn:
                 row = await conn.fetchrow(

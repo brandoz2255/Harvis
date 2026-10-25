@@ -46,11 +46,11 @@ def muted_t(slide, l, t, w, h, content: str, size: float = 14, *, theme: Theme =
 
 
 def write_themed_runs(paragraph, runs: list[Run], size: float, color, theme: Theme = DEFAULT_THEME, **kw) -> None:
-    """``write_runs``, with hyperlinks in the theme's accent (the kit writes them in the stock teal)."""
+    """``write_runs``, with hyperlinks in the theme's link colour, ``accent2`` (the kit writes them in the stock teal)."""
     write_runs(paragraph, runs, size, color, **kw)
     for r in paragraph.runs:
         if r.hyperlink.address:
-            r.font.color.rgb = rgb(theme.accent)
+            r.font.color.rgb = rgb(theme.accent2)
 
 
 MAX_CARDS = 12

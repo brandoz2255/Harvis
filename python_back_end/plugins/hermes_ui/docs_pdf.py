@@ -24,7 +24,7 @@ from .docs_parse import ParsedDoc
 from .docs_rich import rich_as_rows
 from .docs_svg import svg_markup, svg_size
 from .docs_theme import (
-    DEFAULT_THEME, Theme, body_size, classify_slide, font_candidates, font_generic, get_theme, text_stats)
+    DEFAULT_THEME, Theme, body_size, classify_slide, column_size, font_candidates, font_generic, get_theme, text_stats)
 
 DOC_FIT = (640, 880, 640)           # layout width, tallest figure, shown width: an A4 page holds about 950px of it
 DECK_FIT = (860, 430, 1120)
@@ -108,14 +108,16 @@ body {{ font-size: 20pt; }}
 .slide {{ page-break-after: always; }}
 .slide:last-child {{ page-break-after: auto; }}
 .slide h1 {{ font-size: 32pt; margin: 0 0 0.5em; {bar} }}
-.slide.first, .slide.section {{ page: cover; }}
-.slide.first h1, .slide.section h1 {{ color: #{fg}; border: 0; padding: 0; line-height: 1.1; }}
+.slide.first, .slide.section, .slide.closing {{ page: cover; }}
+.slide.first h1, .slide.section h1, .slide.closing h1 {{ color: #{fg}; border: 0; padding: 0; line-height: 1.1; }}
 .slide.first {{ padding-top: 2.8in; }}
 .slide.first h1 {{ font-size: 48pt; margin-bottom: 0.3in; }}
 .slide.first p, .slide.first li {{ font-size: 14pt; color: #{meta}; margin: 0.1em 0; }}
 .slide.first p:first-of-type {{ font-size: 24pt; color: #{sub}; margin-top: 0.1in; }}
 .slide.section {{ padding-top: 1.2in; }}
 .slide.section h1 {{ font-size: 44pt; margin: 0 0 0.4in; }}
+.slide.closing {{ padding-top: 2.4in; text-align: center; }}
+.slide.closing h1 {{ font-size: 44pt; margin: 0; }}
 .kicker {{ font-size: 28pt; font-weight: bold; color: #{sub}; margin-bottom: 1.15in; }}
 .rule {{ width: 1.2in; height: 0.07in; background: #{sub}; }}
 .sq {{ position: absolute; width: 1.45in; height: 1.45in; }}
@@ -266,23 +268,26 @@ def _slide_size(blocks: list[Block]) -> Optional[int]:
     return size if size > 22 else None
 
 
-def _deck_slide(i: int, s, title: str, theme: Theme, dividers: int) -> tuple[str, int]:
+def _deck_slide(i: int, s, title: str, theme: Theme, dividers: int, last: bool = False) -> tuple[str, int]:
     """(html, dividers so far) of one slide; the same layout choices as the pptx writer (docs_theme.classify_slide)."""
-    body = parse_blocks(split_notes(s.body)[0])
-    heading = escape(s.title or (title if i == 0 else ""))
+    raw = split_notes(s.body)[0]
+    body = parse_blocks(raw)
+    heading = _runs(inline_runs(s.title)) if s.title else escape(title if i == 0 else "")
     h1 = f"<h1>{heading}</h1>" if heading else ""
     if i == 0:
         squares = "".join(f'<div class="sq sq{k}"></div>' for k in range(4)) if theme.decor else ""
         rule = '<div class="rule"></div>'
         return (f'<section class="slide first">{squares}{h1}{rule}{blocks_html(body, min_heading=2, fit=DECK_FIT)}</section>',
                 dividers)
-    kind = classify_slide(body, bool(s.title))
+    kind = classify_slide(body, bool(s.title), raw, s.title, last)
     if kind.kind == "section":
         dividers += 1
         return (f'<section class="slide section"><div class="kicker">{dividers:02d}</div>{h1}<div class="rule"></div></section>',
                 dividers)
+    if kind.kind == "closing":
+        return f'<section class="slide closing">{h1}</section>', dividers
     if kind.kind == "columns":
-        size = min(max(body_size(*text_stats(body)), 20), 24)
+        size = column_size(kind.groups)
         cols = "".join(f'<div class="col"><h3>{_runs(head)}</h3>{blocks_html(blocks, min_heading=3, fit=DECK_FIT)}</div>'
                        for head, blocks in kind.groups)
         return f'<section class="slide">{h1}<div class="cols" style="font-size:{size}pt">{cols}</div></section>', dividers
@@ -302,7 +307,7 @@ def build_html(doc: ParsedDoc, title: str) -> str:
     if doc.kind == "deck":
         slides, dividers = [], 0
         for i, s in enumerate(doc.sections):
-            html, dividers = _deck_slide(i, s, title, theme, dividers)
+            html, dividers = _deck_slide(i, s, title, theme, dividers, i == len(doc.sections) - 1)
             slides.append(html)
         css, content = _deck_css(theme), "\n".join(slides)
     else:

@@ -36,6 +36,10 @@ _TYPO_RE = re.compile(r"\b(" + "|".join(sorted(TYPOS, key=len, reverse=True)) + 
 # playground safety rules" still have a topic after the place word, so they are left alone.
 _CLAUSE_END = r"(?=\s*(?:[.,!?;:\n]|$)|\s+(?:please|pls|thanks|thx|now|asap)\b)"
 
+# The words that name a format, for the rewrite that drops a format the user said they do not want.
+_FORMAT_WORD = (r"(?:decks?|slides?|slideshows?|presentations?|powerpoints?|pptx?|keynote|spreadsheets?|excel|xlsx?|"
+                r"csv|pdfs?|docx|docs?|documents?|word|reports?|memos?|sheets?)")
+
 # Phrases rewritten to one token before the words are read. The first rows take the deck sense
 # out of a deck that is not a slide deck, so the rest of the detector never sees it.
 PHRASES = (
@@ -55,6 +59,11 @@ PHRASES = (
     (re.compile(r"\b(?:slide|pitch)[\s-]*decks?\b"), "deck"),
     (re.compile(r"\bslides?[\s-]+shows?\b"), "slideshow"),
     (re.compile(r"\bpower[\s-]+points?\b"), "powerpoint"),
+    # A format the user turned down ("a list instead of a deck", "a pdf, not a deck") is dropped, so a reader
+    # that scans for the first format word never takes it for the one asked for. Runs after the rows above
+    # so "instead of a slide deck" and "rather than a power point" are already one word.
+    (re.compile(r"\b(?:instead\s+of|rather\s+than)\s+(?:an?\s+|the\s+)?" + _FORMAT_WORD + r"\b"
+                r"|\bnot\s+(?:(?:into|as|to)\s+)?(?:(?:an?|the)\s+)?" + _FORMAT_WORD + r"\b"), ""),
 )
 
 # Rewrites that take a spreadsheet sense out of a phrase. The follow-up reader keeps these words

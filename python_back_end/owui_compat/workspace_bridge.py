@@ -390,8 +390,10 @@ async def maybe_handle_workspace(
         return None
     # Launch-path signal: explicit pill picks (agent/orchestrate) are user-initiated;
     # 'auto'/absent goes through the auto-detector. Auto-detected launches run with
-    # heavy tools withheld (no Tier-3 capability token — see below).
-    launch_mode = "user" if mode in ("agent", "orchestrate") else "auto"
+    # heavy tools withheld (no Tier-3 capability token — see below). A run the chat model
+    # started itself (chat_actions.start_agent_run) is not a pill pick, so it launches as auto.
+    picked = mode in ("agent", "orchestrate") and owui_body.get("harvis_launch_origin") != "model"
+    launch_mode = "user" if picked else "auto"
 
     _model_id = str(owui_body.get("model") or "")
     _is_anthropic = _model_id.startswith("anthropic/")
