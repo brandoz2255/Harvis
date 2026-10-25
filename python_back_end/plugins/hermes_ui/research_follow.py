@@ -55,7 +55,22 @@ def progress_line(p: dict) -> str:
     return ""
 
 
-def report_text(research_id: str, result: str, sources: list, origin: str) -> str:
+def duration(seconds: float) -> str:
+    s = max(0, int(seconds))
+    return f"{s} s" if s < 60 else f"{s // 60} min"
+
+
+def time_line(elapsed: int, budget: int) -> str:
+    """How long the run has gone, against the time it was planned to take."""
+    if not budget:
+        return f"{duration(elapsed)} in"
+    if elapsed <= budget:
+        return f"{duration(elapsed)} in, planned about {duration(budget)}"
+    return (f"{duration(elapsed)} in, past the planned {duration(budget)}. "
+            "Still working: the report comes when it is written")
+
+
+def report_text(research_id: str, result: str, sources: list, origin: str, took: float = 0) -> str:
     urls = [s.get("url") for s in sources if isinstance(s, dict) and s.get("url")]
     body = (result or "").strip() or "The research finished without a report."
     listed = [u for u in urls if u not in body][:MAX_SOURCES_LISTED]
@@ -64,7 +79,8 @@ def report_text(research_id: str, result: str, sources: list, origin: str) -> st
         body += "\n\n### Sources\n\n" + "\n".join(f"- [{titles.get(u) or u}]({u})" for u in listed)
     page = f"{origin}/#/research?id={research_id}" if origin else ""
     footer = f"[Open the report page]({page}) · " if page else ""
-    return f"{body}\n\n---\n{footer}{len(urls)} sources · research `{research_id}`"
+    spent = f" · took {duration(took)}" if took else ""
+    return f"{body}\n\n---\n{footer}{len(urls)} sources{spent} · research `{research_id}`"
 
 
 async def follow_research(token: str, research_id: str, origin: str = "") -> AsyncIterator[tuple[str, Any]]:
@@ -73,6 +89,8 @@ async def follow_research(token: str, research_id: str, origin: str = "") -> Asy
     seen: set[str] = set()
     status = "running"
     progress: dict = {}
+    elapsed = 0
+    minute = 0
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
             yield "reasoning", "Deep research started\n"
@@ -88,6 +106,10 @@ async def follow_research(token: str, research_id: str, origin: str = "") -> Asy
                 if line and line not in seen:
                     seen.add(line)
                     yield "reasoning", line + "\n"
+                elapsed = int(data.get("elapsed") or time.monotonic() - started)
+                if status == "running" and elapsed // 60 > minute:
+                    minute = elapsed // 60
+                    yield "reasoning", time_line(elapsed, int(data.get("time_budget") or 0)) + "\n"
             if status == "running":
                 yield "text", f"Research `{research_id}` is still running; it will appear on the Research page when it finishes."
                 return
@@ -99,7 +121,8 @@ async def follow_research(token: str, research_id: str, origin: str = "") -> Asy
             if resp.status_code != 200:
                 raise RuntimeError(f"research result HTTP {resp.status_code}")
             data = resp.json()
-            yield "text", report_text(research_id, str(data.get("result") or ""), data.get("sources") or [], origin)
+            yield "text", report_text(research_id, str(data.get("result") or ""), data.get("sources") or [], origin,
+                                      took=elapsed)
     except asyncio.CancelledError:
         await cancel_research(token, research_id)
         raise
