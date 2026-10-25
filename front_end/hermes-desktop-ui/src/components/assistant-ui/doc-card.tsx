@@ -24,6 +24,8 @@ export const DOC_KIND_ICON: Record<HarvisDocKind, string> = {
 }
 
 interface DocCardProps {
+  /** The turn ended with this fence still open (Stop, or a reply that never closed it). */
+  cutOff?: boolean
   code: string
   streaming?: boolean
 }
@@ -37,7 +39,7 @@ interface DocCardProps {
  * document tool would show it. That happens at most once per document per
  * page load (see autoOpenLiveDoc); closing the tab mid-stream keeps it closed.
  */
-export function DocCard({ code, streaming = false }: DocCardProps) {
+export function DocCard({ code, cutOff = false, streaming = false }: DocCardProps) {
   const { t } = useI18n()
   const copy = t.docCard
   const view = useSessionView()
@@ -66,9 +68,9 @@ export function DocCard({ code, streaming = false }: DocCardProps) {
 
   useEffect(() => {
     if (key) {
-      upsertLiveDoc(key, sessionId, code, streaming)
+      upsertLiveDoc(key, sessionId, code, streaming, cutOff)
     }
-  }, [code, key, sessionId, streaming])
+  }, [code, cutOff, key, sessionId, streaming])
 
   useEffect(() => {
     if (streaming && key && title) {
@@ -194,6 +196,13 @@ export function DocDownloadAll({ files }: { files: readonly DownloadAllFile[] })
 export const OpenDocFenceContext = createContext<null | string>(null)
 
 /**
+ * `code` reaches the card through the markdown preprocessor, which drops trailing spaces and
+ * list or indent prefixes, while the message text it is matched against is raw. Compare with
+ * whitespace removed so those differences never read as a different (cut off) document.
+ */
+const squash = (text: string): string => text.replace(/\s+/g, '')
+
+/**
  * The card the markdown renderer mounts for a `harvis-doc` fence. The fence
  * renderer only knows the part is still running, not whether THIS fence has
  * closed, so a finished document inside a message that keeps talking reads as
@@ -202,14 +211,19 @@ export const OpenDocFenceContext = createContext<null | string>(null)
 export function TranscriptDocCard({ code, running }: { code: string; running: boolean }) {
   const open = useContext(OpenDocFenceContext)
   const { text } = useMessagePartText()
-  const streaming = running && open !== null && open.trimEnd().startsWith(code.trimEnd())
+  const streaming = running && open !== null && squash(open).startsWith(squash(code))
+  // A fence the turn never closed (Stop, or a reply that ended inside it) is a truncated document.
+  const cutOff = useMemo(
+    () => !streaming && !closedHarvisDocFences(text).some(fence => squash(fence) === squash(code)),
+    [code, streaming, text]
+  )
 
   // The button rides under the LAST finished document of the message, so it
   // appears once, after everything it downloads has been written.
   const files = useMemo(() => {
     const fences = closedHarvisDocFences(text)
 
-    if (fences.length < 2 || fences[fences.length - 1].trimEnd() !== code.trimEnd()) {
+    if (fences.length < 2 || squash(fences[fences.length - 1]) !== squash(code)) {
       return []
     }
 
@@ -222,7 +236,7 @@ export function TranscriptDocCard({ code, running }: { code: string; running: bo
 
   return (
     <>
-      <DocCard code={code} streaming={streaming} />
+      <DocCard code={code} cutOff={cutOff} streaming={streaming} />
       {!streaming && <DocDownloadAll files={files} />}
     </>
   )

@@ -590,9 +590,8 @@ async def _apply_default_model(request, owui_body: dict, user_id: int | None) ->
 # This is the house default: it only lands when the turn has no system message of
 # its own, so a project instruction, an attached skill or a user-set prompt always
 # wins. Kept deliberately short — it rides on every turn.
-# NOTE: dead today. _inject_canvas_contract always adds a system message first, so
-# _inject_default_persona never finds a turn without one. Making it live changes
-# every chat turn's tone and needs its own decision; chat_abilities does not depend on it.
+# Only Hermes turns reach it today: everywhere else _inject_canvas_contract adds a
+# system message first, so this finds one and bows out.
 _DEFAULT_PERSONA = (
     "You are Harvis, a direct assistant.\n"
     "Match the length of your answer to the question. A greeting or a one-line "
@@ -614,6 +613,34 @@ def _inject_default_persona(owui_body: dict) -> None:
         if isinstance(m, dict) and m.get("role") == "system":
             return
     messages.insert(0, {"role": "system", "content": _DEFAULT_PERSONA})
+
+
+def _inject_render_prompts(owui_body: dict) -> None:
+    """The house tone plus the block formats the client can render. Hermes renders
+    neither ```canvas panels nor :::blocks, so its turns get the tone only."""
+    hermes = owui_body.get("harvis_client") == "hermes"
+    if not hermes:
+        _inject_canvas_contract(owui_body)  # typed ```canvas panels (opt-in, compact)
+    _inject_default_persona(owui_body)  # house tone: answer length tracks the question
+    if not hermes:
+        _inject_block_vocabulary(owui_body)  # terminal / search / file / writing renderers
+    _inject_turn_notes(owui_body)
+
+
+def _inject_turn_notes(owui_body: dict) -> None:
+    """Facts about this turn from earlier lanes (chat_actions: nothing was scheduled), added to the
+    leading system message so the model cannot claim what did not happen. Not a mid-chat system
+    message: some chat templates drop those and some providers refuse them."""
+    notes = [n for n in owui_body.pop("harvis_turn_notes", None) or [] if isinstance(n, str) and n]
+    messages = owui_body.get("messages")
+    if not notes or not isinstance(messages, list):
+        return
+    note = "\n\n".join(notes)
+    first = messages[0] if messages else None
+    if isinstance(first, dict) and first.get("role") == "system" and isinstance(first.get("content"), str):
+        first["content"] = f"{first['content']}\n\n{note}"
+    else:
+        messages.insert(0, {"role": "system", "content": note})
 
 
 # The semantic half of the content-block router. The model names a TYPE; the
@@ -762,9 +789,7 @@ async def run_chat_completion(request, owui_body: dict, user_id: int | None = No
     # below) — never globally. See _inject_skills.
     await _inject_skills(request, owui_body, user_id=user_id)
     await _inject_project_instructions(request, owui_body)
-    _inject_canvas_contract(owui_body)  # typed ```canvas panels (opt-in, compact)
-    _inject_default_persona(owui_body)  # house tone: answer length tracks the question
-    _inject_block_vocabulary(owui_body)  # terminal / search / file / writing renderers
+    _inject_render_prompts(owui_body)
     from .chat_abilities import inject_abilities
     inject_abilities(owui_body)  # what this install can do, so a missed doc request is not "I can't"
     # LAST prompt mutation on purpose: the house ground rules must sit at the FRONT

@@ -13,13 +13,14 @@ from .docs_blocks import Block, Run, csv_table, inline_runs, parse_blocks, plain
 from .docs_metrics import fit_size, wrap
 from .docs_parse import ParsedDoc
 from .docs_pptx_graph import draw_flow, draw_timeline
-from .docs_pptx_kit import BOTTOM, LEFT, MIDDLE, box, clamp_to_slide, rgb, text
+from .docs_pptx_kit import BOTTOM, CENTER, LEFT, MIDDLE, box, clamp_to_slide, rgb, text
 from .docs_pptx_layouts import (
     BODY_BOTTOM, BODY_TOP, BODY_W, COL_BODY_TOP, COL_GAP, COL_HEAD_H, COL_HEAD_TOP, COL_W, COVER_SUB_TOP, COVER_TITLE_H,
     COVER_TITLE_TOP, COVER_W, COVER_X, LAYOUT_COLUMNS, LAYOUT_CONTENT, LAYOUT_SECTION, LAYOUT_TITLE, LAYOUT_TITLE_ONLY,
     MARGIN_L, SECTION_TITLE_H, SECTION_TITLE_TOP, SLIDE_H, SLIDE_W, TITLE_H, TITLE_TOP, draw_cards, draw_chart,
     draw_quadrant, draw_table, muted_t, prepare_master, write_themed_runs)
-from .docs_theme import DEFAULT_THEME, Theme, body_size, classify_slide, get_theme, text_stats, width_factor
+from .docs_theme import (
+    DEFAULT_THEME, Theme, body_size, classify_slide, column_size, get_theme, text_stats, width_factor)
 
 BODY_H = BODY_BOTTOM - BODY_TOP
 MAX_LEVEL = 4
@@ -169,7 +170,7 @@ def _fill_body(slide, placeholder, blocks: list[Block], theme: Theme = DEFAULT_T
 
 
 def _title_runs(title, runs: list[Run], size: float, min_size: float, width: float, height: float,
-                color: str, theme: Theme = DEFAULT_THEME, anchor=MIDDLE) -> None:
+                color: str, theme: Theme = DEFAULT_THEME, anchor=MIDDLE, align=LEFT) -> None:
     full = plain_text(runs)
     used, lines = fit_size(full, (width - 0.2) * 72 / width_factor(theme.heading_font), (height - 0.1) * 72, size,
                            min_size, bold=True)
@@ -179,7 +180,7 @@ def _title_runs(title, runs: list[Run], size: float, min_size: float, width: flo
     frame.word_wrap = True
     frame.vertical_anchor = anchor
     p = frame.paragraphs[0]
-    p.alignment = LEFT
+    p.alignment = align
     write_themed_runs(p, runs, used, color, theme, bold=True)
 
 
@@ -261,19 +262,32 @@ def _section_slide(prs, section, number: int, theme: Theme = DEFAULT_THEME):
     return slide
 
 
+def _closing_slide(prs, section, theme: Theme = DEFAULT_THEME):
+    """The last slide (``Questions?``, ``Thank you``): the title alone, centred on the cover ground, with no number."""
+    slide = prs.slides.add_slide(prs.slide_layouts[LAYOUT_TITLE_ONLY])
+    fg, _dark = _cover_ground(slide, theme)
+    title = slide.shapes.title
+    title.left, title.top, title.width, title.height = (Inches(COVER_X), Inches((SLIDE_H - SECTION_TITLE_H) / 2),
+                                                        Inches(COVER_W), Inches(SECTION_TITLE_H))
+    _title_runs(title, inline_runs(section.title), 44, 26, COVER_W, SECTION_TITLE_H, fg, theme, anchor=MIDDLE,
+                align=CENTER)
+    clamp_to_slide(slide, SLIDE_W, SLIDE_H)
+    return slide
+
+
 def _columns_slide(prs, section, groups: list, theme: Theme = DEFAULT_THEME):
     """Two columns, each a heading over text, in the layout's two content placeholders."""
     slide = prs.slides.add_slide(prs.slide_layouts[LAYOUT_COLUMNS])
     _slide_title(slide, section, theme)
     height = BODY_BOTTOM - COL_BODY_TOP
+    start = column_size(groups)
     for i, (head, blocks) in enumerate(groups):
         x = MARGIN_L + i * (COL_W + COL_GAP)
         text(slide, x, COL_HEAD_TOP, COL_W, COL_HEAD_H, plain_text(head), 22, color=theme.accent, bold=True,
              anchor=MIDDLE, min_size=14)
         box(slide, x + 0.05, COL_HEAD_TOP + COL_HEAD_H + 0.02, COL_W - 0.1, 0.02, fill=theme.line)
         lines = _text_lines(blocks)
-        _fill_text(slide.placeholders[i + 1], lines, COL_BODY_TOP, height, theme, left=x, width=COL_W,
-                   start=min(max(body_size(*text_stats(blocks)), DEFAULT_START), 28))
+        _fill_text(slide.placeholders[i + 1], lines, COL_BODY_TOP, height, theme, left=x, width=COL_W, start=start)
     clamp_to_slide(slide, SLIDE_W, SLIDE_H)
     return slide
 
@@ -312,10 +326,12 @@ def build_pptx(doc: ParsedDoc, title: str) -> bytes:
             slide = _title_slide(prs, section, title, theme)
         else:
             blocks = parse_blocks(body)
-            kind = classify_slide(blocks, bool(section.title))
+            kind = classify_slide(blocks, bool(section.title), body, section.title, i == len(doc.sections) - 1)
             if kind.kind == "section":
                 dividers += 1
                 slide = _section_slide(prs, section, dividers, theme)
+            elif kind.kind == "closing":
+                slide = _closing_slide(prs, section, theme)
             elif kind.kind == "columns":
                 slide = _columns_slide(prs, section, kind.groups, theme)
             elif kind.kind == "stats":

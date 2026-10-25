@@ -17,7 +17,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from auth_optimized import get_current_user_optimized
-from plugins.cron.store import PgCronJobStore, compute_next_run
+from plugins.cron.store import PgCronJobStore, compute_next_run, zone_of
 from plugins.cron.types import CronJob, JobStatus, ScheduleType
 
 from .cron_schedule import ScheduleError, parse_schedule
@@ -43,13 +43,15 @@ def job_view(job: CronJob) -> dict[str, Any]:
     """Harvis row -> the desktop's CronJob shape (types/hermes.ts)."""
     meta = job.metadata or {}
     display = str(meta.get("schedule_display") or job.schedule_expr)
+    zone = meta.get("timezone")
     return {
         "id": str(job.id),
         "name": job.name,
         "prompt": job.prompt,
         "enabled": job.status != JobStatus.PAUSED,
         "state": job.status.value,
-        "schedule": {"kind": job.schedule_type.value, "expr": job.schedule_expr, "display": display},
+        "schedule": {"kind": job.schedule_type.value, "expr": job.schedule_expr, "display": display,
+                     **({"timezone": zone} if job.schedule_type == ScheduleType.CRON and zone else {})},
         "schedule_display": display,
         "next_run_at": _iso(job.next_run_at),
         "last_run_at": _iso(job.last_run_at),
@@ -198,7 +200,7 @@ async def _apply_update(pool, job: CronJob, updates: dict[str, Any]) -> None:
     elif reschedule and job.status != JobStatus.RUNNING:
         add("status", JobStatus.SCHEDULED.value)
     if reschedule:
-        add("next_run_at", compute_next_run(stype, expr, last_run_at=job.last_run_at))
+        add("next_run_at", compute_next_run(stype, expr, last_run_at=job.last_run_at, tz=zone_of(meta)))
 
     args.append(json.dumps(meta, default=str))
     sets.append(f"metadata = ${len(args)}::jsonb")
@@ -225,7 +227,8 @@ async def pause_job(job_id: str, request: Request, user=Depends(get_current_user
 @router.post("/jobs/{job_id}/resume")
 async def resume_job(job_id: str, request: Request, user=Depends(get_current_user_optimized)):
     job = await _owned(request, user, job_id)
-    if compute_next_run(job.schedule_type, job.schedule_expr, last_run_at=job.last_run_at) is None:
+    if compute_next_run(job.schedule_type, job.schedule_expr, last_run_at=job.last_run_at,
+                        tz=zone_of(job.metadata)) is None:
         raise HTTPException(400, "This schedule has no future run left; give it a new schedule.")
     await _apply_update(_pool(request), job, {"enabled": True})
     return job_view(await _owned(request, user, job_id))

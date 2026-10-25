@@ -67,6 +67,10 @@ function DocumentBody({ live }: { live: LiveDoc }) {
   const { t } = useI18n()
   const copy = t.docPreview
   const streaming = useFreshStreaming(live)
+  // A stalled card reads as finished after 30 s, but its source is then still partial. Only the
+  // card's own report that the fence closed is the real end, so the automatic check waits for it.
+  // A fence the turn cut off (Stop) is not an end either: that source is truncated.
+  const settled = !live.streaming && !live.cutOff
   const [stripOpen, setStripOpen] = useState(true)
   const [mode, setMode] = useState<'live' | 'preview'>('live')
   // Pages are fetched the first time Preview is shown, not before.
@@ -189,7 +193,14 @@ function DocumentBody({ live }: { live: LiveDoc }) {
         </div>
       </div>
 
-      <DocCheckStrip complete={!streaming} kind={doc.kind} source={live.source} title={doc.title} />
+      <DocCheckStrip
+        complete={!streaming}
+        kind={doc.kind}
+        sessionId={live.sessionId}
+        settled={settled}
+        source={live.source}
+        title={doc.title}
+      />
 
       {previewOpened && (
         <div className={cn('min-h-0 flex-1', !previewing && 'hidden')}>

@@ -1946,6 +1946,7 @@ export interface Translations {
       none: string
       failed: string
       vision: string
+      autoFix: string
       fix: string
       fixSent: string
       fixUnavailable: string

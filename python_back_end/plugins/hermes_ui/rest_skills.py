@@ -62,6 +62,11 @@ async def skill_toggle(request: Request, user=Depends(get_current_user_optimized
         # ON also approves (unless already approved) and stamps the hash of the text
         # approved; a draft graduates out of the "drafts" category. OFF leaves the audit alone.
         ok = await skill_pending.set_enabled(conn, uid, name=name, enabled=enabled, via="hermes-toggle")
+    if not ok and enabled:
+        # A 409, not a 200 with ok:false: the Skills tab flips the switch optimistically and
+        # only rolls it back (and shows the sentence) when the request fails.
+        raise HTTPException(
+            409, f"Couldn't switch {name} on. A proposal with no approved text yet has to be reviewed and approved first.")
     return {"ok": ok, "name": name, "enabled": enabled}
 
 
@@ -173,15 +178,21 @@ async def skills_pending(request: Request, user=Depends(get_current_user_optimiz
 
 async def _pending_action(request: Request, user, act: str) -> dict:
     body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Send a JSON object with the skill name.")
     name = _node_name(str(body.get("name") or ""))
     if not name:
         raise HTTPException(400, "Say which skill.")
+    pending_sha = str(body.get("pending_sha") or "")
+    if act == "approve" and not pending_sha:
+        # Without the hash the person saw, a proposal swapped after the listing would be approved unseen.
+        raise HTTPException(400, "Send pending_sha from the listing so the text you reviewed is the text approved.")
     uid = _uid(user)
     try:
         async with _pool(request).acquire() as conn:
             if act == "approve":
                 done = await skill_pending.approve(
-                    conn, uid, name, uid, expected_sha=str(body.get("pending_sha") or "") or None)
+                    conn, uid, name, uid, expected_sha=pending_sha)
                 return {"ok": True, **done, "message": f"Approved {name}. Harvis will use this version."}
             done = await skill_pending.reject(conn, uid, name)
             return {"ok": True, **done, "message": f"Rejected the proposal for {name}."}
@@ -191,8 +202,8 @@ async def _pending_action(request: Request, user, act: str) -> dict:
 
 @router.post("/skills/pending/approve")
 async def skills_pending_approve(request: Request, user=Depends(get_current_user_optimized)):
-    """Approve the revision the person reviewed. Send ``pending_sha`` from the
-    listing and a revision that changed since is refused rather than approved unseen."""
+    """Approve the revision the person reviewed. ``pending_sha`` from the listing is
+    required (400 without it); a revision that changed since is refused rather than approved unseen."""
     return await _pending_action(request, user, "approve")
 
 

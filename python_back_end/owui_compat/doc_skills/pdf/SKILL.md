@@ -10,10 +10,13 @@ Here is the handout as a PDF.
 kind: pdf
 title: Move-In Checklist
 outline:
+  - Summary
   - Before the move
   - First week
 ---
 # Move-In Checklist
+## Summary
+Book the elevator early; the rest fits in the first week.
 ## Before the move
 - [ ] Book the elevator
 - [ ] Pack a box of essentials
@@ -30,6 +33,12 @@ Rules
 - The outline has one line per section, in order; each line becomes one `## ` section (`###` inside it).
 - The app prints it to paged PDF, so write a finished handout: full paragraphs, short tables, no filler.
 - No placeholders, no "TBD", no lorem ipsum.
+
+Design
+- Start with a Summary section: two to four sentences that give the conclusion, so a reader can stop there.
+- Then short sections, each with a real heading that says what it covers, never "Section 2" or "Details".
+- Keep a section to a few sentences or one table, and end on what the reader should do next.
+- Optional look: a `theme:` header line, one of harvis, paper, slate, ember, forest, mono. Leave it out for the default.
 
 Rich blocks: use one only where it makes a point clearer than text. Three backticks, one item per line.
 ```timeline

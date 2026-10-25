@@ -28,6 +28,7 @@ from jose import JWTError, jwt
 from . import config as owui_config
 from . import persistence
 from .chat_completion import run_chat_completion
+from .chat_actions import maybe_handle_action  # also registers its chat abilities at startup
 from .schemas import (
     OwuiChatNewBody,
     OwuiChatUpdateBody,
@@ -400,8 +401,6 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
                 return await run_chat_completion(request, owui_body, user_id=user.id)
         # What no lane above claimed but still names a Harvis action ("remind me every
         # morning at 8 to …", "forget that …", "my class needs a presentation"): chat_actions.
-        from .chat_actions import maybe_handle_action
-
         action = await maybe_handle_action(request, owui_body, user)
         if action is not None:
             return action

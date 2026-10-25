@@ -7,6 +7,7 @@ feeds /help and the composer popover; ``complete.slash`` completes while typing.
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
 
 from . import session_ops, sessions
@@ -41,6 +42,9 @@ SECTIONS = (("Chat", ("/new", "/title", "/branch", "/btw", "/compress", "/save")
 # Each file command sends a plain request the doc detector is proven to match
 # (tests/test_hermes_doc_routing.py), so a missed wording can still be forced.
 FILE_COMMANDS = {"/deck": "slide deck", "/doc": "Word document", "/sheet": "spreadsheet", "/pdf": "PDF"}
+# The wording the file commands send, matched by chat.requested_mode so mode words
+# in the topic never override the document.
+FILE_REQUEST_PREFIX = re.compile(r"^\s*Make a (?:%s) about: " % "|".join(re.escape(k) for k in FILE_COMMANDS.values()))
 WEB_OPTIONS = (("on", "Search the web on every message"), ("off", "Answer without searching the web"))
 
 

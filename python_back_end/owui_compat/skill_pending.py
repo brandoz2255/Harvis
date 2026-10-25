@@ -109,6 +109,20 @@ def content_sha(content: Optional[str], files: Any = None) -> str:
     return hashlib.sha256(payload.encode("utf-8", "surrogatepass")).hexdigest()
 
 
+def _norm_description(description: Any) -> str:
+    return " ".join(str(description or "").split())[:MAX_DESCRIPTION]
+
+
+def review_sha(description: Any, content: Optional[str], files: Any = None) -> str:
+    """Hash of everything a person reads in the review panel: description, body and
+    script files. This is the ``pending_sha`` an approval quotes back. ``content_sha``
+    (body and files only) stays the audit hash; the description is in the review hash
+    because it is written into every chat's skill catalog once approved."""
+    payload = json.dumps({"description": _norm_description(description), "content_sha": content_sha(content, files)},
+                         ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8", "surrogatepass")).hexdigest()
+
+
 def sha_ok(content: Optional[str], meta: Any) -> bool:
     """False only when a human approval hash exists and the text no longer
     matches it. No stored hash is a legacy approval and stays True."""
@@ -158,8 +172,7 @@ def _clean_proposal(description: str, content: str, files: Any) -> tuple[str, st
         raise SkillPendingError("invalid", "A skill must be plain text.")
     if _SECRET_RE.search(content):
         raise SkillPendingError("invalid", "The skill contains something that looks like a credential.")
-    description = " ".join(str(description or "").split())[:MAX_DESCRIPTION]
-    return description, content, clean_files(files)
+    return _norm_description(description), content, clean_files(files)
 
 
 async def propose(conn, user_id: int, name: str, description: str, content: str, files: Any,
@@ -190,7 +203,7 @@ async def propose(conn, user_id: int, name: str, description: str, content: str,
                 "INSERT INTO owui_skills (id, user_id, name, description, content, meta, enabled) "
                 "VALUES ($1, $2, $3, $4, '', $5::jsonb, FALSE)",
                 str(uuid.uuid4()), int(user_id), name, description, json.dumps(meta))
-            return {"name": name, "created": True, "pending_sha": content_sha(content, files)}
+            return {"name": name, "created": True, "pending_sha": review_sha(description, content, files)}
         meta = meta_dict(row["meta"])
         try:
             pending["base_sha"] = content_sha(row["content"], meta.get("files"))
@@ -201,7 +214,7 @@ async def propose(conn, user_id: int, name: str, description: str, content: str,
             raise SkillPendingError("unchanged", f"{name} already has exactly this text.")
         meta["pending"] = pending
         await conn.execute("UPDATE owui_skills SET meta=$2::jsonb WHERE id=$1", row["id"], json.dumps(meta))
-    return {"name": name, "created": False, "pending_sha": content_sha(content, files)}
+    return {"name": name, "created": False, "pending_sha": review_sha(description, content, files)}
 
 
 def _pending_of(meta: dict) -> dict:
@@ -222,9 +235,11 @@ async def approve(conn, user_id: int, name: str, approver: int, *, expected_sha:
                   via: str = "hermes-pending-approve") -> dict:
     """Swap the pending revision in and stamp the hash of what was approved.
     ``expected_sha`` is the hash the person saw (the listing's ``pending_sha``);
-    a different pending revision since then is refused, so an approval can never
-    cover text the person did not look at. Approving a brand-new proposal also
-    switches the skill on; approving a revision leaves ``enabled`` as it was."""
+    a different pending revision since then (body, scripts or description) is refused,
+    so an approval can never cover text the person did not look at. The
+    first human approval of a skill (a new proposal, or an update to a draft nobody
+    ever approved) also switches it on; a skill that was approved before and then
+    switched off by the person stays off."""
     name = (name or "").strip()
     async with conn.transaction():
         row = await conn.fetchrow(_SELECT, int(user_id), name)
@@ -235,10 +250,10 @@ async def approve(conn, user_id: int, name: str, approver: int, *, expected_sha:
         description, content, files = _clean_proposal(pending.get("description"), pending.get("content"),
                                                       pending.get("files"))
         sha = content_sha(content, files)
-        if expected_sha and not hmac.compare_digest(str(expected_sha), sha):
+        if expected_sha and not hmac.compare_digest(str(expected_sha), review_sha(description, content, files)):
             raise SkillPendingError("stale", "This skill's proposal changed after you opened it. Review it again.")
         prior = meta.get("audit") if isinstance(meta.get("audit"), dict) else {}
-        enable = not (row["content"] or "").strip() and prior.get("verdict") != "supported"
+        enable = prior.get("verdict") != "supported"
         new_meta = {k: v for k, v in meta.items() if k not in ("pending", "files", "audit", "stale_after_edit")}
         new_meta["audit"] = approval_record(int(approver), via, sha)
         if files:
@@ -292,7 +307,7 @@ async def list_pending(conn, user_id: int) -> list[dict]:
             continue
         try:
             files = clean_files(pending.get("files"))
-            pending_sha = content_sha(pending.get("content"), files)
+            pending_sha = review_sha(_norm_description(pending.get("description")), str(pending.get("content") or ""), files)
         except SkillPendingError:
             continue  # a malformed revision is not offered for approval
         old_files = meta.get("files") if isinstance(meta.get("files"), dict) else {}
@@ -326,7 +341,10 @@ _ENABLE_SQL = (
     "  || (CASE WHEN meta->>'category' = 'drafts' THEN '{\"category\":\"learned\"}'::jsonb "
     "           ELSE '{}'::jsonb END) "
     "ELSE meta END "
-    "WHERE user_id=$1 AND {col}=$2")
+    "WHERE user_id=$1 AND {col}=$2 "
+    # An empty, never-approved row is a proposal's placeholder: switching it on would
+    # approve and stamp a blank body, not the pending text. Approving the proposal is the way on.
+    "AND (NOT $3 OR btrim(content) <> '' OR COALESCE(meta->'audit'->>'verdict','') = 'supported')")
 
 _STAMP_SQL = ("UPDATE owui_skills SET meta = jsonb_set(meta, '{{audit,content_sha}}', to_jsonb($3::text), true) "
               "WHERE user_id=$1 AND {col}=$2 AND meta->'audit'->>'verdict' = 'supported'{guard}")
@@ -382,7 +400,9 @@ async def set_enabled(conn, user_id: int, *, name: Optional[str] = None, skill_i
                       enabled: bool, via: str) -> bool:
     """Switch a skill on or off. ON is the person's approval: an unapproved skill
     gets a 'supported' verdict (a draft graduates to 'learned') and every ON
-    stamps the hash of the text approved. OFF leaves the audit alone."""
+    stamps the hash of the text approved. OFF leaves the audit alone. An empty,
+    never-approved row (the placeholder of a new proposal) cannot be switched on:
+    it returns False until ``approve`` gives it text."""
     col, val = _target(name, skill_id)
     tag = await conn.execute(_ENABLE_SQL.replace("{col}", col), int(user_id), val, bool(enabled),
                              json.dumps(approval_record(int(user_id), via)))

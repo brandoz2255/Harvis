@@ -22,7 +22,6 @@ from .docs_rich import caption_of, rich_as_rows
 from .docs_theme import DEFAULT_THEME, Theme, get_theme, restyle_theme_xml
 
 MONO = "Consolas"
-RULE_COLOR = "CBD5E1"
 TOC_MIN_SECTIONS = 4
 _theme: ContextVar[Theme] = ContextVar("docx_theme", default=DEFAULT_THEME)     # the theme of the document being built
 
@@ -182,7 +181,7 @@ def _rule(doc) -> None:
     pPr = p._p.get_or_add_pPr()
     border = OxmlElement("w:pBdr")
     bottom = OxmlElement("w:bottom")
-    for key, value in (("val", "single"), ("sz", "6"), ("space", "1"), ("color", RULE_COLOR)):
+    for key, value in (("val", "single"), ("sz", "6"), ("space", "1"), ("color", _theme.get().line)):
         bottom.set(qn(f"w:{key}"), value)
     border.append(bottom)
     pPr.append(border)

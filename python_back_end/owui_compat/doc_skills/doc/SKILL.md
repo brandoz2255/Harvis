@@ -30,6 +30,12 @@ Rules
 - Write full paragraphs with real content. Markdown: lists, tables, **bold**, links.
 - No placeholders, no "TBD", no lorem ipsum.
 
+Design
+- Start with a Summary section: two to four sentences that give the conclusion, so a reader can stop there.
+- Then short sections, each with a real heading that says what it covers ("Costs are under budget"), never "Section 2" or "Details".
+- Keep a section to a few sentences or one table. Use a chart only when the numbers back a point.
+- Optional look: a `theme:` header line, one of harvis, paper, slate, ember, forest, mono. Leave it out for the default.
+
 Rich blocks: use one only where it makes a point clearer than text. Three backticks, one item per line.
 ```timeline
 Planning | Oct 26 | Nov 1

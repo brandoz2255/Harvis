@@ -16,7 +16,7 @@ from typing import Optional
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
-from .docs_formula import SUPPORTED, FormulaError, Unknowable, evaluate_any
+from .docs_formula import SUPPORTED, FormulaError, RecursionUnknowable, Unknowable, evaluate_any
 
 # Functions whose arguments are meant to be numbers: a range of text there is a mistake. IF, SUMIF, lookups and
 # text functions legitimately read text, so formulas using them are only checked for reaching outside the table.
@@ -41,7 +41,18 @@ def _issue(severity: str, where: str, message: str) -> dict:
     return {"severity": severity, "where": where, "message": message}
 
 
-_UNKNOWN = object()
+_FAILURES = (FormulaError, ZeroDivisionError, TypeError, OverflowError, ValueError)
+
+
+class _Failed:
+    """A cell whose formula raised: remembered so a cell read many times through IFERROR is worked out once.
+    Without it each read re-ran the failing formula, and a chain of them took twice as long per row."""
+
+    def __init__(self, exc: Exception) -> None:
+        self.kind, self.args = type(exc), exc.args
+
+    def raise_again(self):
+        raise self.kind(*self.args)             # a fresh exception each time: re-raising one grows its traceback
 
 
 class _Grid:
@@ -70,12 +81,14 @@ class _Grid:
 
     def cell(self, r: int, c: int):
         """What a formula reads from the cell: a number, text, a bool, or None when it is empty. Raises
-        FormulaError on a cycle, a bad formula, or a value we cannot know."""
+        FormulaError on a cycle, a bad formula, or a value we cannot know. Errors are remembered as well as
+        values, so every cell is worked out at most once."""
         key = (r, c)
         if key in self._cache:
-            if self._cache[key] is _UNKNOWN:
-                raise Unknowable("unknown")
-            return self._cache[key]
+            hit = self._cache[key]
+            if isinstance(hit, _Failed):
+                hit.raise_again()
+            return hit
         if key in self._busy:
             raise Unknowable("circular")
         raw = self.raw(r, c)
@@ -90,12 +103,15 @@ class _Grid:
                         # A function the evaluator lacks and no stored value: the cell has a value we cannot
                         # know, and so does every formula that reads it. Raising keeps that from being
                         # mistaken for text or zero.
-                        self._cache[key] = _UNKNOWN
                         raise Unknowable("unknown")
             elif isinstance(raw, (str, bool)):
                 result = raw
             else:
                 result = float(raw) if isinstance(raw, (int, float)) else None
+        except _FAILURES as exc:
+            if not isinstance(exc, RecursionUnknowable):        # too deep just now says nothing about the cell
+                self._cache[key] = _Failed(exc)
+            raise
         finally:
             self._busy.discard(key)
         self._cache[key] = result
@@ -199,6 +215,10 @@ def _evaluation_issue(grid: _Grid, r: int, c: int, where: str) -> Optional[dict]
             return _issue("error", where, f"{name} {grid.raw(r, c)} divides by zero (#DIV/0!)")
         if str(exc) == "circular":
             return _issue("error", where, f"{name} {grid.raw(r, c)} depends on its own result (circular reference)")
+        if str(exc) == "na":
+            return _issue("error", where, f"{name} {grid.raw(r, c)} found no match (#N/A)")
+        if str(exc) == "ref":
+            return _issue("error", where, f"{name} {grid.raw(r, c)} points at a column or cell that does not exist (#REF!)")
     return None
 
 

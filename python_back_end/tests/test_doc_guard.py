@@ -245,6 +245,19 @@ def test_a_body_with_no_user_message_is_left_alone():
     ("make me a slide show", "deck"), ("my teacher wants slides", "deck"), ("get me a pdf", "pdf"),
     ("I need an excel sheet for my budget", "sheet"), ("write a report on dogs", "doc"),
     ("export a pdf of the spreadsheet", "pdf"), ("hello", "doc"),
+    ("how do I convert a word doc to pdf", "pdf"), ("convert this pdf into slides", "deck"),
+    ("can you turn this report into a pdf", "pdf"), ("export my spreadsheet as a csv", "sheet"),
+    ("make me a deck about word of mouth", "deck"), ("convert it to nothing useful, I want a report", "doc"),
+    ("my teacher wants slides on how to turn a report into a pdf, can u help", "deck"),
+    ("my class needs a presentation on how to convert word files to pdf", "deck"),
+    ("help me with my presentation on converting excel to pdf", "deck"),
+    ("my boss wants a report on how we can turn our spreadsheet into slides", "doc"),
+    ("I have a word doc, can you convert it to pdf", "pdf"),
+    ("report on how we can turn our spreadsheet into slides", "doc"),
+    ("I have a word doc, how do I convert it to pdf", "pdf"),
+    ("my excel sheet, what's the easiest way to export it to pdf", "pdf"),
+    ("my powerpoint on the civil war is done, can you export it as a pdf", "pdf"),
+    ("here is my report about dogs, turn it into slides", "deck"),
 ])
 def test_kind_follows_the_first_file_word(text, kind):
     assert doc_guard.kind_from_text(text) == kind
@@ -254,6 +267,8 @@ def test_kind_follows_the_first_file_word(text, kind):
     "I cannot create PowerPoint files.", "I can’t make a pptx for you.", "I'm unable to generate a spreadsheet.",
     "Sorry, I don't have the ability to produce a PDF.", "I have no visible tool to build a deck.",
     "I can't actually create or export files like documents.",
+    "I can't create PDF files, but here's a Python script you can run:\n```python\nfrom reportlab.pdfgen import canvas\n```",
+    "I'm unable to generate PowerPoint files directly. You can use python-pptx:\n```python\nfrom pptx import Presentation\n```",
 ])
 def test_refusals_that_fire(answer):
     assert doc_guard.should_fire(answer)
@@ -435,3 +450,24 @@ def test_answers_about_code_and_how_to_do_not_fire(answer):
 ])
 def test_document_offers_still_fire(answer):
     assert doc_guard.should_fire(answer)
+
+
+def test_a_refusal_line_inside_a_code_answer_does_not_fire():
+    howto = ("Run this:\n```bash\npandoc notes.md -o notes.pdf\n```\n"
+             "I can't run commands here, so I can't generate the PDF for you.")
+    assert not doc_guard.should_fire(howto)
+    assert doc_guard.should_fire("I can't run commands here, so I can't generate the PDF for you.")
+    lane = Lane()
+    out = _drain(_guard(_stream(_sse(howto)), _body("make me a pdf from my notes"), lane))
+    assert lane.bodies == [] and b"---" not in out
+
+
+def test_the_fire_log_has_the_kind_reason_and_length_but_not_the_users_words(caplog):
+    user = "make me a slide show about my secret project orchid"
+    lane = Lane()
+    with caplog.at_level("INFO", logger="owui_compat.doc_guard"):
+        _drain(_guard(_stream(_sse(REFUSAL)), _body(user), lane))
+    fired = [r.getMessage() for r in caplog.records if "doc_guard fired" in r.getMessage()]
+    assert len(fired) == 1
+    assert "kind=deck" in fired[0] and "reason=refusal" in fired[0] and f"message_chars={len(user)}" in fired[0]
+    assert "orchid" not in caplog.text and "slide show" not in caplog.text

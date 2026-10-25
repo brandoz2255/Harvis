@@ -2279,6 +2279,7 @@ export const en: Translations = {
       none: 'No problems found',
       failed: 'Check failed',
       vision: 'Also look at the pages (slower)',
+      autoFix: 'Fix errors automatically',
       fix: 'Fix it',
       fixSent: 'Sent',
       fixUnavailable: 'Sending to the chat is not available here',

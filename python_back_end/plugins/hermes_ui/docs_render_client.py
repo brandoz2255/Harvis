@@ -5,10 +5,13 @@ import hashlib
 import json
 import logging
 import os
+import io
+import re
 import threading
 import time
 import urllib.error
 import urllib.request
+import zipfile
 from collections import OrderedDict
 from typing import Any, Dict, Optional
 
@@ -87,6 +90,34 @@ _lock = threading.Lock()
 _cache: "OrderedDict[str, bytes]" = OrderedDict()     # sha256 of the workbook sent -> the recalculated bytes
 _bad: "OrderedDict[str, None]" = OrderedDict()        # workbooks the sandbox answered "no" for; not asked twice
 _skip_until = 0.0
+_VOLATILE = ("docProps/core.xml", "docProps/app.xml")   # openpyxl stamps the save time into these on every export
+
+
+def _content_key(data: bytes) -> str:
+    """Identifies a workbook by what it holds, not by when it was saved: two exports of an unchanged sheet differ
+    only in the timestamp openpyxl writes into docProps/core.xml, and hashing the raw bytes would make every
+    export look new. Falls back to the raw bytes for anything that is not a readable zip."""
+    digest = hashlib.sha256()
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            for name in sorted(z.namelist()):
+                if name not in _VOLATILE:
+                    digest.update(hashlib.sha256(name.encode()).digest() + hashlib.sha256(z.read(name)).digest())
+    except (zipfile.BadZipFile, OSError, ValueError, RuntimeError, EOFError):
+        digest = hashlib.sha256(data)
+    return digest.hexdigest()
+
+
+_VOLATILE_CALL = re.compile(rb"<f[ >][^<]*?\b(?:TODAY|NOW)\s*\(", re.I)
+
+
+def _uses_volatile(data: bytes) -> bool:
+    """True when a formula calls TODAY or NOW: its value is the moment of the recalculation, so a kept copy goes stale."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            return any(_VOLATILE_CALL.search(z.read(n)) for n in z.namelist() if n.startswith("xl/worksheets/"))
+    except (zipfile.BadZipFile, OSError, ValueError, RuntimeError, EOFError):
+        return False
 
 
 def recalc_xlsx(data: bytes) -> Optional[bytes]:
@@ -96,9 +127,10 @@ def recalc_xlsx(data: bytes) -> Optional[bytes]:
     all give None, and the caller keeps the bytes it has. Results are kept by content hash, and a failure to
     reach the sandbox is remembered for a while so a dead sandbox costs one attempt, not one per export."""
     global _skip_until
-    key = hashlib.sha256(data).hexdigest()
+    key = _content_key(data)
+    volatile = _uses_volatile(data)                  # recalculated every time, never served from or kept in the cache
     with _lock:
-        if key in _cache:
+        if key in _cache and not volatile:
             _cache.move_to_end(key)
             return _cache[key]
         if key in _bad or time.monotonic() < _skip_until:
@@ -122,7 +154,7 @@ def recalc_xlsx(data: bytes) -> Optional[bytes]:
                 _bad.popitem(last=False)
             log.info("xlsx recalculation refused: %s", reply.get("error") or "no workbook returned")
             return None
-        if len(out) <= _MAX_CACHED_BYTES:
+        if len(out) <= _MAX_CACHED_BYTES and not volatile:
             _cache[key] = out
             while len(_cache) > _CACHE_ENTRIES:
                 _cache.popitem(last=False)

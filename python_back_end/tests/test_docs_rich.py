@@ -223,16 +223,33 @@ def test_every_layout_exports_a_deck_that_reopens_with_everything_on_the_slide()
         _inside(prs, slide)
 
 
-def test_the_title_slide_is_dark_with_the_accent_squares():
+def _cover_squares(slide):
     from pptx.util import Inches
 
+    return [s for s in slide.shapes if abs(s.width - Inches(1.45)) < 10 and s.left > Inches(9)]
+
+
+def test_the_title_slide_is_dark_and_has_no_decorative_squares_by_default():
     slide = _prs(deck("## Next\n- x")).slides[0]
     assert slide.shapes.title.text_frame.text == "Rich deck"
     assert str(slide.background.fill.fore_color.rgb) == "0E1E33"
-    squares = [s for s in slide.shapes if abs(s.width - Inches(1.45)) < 10 and s.left > Inches(9)]
-    assert len(squares) == 4
+    assert _cover_squares(slide) == []                                            # decor is a theme option, off by default
     assert slide.shapes.title.text_frame.paragraphs[0].alignment == 1             # left
     assert any(s.has_text_frame and "Jan 5" in s.text_frame.text for s in slide.shapes)
+
+
+def test_the_title_slide_gets_the_accent_squares_when_the_theme_asks_for_decor(monkeypatch):
+    import dataclasses
+
+    from plugins.hermes_ui import docs_pptx
+    from plugins.hermes_ui.docs_theme import DEFAULT_THEME
+
+    decorated = dataclasses.replace(DEFAULT_THEME, decor=True)
+    monkeypatch.setattr(docs_pptx, "get_theme", lambda _name: decorated)
+    slide = _prs(deck("## Next\n- x")).slides[0]
+    assert len(_cover_squares(slide)) == 4
+    assert slide.shapes.title.text_frame.text == "Rich deck"
+    assert str(slide.background.fill.fore_color.rgb) == "0E1E33"
 
 
 def _texts(slide):

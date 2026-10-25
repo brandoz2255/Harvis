@@ -293,9 +293,9 @@ class Connection(SettingsMethods, SessionMethods, SlashMethods, ApprovalMethods,
                 # Small models can ignore a prose request to be brief. The
                 # voice route also needs a hard output ceiling so speech stays
                 # conversational; rest_voice keeps this a shared constant.
-                from .rest_voice import VOICE_MAX_TOKENS
+                from .rest_voice import voice_max_tokens
                 extra = {"harvis_research": False, "harvis_plain": True,
-                         "max_tokens": VOICE_MAX_TOKENS}
+                         "max_tokens": voice_max_tokens(query)}
             elif chat.is_group_turn(s.title, query):
                 # Room turns are conversation only: no workspace run, no deep research.
                 mode, extra = "chat", {**extra, "harvis_research": False}
@@ -332,11 +332,12 @@ class Connection(SettingsMethods, SessionMethods, SlashMethods, ApprovalMethods,
                 if not run_id:
                     raise chat.ChatError("workspace run started without an id")
                 self.runs[s.id] = run_id
-                ran_workspace = True
                 header = (f"Working in a Harvis workspace ({delta.get('engine') or 'engine'}): "
                           f"{delta.get('tasklabel') or delta.get('tasktype') or 'task'}\n\n")
                 await self._relay(s, "text", header, parts, thoughts)
                 async for kind2, delta2 in runs.follow_run(self.token, run_id, self.origin):
+                    # Only a run that actually used a tool has a procedure worth drafting as a skill.
+                    ran_workspace = ran_workspace or kind2 in ("tool.start", "subagent.tool")
                     await self._relay(s, kind2, delta2, parts, thoughts)
                 self.runs.pop(s.id, None)
             if effort and effort != "none" and thoughts and not "".join(parts).strip():
@@ -364,8 +365,13 @@ class Connection(SettingsMethods, SessionMethods, SlashMethods, ApprovalMethods,
         except Exception:  # noqa: BLE001
             log.exception("hermes_ui: could not persist assistant turn for %s", s.id)
         if status is None and text.strip() and not plain:
+            # drafted carries kind 'new' or 'update'; skipped carries why, and whether the person asked.
+            asked = learn.wants_skill(next((str(m.get("content") or "") for m in reversed(msgs)
+                                            if m.get("role") == "user"), ""))
             learn.after_turn(self.pool, self.user_id, s.id, msgs, text, ran_workspace,
-                             on_skill=lambda drafted, sid=s.id: self.emit("harvis.skill.drafted", sid, drafted))
+                             on_skill=lambda drafted, sid=s.id: self.emit("harvis.skill.drafted", sid, drafted),
+                             on_skipped=lambda info, sid=s.id, a=asked: self.emit(
+                                 "harvis.skill.skipped", sid, {**info, "asked": a}))
         s.running = False
         done = {"text": text}
         if status == "error":

@@ -101,7 +101,8 @@ def _one_line(text: str, limit: int) -> str:
 def catalog(rows: list[dict]) -> str:
     """One line per skill ('name: first 90 chars of its description'), at most
     CATALOG_MAX_CHARS in all. Names and descriptions only; no bodies."""
-    head = "Your saved skills (the person loads one by typing /name; only matching ones are open below):"
+    head = ("Your saved skills (a matching one is opened below; the person can name one, "
+            "e.g. \"use docker-compose-debug\"):")
     lines: list[str] = []
     used = len(head)
     for i, r in enumerate(rows):
@@ -139,3 +140,70 @@ async def skill_message(pool, user_id: int, query: str) -> Optional[dict]:
         text += ("\n\nSaved skills (playbooks) that match this request \u2014 follow them where they apply:\n\n"
                  + "\n\n".join(blocks))
     return {"role": "system", "content": text}
+
+
+# ── the same skills, seen from a workspace run (workspace/orchestration/runner.py) ──
+# Read-only listing and reading, plus proposing a revision. None of these can change
+# a skill's text, switch it on or touch its audit; a revision waits in meta.pending.
+
+async def run_propose_update(pool, user_id: int, name: str, description: str, content: str) -> str:
+    """Propose new text for an existing skill (``propose_skill`` with update_of, or a
+    name that already exists). Returns a result line; never raises."""
+    from owui_compat import skill_pending
+
+    if pool is None or user_id is None:
+        return "ERROR: cannot save skills in this run context."
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT meta FROM owui_skills WHERE user_id=$1 AND name=$2", int(user_id), name)
+            if row is None:
+                return f"ERROR: there is no skill called '{name}' to update. Leave update_of out to propose a new one."
+            # The skill's own script files travel with the proposal so approving it keeps them.
+            files = skill_pending.meta_dict(row["meta"]).get("files")
+            await skill_pending.propose(conn, int(user_id), name, description, content, files,
+                                        "workspace-run", None)
+    except skill_pending.SkillPendingError as exc:
+        return f"ERROR: {exc}"
+    except Exception:  # noqa: BLE001
+        log.exception("hermes_ui: could not save a skill proposal")
+        return "ERROR: could not save the proposal."
+    return (f"Proposed an update to '{name}'. It waits in Customize -> Skills for a human to review and "
+            "approve; the current version stays in use until then.")
+
+
+async def run_list_skills(pool, user_id: int) -> str:
+    """The approved, enabled skills as 'name: when to use it' lines."""
+    if pool is None or user_id is None:
+        return "ERROR: skills are not available in this run context."
+    try:
+        async with pool.acquire() as conn:
+            rows = await trusted_skills(conn, user_id)
+    except Exception:  # noqa: BLE001
+        log.exception("hermes_ui: list_skills failed")
+        return "ERROR: could not read the skills."
+    if not rows:
+        return "There are no approved skills yet."
+    return "\n".join(f"{r['name']}: {_one_line(r['description'], 200)}".rstrip(": ") for r in rows)[:3000]
+
+
+async def run_read_skill(pool, user_id: int, name: str) -> str:
+    """One approved, enabled skill's text, through the same gate chat uses. A skill
+    that is off, unapproved or edited since approval is never returned."""
+    if pool is None or user_id is None:
+        return "ERROR: skills are not available in this run context."
+    want = " ".join(str(name or "").split()).lower()
+    try:
+        async with pool.acquire() as conn:
+            rows = await trusted_skills(conn, user_id)
+        hit = next((r for r in rows if str(r["name"]).lower() == want), None)
+        if hit is None:
+            return f"There is no approved, enabled skill called '{name}'. Use list_skills to see the names."
+        from owui_compat.skills import gated_skill_blocks
+        blocks = await gated_skill_blocks(pool, int(user_id), [hit["id"]])
+    except Exception:  # noqa: BLE001
+        log.exception("hermes_ui: read_skill failed")
+        return "ERROR: could not read the skill."
+    text = blocks[0] if blocks else f"The skill '{hit['name']}' is not available right now."
+    return text if len(text) <= 8000 else text[:8000] + "\n[...cut at 8000 characters]"
+

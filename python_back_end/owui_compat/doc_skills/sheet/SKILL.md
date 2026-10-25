@@ -13,13 +13,14 @@ outline:
   - Budget
 ---
 ## Budget
-| Item | Cost |
+| Item | Cost (USD) |
 | --- | --- |
 | Fuel | 320 |
 | Hotels | 540 |
 | Food | 260 |
 | Total | =SUM(B2:B4) |
-| Left of $2000 | =2000-B5 |
+| Budget | 2000 |
+| Left | =$B$6-B5 |
 ````
 
 Totals are formulas, so they update when you change a number.
@@ -29,6 +30,12 @@ Rules
 - Numbers are plain numbers (`1200`, `0.15`, `$40`, `12%`), no units inside number cells.
 - A cell that starts with `=` is a formula. Totals and derived columns are formulas (`=SUM(B2:B5)`, `=B2*C2`, `=AVERAGE(D2:D9)`), never a typed total.
 - Tables and formulas only: no charts, timelines or other blocks.
+
+Design
+- Put units in the headers (`Cost (USD)`, `Weight (kg)`), so the cells stay plain numbers.
+- Give each assumption (a rate, a limit, a budget) its own labelled row below the totals, like `Budget | 2000`, and point formulas at that cell (`=$B$6-B5`) instead of retyping the number.
+- Keep SUM ranges above the assumption rows, so a total never adds a rate in.
+- One table per sheet. Assumptions are rows in that table, not a second table.
 
 Gotchas
 - Never write a `<body>` tag.

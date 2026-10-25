@@ -16,8 +16,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Awaitable, Callable, Optional
 
-from .store import CronJobStore, compute_next_run
-from .types import CronJob, JobStatus
+from .store import CronJobStore, compute_next_run, zone_of
+from .types import CronJob
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +66,7 @@ class CronScheduler:
                     job.schedule_expr,
                     now=ts,
                     last_run_at=ts,
+                    tz=zone_of(job.metadata),
                 )
                 if success
                 else None

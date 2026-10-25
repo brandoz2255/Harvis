@@ -141,6 +141,13 @@ def test_agent_pick_still_syncs_the_workspace_model(monkeypatch):
     assert len(h.started) == 1 and h.synced == ["qwen3:4b"]
 
 
+def test_an_agent_run_the_chat_model_started_launches_like_an_auto_one(monkeypatch):
+    h = _Harness(monkeypatch, {"qwen3:4b": ["completion", "tools"]})
+    assert h.run("qwen3:4b", mode="agent", harvis_launch_origin="model") is not None
+    assert len(h.started) == 1 and h.synced == []
+    assert h.started[0]["launch_mode"] == "auto"
+
+
 def test_orchestrate_on_pool_models_is_not_refused_for_the_chat_pick(monkeypatch):
     h = _Harness(monkeypatch, {"gemma3:4b": ["completion", "vision"]})
     assert h.run("gemma3:4b", mode="orchestrate") is not None

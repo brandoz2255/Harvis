@@ -18,7 +18,8 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from .docs_blocks import inline_runs, plain_text
-from .docs_formula import FormulaError, Unknowable, evaluate_any, is_safe_formula, parse_number
+from .docs_formula import FormulaError, RecursionUnknowable, Unknowable, evaluate_any, is_safe_formula
+from .docs_number import parse_number
 from .docs_parse import ParsedDoc, Sheet
 
 _BAD_NAME = re.compile(r"[\[\]:*?/\\]")
@@ -172,13 +173,19 @@ def build_csv(sheet: Sheet) -> bytes:
     never written out as ``=...`` text, which another program would run or show raw."""
     rows = sheet.rows
     cache: dict[tuple[int, int], object] = {}
+    failed: dict[tuple[int, int], tuple[type, tuple]] = {}      # cells whose formula raised, so each is worked out once
     busy: set[tuple[int, int]] = set()
 
     def value(r: int, c: int):
-        """What a formula reads from the cell: a number (formulas evaluated), its text, or None when empty."""
+        """What a formula reads from the cell: a number (formulas evaluated), its text, or None when empty.
+        An error is remembered like a value: IFERROR catches it, and without this every read of the cell
+        would run its formula again, doubling the work for each row that reads the one above."""
         key = (r, c)
         if key in cache:
             return cache[key]
+        if key in failed:
+            kind, args = failed[key]
+            raise kind(*args)                           # a fresh exception: re-raising one grows its traceback
         raw = _unwrap(rows[r][c])[0] if r < len(rows) and c < len(rows[r]) else ""
         if key in busy:
             raise Unknowable("circular")
@@ -189,6 +196,10 @@ def build_csv(sheet: Sheet) -> bytes:
             else:
                 parsed = parse_number(raw) if r > 0 else None
                 result = parsed[0] if parsed else (clean_text(raw)[0] or None)
+        except (FormulaError, ZeroDivisionError, TypeError, OverflowError, ValueError) as exc:
+            if not isinstance(exc, RecursionUnknowable):        # too deep just now says nothing about the cell
+                failed[key] = (type(exc), exc.args)
+            raise
         finally:
             busy.discard(key)
         cache[key] = result

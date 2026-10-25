@@ -16,6 +16,8 @@ import { openPreview, type PreviewTarget } from './preview'
  */
 
 export interface LiveDoc {
+  /** The turn ended (finished or stopped) while the fence was still open: the source is cut off. */
+  cutOff: boolean
   key: string
   sessionId: string
   source: string
@@ -46,15 +48,21 @@ export function liveDocKey(sessionId: string, title: string): string {
   return `${sessionId}:${liveDocSlug(title)}`
 }
 
-export function upsertLiveDoc(key: string, sessionId: string, source: string, streaming: boolean): void {
+export function upsertLiveDoc(
+  key: string,
+  sessionId: string,
+  source: string,
+  streaming: boolean,
+  cutOff = false
+): void {
   const docs = $liveDocs.get()
   const existing = docs[key]
 
-  if (existing && existing.source === source && existing.streaming === streaming) {
+  if (existing && existing.source === source && existing.streaming === streaming && existing.cutOff === cutOff) {
     return
   }
 
-  const next = { ...docs, [key]: { key, sessionId, source, streaming, updatedAt: Date.now() } }
+  const next = { ...docs, [key]: { cutOff, key, sessionId, source, streaming, updatedAt: Date.now() } }
   const keys = Object.keys(next)
 
   if (keys.length > MAX_LIVE_DOCS) {
@@ -64,6 +72,29 @@ export function upsertLiveDoc(key: string, sessionId: string, source: string, st
   }
 
   $liveDocs.set(next)
+}
+
+interface DocSessionState {
+  busy: boolean
+  storedSessionId?: null | string
+}
+
+/**
+ * The runtime chat a live doc's `sessionId` (its stored id, or the runtime id of a chat not yet
+ * stored) belongs to, as a submit target. Null when no live chat owns it: the fix request then
+ * has nowhere to go, and must not fall through to whichever chat is in front.
+ */
+export function docSessionTarget(
+  states: Record<string, DocSessionState>,
+  sessionId: string
+): null | { sessionId: string; storedSessionId?: string } {
+  const owned = Object.entries(states).find(([, state]) => state.storedSessionId === sessionId)
+
+  if (owned) {
+    return { sessionId: owned[0], storedSessionId: sessionId }
+  }
+
+  return states[sessionId] ? { sessionId } : null
 }
 
 export function liveDocTarget(key: string, title: string): PreviewTarget {

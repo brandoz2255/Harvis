@@ -17,7 +17,7 @@ from typing import Optional
 
 from lxml import etree
 
-from .docs_blocks import Block, Run, plain_text
+from .docs_blocks import Block, Run, inline_runs, plain_text
 from .docs_chips import ACCENT, ACCENT2, CARD, DARK, GROUND, INK, LINE, MUTED, SERIES
 
 _A = "http://schemas.openxmlformats.org/drawingml/2006/main"
@@ -32,8 +32,8 @@ class Theme:
     ink: str                    # headings, body text, table header fill
     ground: str                 # slide background
     dark: str                   # title and section slide background
-    accent: str                 # badges, rules, big numbers, links on light ground
-    accent2: str                # links, second series
+    accent: str                 # badges, rules, big numbers, headings of columns and quadrants
+    accent2: str                # links (in the pptx, PDF and docx alike, and the theme's hlink), second series
     muted: str                  # secondary text on the ground
     card: str                   # card and zebra-row fill
     line: str                   # hairlines and borders
@@ -123,7 +123,7 @@ def restyle_theme_xml(blob: bytes, theme: Theme) -> bytes:
     series = (list(theme.series) + list(SERIES))[:6]
     colors = {"dk1": theme.ink, "lt1": theme.ground, "dk2": theme.dark, "lt2": theme.card,
               "accent1": theme.accent, "accent2": theme.accent2, "accent3": series[2], "accent4": series[3],
-              "accent5": series[4], "accent6": series[5], "hlink": theme.accent, "folHlink": theme.muted}
+              "accent5": series[4], "accent6": series[5], "hlink": theme.accent2, "folHlink": theme.muted}
     scheme = root.find(f".//{{{_A}}}clrScheme")
     if scheme is not None:
         scheme.set("name", f"Harvis {theme.label}")
@@ -174,18 +174,36 @@ def text_stats(blocks: list[Block]) -> tuple[int, int]:
 
 @dataclass
 class SlideKind:
-    kind: str = "content"       # content | section | columns | stats
+    kind: str = "content"       # content | section | closing | columns | stats
     # columns: [(heading runs, blocks)] x 2; stats: [(number runs, caption runs)] x 1-3
     groups: list = field(default_factory=list)
 
 
 _COLUMN_KINDS = {"heading", "para", "list", "quote", "code", "math"}
 MAX_STATS = 3
+COLUMN_MIN, COLUMN_MAX = 20, 24     # the PDF cannot shrink text to fit a page, so the pptx starts no larger either
+
+
+def column_size(groups: list) -> int:
+    """The size, in pt, both columns of a two-column slide start at (the pptx then fits it down); the PDF uses it as is."""
+    blocks = [b for _head, body in groups for b in body]
+    return min(max(body_size(*text_stats(blocks)), COLUMN_MIN), COLUMN_MAX)
+
+
+_NUMBER = r"\d[\d,]*(?:\.\d+)?"
+_SUFFIX = r"[kmb]|bn|[kmgt]b|ms|s|h|x"
+_SPACED_UNIT = r"%|[kmbx]|[kmgt]b|ms|(?:sec|min|hr|mo|yr)s?|(?:second|minute|hour|day|week|month|year)s?"
+# A figure: a number, with an optional sign or currency before it, a short suffix after it (%, x, M, ms, GB; or a unit
+# after a space, like ``3 weeks``) and an optional ``/total``. The suffixes are an explicit list, so a label that merely
+# contains a digit (``Q3``, ``Step 1:``) or is an acronym or ordinal (``2FA``, ``3D``, ``5G``, ``1st``, ``3am``) is not one.
+_FIGURE_RE = re.compile(
+    rf"^[~\u2248<>\u2264\u2265+\-\u2212\u00b1]?[$\u20ac\u00a3\u00a5]?{_NUMBER}"
+    rf"(?:%|\u00d7|{_SUFFIX}|\s(?:{_SPACED_UNIT}))?(?:/{_NUMBER})?\+?$", re.I)
 
 
 def _is_figure(text: str) -> bool:
     text = text.strip()
-    return 0 < len(text) <= 14 and len(text.split()) <= 2 and bool(re.search(r"\d", text))
+    return len(text) <= 14 and bool(_FIGURE_RE.match(text))
 
 
 def is_stat(block: Block) -> bool:
@@ -204,26 +222,26 @@ def _is_figure_run(run: Run) -> bool:
 MAX_CAPTION = 80
 
 
-def _stat_groups(blocks: list[Block]) -> Optional[list]:
+def _stat_groups(lines: list[list[Run]]) -> Optional[list]:
     """[(number runs, caption runs)] when the slide is only bold figures with a short caption each, else None.
 
-    A figure and its caption may be two paragraphs (``**42%**``, then ``fewer incidents``) or one (``**42%** fewer
-    incidents``); the paragraph merger also joins consecutive lines, so a bold figure inside a paragraph that began
-    with one starts the next card."""
+    ``lines`` holds the inline runs of each source line. A card starts only at a line that opens with a bold figure;
+    its caption is the rest of that line, or the one plain line right after a figure-only line (``**42%**``, then
+    ``fewer incidents``). A figure in the middle of a line belongs to that sentence, so a slide written that way is
+    an ordinary content slide and not two cards."""
     groups: list[list[list[Run]]] = []
-    for b in blocks:
-        if b.kind != "para" or not b.runs:
-            return None
-        if is_stat(b):
-            groups.append([b.runs, []])
-        elif _is_figure_run(b.runs[0]):
-            for r in b.runs:
-                if _is_figure_run(r):
-                    groups.append([[r], []])
-                else:
-                    groups[-1][1].append(r)
-        elif groups and not groups[-1][1] and not any(_is_figure_run(r) for r in b.runs):
-            groups[-1][1] = b.runs
+    for runs in lines:
+        if not runs:
+            continue
+        if _is_figure_run(runs[0]):
+            if all(r.bold and not r.code and not r.href for r in runs) and _is_figure(plain_text(runs)):
+                groups.append([runs, []])
+            elif any(_is_figure_run(r) for r in runs[1:]):
+                return None
+            else:
+                groups.append([[runs[0]], list(runs[1:])])
+        elif groups and not groups[-1][1] and not any(_is_figure_run(r) for r in runs):
+            groups[-1][1] = runs
         else:
             return None
     if not groups or len(groups) > MAX_STATS:
@@ -241,18 +259,40 @@ def _stat_groups(blocks: list[Block]) -> Optional[list]:
     return out
 
 
-def classify_slide(blocks: list[Block], has_title: bool = True) -> SlideKind:
+def _source_lines(blocks: list[Block], body: Optional[str]) -> list[list[Run]]:
+    """The inline runs of each source line of a slide made only of paragraphs.
+
+    ``parse_blocks`` joins consecutive lines of a paragraph with spaces, so the line breaks are only known from the
+    raw ``body``. Without it each paragraph counts as one line."""
+    if body is None:
+        return [b.runs for b in blocks]
+    return [inline_runs(line.strip()) for line in body.split("\n") if line.strip()]
+
+
+def _is_closing(title: str) -> bool:
+    """A title that ends a talk rather than opens a part: ``Questions?``, ``Thank you!``."""
+    return plain_text(inline_runs(title)).rstrip().endswith(("?", "!"))
+
+
+def classify_slide(blocks: list[Block], has_title: bool = True, body: Optional[str] = None, title: str = "",
+                   last: bool = False) -> SlideKind:
     """Which layout a (non-title) slide gets.
 
-    * a title and nothing else is a section divider;
+    * a title and nothing else is a section divider, or, when it is the last slide of the deck (``last``) or its
+      ``title`` ends in ``?`` or ``!``, a closing slide: the title alone, with no running number;
     * exactly two ``###`` headings, each followed by text, are two columns;
     * paragraphs that open with one to three bold figures (each followed by a short caption) are big numbers.
 
-    Anything else, and every slide with a figure or a table in it, is an ordinary content slide."""
+    Anything else, and every slide with a figure or a table in it, is an ordinary content slide.
+
+    ``body`` is the slide's raw markdown (without speaker notes); pass it so a bold figure in the middle of a line is
+    not mistaken for the start of another card."""
     if not blocks:
-        return SlideKind("section") if has_title else SlideKind()
+        if not has_title:
+            return SlideKind()
+        return SlideKind("closing") if last or _is_closing(title) else SlideKind("section")
     if blocks[0].kind == "para" and blocks[0].runs and _is_figure_run(blocks[0].runs[0]):
-        stats = _stat_groups(blocks)
+        stats = _stat_groups(_source_lines(blocks, body)) if all(b.kind == "para" and b.runs for b in blocks) else None
         if stats:
             return SlideKind("stats", stats)
         return SlideKind()

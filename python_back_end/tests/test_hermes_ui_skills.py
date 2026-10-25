@@ -101,8 +101,11 @@ def test_skill_message_asks_only_for_trusted_skills_and_gates_the_bodies(monkeyp
     assert msg["role"] == "system" and "docker compose logs" in msg["content"]
 
 
-def test_skill_message_is_none_when_nothing_matches_or_the_db_fails():
-    assert asyncio.run(skill_select.skill_message(_Pool([DOCKER]), 7, "hello")) is None
+def test_skill_message_carries_only_the_catalog_when_nothing_matches_and_is_none_when_the_db_fails():
+    msg = asyncio.run(skill_select.skill_message(_Pool([DOCKER]), 7, "hello"))
+    assert msg["role"] == "system" and "- docker-compose-debug:" in msg["content"]
+    assert "Saved skills (playbooks)" not in msg["content"]  # no body rode along
+    assert asyncio.run(skill_select.skill_message(_Pool([]), 7, "hello")) is None  # no skills, no message
     assert asyncio.run(skill_select.skill_message(object(), 7, "docker compose")) is None
     assert asyncio.run(skill_select.skill_message(None, 7, "docker compose")) is None
 

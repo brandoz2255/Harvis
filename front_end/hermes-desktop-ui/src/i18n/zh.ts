@@ -2459,6 +2459,7 @@ export const zh: Translations = {
       none: '未发现问题',
       failed: '检查失败',
       vision: '同时查看页面（较慢）',
+      autoFix: '自动修复错误',
       fix: '修复',
       fixSent: '已发送',
       fixUnavailable: '此处无法发送到聊天',
