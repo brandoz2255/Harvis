@@ -423,6 +423,11 @@ cmd_up() {
   export HARVIS_BIND_ADDR_PUBLIC=0.0.0.0
   export HARVIS_CONTROL_DIR=/var/lib/harvis/control
   install_k3s
+  # After ./install.sh --stop k3s is installed but disabled; start it like --start does.
+  if ! svc is-active --quiet "$(k3s_unit)"; then
+    bash scripts/power-button.sh clear 2>/dev/null || true
+    svc enable --now "$(k3s_unit)" >/dev/null 2>&1 || die "k3s did not start — see: sudo journalctl -u $(k3s_unit) -n 100"
+  fi
   wait_node_ready
   setup_gpu
   check_dns
@@ -519,6 +524,16 @@ svc() { $SUDO systemctl "$@"; }
 k3s_unit() { if svc cat k3s >/dev/null 2>&1; then echo k3s; else echo k3s-agent; fi; }
 # Stopping the k3s service leaves the pods' containers (and their ports) running.
 k3s_killall() { if [ -x /usr/local/bin/k3s-killall.sh ]; then $SUDO /usr/local/bin/k3s-killall.sh >/dev/null 2>&1; fi; }
+# A tunnel started by hand (docker run cloudflare/cloudflared …) is outside k3s and the
+# network lock, so Stop takes it down too, whatever its tag.
+stop_stray_tunnels() {
+  command -v docker >/dev/null 2>&1 || return 0
+  local ids
+  ids="$(docker ps --format '{{.ID}} {{.Image}}' 2>/dev/null | awk '$2 ~ /(^|\/)cloudflare\/cloudflared([:@]|$)/ {print $1}')"
+  [ -n "$ids" ] || return 0
+  # shellcheck disable=SC2086
+  docker stop $ids >/dev/null && say "✓ Stopped a Cloudflare tunnel running in Docker outside Harvis"
+}
 
 cmd_stop() {
   command -v k3s >/dev/null 2>&1 || { say "Kubernetes mode is off here (k3s is not installed) — nothing to stop."; return 0; }
@@ -528,6 +543,7 @@ cmd_stop() {
   # Disabled too, so a reboot does not bring Harvis back onto the network.
   svc disable --now "$unit" >/dev/null 2>&1 || true
   k3s_killall || true
+  stop_stray_tunnels || true
   if port_busy 9000; then die "something still answers on port 9000 — see: sudo ss -tlnp 'sport = :9000'"; fi
   say "✓ Harvis is stopped and stays off after a reboot. Nothing was deleted."
   say "  Start it again: ./install.sh --start"

@@ -20,7 +20,8 @@ class FireTest(unittest.TestCase):
         os.makedirs(self.inbox)
         self.fake("systemctl", 'echo "systemctl $*" >> "$LOG"')
         self.fake("killall", 'echo "killall" >> "$LOG"')
-        self.fake("docker", 'echo "docker $*" >> "$LOG"; [ "$1" = ps ] && printf "c1\\nc2\\n"; true')
+        self.fake("docker", 'echo "docker $*" >> "$LOG"; [ "$1" = ps ] && printf "$PS_OUT"; true')
+        self.ps_out = "c1\\nc2\\n"
         with open(os.path.join(self.inbox, "stop"), "w") as fh:
             fh.write("rm -rf / ; ignored\n")
 
@@ -34,7 +35,7 @@ class FireTest(unittest.TestCase):
         mode_file = os.path.join(self.tmp, "mode")
         with open(mode_file, "w") as fh:
             fh.write(mode)
-        env = {"PATH": f"{self.bin}:/usr/bin:/bin", "LOG": self.log, "HARVIS_REPO": self.tmp,
+        env = {"PATH": f"{self.bin}:/usr/bin:/bin", "LOG": self.log, "PS_OUT": self.ps_out, "HARVIS_REPO": self.tmp,
                "HARVIS_CONTROL_DIR": self.control, "HARVIS_POWER_GRACE": "0",
                "HARVIS_POWER_SUDO": "env", "HARVIS_BACKEND_UID": str(os.getuid()),
                "HARVIS_K8S_MODE_FILE": mode_file, "HARVIS_K3S_KILLALL": os.path.join(self.bin, "killall")}
@@ -44,12 +45,21 @@ class FireTest(unittest.TestCase):
         with open(self.log) as fh:
             return fh.read().splitlines()
 
+    TUNNEL_CHECK = "docker ps --format {{.ID}} {{.Image}}"
+
     def test_kubernetes_mode_disables_k3s_and_kills_its_containers(self):
-        self.assertEqual(self.fire("k8s\n"), ["systemctl cat k3s", "systemctl disable --now k3s", "killall"])
+        self.assertEqual(self.fire("k8s\n"),
+                         [self.TUNNEL_CHECK, "systemctl cat k3s", "systemctl disable --now k3s", "killall"])
+
+    def test_a_tunnel_started_by_hand_is_stopped_too(self):
+        # Outside k3s and the network lock, so nothing else would take it down.
+        self.ps_out = "t1 cloudflare/cloudflared:latest\\nt2 cloudflare/cloudflared@sha256:ab\\nx1 nginx:1\\n"
+        self.assertEqual(self.fire("k8s\n")[:2], [self.TUNNEL_CHECK, "docker stop t1 t2"])
 
     def test_docker_mode_stops_only_this_checkouts_containers(self):
         calls = self.fire("")
         self.assertEqual(calls, [
+            self.TUNNEL_CHECK,
             f"docker ps -q --filter label=com.docker.compose.project.working_dir={os.path.realpath(self.tmp)}",
             "docker stop c1 c2"])
 
@@ -57,7 +67,7 @@ class FireTest(unittest.TestCase):
         # rm -f cannot remove it, and a stop that never goes away would stop Harvis on every start.
         os.remove(os.path.join(self.inbox, "stop"))
         os.makedirs(os.path.join(self.inbox, "stop", "deeper"))
-        self.assertEqual(self.fire("k8s\n")[1], "systemctl disable --now k3s")
+        self.assertEqual(self.fire("k8s\n")[2], "systemctl disable --now k3s")
         self.assertEqual(oct(os.stat(self.inbox).st_mode & 0o777), "0o700")
 
 
