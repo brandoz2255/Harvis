@@ -1,3 +1,54 @@
+## 2026-10-26 13:30 PDT: A bot's persona stays in its own chats unless set to "all new chats"
+
+### Problem
+After you opened a bot's chat (a profile such as a custom persona), every ordinary New chat afterwards spoke as that bot.
+
+### Root cause
+`desktopSessionCreateParams` sends `profile = route || $newChatProfile || $activeGatewayProfile`. Clicking a profile in the rail (`selectProfile`) sets both $newChatProfile and $activeGatewayProfile, and `ws_session.m_session_create` binds whatever profile it is given to that profile's bot (`chat.bot_id`). So "the profile I'm looking at" and "start this chat as that bot" were the same thing.
+
+### Solution
+- Desktop: new `$newChatProfilePicked`, true only when a chat is deliberately started as a profile: the per-profile "+" (`newSessionInProfile`), `newSessionInAgent` or `/profile`. It is false after a rail switch, a connection switch, the New session button or the keybind. `session.create` sends `profile_source: 'picked' | 'active'`.
+- Backend: `resolve_session_bot(…, explicit)` binds the named profile only when explicit. Otherwise it binds the one profile marked `all_sessions`, if any. Bot Mode paths (`requestForBot`: the bot's own chat, group turns) send no `profile_source` and stay explicit.
+- Per-bot "Use in all new chats" switch (bot editor → `profiles.configure {all_sessions}`). Only one bot at a time; not allowed on `default` (its soul already applies everywhere).
+
+### Files
+- `python_back_end/plugins/hermes_ui/profiles.py`, `python_back_end/plugins/hermes_ui/ws_session.py`
+- `python_back_end/tests/test_hermes_ui_settings.py` (2 new tests)
+- `front_end/hermes-desktop-ui/src/store/profile.ts`, `src/store/connections.ts`, `src/app/hooks/use-keybinds.ts`, `src/app/chat/sidebar/index.tsx`, `src/app/session/hooks/use-prompt-actions/slash.ts`, `src/app/session/hooks/use-session-actions/index.ts`, `src/plugins/hermes-bots/profile-config.tsx`, `src/plugins/hermes-bots/edit-profile-dialog.tsx`
+
+### Result
+Backend Hermes tests: 631 passed, 3 failed (the same 3 fail without this change). Existing chats keep their bot.
+
+---
+
+## 2026-10-26 12:50 PDT: Route pooled models through the PAIR router in Kubernetes mode
+
+### Problem
+With HARVIS_MODEL_POOLS set, every request in Kubernetes mode still went to the in-cluster Ollama, so the second machine never took work.
+
+### Root cause
+- The k8s backend's model URL is `http://ollama:11434`; the PAIR router (ollama-proxy) was never a host.
+- model_pool swaps the tag after the host is chosen and sends to the same URL, so pooling only works through one endpoint that serves every tag in the pool (the PAIR router).
+- The k8s `lan-models` LoadBalancer fell back to 11435, the PAIR router's port, and took traffic to the node IP on it.
+- `HARVIS_LAN_MODELS_PORT` was read from the shell only, so 0 did not stick, and `kubectl apply` never removed an earlier lan-models.
+
+### Solution
+- `pick_lan_port` reads `HARVIS_LAN_MODELS_PORT` from .env too (shell still wins).
+- `cmd_up` deletes the lan-models Service, Deployment, ConfigMap and NetworkPolicies when sharing is off.
+- Site config (.env, not committed): `HARVIS_LAN_MODELS_PORT=0`, `HARVIS_OLLAMA_HOSTS=pair=http://<node IP>:<router port>|label=…|prefer=<model prefix>`.
+
+- PAIR closed → normal: a host's `prefer` only counts while it answers and has the tag, so qwen falls back to this machine's Ollama. New `ollama_hosts.served_tags(url)` + `model_pool.lease(model, served)` keep the pool from swapping to a tag the chosen upstream lacks (with the router closed, a concurrent chat was renamed to the other machine's tag and 404'd). Unknown upstreams (`None`) pool as before.
+
+### Files
+- `scripts/k8s/harvis-k8s.sh`
+- `python_back_end/workspace/model_pool.py`, `python_back_end/workspace/model_proxy.py`, `python_back_end/owui_compat/ollama_hosts.py`
+- `python_back_end/tests/test_model_pool.py` (2 new tests)
+
+### Result
+`scripts/k8s` tests 106 passed; backend pool/host/proxy tests 42 passed (run in the backend pod); the hosts value parses in the backend. Takes effect on the next `./install.sh --k8s` (rebuilds the backend image).
+
+---
+
 ## 2026-10-26 12:00 PDT: ./harvis-start.sh — LAN-only or LAN + tunnel, home networks only
 
 ### Problem

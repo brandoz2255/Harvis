@@ -251,6 +251,12 @@ export const $activeGatewayProfile = atom<string>('default')
 // Profile for the NEXT new chat (chosen via the new-chat picker). null = primary
 // / default, so single-profile users are unaffected.
 export const $newChatProfile = atom<string | null>(null)
+
+// True only when the user chose to start the next chat AS that profile (the
+// per-profile "+", /profile, an agent route). Switching the rail context leaves
+// it false: a plain New chat there must not carry that bot's persona. Harvis
+// sends it as session.create `profile_source` ("picked" vs "active").
+export const $newChatProfilePicked = atom<boolean>(false)
 /** The draft's exact owner — the same shape every session-scoped surface
  *  routes by (store/session-request-router SessionOwnerRoute). */
 export type AgentProfileRoute = SessionOwnerRoute
@@ -773,6 +779,7 @@ export function selectProfile(name: string): void {
   const switching = $showAllProfiles.get() || target !== normalizeProfileKey($activeGatewayProfile.get())
   $showAllProfiles.set(false)
   $newChatProfile.set(target)
+  $newChatProfilePicked.set(false)
   $newChatRoute.set(null)
   // Clearing the agent route must NOT discard the registry identity: the pick
   // is made on the source the user is looking at (activateOnCurrentSource
@@ -860,6 +867,7 @@ function activateOnCurrentSource(target: string): Promise<void> {
 export function newSessionInProfile(name: string): void {
   const target = normalizeProfileKey(name)
   $newChatProfile.set(target)
+  $newChatProfilePicked.set(true)
   $newChatRoute.set(null)
   captureNewChatSource(profilePickConnectionId(target))
   requestFreshSession()
@@ -887,6 +895,7 @@ export function newSessionInAgent(route: AgentProfileRoute): void {
   }
 
   $newChatProfile.set(captured.profile)
+  $newChatProfilePicked.set(true)
   $newChatRoute.set(captured)
   $newChatConnectionId.set(captured.connectionId)
   requestFreshSession()

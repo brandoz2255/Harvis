@@ -152,17 +152,27 @@ async def ensure_bot(pool, uid: int, name: str) -> Optional[dict]:
     return bot
 
 
-async def resolve_session_bot(pool, uid: int, profile: Any) -> Optional[dict]:
-    """The bot a ``session.create`` for ``profile`` should speak as (None = plain Harvis)."""
+async def resolve_session_bot(pool, uid: int, profile: Any, explicit: bool = True) -> Optional[dict]:
+    """The bot a ``session.create`` for ``profile`` should speak as (None = plain Harvis).
+
+    ``explicit`` is False when the client only sent the profile that happens to be
+    selected (a plain New chat): a bot's persona then stays in its own chats, and a
+    new chat speaks as a bot only if that bot is set to ``all_sessions``."""
     raw = str(profile or "").strip()
-    if not raw:
-        return None
     try:
-        name = normalize_name(raw)
-        return await ensure_bot(pool, uid, name)
+        if explicit and raw:
+            return await ensure_bot(pool, uid, normalize_name(raw))
+        name = await all_sessions_profile(pool, uid)
+        return await ensure_bot(pool, uid, name) if name else None
     except Exception as exc:  # noqa: BLE001 — a chat must still open as plain Harvis
         logger.warning("profile %r has no bot identity (%s); using plain Harvis", raw, exc)
         return None
+
+
+async def all_sessions_profile(pool, uid: int) -> Optional[str]:
+    """The profile set to speak in every new chat, if any (at most one, see configure)."""
+    records = await _records(pool, uid)
+    return next((n for n in sorted(records) if n != DEFAULT and records[n].get("all_sessions")), None)
 
 
 async def _sync_bot(pool, uid: int, name: str, rec: dict) -> None:
@@ -299,6 +309,7 @@ async def _row(pool, uid: int, name: str, rec: dict, preview: Optional[dict] = N
         "last_session": preview.get("last_session"),
         "canonical_session": preview.get("canonical_session"),
         "created_at": rec.get("created_at"),
+        "all_sessions": bool(rec.get("all_sessions")) and name != DEFAULT,
     }
 
 
@@ -443,6 +454,18 @@ async def configure(pool, uid: int, name: str, payload: dict) -> dict:
         if isinstance(payload.get(key), list):
             rec[key] = [str(v) for v in payload[key]]
             applied[key] = True
+    if isinstance(payload.get("all_sessions"), bool):
+        if name == DEFAULT:
+            raise ProfileError("The default profile already speaks in every new chat")
+        if payload["all_sessions"]:
+            # One persona for every new chat: turning it on for this bot turns it off for the rest.
+            for other, orec in records.items():
+                if other != name:
+                    orec.pop("all_sessions", None)
+            rec["all_sessions"] = True
+        else:
+            rec.pop("all_sessions", None)
+        applied["all_sessions"] = True
     await _save(pool, uid, records)
     if applied.keys() & {"model", "description", "display_name"}:
         await _sync_bot(pool, uid, name, rec)

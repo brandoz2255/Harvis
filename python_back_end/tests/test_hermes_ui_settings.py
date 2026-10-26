@@ -461,3 +461,43 @@ def test_rpc_reload_env_and_profiles(section, soul, default_model):
     assert run(conn.m_profiles_get_asset(7, {"name": "helper", "asset": "avatar"}))["result"]["found"] is True
     assert run(conn.m_profiles_describe(8, {"name": "ghost"}))["error"]["code"] == ws_settings.ERR_PROFILE
     assert run(conn.m_profiles_describe(9, {"name": "../x"}))["error"]["code"] == ws_settings.ERR_PARAMS
+
+
+# ── a bot's persona stays in its own chats unless set to all chats ─────────────
+
+@pytest.fixture
+def fake_bots(monkeypatch):
+    async def ensure_bot(pool, uid, name):
+        return None if name == profiles.DEFAULT else {"id": f"bot-{name}"}
+
+    monkeypatch.setattr(profiles, "ensure_bot", ensure_bot)
+
+
+def test_selected_profile_alone_does_not_bind_its_bot(section, soul, default_model, fake_bots):
+    run(profiles.create(None, 7, {"name": "persona"}))
+    # Bot Mode / the per-profile "+": the chat speaks as the bot.
+    assert run(profiles.resolve_session_bot(None, 7, "persona")) == {"id": "bot-persona"}
+    # A plain New chat that only carries the selected rail profile stays plain Harvis.
+    assert run(profiles.resolve_session_bot(None, 7, "persona", explicit=False)) is None
+    assert run(profiles.resolve_session_bot(None, 7, "", explicit=False)) is None
+
+
+def test_all_sessions_bot_speaks_in_every_new_chat(section, soul, default_model, fake_bots):
+    run(profiles.create(None, 7, {"name": "persona"}))
+    run(profiles.create(None, 7, {"name": "coder"}))
+    assert run(profiles.describe(None, 7, "persona"))["all_sessions"] is False
+    applied = run(profiles.configure(None, 7, "persona", {"all_sessions": True}))
+    assert applied["applied"] == {"all_sessions": True}
+    assert run(profiles.describe(None, 7, "persona"))["all_sessions"] is True
+    for profile in ("", "default", "coder"):
+        assert run(profiles.resolve_session_bot(None, 7, profile, explicit=False)) == {"id": "bot-persona"}
+    # Picking another bot explicitly still wins.
+    assert run(profiles.resolve_session_bot(None, 7, "coder")) == {"id": "bot-coder"}
+    # Only one at a time: switching it on for coder switches it off for persona.
+    run(profiles.configure(None, 7, "coder", {"all_sessions": True}))
+    assert run(profiles.describe(None, 7, "persona"))["all_sessions"] is False
+    assert run(profiles.resolve_session_bot(None, 7, "", explicit=False)) == {"id": "bot-coder"}
+    run(profiles.configure(None, 7, "coder", {"all_sessions": False}))
+    assert run(profiles.resolve_session_bot(None, 7, "", explicit=False)) is None
+    with pytest.raises(profiles.ProfileError):
+        run(profiles.configure(None, 7, "default", {"all_sessions": True}))
