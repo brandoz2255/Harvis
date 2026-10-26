@@ -17,7 +17,7 @@ sources:
   - https://github.com/brandoz2255/aidev
 maintainers:
   - name: dulc3
-    email: dulc3@users.noreply.github.com
+    url: https://github.com/brandoz2255
 dependencies: []
 annotations:
   category: AI/ML

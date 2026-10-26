@@ -241,7 +241,7 @@ Per user's hard rule: only push after the full benchmark has actually worked in 
   ```
 - Direct model_proxy smoke test (bypasses openclaw):
   ```bash
-  TOK=***REMOVED***
+  TOK=<your-gateway-token>
   curl -sS -X POST http://localhost:8000/v1/chat/completions \
     -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" \
     -d '{"model":"harvis-proxy/auto","stream":true,

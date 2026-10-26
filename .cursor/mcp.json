@@ -5,7 +5,7 @@
       "transport": "http",
       "description": "Harvis AI OpenClaw workspace — exec commands, read/write files, chat with agent, web search, GitHub repo management",
       "headers": {
-        "Authorization": "Bearer ***REMOVED***"
+        "Authorization": "Bearer ${env:OPENCLAW_GATEWAY_TOKEN}"
       }
     }
   }

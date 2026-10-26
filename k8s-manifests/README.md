@@ -357,4 +357,4 @@ This manifest set is equivalent to the Helm chart deployment with the following 
 
 For issues or questions:
 - Project: https://github.com/brandoz2255/aidev
-- Maintainer: dulc3 <dulc3@users.noreply.github.com>
+- Maintainer: dulc3 (https://github.com/brandoz2255)

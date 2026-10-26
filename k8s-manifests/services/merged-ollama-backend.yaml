@@ -134,13 +134,13 @@ spec:
                   key: ollama-api-key
             # External Ollama - set correct BASE URL (code appends /api/chat, /api/tags, etc.)
             # Examples:
-            #   If OpenWebUI is at https://ollama.example.com/ollama/api/chat
-            #   Then set: https://ollama.example.com/ollama (without /api/chat)
+            #   If OpenWebUI is at https://your-ollama.example.com/ollama/api/chat
+            #   Then set: https://your-ollama.example.com/ollama (without /api/chat)
             #
-            #   If exposed directly at https://ollama.example.com/api/chat
-            #   Then set: https://ollama.example.com
+            #   If exposed directly at https://your-ollama.example.com/api/chat
+            #   Then set: https://your-ollama.example.com
             - name: EXTERNAL_OLLAMA_URL
-              value: "https://ollama.example.com/ollama"
+              value: "https://your-ollama.example.com/ollama"
             - name: EXTERNAL_OLLAMA_API_KEY
               valueFrom:
                 secretKeyRef:

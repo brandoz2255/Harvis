@@ -13,7 +13,7 @@ The laptop backend has been reconfigured. Confirmed env on `harvis-backend` cont
 - `OPENCLAW_FALLBACK_URL=ws://openclaw:18789` ← laptop docker openclaw (fallback)
 - `DESKTOP_OLLAMA_URL=http://192.168.20.58:11434` ← rig Ollama (for model_proxy auto-routing)
 - `OPENCLAW_HOME=/home/node` ← rig container is `node` user
-- `OPENCLAW_GATEWAY_TOKEN=***REMOVED***`
+- `OPENCLAW_GATEWAY_TOKEN=<your-gateway-token>`
 
 **Verified network from laptop → rig:**
 - TCP 192.168.20.58:18789 → open (openclaw exposed to LAN — already done)
@@ -33,7 +33,7 @@ The laptop backend has been reconfigured. Confirmed env on `harvis-backend` cont
 
 ```bash
 grep '^OPENCLAW_GATEWAY_TOKEN=' /home/harvis/harvis-host/.env
-# expected: OPENCLAW_GATEWAY_TOKEN=***REMOVED***
+# expected: OPENCLAW_GATEWAY_TOKEN=<your-gateway-token>
 ```
 
 If it differs, the laptop's backend will get "Invalid proxy token" errors and every workspace will fail at the WebSocket handshake. Either change the rig to match, or change the laptop's `.env` and restart the laptop's backend. Whichever you pick, both ends must agree.
@@ -140,7 +140,7 @@ This proves the full loop works before involving Discord. From the rig:
 #   5. Stream back the response
 
 LAPTOP=192.168.10.244
-TOK=***REMOVED***
+TOK=<your-gateway-token>
 
 curl -sS -X POST http://$LAPTOP:8000/v1/chat/completions \
   -H "Authorization: Bearer $TOK" \
@@ -199,7 +199,7 @@ The laptop bot will dispatch to the rig's openclaw, which will run qwen3:14b on 
 
 - **Laptop LAN IP**: `192.168.10.244`
 - **Rig LAN IP**: `192.168.20.58`
-- **Shared gateway token**: `***REMOVED***`
+- **Shared gateway token**: `<your-gateway-token>`
 - **Rig openclaw config (probable)**: `/home/harvis/harvis-host/openclaw/config/byo/openclaw.json`
 - **Target model**: `qwen3:14b`
 - **Smoke test endpoint**: `http://192.168.10.244:8000/v1/chat/completions`

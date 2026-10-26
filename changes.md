@@ -4031,7 +4031,7 @@ Two inference backends run simultaneously with zero VRAM conflict (CUDA_VISIBLE_
 - Qwen3.5 context: raise `--max-model-len` from 131072 → 262144 for full 256K once VRAM verified
 - Devstral context: raise `--ctx-size` from 131072 → 393216 for full 384K (needs ~16GB CPU RAM for KV)
 - Devstral GPU layers: bump `--n-gpu-layers` from 12 → 16 if 1650 Ti has headroom (~312MB/layer)
-- HuggingFace DNS: run `./scripts/add-dns-entry.sh huggingface.co` before deploying (campus blocks UDP 53)
+- HuggingFace DNS: run `./scripts/add-dns-entry.sh huggingface.co` before deploying (some networks block UDP 53)
 
 ---
 

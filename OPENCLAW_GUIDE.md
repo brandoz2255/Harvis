@@ -57,7 +57,7 @@ Open your browser to: `http://192.168.122.100:18789`
 2. Go to **"Settings"**
 3. Paste this Gateway Token:
    ```
-   <your gateway token>
+   <your-gateway-token>
    ```
 4. Save settings
 
@@ -87,7 +87,7 @@ ws.onopen = () => {
   // Authenticate with token
   ws.send(JSON.stringify({
     type: 'auth',
-    token: '<your gateway token>'
+    token: '<your-gateway-token>'
   }));
 };
 
@@ -263,7 +263,7 @@ docker compose restart
 - **OpenClaw Docs**: https://docs.openclaw.ai/cli
 - **GitHub**: https://github.com/openclaw
 - **Gateway URL**: http://192.168.122.100:18789
-- **Gateway Token**: `<your gateway token>`
+- **Gateway Token**: `<your-gateway-token>`
 
 ## VM Details
 

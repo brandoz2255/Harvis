@@ -23,7 +23,7 @@ Companion to `2026-06-02-odysseus-features.md` (the design/spec). This file = wh
 
 ## ⚠ Loose ends to clean up
 - **`markdown` is installed EPHEMERALLY** in the running backend (`pip install` in-container). Survives `docker restart`, but a `docker compose up -d backend` (recreate) DROPS it → visual report endpoint breaks until reinstalled. It's in `requirements.txt` now → **`docker compose build backend` bakes it durably.** Do that tomorrow (or re-pip after any recreate).
-- **Deep Research is slow (~8.5 min/round).** Causes seen in the E2E log: `async_make_ollama_request` tries CLOUD Ollama first (`EXTERNAL_OLLAMA_URL=ollama.example.com`) → 404 → falls back to local (wasted round-trips per call); plus some extractions failed under concurrency on llama3.1:8b. Tuning, not correctness.
+- **Deep Research is slow (~8.5 min/round).** Causes seen in the E2E log: `async_make_ollama_request` tries CLOUD Ollama first (`EXTERNAL_OLLAMA_URL=your-ollama.example.com`) → 404 → falls back to local (wasted round-trips per call); plus some extractions failed under concurrency on llama3.1:8b. Tuning, not correctness.
 - **Persistence not fully exercised:** the E2E used `call_research_service` (no save). The `/api/research/start` → `_save_result` → `/library` → `/report` flow is unproven (but the dir is writable). Confirm tomorrow.
 - **Uncommitted (no push — your rule):** 6 OWUI files (Wave 2 dock-router, unverified) + new `cookbook/` (4) + `deep_research/` (7) + `main.py` + `docker-compose.yaml` + `requirements.txt` + 2 handoff docs.
 

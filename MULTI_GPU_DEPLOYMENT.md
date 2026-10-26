@@ -5,7 +5,7 @@
 This deployment splits Harvis AI workloads across two GPU nodes for optimal performance:
 
 - **Node 1 (node-gpu-1 / 192.168.1.195)**: Dedicated to **Ollama LLM inference**
-- **Node 2 (node-gpu-2 / 203.0.113.125)**: Dedicated to **ML workloads** (Whisper STT, TTS, Vision models)
+- **Node 2 (node-gpu-2 / 10.20.0.125)**: Dedicated to **ML workloads** (Whisper STT, TTS, Vision models)
 
 ### Benefits
 
@@ -48,8 +48,8 @@ showmount -e 192.168.1.195
 
 # Expected output:
 # Export list for 192.168.1.195:
-# /srv/nfs/ollama-models   192.168.1.0/24,203.0.113.0/24
-# /srv/nfs/ml-models-cache 192.168.1.0/24,203.0.113.0/24
+# /srv/nfs/ollama-models   192.168.1.0/24,10.20.0.0/24
+# /srv/nfs/ml-models-cache 192.168.1.0/24,10.20.0.0/24
 ```
 
 ### Step 3: Migrate Existing ML Models to NFS
