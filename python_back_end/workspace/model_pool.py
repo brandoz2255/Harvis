@@ -60,13 +60,20 @@ def _busy(tag: str, now: float) -> int:
 
 
 @contextmanager
-def lease(model: str | None) -> Iterator[str | None]:
+def lease(model: str | None, served: set[str] | None = None) -> Iterator[str | None]:
     """Yield the tag to send this request under, counting it in flight until exit.
+
+    ``served`` is what the upstream the request goes to holds right now. The host is
+    chosen before the tag, so a tag it lacks would 404 (the PAIR router is closed and
+    the request went to this machine's own Ollama). ``None`` means unknown: pool as
+    before.
 
     No awaits between choosing and counting, so concurrent requests on the one
     event loop each see the others' leases."""
     pool = pool_for(model)
-    if not pool:
+    if pool and served is not None:
+        pool = [t for t in pool if t == model or t in served]
+    if not pool or len(pool) < 2:
         yield model
         return
     now = time.monotonic()

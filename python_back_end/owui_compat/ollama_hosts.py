@@ -457,6 +457,20 @@ async def resolve(model: str, *, force: bool = False) -> tuple[str | None, str]:
     return None, "absent"
 
 
+def served_tags(url: str) -> set[str] | None:
+    """Tags the configured host behind ``url`` served at its last probe.
+
+    ``None`` when that is unknown: ``url`` is not one of the configured hosts, or the
+    host was never probed (a single-machine install never probes). Never probes itself:
+    the caller has just routed, so the cache is as fresh as the routing decision."""
+    want = _clean(url)
+    for st in sorted(_cache.values(), key=lambda s: len(s.base_url), reverse=True):
+        base = _clean(st.base_url)
+        if base and (want == base or want.startswith(base + "/")):
+            return set(st.tags) if st.reachable else None
+    return None
+
+
 def host_label(name: str) -> str:
     """The user-facing label of a configured host, or the name when it is not configured."""
     st = _cache.get(name)
