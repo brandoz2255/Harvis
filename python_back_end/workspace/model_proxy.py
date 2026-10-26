@@ -31,6 +31,14 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from workspace import model_pool as _model_pool
 
+
+def _served_tags(url: str) -> set[str] | None:
+    """What the upstream at ``url`` holds now, so the pool never swaps to a tag it lacks."""
+    from owui_compat import ollama_hosts
+
+    return ollama_hosts.served_tags(url)
+
+
 logger = logging.getLogger(__name__)
 
 MOONSHOT_API_KEY = os.getenv("MOONSHOT_API_KEY", "")
@@ -1364,7 +1372,7 @@ async def execute_chat_completion(request: Request, body: dict):
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(600.0, connect=10.0)
         ) as client:
-            with _model_pool.lease(body.get("model")) as _pooled:
+            with _model_pool.lease(body.get("model"), _served_tags(target_url)) as _pooled:
                 if _pooled != body.get("model"):
                     body = {**body, "model": _pooled}
                 resp = await client.post(target_url, json=body, headers=headers)
@@ -1624,7 +1632,7 @@ async def _stream_from_upstream(
     Safe to retry at this point: a non-200 means nothing has been yielded yet.
     """
     state: dict = {}
-    with _model_pool.lease(body.get("model")) as _pooled:
+    with _model_pool.lease(body.get("model"), _served_tags(url)) as _pooled:
         if _pooled != body.get("model"):
             body = {**body, "model": _pooled}
         async for event in _stream_from_upstream_once(

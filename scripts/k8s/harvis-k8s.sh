@@ -295,11 +295,13 @@ choose_build_space() {
 
 pick_lan_port() {
   local cur
-  LAN_PORT="${HARVIS_LAN_MODELS_PORT:-11434}"
+  # The shell wins over .env, as for the other settings; .env makes a choice such as 0 stick.
+  local want="${HARVIS_LAN_MODELS_PORT:-$(env_get HARVIS_LAN_MODELS_PORT)}"
+  LAN_PORT="${want:-11434}"
   [ "$LAN_PORT" = "0" ] && return 0
   # A re-run keeps the port we already serve on, even if that was the 11435 fallback.
   cur="$(kc -n "$NS" get svc lan-models -o jsonpath='{.spec.ports[0].port}' 2>/dev/null || true)"
-  if [ -n "$cur" ] && { [ -z "${HARVIS_LAN_MODELS_PORT:-}" ] || [ "$cur" = "$LAN_PORT" ]; }; then
+  if [ -n "$cur" ] && { [ -z "$want" ] || [ "$cur" = "$LAN_PORT" ]; }; then
     LAN_PORT="$cur"; return 0
   fi
   if port_busy "$LAN_PORT"; then
@@ -446,6 +448,12 @@ cmd_up() {
   bash scripts/power-button.sh install || true
   say "Applying Harvis to the cluster (namespace $NS) ..."
   render "$node" "$ip" "$dns" | kc apply -f - >/dev/null
+  # apply never deletes: with sharing turned off, remove what an earlier run made.
+  if [ "$LAN_PORT" = "0" ] || [ "${HARVIS_K8S_OLLAMA:-1}" != "1" ]; then
+    kc -n "$NS" delete svc/lan-models deploy/lan-models configmap/lan-models \
+      networkpolicy/public-lan-models networkpolicy/ollama-from-lan-models \
+      --ignore-not-found >/dev/null 2>&1 || true
+  fi
   # From here Kubernetes holds the ports, ready or not. Marked now, not after the
   # rollout: a run that failed on one pod left no mark, and the next ./install.sh
   # --k8s then found its own ports "taken" by the cluster it had just made.

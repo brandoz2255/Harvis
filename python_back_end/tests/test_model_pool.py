@@ -39,3 +39,16 @@ def test_no_pools_configured(monkeypatch):
     monkeypatch.delenv("HARVIS_MODEL_POOLS", raising=False)
     with model_pool.lease(A) as m1, model_pool.lease(A) as m2:
         assert m1 == m2 == A
+
+
+def test_never_swaps_to_a_tag_the_upstream_lacks(monkeypatch):
+    # The PAIR router is closed: the request goes to this machine's Ollama, which holds A only.
+    monkeypatch.setenv("HARVIS_MODEL_POOLS", f"{A},{B}")
+    with model_pool.lease(A, {A}) as m1, model_pool.lease(A, {A}) as m2:
+        assert m1 == m2 == A
+
+
+def test_swaps_when_the_upstream_serves_both(monkeypatch):
+    monkeypatch.setenv("HARVIS_MODEL_POOLS", f"{A},{B}")
+    with model_pool.lease(A, {A, B}) as m1, model_pool.lease(A, {A, B}) as m2:
+        assert sorted([m1, m2]) == sorted([A, B])
