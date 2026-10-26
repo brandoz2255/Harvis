@@ -16,7 +16,7 @@ spec:
     requests:
       storage: 50Gi
 ---
-# Local PVC for Ollama Models (will be created on node2/pop-os-343570d8 because ollama pod has nodeSelector)
+# Local PVC for Ollama Models (will be created on node2/node-gpu-2 because ollama pod has nodeSelector)
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

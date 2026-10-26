@@ -1,5 +1,5 @@
 ---
-# GitLab Runner Deployment - Node 1 (pop-os) for Backend Builds
+# GitLab Runner Deployment - Node 1 (node-gpu-1) for Backend Builds
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -22,7 +22,7 @@ spec:
         app.kubernetes.io/instance: node1
     spec:
       serviceAccountName: gitlab-runner
-      # Force scheduling on Node 1 (pop-os) - control plane with RTX 4090
+      # Force scheduling on Node 1 (node-gpu-1) - control plane with RTX 4090
       nodeSelector:
         kubernetes.io/hostname: pop-os
 
@@ -108,7 +108,7 @@ spec:
           emptyDir: {}
 
 ---
-# GitLab Runner Deployment - Node 2 (pop-os-343570d8) for Frontend/General Builds
+# GitLab Runner Deployment - Node 2 (node-gpu-2) for Frontend/General Builds
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -131,7 +131,7 @@ spec:
         app.kubernetes.io/instance: node2
     spec:
       serviceAccountName: gitlab-runner
-      # Force scheduling on Node 2 (pop-os-343570d8) - worker with RTX 3090 Ti
+      # Force scheduling on Node 2 (node-gpu-2) - worker with RTX 3090 Ti
       nodeSelector:
         kubernetes.io/hostname: pop-os-343570d8
 

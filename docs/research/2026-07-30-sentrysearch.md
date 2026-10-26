@@ -61,7 +61,7 @@ Honest maturity read: a real, well-tested, actively developed personal project w
 
 - **Linux + compose:** straightforward sibling container; needs the footage path bind-mounted and egress to the Gemini API allowed for that container only.
 - **Windows (Docker Desktop/WSL2):** works — upstream CI tests Windows natively; inside a Linux container the platform is moot. Real friction is bind-mounting footage from the Windows filesystem (`/mnt/c/...` I/O is slow for multi-GB video; advise copying footage into a WSL2/volume path). Upstream's uv config even special-cases Windows CUDA wheels, but that's irrelevant to the containerized default path.
-- **K8s:** container + PVC for the index + NetworkPolicy allowing only `generativelanguage.googleapis.com` — which collides with the known csusb.edu UDP/53 DNS blocking; the Gemini hostname would need the same CoreDNS workaround as `registry.ollama.ai` (K8S_DNS_WORKAROUND.md). Getting user footage into a cluster PVC is awkward; K8s is honestly a poor fit for this feature.
+- **K8s:** container + PVC for the index + NetworkPolicy allowing only `generativelanguage.googleapis.com` — which collides with the known campus-network UDP/53 DNS blocking; the Gemini hostname would need the same CoreDNS workaround as `registry.ollama.ai` (K8S_DNS_WORKAROUND.md). Getting user footage into a cluster PVC is awkward; K8s is honestly a poor fit for this feature.
 
 ## 7. Risks, license and ToS traps
 

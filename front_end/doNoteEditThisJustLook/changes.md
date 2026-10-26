@@ -2544,7 +2544,7 @@ Multiple critical issues identified with the vibecoding service:
 #### 1. Ollama URL Configuration (Tools: Bash, Grep)
 - **Investigation**: Used `Grep` to search for Ollama URL patterns across codebase
 - **Verification**: Used `Bash` to check Docker container environment variables
-- **Finding**: Confirmed `OLLAMA_URL=https://coyotegpt.ngrok.app/ollama` was already set in backend container
+- **Finding**: Confirmed `OLLAMA_URL=https://your-ollama.example.com/ollama` was already set in backend container
 
 #### 2. Authentication Headers Fix (Tools: Read, Edit, Grep)
 - **Pattern Analysis**: Used `Grep` to find existing authentication patterns:
@@ -2917,7 +2917,7 @@ async def startup_event_disabled():
 ```bash
 DATABASE_URL=postgresql://pguser:pgpassword@pgsql-db:5432/database
 JWT_SECRET=<your-jwt-secret>
-OLLAMA_URL=https://coyotegpt.ngrok.app/ollama
+OLLAMA_URL=https://your-ollama.example.com/ollama
 OLLAMA_API_KEY=<your-ollama-api-key>
 ```
 
@@ -7616,7 +7616,7 @@ Multiple critical issues identified with the vibecoding service:
 #### 1. Ollama URL Configuration (Tools: Bash, Grep)
 - **Investigation**: Used `Grep` to search for Ollama URL patterns across codebase
 - **Verification**: Used `Bash` to check Docker container environment variables
-- **Finding**: Confirmed `OLLAMA_URL=https://coyotegpt.ngrok.app/ollama` was already set in backend container
+- **Finding**: Confirmed `OLLAMA_URL=https://your-ollama.example.com/ollama` was already set in backend container
 
 #### 2. Authentication Headers Fix (Tools: Read, Edit, Grep)
 - **Pattern Analysis**: Used `Grep` to find existing authentication patterns:
@@ -7989,7 +7989,7 @@ async def startup_event_disabled():
 ```bash
 DATABASE_URL=postgresql://pguser:pgpassword@pgsql-db:5432/database
 JWT_SECRET=<your-jwt-secret>
-OLLAMA_URL=https://coyotegpt.ngrok.app/ollama
+OLLAMA_URL=https://your-ollama.example.com/ollama
 OLLAMA_API_KEY=<your-ollama-api-key>
 ```
 

@@ -84,7 +84,7 @@ Net: the *product* duplicates open-notebook + K3 + research/. The *parts worth h
 
 - **Linux/compose:** Phase 1–2 are pure backend code + one migration; restart `harvis-backend` (bind-mount inode trap applies — restart, don't trust live edits on root-level files).
 - **Windows/WSL2:** OAuth callback URLs must resolve to the browser-reachable origin (`http://localhost:9000` via nginx), not an internal Docker name — same rule as Linux since Harvis fronts everything with nginx; no `host.docker.internal` needed for this feature. Extension (Phase 3) is host-browser software, identical on all OSes.
-- **K8s:** token-storage table lives in the existing pgsql; outbound OAuth/token-exchange calls need egress from the backend pod to the identity providers — note the csusb.edu cluster blocks outbound UDP/53, so provider hostnames may need CoreDNS entries (see `K8S_DNS_WORKAROUND.md`). NetworkPolicy: OAuth egress is backend-pod-only, never OpenClaw.
+- **K8s:** token-storage table lives in the existing pgsql; outbound OAuth/token-exchange calls need egress from the backend pod to the identity providers — note the campus cluster blocks outbound UDP/53, so provider hostnames may need CoreDNS entries (see `K8S_DNS_WORKAROUND.md`). NetworkPolicy: OAuth egress is backend-pod-only, never OpenClaw.
 
 ## 7. Risks, license and ToS traps
 

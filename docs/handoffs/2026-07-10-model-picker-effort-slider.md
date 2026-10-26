@@ -50,7 +50,7 @@ composer UI over several turns.
    preview + length at INFO — also the source of the earlier `Failed to decrypt` log noise); model_id length cap;
    negative cache; display-name clobber guard (`nameTouched` in ModelProfileEditor).
 
-Also earlier this session: diagnosed OpenClaw "Error" (= `.env` `OPENCLAW_URL=ws://192.168.5.58:18789` points at an
+Also earlier this session: diagnosed OpenClaw "Error" (= `.env` `OPENCLAW_URL=ws://192.168.20.58:18789` points at an
 intentional remote box that's firewalled on :18789 — remote-side fix, NOT a Harvis bug) + the "no verified
 credential" chat error (stale pre-verification timing; subscription chat works). See memory
 `project_openclaw_remote_and_cred_timing.md`.

@@ -161,7 +161,7 @@ and the default backend needs the Gemini API.
 |---|---|---|---|
 | MCP OAuth port | native | unaffected | needs a public callback URL / ingress |
 | screenshot-to-code harvest | native | unaffected | unaffected |
-| zoo.dev adapter | native | unaffected | **CoreDNS entry for `api.zoo.dev`** (csusb blocks UDP/53); CDN-backed, so pinned IPs drift |
+| zoo.dev adapter | native | unaffected | **CoreDNS entry for `api.zoo.dev`** (some networks block UDP/53); CDN-backed, so pinned IPs drift |
 | Lightpanda | native | ships as a Linux container — **no native Windows binary needed**; arm64 first-class | fine |
 | electronics sidecar | native | unaffected | fine |
 | provider catalog | native | unaffected | **CoreDNS entries per provider domain** |

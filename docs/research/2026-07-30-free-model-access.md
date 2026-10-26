@@ -92,7 +92,7 @@ Never do:
 ## 7. Distro notes
 
 - **Linux/compose**: nothing changes — backend already makes outbound HTTPS calls (Moonshot/NVIDIA routes). No new networks, ports, or mounts.
-- **Kubernetes**: backend pod must be able to resolve/reach ~6 new HTTPS domains (`generativelanguage.googleapis.com`, `api.groq.com`, `openrouter.ai`, etc.). Two real constraints: (a) if a NetworkPolicy ever restricts backend egress (today only OpenClaw is restricted), these domains must be allowed; (b) the documented csusb.edu **UDP/53 block** (`K8S_DNS_WORKAROUND.md`) means each provider domain may need a CoreDNS entry, exactly like `registry.ollama.ai` did. Flag this in the Phase 3 docs.
+- **Kubernetes**: backend pod must be able to resolve/reach ~6 new HTTPS domains (`generativelanguage.googleapis.com`, `api.groq.com`, `openrouter.ai`, etc.). Two real constraints: (a) if a NetworkPolicy ever restricts backend egress (today only OpenClaw is restricted), these domains must be allowed; (b) the documented campus-network **UDP/53 block** (`K8S_DNS_WORKAROUND.md`) means each provider domain may need a CoreDNS entry, exactly like `registry.ollama.ai` did. Flag this in the Phase 3 docs.
 - **Windows (Docker Desktop/WSL2)**: no host networking, no GPU, no Docker socket, no bind-mount sensitivity — all calls originate inside the backend container, so behavior is identical. The only Windows-specific note is cosmetic: signup flows open in the user's browser, which works the same.
 
 ## 8. Risks, license and ToS traps

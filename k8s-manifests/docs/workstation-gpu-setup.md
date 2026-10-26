@@ -8,7 +8,7 @@ This document describes the two-GPU workstation deployment for high-performance 
 ┌────────────────────────────────────────────────────────────────────────────┐
 │                        HARVIS AI WORKSTATION CLUSTER                        │
 ├────────────────────────────────────┬───────────────────────────────────────┤
-│  NODE 1: pop-os (RTX 4090 24GB)    │  NODE 2: pop-os-343570d8 (3090Ti 24GB)│
+│  NODE 1: node-gpu-1 (RTX 4090 24GB)    │  NODE 2: node-gpu-2 (3090Ti 24GB)│
 │  ─────────────────────────────     │  ───────────────────────────────────  │
 │                                    │                                       │
 │  ┌──────────────────────────┐      │  ┌─────────────────────────────────┐  │
@@ -36,8 +36,8 @@ This document describes the two-GPU workstation deployment for high-performance 
 
 | File | Description | Node |
 |------|-------------|------|
-| `ollama-workstation.yaml` | Dedicated Ollama for LLMs | pop-os (RTX 4090) |
-| `backend-workstation.yaml` | Dedicated ML Backend (no Ollama) | pop-os-343570d8 (RTX 3090 Ti) |
+| `ollama-workstation.yaml` | Dedicated Ollama for LLMs | node-gpu-1 (RTX 4090) |
+| `backend-workstation.yaml` | Dedicated ML Backend (no Ollama) | node-gpu-2 (RTX 3090 Ti) |
 
 ## Configuration
 
@@ -96,8 +96,8 @@ kubectl apply -f k8s-manifests/services/backend-workstation.yaml
 kubectl get pods -n ai-agents -o wide | grep workstation
 
 # Expected:
-# harvis-ai-ollama-workstation-xxx    pop-os
-# harvis-ai-backend-workstation-xxx   pop-os-343570d8
+# harvis-ai-ollama-workstation-xxx    node-gpu-1
+# harvis-ai-backend-workstation-xxx   node-gpu-2
 
 # Test Ollama from backend pod
 kubectl exec -n ai-agents deploy/harvis-ai-backend-workstation -- \
@@ -111,8 +111,8 @@ kubectl logs -n ai-agents deploy/harvis-ai-backend-workstation | grep -i ollama
 
 | Node | GPU | Workload | VRAM Usage |
 |------|-----|----------|------------|
-| pop-os | RTX 4090 (24GB) | Ollama LLMs | Up to 24GB for models |
-| pop-os-343570d8 | RTX 3090 Ti (24GB) | Whisper + TTS | ~6-10GB typical |
+| node-gpu-1 | RTX 4090 (24GB) | Ollama LLMs | Up to 24GB for models |
+| node-gpu-2 | RTX 3090 Ti (24GB) | Whisper + TTS | ~6-10GB typical |
 
 ## Troubleshooting
 

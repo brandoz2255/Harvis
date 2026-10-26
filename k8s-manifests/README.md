@@ -14,7 +14,7 @@ Plain Kubernetes manifests for deploying the Harvis AI Project to Kubernetes.
 
 The deployment consists of the following components:
 
-- **Nginx**: LoadBalancer service (192.168.4.241) - Entry point for all traffic
+- **Nginx**: LoadBalancer service (192.168.10.241) - Entry point for all traffic
 - **Frontend**: Next.js web application (ClusterIP:3000)
 - **Merged Ollama + Backend**: Combined deployment with GPU support
   - Ollama AI models server (port 11434)
@@ -101,8 +101,8 @@ kubectl get pvc -n ai-agents
 
 ### 5. Access the Application
 
-- **Web UI**: http://192.168.4.241 (via Nginx LoadBalancer)
-- **Backend API**: http://192.168.4.241/api (proxied by Nginx)
+- **Web UI**: http://192.168.10.241 (via Nginx LoadBalancer)
+- **Backend API**: http://192.168.10.241/api (proxied by Nginx)
 - **n8n**: Configure Ingress or port-forward to access
 
 ```bash
@@ -152,7 +152,7 @@ Edit `services/nginx.yaml`:
 ```yaml
 spec:
   type: LoadBalancer
-  loadBalancerIP: 192.168.4.241  # Change this IP
+  loadBalancerIP: 192.168.10.241  # Change this IP
 ```
 
 ### GPU Configuration
@@ -357,4 +357,4 @@ This manifest set is equivalent to the Helm chart deployment with the following 
 
 For issues or questions:
 - Project: https://github.com/brandoz2255/aidev
-- Maintainer: dulc3 <0081833650@coyote.csusb.edu>
+- Maintainer: dulc3 (https://github.com/brandoz2255)

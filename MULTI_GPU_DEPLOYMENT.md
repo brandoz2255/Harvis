@@ -4,8 +4,8 @@
 
 This deployment splits Harvis AI workloads across two GPU nodes for optimal performance:
 
-- **Node 1 (pop-os / 192.168.1.195)**: Dedicated to **Ollama LLM inference**
-- **Node 2 (pop-os-343570d8 / 139.182.180.125)**: Dedicated to **ML workloads** (Whisper STT, TTS, Vision models)
+- **Node 1 (node-gpu-1 / 192.168.1.195)**: Dedicated to **Ollama LLM inference**
+- **Node 2 (node-gpu-2 / 10.20.0.125)**: Dedicated to **ML workloads** (Whisper STT, TTS, Vision models)
 
 ### Benefits
 
@@ -36,7 +36,7 @@ This script will:
 SSH to the worker node and install NFS client:
 
 ```bash
-ssh pop-os-343570d8
+ssh node-gpu-2
 sudo apt update && sudo apt install -y nfs-common
 ```
 
@@ -48,8 +48,8 @@ showmount -e 192.168.1.195
 
 # Expected output:
 # Export list for 192.168.1.195:
-# /srv/nfs/ollama-models   192.168.1.0/24,139.182.180.0/24
-# /srv/nfs/ml-models-cache 192.168.1.0/24,139.182.180.0/24
+# /srv/nfs/ollama-models   192.168.1.0/24,10.20.0.0/24
+# /srv/nfs/ml-models-cache 192.168.1.0/24,10.20.0.0/24
 ```
 
 ### Step 3: Migrate Existing ML Models to NFS
@@ -61,7 +61,7 @@ Before deleting the old deployment, copy existing models to NFS:
 kubectl exec -it -n ai-agents $(kubectl get pods -n ai-agents -l app.kubernetes.io/component=merged-ollama-backend -o jsonpath='{.items[0].metadata.name}') -c harvis-backend -- ls -la /models-cache
 
 # Copy existing models to NFS (from control plane node)
-# This assumes the old PVC is mounted on pop-os node
+# This assumes the old PVC is mounted on node-gpu-1 node
 sudo cp -r /var/lib/rancher/k3s/storage/pvc-6d5ffc7d-437d-42f8-8e62-76c9a478fee2_ai-agents_ml-models-cache/* /srv/nfs/ml-models-cache/
 
 # Copy existing Ollama models
@@ -125,17 +125,17 @@ kubectl get pods -n ai-agents -o wide | grep -E 'ollama|backend'
 
 Expected output:
 ```
-harvis-ai-ollama-xxxxx    1/1   Running   ...   pop-os
-harvis-ai-backend-xxxxx   1/1   Running   ...   pop-os-343570d8
+harvis-ai-ollama-xxxxx    1/1   Running   ...   node-gpu-1
+harvis-ai-backend-xxxxx   1/1   Running   ...   node-gpu-2
 ```
 
 Verify GPU allocation:
 
 ```bash
-# On Node 1 (pop-os) - should show Ollama using GPU
+# On Node 1 (node-gpu-1) - should show Ollama using GPU
 kubectl exec -n ai-agents $(kubectl get pods -n ai-agents -l app.kubernetes.io/component=ollama -o jsonpath='{.items[0].metadata.name}') -- nvidia-smi
 
-# On Node 2 (pop-os-343570d8) - should show Backend using GPU
+# On Node 2 (node-gpu-2) - should show Backend using GPU
 kubectl exec -n ai-agents $(kubectl get pods -n ai-agents -l app.kubernetes.io/component=backend -o jsonpath='{.items[0].metadata.name}') -- nvidia-smi
 ```
 
@@ -170,8 +170,8 @@ Nodes are labeled for GPU workload distribution:
 kubectl get nodes --show-labels | grep gpu-workload
 ```
 
-- `gpu-workload=ollama` - Node 1 (pop-os)
-- `gpu-workload=ml-backend` - Node 2 (pop-os-343570d8)
+- `gpu-workload=ollama` - Node 1 (node-gpu-1)
+- `gpu-workload=ml-backend` - Node 2 (node-gpu-2)
 
 ## Architecture Diagram
 
@@ -184,7 +184,7 @@ kubectl get nodes --show-labels | grep gpu-workload
                  │                        │
         ┌────────▼────────┐      ┌───────▼────────┐
         │   Node 1 (GPU)  │      │  Node 2 (GPU)  │
-        │   pop-os        │      │ pop-os-343570d8│
+        │   node-gpu-1        │      │ node-gpu-2│
         │                 │      │                 │
         │  ┌───────────┐  │      │  ┌──────────┐  │
         │  │  Ollama   │  │      │  │ Backend  │  │

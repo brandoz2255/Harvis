@@ -3,7 +3,7 @@
 **Date:** 2026-08-25
 **Branch:** `claude/jolly-dhawan-5babcd` (worktree), on top of `test/fresh-clone-2026-08-23` @ `21d82e71`
 **State:** implemented, compiled, deployed to the test VM, **uncommitted**
-**Test bed:** VM 901 `harvis-blank` — `http://192.168.4.201:9000`, `ssh ommblitz@192.168.4.201`
+**Test bed:** VM 901 `harvis-blank` — `http://192.168.10.201:9000`, `ssh ommblitz@192.168.10.201`
 
 ---
 
@@ -53,7 +53,7 @@ Verified live on VM 901:
 
 **Not verified:** an actual successful codeless signup. Completing it creates the admin account,
 which is yours to make. That is the one remaining assertion — sign up at
-`http://192.168.4.201:9000` with no code and it should just work. If it 403s, the gate inverted
+`http://192.168.10.201:9000` with no code and it should just work. If it 403s, the gate inverted
 wrong and `main.py` `_signup_with_connection` is the only place to look.
 
 ## 4. ⚠ Separate defect found — the VM cannot rebuild its own frontend while the stack runs
@@ -90,7 +90,7 @@ Worth fixing properly, in rough order of value:
 - **`HARVIS_OWUI_ENABLE_SIGNUP` defaults to `true`.** Post-change this is the flag that matters for
   an exposed box: anyone who can reach port 9000 can self-register an ordinary account. Fine for the
   lab VM, not fine for anything internet-facing.
-- **VM 901's `.env` now has `HARVIS_LLM_BASE_URL=http://192.168.4.244:11434`** pointing at the
+- **VM 901's `.env` now has `HARVIS_LLM_BASE_URL=http://192.168.10.244:11434`** pointing at the
   laptop's Ollama. That only works while the laptop is on the same network — on campus it will not
   resolve, so point it at whatever model server is reachable there, or install Ollama on the VM.
 

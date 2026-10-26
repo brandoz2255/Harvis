@@ -68,7 +68,7 @@ the build exiting 0, which on this repo is [not evidence](2026-08-23-video-artif
 - Dark mode reloaded and compared: unchanged. Ollama and GitHub marks are still white there.
 - Free Keys guide modal in light mode: all six providers brand-tinted, previously all on `#0e1320`.
 
-**Not verified:** the test VM (192.168.4.201) has not received this change — it is still at
+**Not verified:** the test VM (192.168.10.201) has not received this change — it is still at
 `eb7a3f67` from the previous deploy.
 
 ## 4. Found while working, not fixed

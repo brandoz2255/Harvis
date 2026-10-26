@@ -1,5 +1,5 @@
 # Ollama Workstation Deployment - Dedicated LLM Node
-# Runs on Node 1 (pop-os) with RTX 4090 for large model inference
+# Runs on Node 1 (node-gpu-1) with RTX 4090 for large model inference
 # Single Ollama instance - Backend on Node 2 calls this over network
 apiVersion: apps/v1
 kind: Deployment
@@ -27,7 +27,7 @@ spec:
         gpu-role: dedicated-llm
     spec:
       runtimeClassName: nvidia
-      # Node 1: pop-os with RTX 4090 (24GB VRAM) for large models
+      # Node 1: node-gpu-1 with RTX 4090 (24GB VRAM) for large models
       nodeSelector:
         kubernetes.io/hostname: pop-os
       containers:

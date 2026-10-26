@@ -90,7 +90,7 @@ Net effect on the 7 GB budget: **zero by default**; ~0.3 GB opt-in. Backend imag
 
 - **Linux/compose:** `docker compose --profile electronics up -d`; internal network only, mirrors `cad-internal`.
 - **Windows (Docker Desktop/WSL2):** sidecar is pure CPU/pure Python — no GPU, no device mounts, no inotify or path-perf concerns; works unchanged. Phase 2 egress is from the backend, so proxy/firewall behavior is identical to existing cloud-engine calls.
-- **K8s:** separate Deployment + Service for erc-engine; NetworkPolicy = ingress only from `app: backend`, **egress deny-all** (it needs none — note this is *stricter* than the campus-DNS problem, which therefore doesn't affect it). Nexar/DigiKey egress originates from the backend pod only and does hit the known csusb.edu UDP-53 block — the `K8S_DNS_WORKAROUND.md` CoreDNS entry dance applies to `api.nexar.com` (or chosen vendor).
+- **K8s:** separate Deployment + Service for erc-engine; NetworkPolicy = ingress only from `app: backend`, **egress deny-all** (it needs none — note this is *stricter* than the campus-DNS problem, which therefore doesn't affect it). Nexar/DigiKey egress originates from the backend pod only and does hit the campus-network UDP-53 block — the `K8S_DNS_WORKAROUND.md` CoreDNS entry dance applies to `api.nexar.com` (or chosen vendor).
 
 ## 8. Risks, license and ToS traps
 

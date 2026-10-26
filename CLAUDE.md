@@ -294,7 +294,7 @@ The frontend has a single **Web Research** toggle button. First click shows a on
 
 ## Kubernetes DNS Issues
 
-**CRITICAL**: The Kubernetes cluster is in a network environment (csusb.edu) that blocks outbound UDP port 53 traffic from pods, preventing DNS resolution of external domains. This affects model pulling, registry access, and any external API calls.
+**CRITICAL**: The Kubernetes cluster is in a network environment (a campus network) that blocks outbound UDP port 53 traffic from pods, preventing DNS resolution of external domains. This affects model pulling, registry access, and any external API calls.
 
 **Solution**: See `K8S_DNS_WORKAROUND.md` for detailed instructions on adding DNS entries to CoreDNS.
 

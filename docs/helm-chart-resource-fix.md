@@ -2,7 +2,7 @@
 
 ## Problem Summary
 
-After a git pull and FluxCD update, the Harvis AI application was experiencing 502 errors and backend pod crashes. The application was inaccessible via its MetalLB LoadBalancer IP (139.182.180.201).
+After a git pull and FluxCD update, the Harvis AI application was experiencing 502 errors and backend pod crashes. The application was inaccessible via its MetalLB LoadBalancer IP (10.20.0.201).
 
 ## Root Cause Analysis
 
@@ -160,7 +160,7 @@ INFO:main:Audio written to /tmp/response_a0db0a13-0df6-4e1b-85bb-6a5c4fc0342a.wa
 ```
 
 **Application Status**:
-- MetalLB LoadBalancer: `139.182.180.201` (accessible)
+- MetalLB LoadBalancer: `10.20.0.201` (accessible)
 - Backend pods: Stable, no crashes
 - TTS functionality: Working on GPU with CUDA
 - Ollama integration: Connected via localhost endpoint

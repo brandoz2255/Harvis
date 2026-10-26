@@ -9,20 +9,20 @@
 ## Context from the laptop side (don't change these — they're already done)
 
 The laptop backend has been reconfigured. Confirmed env on `harvis-backend` container:
-- `OPENCLAW_URL=ws://192.168.5.58:18789` ← rig openclaw (primary)
+- `OPENCLAW_URL=ws://192.168.20.58:18789` ← rig openclaw (primary)
 - `OPENCLAW_FALLBACK_URL=ws://openclaw:18789` ← laptop docker openclaw (fallback)
-- `DESKTOP_OLLAMA_URL=http://192.168.5.58:11434` ← rig Ollama (for model_proxy auto-routing)
+- `DESKTOP_OLLAMA_URL=http://192.168.20.58:11434` ← rig Ollama (for model_proxy auto-routing)
 - `OPENCLAW_HOME=/home/node` ← rig container is `node` user
-- `OPENCLAW_GATEWAY_TOKEN=5e948a4673f0241c0e6fb1f0ec708147eee6e2289f2dc0401a5e100446cab1e7`
+- `OPENCLAW_GATEWAY_TOKEN=<your-gateway-token>`
 
 **Verified network from laptop → rig:**
-- TCP 192.168.5.58:18789 → open (openclaw exposed to LAN — already done)
-- TCP 192.168.5.58:11434 → open (Ollama exposed to LAN — already done)
+- TCP 192.168.20.58:18789 → open (openclaw exposed to LAN — already done)
+- TCP 192.168.20.58:11434 → open (Ollama exposed to LAN — already done)
 - Rig has **zero models installed** in Ollama currently.
 
 **Key IPs:**
-- Laptop LAN IP: `192.168.4.244` (the rig's openclaw needs to call back here for the harvis-proxy LLM router)
-- Rig LAN IP: `192.168.5.58`
+- Laptop LAN IP: `192.168.10.244` (the rig's openclaw needs to call back here for the harvis-proxy LLM router)
+- Rig LAN IP: `192.168.20.58`
 - Same `/22` subnet so routing is direct, no NAT.
 
 ---
@@ -33,7 +33,7 @@ The laptop backend has been reconfigured. Confirmed env on `harvis-backend` cont
 
 ```bash
 grep '^OPENCLAW_GATEWAY_TOKEN=' /home/harvis/harvis-host/.env
-# expected: OPENCLAW_GATEWAY_TOKEN=5e948a4673f0241c0e6fb1f0ec708147eee6e2289f2dc0401a5e100446cab1e7
+# expected: OPENCLAW_GATEWAY_TOKEN=<your-gateway-token>
 ```
 
 If it differs, the laptop's backend will get "Invalid proxy token" errors and every workspace will fail at the WebSocket handshake. Either change the rig to match, or change the laptop's `.env` and restart the laptop's backend. Whichever you pick, both ends must agree.
@@ -50,7 +50,7 @@ Edit the active config file (likely `openclaw/config/byo/openclaw.json` per the 
   "providers": {
     "harvis-proxy": {
       "api": "openai-completions",
-      "baseUrl": "http://192.168.4.244:8000/v1",   // ← LAPTOP's LAN IP
+      "baseUrl": "http://192.168.10.244:8000/v1",   // ← LAPTOP's LAN IP
       "apiKey": "${OPENCLAW_GATEWAY_TOKEN}",
       "models": [
         { "id": "auto", "name": "Auto (follows /model picked in Discord)" }
@@ -136,11 +136,11 @@ This proves the full loop works before involving Discord. From the rig:
 #   1. Strip the prefix
 #   2. Hit the auto-sentinel branch
 #   3. Look up openclaw_llm_config for the current /model pick
-#   4. If model is on rig, route to http://192.168.5.58:11434
+#   4. If model is on rig, route to http://192.168.20.58:11434
 #   5. Stream back the response
 
-LAPTOP=192.168.4.244
-TOK=5e948a4673f0241c0e6fb1f0ec708147eee6e2289f2dc0401a5e100446cab1e7
+LAPTOP=192.168.10.244
+TOK=<your-gateway-token>
 
 curl -sS -X POST http://$LAPTOP:8000/v1/chat/completions \
   -H "Authorization: Bearer $TOK" \
@@ -180,7 +180,7 @@ The laptop bot will dispatch to the rig's openclaw, which will run qwen3:14b on 
 |---|---|---|
 | Discord: workspace fails immediately with "Connection refused" | Rig openclaw not running or port not LAN-exposed | `docker ps` on rig + check the openclaw service is up + verify `0.0.0.0:18789:18789` port binding |
 | Discord: "Invalid proxy token" or auth errors | Token mismatch | Re-sync `OPENCLAW_GATEWAY_TOKEN` between rig `.env` and laptop `.env` |
-| Workspace launches but agent never produces output | Rig openclaw can't reach laptop backend (harvis-proxy callback) | curl from inside the rig's openclaw container: `docker exec harvis-openclaw curl http://192.168.4.244:8000/health` — should return 200 |
+| Workspace launches but agent never produces output | Rig openclaw can't reach laptop backend (harvis-proxy callback) | curl from inside the rig's openclaw container: `docker exec harvis-openclaw curl http://192.168.10.244:8000/health` — should return 200 |
 | Agent runs but model is wrong | model_proxy resolver didn't find the model on rig Ollama | Check laptop backend logs for `model_proxy: capping ollama num_ctx=` and `model_proxy: resolved` lines; ensure rig Ollama has the model in `api/tags` |
 | GPU residency < 100% | KV cache too big OR model too big | Lower `OLLAMA_CONTEXT_LENGTH` on rig, or pick a smaller model (qwen3:8b) |
 
@@ -197,11 +197,11 @@ The laptop bot will dispatch to the rig's openclaw, which will run qwen3:14b on 
 
 ## Quick reference
 
-- **Laptop LAN IP**: `192.168.4.244`
-- **Rig LAN IP**: `192.168.5.58`
-- **Shared gateway token**: `5e948a4673f0241c0e6fb1f0ec708147eee6e2289f2dc0401a5e100446cab1e7`
+- **Laptop LAN IP**: `192.168.10.244`
+- **Rig LAN IP**: `192.168.20.58`
+- **Shared gateway token**: `<your-gateway-token>`
 - **Rig openclaw config (probable)**: `/home/harvis/harvis-host/openclaw/config/byo/openclaw.json`
 - **Target model**: `qwen3:14b`
-- **Smoke test endpoint**: `http://192.168.4.244:8000/v1/chat/completions`
+- **Smoke test endpoint**: `http://192.168.10.244:8000/v1/chat/completions`
 
 If anything in the rig's directory structure doesn't match the laptop's pattern (different config paths, different compose layout), trust what's actually on disk over what this brief assumes — and tell the user so they can update this doc.

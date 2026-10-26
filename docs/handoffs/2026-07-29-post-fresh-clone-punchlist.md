@@ -1,7 +1,7 @@
 # Handoff — 2026-07-29 → next session
 
 **Where we are:** the fresh-clone install works. VM 900 (`harvis-clean`, Ubuntu 24.04, 8 GB, no GPU,
-**192.168.5.95**) came up from nothing, the setup wizard walks a user from no model server to a pulled
+**192.168.20.95**) came up from nothing, the setup wizard walks a user from no model server to a pulled
 and verified model, and the whole free/Ollama path is proven live end to end. The user's read after
 walking the running stack: *"it looks fine but just needs those things."*
 

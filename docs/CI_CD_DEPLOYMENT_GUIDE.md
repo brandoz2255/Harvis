@@ -28,10 +28,10 @@ This guide covers the complete CI/CD pipeline for Harvis AI, from code commit to
    └─ GitLab CI pipeline starts
 
 3. GitLab CI Build Stage
-   ├─ Backend build job (runs on node1 - pop-os)
+   ├─ Backend build job (runs on node1 - node-gpu-1)
    │  ├─ Docker build: python_back_end/Dockerfile
    │  └─ Tags: staging-<sha>, staging-latest, build-<id>
-   └─ Frontend build job (runs on node2 - pop-os-343570d8)
+   └─ Frontend build job (runs on node2 - node-gpu-2)
       ├─ Docker build: front_end/jfrontend/Dockerfile
       └─ Tags: staging-<sha>, staging-latest, build-<id>
 

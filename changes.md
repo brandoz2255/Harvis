@@ -1473,7 +1473,7 @@ Hermes UI, browser tools in plain chat, GPU passthrough (David).
   `HARVIS_LLM_BASE_URL` already saved in `.env` (as `--llm-url` does), probes it and reports PASS or WARN.
 - **Verified:** laptop backend 22 passed (`test_research_from_chat`, `test_sandbox_path_to_rel`), 84 passed across
   tool/orchestration/sandbox/runner suites; `nginx -t` passes. On pve VM 901 (Docker mode, model server
-  192.168.4.244): `./install.sh --yes` exit 0 three times, "model server ... (saved in .env), 14 model(s)";
+  192.168.10.244): `./install.sh --yes` exit 0 three times, "model server ... (saved in .env), 14 model(s)";
   signed out `/` → 302 `/auth?redirect=/`, `/hermes/` → 301 `/`; signed in, `/hermes/#/<chat>` reloads to
   `/#/<chat>` with the chat open, WebSocket opens, no failed asset loads.
 - **Not done / known:** OWUI is still the sign-in page, and after sign-in its client router can render the
@@ -2772,7 +2772,7 @@ the storefront and 15 live vendor MCP endpoints. Worth its own task.
 
 Two reports, one theme. The setup wizard and the chat composer both had places where a working
 thing was reported as broken, or a broken thing as fine. Everything below was fixed and verified
-against the live stack on VM 102 (192.168.5.98), the fresh-install rig.
+against the live stack on VM 102 (192.168.20.98), the fresh-install rig.
 
 ### 1. The wizard would not advance after a Kimi Code key was connected
 
@@ -2838,7 +2838,7 @@ media devices"* instead of opening the voice sidebar.
 
 **Root cause:** browsers expose `navigator.mediaDevices` **only in a secure context** — HTTPS, or
 `localhost` / `127.0.0.1`. `nginx.conf` has exactly one `listen 80;` and zero `ssl_certificate`
-lines, so on a LAN origin like `http://192.168.5.98:9000` the property is simply `undefined`. Every
+lines, so on a LAN origin like `http://192.168.20.98:9000` the property is simply `undefined`. Every
 mic call throws a `TypeError` *before* any permission prompt can appear, and a single catch-all
 converted that into a denial. Nothing was denied; the API does not exist on that origin. The
 message sent the operator to audit browser settings that were never involved.
@@ -4031,7 +4031,7 @@ Two inference backends run simultaneously with zero VRAM conflict (CUDA_VISIBLE_
 - Qwen3.5 context: raise `--max-model-len` from 131072 → 262144 for full 256K once VRAM verified
 - Devstral context: raise `--ctx-size` from 131072 → 393216 for full 384K (needs ~16GB CPU RAM for KV)
 - Devstral GPU layers: bump `--n-gpu-layers` from 12 → 16 if 1650 Ti has headroom (~312MB/layer)
-- HuggingFace DNS: run `./scripts/add-dns-entry.sh huggingface.co` before deploying (csusb.edu blocks UDP 53)
+- HuggingFace DNS: run `./scripts/add-dns-entry.sh huggingface.co` before deploying (some networks block UDP 53)
 
 ---
 

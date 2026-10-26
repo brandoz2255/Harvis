@@ -64,7 +64,7 @@ spec:
                   name: harvis-ai-backend-secret
                   key: ollama-api-key
             - name: EXTERNAL_OLLAMA_URL
-              value: "https://coyotedev.ngrok.app/ollama"
+              value: "https://your-ollama.example.com/ollama"
             - name: EXTERNAL_OLLAMA_API_KEY
               valueFrom:
                 secretKeyRef:

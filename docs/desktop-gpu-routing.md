@@ -6,11 +6,11 @@ unreachable.
 
 ## TL;DR
 
-- **Laptop** (`192.168.4.244`) runs Harvis: frontend, backend, Discord bot,
+- **Laptop** (`192.168.10.244`) runs Harvis: frontend, backend, Discord bot,
   browser-runner, plus a *bundled* OpenClaw container as the safety net.
-- **Desktop** (`192.168.5.58`) runs OpenClaw + native Ollama. It is the agent
+- **Desktop** (`192.168.20.58`) runs OpenClaw + native Ollama. It is the agent
   runtime and the model inference engine. The 5080 does the actual thinking.
-- A WebSocket from the laptop backend to `ws://192.168.5.58:18789` carries the
+- A WebSocket from the laptop backend to `ws://192.168.20.58:18789` carries the
   task. If that WS fails to connect, the backend silently retries against
   `ws://openclaw:18789` (the local bundled container) — the user never sees an
   error.
@@ -24,7 +24,7 @@ flowchart LR
         Discord["@Harvis-Bot in Discord"]
     end
 
-    subgraph Laptop["Laptop · 192.168.4.244"]
+    subgraph Laptop["Laptop · 192.168.10.244"]
         Nginx[nginx-proxy :9000]
         Frontend[harvis-frontend]
         Backend[harvis-backend]
@@ -33,7 +33,7 @@ flowchart LR
         DiscordBot[Discord bridge in backend]
     end
 
-    subgraph Desktop["Desktop · 192.168.5.58 · RTX 5080"]
+    subgraph Desktop["Desktop · 192.168.20.58 · RTX 5080"]
         DesktopOC["harvis-openclaw-desktop :18789<br/>(primary)"]
         Ollama["Ollama 0.21.2<br/>gemma4:e4b loaded in VRAM"]
         GPU[(RTX 5080)]
@@ -60,7 +60,7 @@ or callbacks).
 1. You send a message in the browser at `http://localhost:9000` or `@Harvis-Bot`
    in Discord.
 2. The laptop backend (`harvis-backend`) opens a WebSocket to
-   `ws://192.168.5.58:18789` (desktop). On connection failure it transparently
+   `ws://192.168.20.58:18789` (desktop). On connection failure it transparently
    retries against `ws://openclaw:18789` (laptop local).
 3. The active OpenClaw gateway dispatches the task to its agent and starts a
    tool loop. For inference it calls
@@ -113,7 +113,7 @@ Does **not** trigger fallback (yet):
 curl -s http://localhost:9000/api/health/services | jq
 
 # Confirm desktop is reachable
-( exec 3<>/dev/tcp/192.168.5.58/18789 && echo OPEN ) 2>/dev/null
+( exec 3<>/dev/tcp/192.168.20.58/18789 && echo OPEN ) 2>/dev/null
 
 # Confirm desktop is actually doing the work (real round-trip)
 docker exec harvis-backend python3 /tmp/confirm.py   # if the helper is still in /tmp
@@ -142,7 +142,7 @@ After editing files, restart the desktop OpenClaw container so it picks them
 up:
 
 ```powershell
-ssh memel@192.168.5.58 "wsl -d Ubuntu --user harvis -e bash -c 'cd ~/harvis-host && docker compose restart openclaw'"
+ssh memel@192.168.20.58 "wsl -d Ubuntu --user harvis -e bash -c 'cd ~/harvis-host && docker compose restart openclaw'"
 ```
 
 ### Revert to laptop-only
@@ -151,8 +151,8 @@ Delete these three lines from `~/Projects/Recent-EX/Harvis/.env` and
 `docker compose up -d backend`:
 
 ```
-OPENCLAW_URL=ws://192.168.5.58:18789
-OPENCLAW_BUNDLED_URL=ws://192.168.5.58:18789
+OPENCLAW_URL=ws://192.168.20.58:18789
+OPENCLAW_BUNDLED_URL=ws://192.168.20.58:18789
 OPENCLAW_FALLBACK_URL=ws://openclaw:18789
 ```
 
@@ -187,7 +187,7 @@ to uid 1000 on every `up`, which fixes the EACCES bug we hit on first deploy.
 - The same `OPENCLAW_GATEWAY_TOKEN` is configured on both desktop and laptop
   (`.env` files). The gateway's `connect.challenge` handshake validates it.
 - The desktop gateway listens on `0.0.0.0:18789` — anyone on
-  `192.168.5.0/24` can reach the TCP port. Authentication is the token.
+  `192.168.20.0/24` can reach the TCP port. Authentication is the token.
   Rotate it by setting a new value in **both** `.env` files and restarting
   both `harvis-backend` (laptop) and `harvis-openclaw-desktop` (desktop).
 
@@ -196,7 +196,7 @@ to uid 1000 on every `up`, which fixes the EACCES bug we hit on first deploy.
 | Symptom | First thing to check |
 |---|---|
 | Tasks suddenly slow or simple | Probably on fallback. Check backend logs for `Primary OpenClaw … failed … falling back to`. Then ping desktop, check `docker ps` on desktop. |
-| `OPEN` from `/dev/tcp/192.168.5.58/18789` but tasks fail | Check desktop OpenClaw logs: `wsl -d Ubuntu --user harvis -e docker logs harvis-openclaw-desktop --tail 100`. Likely token mismatch (re-sync) or tool-call error. |
+| `OPEN` from `/dev/tcp/192.168.20.58/18789` but tasks fail | Check desktop OpenClaw logs: `wsl -d Ubuntu --user harvis -e docker logs harvis-openclaw-desktop --tail 100`. Likely token mismatch (re-sync) or tool-call error. |
 | Desktop unreachable on LAN | WiFi blip — ping it. If desktop just rebooted, give Docker Desktop ~30 s. |
 | Desktop perms regression (EACCES) | The `openclaw-init` service didn't run. `docker compose down && docker compose up -d` from `/home/harvis/harvis-host/` to force init to re-execute. |
 

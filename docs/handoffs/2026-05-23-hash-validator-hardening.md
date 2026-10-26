@@ -108,7 +108,7 @@ Final Discord reply (the model's own words):
 ## What still has gaps / known issues
 
 ### 1. Model auto-routing surprise
-The user used `model=auto` and the proxy auto-routed to **qwen3:14b** (on the desktop rig at `192.168.5.58:11434`), not granite4.1:8b. Log: `auto-routing 'auto' → 'qwen3:14b'`. qwen3 behaves DIFFERENTLY from granite — notably it ignores forced `tool_choice` more readily. This is why issue #4 ("forced exec did nothing") manifested only after the CodeAct marker was missing. Watch for cross-model differences. The CodeAct marker fix is robust across models (avoids fighting the proxy).
+The user used `model=auto` and the proxy auto-routed to **qwen3:14b** (on the desktop rig at `192.168.20.58:11434`), not granite4.1:8b. Log: `auto-routing 'auto' → 'qwen3:14b'`. qwen3 behaves DIFFERENTLY from granite — notably it ignores forced `tool_choice` more readily. This is why issue #4 ("forced exec did nothing") manifested only after the CodeAct marker was missing. Watch for cross-model differences. The CodeAct marker fix is robust across models (avoids fighting the proxy).
 
 ### 2. `method` field provenance is ambiguous
 `cracker.py` outputs `method: "wordlist:<basename>"`. For runtime-fetched lists like `/tmp/pokemon.txt`, this collides with bundled-list basenames in look. User asked about this, then chose "leave as-is" — they can now distinguish `/tmp/*` (runtime) vs `/skills-shared/.../wordlists/*` (bundled). Could revisit if confusion repeats; would be a ~3-line tweak in `cracker.py` to emit the full path.

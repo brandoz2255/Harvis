@@ -80,15 +80,15 @@ These are ours, not merge-related, and each is independently checkable.
    no tracked file carries a dev path or a home IP. Still present:
    - `embedding/config.py:18-20`, `embedding/docker-compose.yml:13`, `embedding/run-embedding.sh:69,87`
      → hardcoded `/home/guruai/compose/rag-info`.
-   - `harvis-helm-chart/values.yaml:177`, `metallb-config.yaml`, `k8s-manifests/**` → `192.168.4.24x`
+   - `harvis-helm-chart/values.yaml:177`, `metallb-config.yaml`, `k8s-manifests/**` → `192.168.10.24x`
      LoadBalancer IPs. Defensible for an infra overlay, but they should be values, not literals.
-   - `python_back_end/tests/test_ollama_hosts.py:34` → `http://192.168.5.58:11434`, a real rig.
+   - `python_back_end/tests/test_ollama_hosts.py:34` → `http://192.168.20.58:11434`, a real rig.
    (Placeholder IPs inside `placeholder="…"` attributes are fine — those are UI hints.)
 
 3. **`python_back_end/__pycache__/browser.cpython-311.pyc` is tracked.** One committed bytecode
    file. It should be removed and the directory ignored.
 
-4. **The test VM is behind.** 192.168.4.201 is still on `eb7a3f67`; the Engines-tab work has not
+4. **The test VM is behind.** 192.168.10.201 is still on `eb7a3f67`; the Engines-tab work has not
    been deployed there. E2E verification on a clean box is the last gate before any of this is
    called releasable.
 
@@ -127,7 +127,7 @@ the manifests turn out to be dead too — the whole cluster story has moved sinc
 2. Clear §4 items 2 and 3 as their own commits — path/IP cleanup, drop the tracked `.pyc`.
 3. Build owui, verify by string presence in the bundle (never by exit code — it lies two ways on
    this repo), restart nginx, spot-check both themes.
-4. Deploy to VM 192.168.4.201, run the fresh-clone install path, confirm 10/10 services.
+4. Deploy to VM 192.168.10.201, run the fresh-clone install path, confirm 10/10 services.
 5. Only then execute the chosen merge strategy on a scratch branch first, build and run from that
    result, and confirm the stack still comes up.
 6. Push to `main` with an explicit refspec, after the user says so.

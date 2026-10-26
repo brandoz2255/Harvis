@@ -140,7 +140,7 @@ kubectl exec -n ai-agents deploy/harvis-ai-merged-ollama-backend -c vllm -- \
 
 Add this to `spec.initContainers[]` after the existing `download-models` container.
 
-**HuggingFace Hub DNS note:** The csusb.edu network blocks outbound UDP port 53. Add `huggingface.co` to CoreDNS before the init container will work:
+**HuggingFace Hub DNS note:** Some campus networks block outbound UDP port 53. Add `huggingface.co` to CoreDNS before the init container will work:
 ```bash
 ./scripts/add-dns-entry.sh huggingface.co
 # dig huggingface.co @8.8.8.8 first to get the current IP
@@ -505,7 +505,7 @@ The chunk parsing in `/api/chat` (~lines 2575–2640 of `main.py`) is tightly co
 
 `Qwen/Qwen3-4B` is not gated — no token required. The `optional: true` on the secret key is defensive and allows pulling gated models in the future (LLaMA 3, Gemma) without restructuring the secret.
 
-### DNS Resolution on csusb.edu Network
+### DNS Resolution on Networks That Block DNS
 
 Outbound UDP port 53 is blocked on the cluster. The init container needs to resolve `huggingface.co`. Run before first deployment:
 ```bash

@@ -135,7 +135,7 @@ timeline
 3. **Production default: qwen3:14b** (most consistent across task classes). gemma4:e4b strong for MCQ/scenario. granite4.1:8b a viable non-Qwen option. **Avoid:** hermes4:14b-q5 and IQ3-class 27B (quant breaks tool-use).
 4. **Quantization matters for tool-use** — IQ3 broke function-calling on a 27B; Q4_K_M is the practical floor.
 5. **Forcing `tool_choice` is futile** on Ollama at production complexity — rely on `auto` + good prompt/skill shape.
-6. **Measure, don't guess.** The harness is the durable asset: `python3 scripts/diagnostics/model_harness.py --body <captured request.json> --model <name> --target ollama --ollama-url http://192.168.5.58:11434 --runs 8`. Run it on any new model before trusting Discord anecdotes.
+6. **Measure, don't guess.** The harness is the durable asset: `python3 scripts/diagnostics/model_harness.py --body <captured request.json> --model <name> --target ollama --ollama-url http://192.168.20.58:11434 --runs 8`. Run it on any new model before trusting Discord anecdotes.
 
 ---
 

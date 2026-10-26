@@ -13,7 +13,7 @@ spec:
   avoidBuggyIPs: false
 
 ---
-# Dedicated IP pool for Harvis AI - guarantees 139.182.180.201 availability
+# Dedicated IP pool for Harvis AI - guarantees 10.20.0.201 availability
 apiVersion: metallb.io/v1beta1
 kind: IPAddressPool
 metadata:

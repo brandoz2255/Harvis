@@ -5,7 +5,7 @@ metadata:
   namespace: metallb-system
 spec:
   addresses:
-  - 139.182.180.200-139.182.180.210
+  - 10.20.0.200-10.20.0.210  # example range; set your lab network's pool
 ---
 apiVersion: metallb.io/v1beta1
 kind: L2Advertisement

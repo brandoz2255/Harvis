@@ -123,7 +123,7 @@ Kubernetes + the RTX 4090: see the last section of `docs/inference-nodes.md`. Su
 FreeToken as a Deployment on a PVC with `--max-running-requests 4–8`, a token-checking
 front (FreeToken has no auth), per-user quotas at the Harvis layer, registered as a
 node with a lower priority than the laptop so the cluster wins when up; then prefix/KV
-sharing, model-swap scheduling, multi-GPU, scraping `/v1/stats`. The csusb.edu
+sharing, model-swap scheduling, multi-GPU, scraping `/v1/stats`. The campus
 cluster's outbound-DNS block will hit the checkpoint download first.
 
 ---

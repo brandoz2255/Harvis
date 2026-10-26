@@ -17,7 +17,7 @@ commits are from branch `deploy-optimize-test`.
 Not "smaller" — a number, reachable from a clean machine, with no install-time decisions. A CI guard
 (`ce29c284`, fails above 7.5 GB) makes it a property of the project instead of a cleanup that decays.
 
-**Result, measured on VM 102 (`harvis-fresh`, 192.168.5.98) after `./install.sh` plus one frontend
+**Result, measured on VM 102 (`harvis-fresh`, 192.168.20.98) after `./install.sh` plus one frontend
 rebuild, 2026-07-29:**
 
 | | |

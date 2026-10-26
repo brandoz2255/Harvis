@@ -127,8 +127,8 @@ This guide documents the complete CI/CD pipeline for Harvis AI, which uses:
 4. **Deploy**: Trigger Flux updates and cleanup
 
 **Runner Tags**:
-- Node 1 (pop-os): `node1`, `backend`, `gpu`, `docker`
-- Node 2 (pop-os-343570d8): `node2`, `frontend`, `docker`
+- Node 1 (node-gpu-1): `node1`, `backend`, `gpu`, `docker`
+- Node 2 (node-gpu-2): `node2`, `frontend`, `docker`
 
 **Image Tagging Strategy**:
 ```

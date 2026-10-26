@@ -30,7 +30,7 @@ Per user's standing "no push until verified" rule — all on `feat/hermes-integr
 | File | Change | Purpose |
 |---|---|---|
 | `docker-compose.yaml` | `DISCORD_WORKSPACE_MAX_WAIT_SECONDS: 1200→600`, `OLLAMA_CONTEXT_LENGTH: 32768→16384`, `OLLAMA_KEEP_ALIVE: 30m→-1` | 10-min cap, halve KV cache footprint, keep model warm forever |
-| `docker-compose.override.yml` *(gitignored)* | `OPENCLAW_URL` → `ws://192.168.5.58:18789` (rig), `DESKTOP_OLLAMA_URL` → rig Ollama, `OPENCLAW_HOME=/home/node` | Route primary openclaw + Ollama traffic to the rig (5080) |
+| `docker-compose.override.yml` *(gitignored)* | `OPENCLAW_URL` → `ws://192.168.20.58:18789` (rig), `DESKTOP_OLLAMA_URL` → rig Ollama, `OPENCLAW_HOME=/home/node` | Route primary openclaw + Ollama traffic to the rig (5080) |
 | `python_back_end/workspace/model_proxy.py` | **Critical fix.** When Ollama is the upstream, force `stream=False`, set `options.num_ctx=16384`, `options.think=False` | Fixes the tool-call drop bug (see "The bug we solved" below) |
 | `python_back_end/workspace/openclaw_client.py` | Per-gateway `OPENCLAW_HOME` + `SKILLS_BASE` resolution (host BYO vs dockerized openclaw) | Fixes path-mismatch the model was hitting |
 | `python_back_end/integrations/discord_workspace_bot.py` | `⛔ Cancel` button + `@bot cancel`/`stop` text command + auto-cancel on timeout | UX for stuck runs |
@@ -127,15 +127,15 @@ laptop containers — all up 19-20 hours, healthy
   harvis-browser-runner, pgsql-db
 
 backend env:
-  OPENCLAW_URL          = ws://192.168.5.58:18789      (rig — PRIMARY)
+  OPENCLAW_URL          = ws://192.168.20.58:18789      (rig — PRIMARY)
   OPENCLAW_FALLBACK_URL = ws://openclaw:18789           (laptop docker fallback)
-  DESKTOP_OLLAMA_URL    = http://192.168.5.58:11434    (rig Ollama)
+  DESKTOP_OLLAMA_URL    = http://192.168.20.58:11434    (rig Ollama)
   OPENCLAW_HOME         = /home/node
   DISCORD_WORKSPACE_MAX_WAIT_SECONDS = 600
 
 rig reachability:
-  192.168.5.58:18789 (openclaw)  ← TIMING OUT RIGHT NOW (was open earlier)
-  192.168.5.58:11434 (Ollama)    ← still reachable
+  192.168.20.58:18789 (openclaw)  ← TIMING OUT RIGHT NOW (was open earlier)
+  192.168.20.58:11434 (Ollama)    ← still reachable
 
 rig models confirmed (from earlier this session):
   qwen3:14b — 9.3GB, 100% GPU residency at 9.85GB / 9.85GB
@@ -150,7 +150,7 @@ rig models confirmed (from earlier this session):
 ### 1. Verify rig is still serving openclaw on 18789
 
 ```bash
-nc -zv -w 3 192.168.5.58 18789
+nc -zv -w 3 192.168.20.58 18789
 ```
 
 If timeout: SSH to rig OR have the rig-side Claude session check the openclaw container state. The LAN-binding fix from yesterday may have rolled back, or the container restarted to a localhost-only binding.
@@ -241,7 +241,7 @@ Per user's hard rule: only push after the full benchmark has actually worked in 
   ```
 - Direct model_proxy smoke test (bypasses openclaw):
   ```bash
-  TOK=5e948a4673f0241c0e6fb1f0ec708147eee6e2289f2dc0401a5e100446cab1e7
+  TOK=<your-gateway-token>
   curl -sS -X POST http://localhost:8000/v1/chat/completions \
     -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" \
     -d '{"model":"harvis-proxy/auto","stream":true,

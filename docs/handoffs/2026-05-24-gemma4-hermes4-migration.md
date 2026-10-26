@@ -111,10 +111,10 @@ docker compose logs backend --since 10m 2>&1 | grep -aE \
 docker compose logs backend --since 5m 2>&1 | grep -aE "auto-routing|desktop-preferred"
 
 # Probe what's loaded on the rig
-curl -s http://192.168.5.58:11434/api/ps | python3 -m json.tool
+curl -s http://192.168.20.58:11434/api/ps | python3 -m json.tool
 
 # Smoke-test gemma4 (RT2 silent stop check)
-curl -s http://192.168.5.58:11434/api/chat -d '{
+curl -s http://192.168.20.58:11434/api/chat -d '{
   "model": "gemma4:e4b", "messages": [...], "think": false, "stream": false,
   "tools": [...]
 }'

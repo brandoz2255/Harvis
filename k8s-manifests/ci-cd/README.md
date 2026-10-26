@@ -4,7 +4,7 @@ This directory contains Kubernetes manifests for deploying GitLab Runners on you
 
 ## Architecture
 
-- **2 GitLab Runners**: One on each node (node1: pop-os, node2: pop-os-343570d8)
+- **2 GitLab Runners**: One on each node (node1: node-gpu-1, node2: node-gpu-2)
 - **Node 1 Runner**: Handles backend builds (GPU-enabled node)
 - **Node 2 Runner**: Handles frontend builds
 - **Executor**: Docker (using host Docker socket)

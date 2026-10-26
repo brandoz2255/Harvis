@@ -54,12 +54,12 @@ kubectl get pods --all-namespaces -o wide | grep -E "(ai-agents|artifact-executo
 ### Node IP Assignments
 | Node | VPN IP | Current Internal IP | Role |
 |------|--------|---------------------|------|
-| dulc3-os | 10.8.0.1 | 192.168.4.47 | VPN Server + K8s Master |
+| dulc3-os | 10.8.0.1 | 192.168.10.47 | VPN Server + K8s Master |
 | rocky1vm.local | 10.8.0.2 | 192.168.122.194 | K8s Worker (Harvis Backend) |
 | rocky2vm.local | 10.8.0.3 | 192.168.122.40 | K8s Worker (ArgoCD) |
 | rocky3vm.local | 10.8.0.4 | 192.168.122.50 | K8s Worker (Artifact Executor) |
-| raspberrypi | 10.8.0.5 | 192.168.4.115 | K8s Worker (CI Runner) |
-| raspberrypi2 | 10.8.0.6 | 192.168.4.117 | K8s Worker (CI Runner) |
+| raspberrypi | 10.8.0.5 | 192.168.10.115 | K8s Worker (CI Runner) |
+| raspberrypi2 | 10.8.0.6 | 192.168.10.117 | K8s Worker (CI Runner) |
 
 ---
 
@@ -78,14 +78,14 @@ cd ~/ansible-playbooks/vpn-setup
 **File:** `inventory/hosts.ini`
 ```ini
 [vpn_server]
-dulc3-os ansible_host=192.168.4.47 vpn_ip=10.8.0.1
+dulc3-os ansible_host=192.168.10.47 vpn_ip=10.8.0.1
 
 [vpn_clients]
 rocky1vm.local ansible_host=192.168.122.194 vpn_ip=10.8.0.2
 rocky2vm.local ansible_host=192.168.122.40 vpn_ip=10.8.0.3
 rocky3vm.local ansible_host=192.168.122.50 vpn_ip=10.8.0.4
-raspberrypi ansible_host=192.168.4.115 vpn_ip=10.8.0.5
-raspberrypi2 ansible_host=192.168.4.117 vpn_ip=10.8.0.6
+raspberrypi ansible_host=192.168.10.115 vpn_ip=10.8.0.5
+raspberrypi2 ansible_host=192.168.10.117 vpn_ip=10.8.0.6
 
 [k8s_nodes:children]
 vpn_server
@@ -468,7 +468,7 @@ sudo tailscale up
 tailscale ip -4
 
 # Enable subnet routing (on dulc3-os)
-sudo tailscale up --advertise-routes=192.168.4.0/24,192.168.122.0/24
+sudo tailscale up --advertise-routes=192.168.10.0/24,192.168.122.0/24
 ```
 
 **Benefits:**

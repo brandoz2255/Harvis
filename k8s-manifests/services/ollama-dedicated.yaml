@@ -19,7 +19,7 @@ spec:
         app.kubernetes.io/component: ollama
     spec:
       runtimeClassName: nvidia
-      # Node affinity: Force scheduling on Node 2 (pop-os-343570d8) for Ollama workload
+      # Node affinity: Force scheduling on Node 2 (node-gpu-2) for Ollama workload
       nodeSelector:
         kubernetes.io/hostname: pop-os
       containers:

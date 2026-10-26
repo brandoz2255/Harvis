@@ -126,7 +126,7 @@ healthy-looking stack whose first message fails, because Ollama has no models.
 **not** auto-download (prints the manual command instead).
 
 Note the k8s DNS caveat if relevant: `K8S_DNS_WORKAROUND.md` documents `registry.ollama.ai` being
-blocked on the csusb.edu network. Docker installs are unaffected, but the failure is confusing if hit.
+blocked on the campus network. Docker installs are unaffected, but the failure is confusing if hit.
 
 ---
 

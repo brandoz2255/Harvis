@@ -48,7 +48,7 @@
 			<div class="flex flex-col gap-2 text-sm py-3">
 				<a
 					class="text-blue-600 dark:text-blue-400 hover:underline"
-					href="https://github.com/ommblitz/Harvis"
+					href="https://github.com/brandoz2255/Harvis"
 					target="_blank"
 					rel="noopener noreferrer"
 				>
@@ -56,7 +56,7 @@
 				</a>
 				<a
 					class="text-blue-600 dark:text-blue-400 hover:underline"
-					href="https://github.com/ommblitz/Harvis/blob/main/README.md"
+					href="https://github.com/brandoz2255/Harvis/blob/main/README.md"
 					target="_blank"
 					rel="noopener noreferrer"
 				>

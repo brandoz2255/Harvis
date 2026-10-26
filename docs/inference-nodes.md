@@ -69,7 +69,7 @@ always `name=url`. Attributes: `dialect` (`openai` default, or `ollama`), `label
 Anything containing a comma goes in the JSON form:
 
 ```yaml
-HARVIS_INFERENCE_NODES: '[{"name":"rig","base_url":"http://192.168.5.58:1919","label":"Desktop 5080","token_env":"RIG_NODE_TOKEN"}]'
+HARVIS_INFERENCE_NODES: '[{"name":"rig","base_url":"http://192.168.20.58:1919","label":"Desktop 5080","token_env":"RIG_NODE_TOKEN"}]'
 ```
 
 `token_env` names the **variable** holding a bearer token; the token itself never
@@ -708,7 +708,7 @@ fails; host edits are already live, only the test file needs copying.
 
 The centralized version: Harvis as one tenant of a shared inference service instead
 of the owner of a laptop process. Hardware on the table: an **RTX 4090** (24 GB), a
-Kubernetes cluster (the csusb.edu one has the outbound-DNS block documented in
+Kubernetes cluster (the campus one has the outbound-DNS block documented in
 `K8S_DNS_WORKAROUND.md`, which will bite the Hugging Face download and PyPI).
 
 What it would need, roughly in order:

@@ -23,7 +23,7 @@ spec:
         app.kubernetes.io/component: backend
     spec:
       runtimeClassName: nvidia
-      # Node affinity: Force scheduling on Node 1 (pop-os) control-plane for ML workload
+      # Node affinity: Force scheduling on Node 1 (node-gpu-1) control-plane for ML workload
       nodeSelector:
         kubernetes.io/hostname: pop-os
       initContainers:

@@ -1,6 +1,6 @@
 ---
 # ArgoCD Nginx Proxy Configuration
-# Proxies external traffic (192.168.4.242) to ArgoCD server via VPN (10.0.0.x)
+# Proxies external traffic (192.168.10.242) to ArgoCD server via VPN (10.0.0.x)
 apiVersion: v1
 kind: ConfigMap
 metadata:

@@ -23,10 +23,10 @@ K3s binds to specific IP addresses during initial setup. When the IP changes:
 
 **Initial Setup:**
 - Node1 (control plane): `192.168.1.195` (local network)
-- Node2 (worker): `139.182.180.125` (remote/public IP)
+- Node2 (worker): `10.20.0.125` (remote/public IP)
 
 **After Network Change:**
-- Node1 moved to: `139.182.180.198` (same network as node2)
+- Node1 moved to: `10.20.0.198` (same network as node2)
 - K3s still configured with: `192.168.1.195` ❌
 
 **Symptoms:**
@@ -36,8 +36,8 @@ E1202 19:27:11.228237 2476 kubelet_node_status.go:719 "Failed to set some node s
 err="failed to validate nodeIP: node IP: \"192.168.1.195\" not found in the host's network interfaces"
 
 # 502 errors when accessing node2 pods
-Error from server: Get "https://139.182.180.125:10250/containerLogs/...":
-proxy error from 127.0.0.1:6443 while dialing 139.182.180.125:10250, code 502: 502 Bad Gateway
+Error from server: Get "https://10.20.0.125:10250/containerLogs/...":
+proxy error from 127.0.0.1:6443 while dialing 10.20.0.125:10250, code 502: 502 Bad Gateway
 ```
 
 ---
@@ -56,7 +56,7 @@ proxy error from 127.0.0.1:6443 while dialing 139.182.180.125:10250, code 502: 5
 sudo systemctl stop k3s
 
 # Update K3s configuration with new IP
-NEW_IP="139.182.180.198"  # Update this to your new IP
+NEW_IP="10.20.0.198"  # Update this to your new IP
 
 sudo mkdir -p /etc/rancher/k3s
 sudo tee /etc/rancher/k3s/config.yaml << EOF
@@ -103,7 +103,7 @@ sudo cat /var/lib/rancher/k3s/server/node-token
 # Run on worker node (node2)
 
 K3S_TOKEN="<paste-token-here>"
-K3S_URL="https://139.182.180.198:6443"  # Control plane IP
+K3S_URL="https://10.20.0.198:6443"  # Control plane IP
 
 # Stop agent
 sudo systemctl stop k3s-agent
@@ -135,7 +135,7 @@ nfs:
 **After:**
 ```yaml
 nfs:
-  server: 139.182.180.198
+  server: 10.20.0.198
   path: /srv/nfs/ml-models-cache
 ```
 
@@ -282,7 +282,7 @@ kubectl logs <any-pod> -n <namespace>
 ## Files Modified in Our Fix
 
 1. `/etc/rancher/k3s/config.yaml` - Added IP configuration
-2. `k8s-manifests/storage/nfs-storage.yaml` - Updated NFS server IP from 192.168.1.195 → 139.182.180.198
+2. `k8s-manifests/storage/nfs-storage.yaml` - Updated NFS server IP from 192.168.1.195 → 10.20.0.198
 3. `python_back_end/download_models.py` - Made NFS permission errors non-fatal
 4. `k8s-manifests/services/ollama-dedicated.yaml` - Removed failing model downloads from startup
 

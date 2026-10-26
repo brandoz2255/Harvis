@@ -71,7 +71,7 @@ Create the updated hosts content with ALL entries (old + new):
 kubectl patch configmap coredns -n kube-system --type='json' -p='[{
   "op": "replace",
   "path": "/data/NodeHosts",
-  "value": "139.182.180.125 pop-os-343570d8 pop-os\n139.182.180.198 pop-os\n104.21.75.227 registry.ollama.ai\n172.67.182.229 registry.ollama.ai\n<NEW_IP> <NEW_DOMAIN>"
+  "value": "10.20.0.125 node-gpu-2 node-gpu-1\n10.20.0.198 node-gpu-1\n104.21.75.227 registry.ollama.ai\n172.67.182.229 registry.ollama.ai\n<NEW_IP> <NEW_DOMAIN>"
 }]'
 ```
 
@@ -155,7 +155,7 @@ kubectl get configmap coredns -n kube-system -o jsonpath='{.data.NodeHosts}'
 kubectl patch configmap coredns -n kube-system --type='json' -p='[{
   "op": "replace",
   "path": "/data/NodeHosts",
-  "value": "139.182.180.125 pop-os-343570d8 pop-os\n139.182.180.198 pop-os\n104.21.75.227 registry.ollama.ai\n172.67.182.229 registry.ollama.ai\n13.224.157.84 huggingface.co\n13.224.157.26 huggingface.co"
+  "value": "10.20.0.125 node-gpu-2 node-gpu-1\n10.20.0.198 node-gpu-1\n104.21.75.227 registry.ollama.ai\n172.67.182.229 registry.ollama.ai\n13.224.157.84 huggingface.co\n13.224.157.26 huggingface.co"
 }]'
 
 # Step 4: Restart CoreDNS
@@ -354,8 +354,8 @@ kubectl get configmap coredns -n kube-system -o yaml
 ## Current DNS Entries (as of 2026-01-20)
 
 ```
-139.182.180.125 pop-os-343570d8 pop-os
-139.182.180.198 pop-os
+10.20.0.125 node-gpu-2 node-gpu-1
+10.20.0.198 node-gpu-1
 104.21.75.227 registry.ollama.ai
 172.67.182.229 registry.ollama.ai
 ```

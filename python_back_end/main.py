@@ -2187,7 +2187,7 @@ def make_ollama_request(
     is_local_ollama_model = model_name in LOCAL_OLLAMA_MODELS_CACHE
 
     if is_external_model and EXTERNAL_OLLAMA_URL and EXTERNAL_OLLAMA_API_KEY:
-        # Route to external Ollama (e.g., coyotedev.ngrok.app)
+        # Route to external Ollama (e.g., your-ollama.example.com)
         try:
             headers = {
                 "Authorization": f"Bearer {EXTERNAL_OLLAMA_API_KEY}",

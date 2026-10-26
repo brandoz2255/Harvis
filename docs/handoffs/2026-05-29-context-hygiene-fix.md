@@ -75,6 +75,6 @@ Weak-point check = done (infra health green; weak points catalogued in thread #2
 2. Decide `crack_all.py` deployment (#2) before any clean deploy.
 3. Read the OTHER Claude chat for the ideas you wanted (scroll up — its memory compressed).
 4. Pick next phase: UI overhaul (recon `front_end/jfrontend` first) or terminal access (build on `HARVIS_TERMINAL_*`).
-5. The harness is your friend for any future model question — `python3 scripts/diagnostics/model_harness.py --body <captured request.json> --model <name> --target ollama --ollama-url http://192.168.5.58:11434 --runs 8`.
+5. The harness is your friend for any future model question — `python3 scripts/diagnostics/model_harness.py --body <captured request.json> --model <name> --target ollama --ollama-url http://192.168.20.58:11434 --runs 8`.
 
 Branch: `feat/hermes-integration`, 11 commits ahead of session open, **unpushed**. Working tree clean (tracked). Backend healthy on the committed code.

@@ -1,5 +1,5 @@
 # Backend Workstation Deployment - Dedicated ML Node
-# Runs on Node 2 (pop-os-343570d8) with RTX 3090 Ti for ML workloads
+# Runs on Node 2 (node-gpu-2) with RTX 3090 Ti for ML workloads
 # NO Ollama here - calls Ollama on Node 1 over network
 #
 # Workloads:
@@ -35,7 +35,7 @@ spec:
         gpu-role: dedicated-ml
     spec:
       runtimeClassName: nvidia
-      # Node 2: pop-os-343570d8 with RTX 3090 Ti (24GB VRAM) for ML
+      # Node 2: node-gpu-2 with RTX 3090 Ti (24GB VRAM) for ML
       nodeSelector:
         kubernetes.io/hostname: pop-os-343570d8
 

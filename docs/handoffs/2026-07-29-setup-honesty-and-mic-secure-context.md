@@ -1,6 +1,6 @@
 # Handoff — 2026-07-29 (late): setup wizard honesty pass + the mic "permission denied" that wasn't
 
-**Branch:** `deploy-optimize-test` · **rig:** VM 102 `harvis-fresh` 192.168.5.98 (the pristine
+**Branch:** `deploy-optimize-test` · **rig:** VM 102 `harvis-fresh` 192.168.20.98 (the pristine
 fresh-install box) · **everything below is deployed there and verified live.**
 
 Read `changes.md` (top entry, same date) for the per-fix detail. This document is the state of
@@ -38,7 +38,7 @@ Five wizard items the user reported, plus two defects found while verifying them
 `navigator.mediaDevices` **only** over HTTPS or from `localhost`/`127.0.0.1`. So:
 
 - On `http://localhost:9000` (the machine running Docker) voice works.
-- On any LAN origin — `http://192.168.5.98:9000`, which is how anyone else opens Harvis — the API
+- On any LAN origin — `http://192.168.20.98:9000`, which is how anyone else opens Harvis — the API
   is `undefined` and voice **cannot** work.
 
 The code fix made the message honest (it now names the origin and says nothing was denied). It did

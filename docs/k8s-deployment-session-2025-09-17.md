@@ -41,8 +41,8 @@ spec:
 ```bash
 kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.14.8/config/manifests/metallb-native.yaml
 ```
-- **IP Pool**: `139.182.180.200-139.182.180.210`
-- **Result**: External access via `http://139.182.180.200`
+- **IP Pool**: `10.20.0.200-10.20.0.210`
+- **Result**: External access via `http://10.20.0.200`
 
 ### ✅ 5. Fixed Nginx Proxy Configuration
 - **Problem**: 502 Bad Gateway errors - nginx couldn't reach backend
@@ -91,14 +91,14 @@ cache_dir=os.path.join(tempfile.gettempdir(), "research_cache")
 ## Current Architecture
 
 ### Network Access
-- **External IP**: `139.182.180.200` (via MetalLB)
-- **Frontend**: `http://139.182.180.200/`
-- **API Docs**: `http://139.182.180.200/api/docs`
-- **Health Check**: `http://139.182.180.200/health`
+- **External IP**: `10.20.0.200` (via MetalLB)
+- **Frontend**: `http://10.20.0.200/`
+- **API Docs**: `http://10.20.0.200/api/docs`
+- **Health Check**: `http://10.20.0.200/health`
 
 ### Service Architecture
 ```
-Browser → MetalLB LoadBalancer (139.182.180.200) → Nginx Proxy → Services
+Browser → MetalLB LoadBalancer (10.20.0.200) → Nginx Proxy → Services
                                                         ├── Frontend (Next.js)
                                                         ├── Backend + Ollama (GPU)
                                                         ├── PostgreSQL
@@ -180,7 +180,7 @@ flux create helmrelease harvis-ai \
 - ✅ **Front-end**: Next.js app ready for production
 
 ### Infrastructure
-- ✅ **MetalLB**: IP pool `139.182.180.200-210` configured
+- ✅ **MetalLB**: IP pool `10.20.0.200-210` configured
 - ✅ **K3s**: Single-node cluster with GPU support
 - ✅ **Storage**: Local path provisioner with persistent volumes
 
@@ -214,13 +214,13 @@ kubectl logs -n ai-agents -l app.kubernetes.io/component=merged-ollama-backend -
 ### Testing Endpoints
 ```bash
 # Health check
-curl http://139.182.180.200/health
+curl http://10.20.0.200/health
 
 # API documentation
-curl http://139.182.180.200/api/docs
+curl http://10.20.0.200/api/docs
 
 # Test auth signup (after pod restart)
-curl -X POST http://139.182.180.200/api/auth/signup \
+curl -X POST http://10.20.0.200/api/auth/signup \
   -H "Content-Type: application/json" \
   -d '{"username":"test","email":"test@example.com","password":"password123"}'
 ```
@@ -260,7 +260,7 @@ curl -X POST http://139.182.180.200/api/auth/signup \
 
 - **Repository**: https://github.com/brandoz2255/aidev
 - **Helm Chart**: `./harvis-helm-chart/`
-- **Access URL**: http://139.182.180.200
+- **Access URL**: http://10.20.0.200
 - **Namespace**: `ai-agents`
 
 ---

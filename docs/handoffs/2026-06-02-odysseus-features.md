@@ -40,7 +40,7 @@ Cookbook is multi-node. Each machine runs its own `llmfit serve` (node-level RES
 
 Nodes:
 - **laptop** — `http://localhost:8787` — Docker host / main box; runs its own `llmfit serve`, scans its own hardware.
-- **rig** — `http://192.168.5.58:8787` — `llmfit serve` in a **GPU-passthrough** Docker container (so it detects the real RTX 5080 / 16GB) + Ollama (already there; Harvis uses it).
+- **rig** — `http://192.168.20.58:8787` — `llmfit serve` in a **GPU-passthrough** Docker container (so it detects the real RTX 5080 / 16GB) + Ollama (already there; Harvis uses it).
 
 Each node's llmfit detects its OWN hardware locally — no remote-scan mode exists, so per-node serve is what makes "what fits the 5080" correct. No `--memory` override fakery; the rig's container sees the real card.
 
@@ -58,7 +58,7 @@ New FastAPI router, registered in `main.py` like the existing workspace/memory r
 ```python
 LLMFIT_NODES = {
   "laptop": "http://localhost:8787",
-  "rig":    "http://192.168.5.58:8787",
+  "rig":    "http://192.168.20.58:8787",
 }
 ```
 Endpoints:
@@ -66,7 +66,7 @@ Endpoints:
 - `GET /api/cookbook/system?node=rig` — proxy that node's `/api/v1/system`.
 - `GET /api/cookbook/recommend?node=rig&use_case=coding&min_fit=good` — proxy that node's `/api/v1/models/top`, params passed through.
 - `GET /api/cookbook/models?node=...` (optional, browse/search) — proxy `/api/v1/models`.
-- `POST /api/cookbook/download` — body `{node, model, provider:"ollama"}`. Pull on that node's Ollama: laptop → `localhost:11434/api/pull`, rig → `192.168.5.58:11434/api/pull`. Pull target follows the node (scoring node == download node == same tab).
+- `POST /api/cookbook/download` — body `{node, model, provider:"ollama"}`. Pull on that node's Ollama: laptop → `localhost:11434/api/pull`, rig → `192.168.20.58:11434/api/pull`. Pull target follows the node (scoring node == download node == same tab).
 
 ### Two things to resolve while building (flag, don't guess)
 1. **HF→Ollama name mapping.** llmfit's DB uses HF names (`Qwen/Qwen2.5-Coder-14B-Instruct`); Ollama wants tags (`qwen2.5-coder:14b`). Check whether `/api/v1/models/top` JSON already carries an Ollama-tag field. If yes, use it. If no, the frontend passes the exact tag, or you add a small mapping step — **never hand `/api/pull` a raw HF name** (it 404s).
@@ -84,7 +84,7 @@ Endpoints:
 
 ### Verify before done (hard gates)
 1. `docker exec <rig-llmfit-container> nvidia-smi -L` → lists the RTX 5080. If not → it's a GPU-passthrough problem, not llmfit; fix first.
-2. `curl http://192.168.5.58:8787/api/v1/system` → reports **16GB VRAM + the 5080 by name** (not CPU/no-GPU). Gates whether the rig tab is trustworthy.
+2. `curl http://192.168.20.58:8787/api/v1/system` → reports **16GB VRAM + the 5080 by name** (not CPU/no-GPU). Gates whether the rig tab is trustworthy.
 3. `curl http://localhost:8787/health` AND the rig's `/health` both 200 → `/api/cookbook/nodes` returns both alive.
 4. `GET /api/cookbook/recommend?node=rig&use_case=coding&min_fit=good` through Harvis (authed) → ranked list.
 5. `POST /api/cookbook/download {node:"rig", model:...}` with a small model → appears in the rig's `ollama list`, and Harvis can then chat with it (proves the loop closes into the existing model path).
