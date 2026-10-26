@@ -95,6 +95,8 @@ export function CheckList({ items, onToggle, columns = 2 }: CheckListProps) {
 
 /** `profiles.describe` as the advanced editor reads it. */
 export interface ProfileDescribeResponse {
+  /** Harvis: this bot speaks in every new chat, not only its own. */
+  all_sessions?: boolean
   mcp_servers?: CapabilityEntry[]
   model?: { default?: string; provider?: string }
   skills?: CapabilityEntry[]
@@ -108,6 +110,9 @@ export interface McpCatalogResponse {
 /** Staged advanced-config edits. Each `dirty*` flag gates one section of the
  *  `profiles.configure` payload, so an untouched section is never written. */
 interface AdvancedConfigState {
+  /** Harvis: speak in every new chat (else only in this bot's own chats). */
+  allSessions?: boolean
+  dirtyAllSessions?: boolean
   dirtyMcp: boolean
   dirtyModel: boolean
   dirtySkills: boolean
@@ -159,6 +164,7 @@ export function AdvancedProfileConfig({ bot, state, setState }: AdvancedProfileC
           provider: res.model?.provider || '',
           model: res.model?.default || '',
           soul: res.soul || '',
+          allSessions: Boolean(res.all_sessions),
           skills: res.skills || [],
           toolsets: res.toolsets || [],
           mcp: [
@@ -358,6 +364,27 @@ export function AdvancedProfileConfig({ bot, state, setState }: AdvancedProfileC
           model: state.model
         }}
       />
+      {bot.name !== 'default' && (
+        <label className="flex items-start gap-2 rounded-md border border-(--ui-stroke-secondary) p-2 text-xs text-(--ui-text-secondary)">
+          <Checkbox
+            checked={!!state.allSessions}
+            onCheckedChange={value =>
+              setState(prev => ({
+                ...prev,
+                allSessions: Boolean(value),
+                dirtyAllSessions: true
+              }))
+            }
+          />
+          <span>
+            <span className="font-medium">Use in all new chats</span>
+            <span className="block text-(--ui-text-tertiary)">
+              Off: this persona only speaks in this bot&apos;s own chats. On: every new chat uses it (only one bot at
+              a time).
+            </span>
+          </span>
+        </label>
+      )}
       {labeled(
         `Skills (${enabledSkills}/${state.skills.length} enabled)`,
         <div className="grid gap-1.5 rounded-md border border-(--ui-stroke-secondary) p-2">
@@ -528,6 +555,7 @@ export function emptyAdvancedState(): AdvancedConfigState {
  *  `requestForBot`, whose params are a `Record<string, unknown>`, and only
  *  aliases pick up the implicit index signature that requires. */
 export type ProfileConfigurePayload = {
+  all_sessions?: boolean
   disabled_skills?: string[]
   enabled_mcp_servers?: string[]
   enabled_toolsets?: string[]
@@ -576,6 +604,10 @@ export async function applyAdvancedConfig(bot: RosterRow, state: AdvancedConfigS
     } else {
       applied.model = false
     }
+  }
+
+  if (state.dirtyAllSessions) {
+    payload.all_sessions = Boolean(state.allSessions)
   }
 
   if (state.dirtySkills) {

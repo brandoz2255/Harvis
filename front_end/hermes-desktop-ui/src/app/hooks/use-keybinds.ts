@@ -38,6 +38,7 @@ import {
 import { openBrowserTab } from '@/store/preview'
 import {
   $newChatProfile,
+  $newChatProfilePicked,
   cycleProfile,
   requestProfileCreate,
   switchProfileToSlot,
@@ -218,6 +219,7 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
       // selection from a prior action.
       setWorkspaceScope('sessions')
       $newChatProfile.set(null)
+      $newChatProfilePicked.set(false)
       deps.startFreshSession()
       window.dispatchEvent(new CustomEvent('hermes:new-session-shortcut'))
     },

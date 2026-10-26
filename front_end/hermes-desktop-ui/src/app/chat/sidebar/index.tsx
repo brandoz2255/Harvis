@@ -77,6 +77,7 @@ import {
 import { notifyError } from '@/store/notifications'
 import {
   $newChatProfile,
+  $newChatProfilePicked,
   $profileColors,
   $profiles,
   $profileScope,
@@ -1529,6 +1530,7 @@ export function ChatSidebar({
                       // change which profile that is.
                       if (isNewSession) {
                         $newChatProfile.set(null)
+                        $newChatProfilePicked.set(false)
                       }
 
                       onNavigate(item)

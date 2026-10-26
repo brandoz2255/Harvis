@@ -41,6 +41,7 @@ import {
   $activeGatewayProfile,
   $gatewaySwapTarget,
   $newChatProfile,
+  $newChatProfilePicked,
   $profiles,
   $showAllProfiles,
   type AgentProfileRoute,
@@ -274,6 +275,9 @@ async function desktopSessionCreateParams(
     source: 'desktop',
     ...(cwd && { cwd }),
     ...(profile ? { profile: capturedRoute?.targetProfile || profile } : {}),
+    // Only a chat started AS a profile speaks as its bot (Harvis ws_session); one that
+    // merely opened in the selected profile stays plain unless that bot is set to all chats.
+    profile_source: capturedRoute || $newChatProfilePicked.get() ? 'picked' : 'active',
     ...(selection.model
       ? { model: selection.model, ...(selection.provider ? { provider: selection.provider } : {}) }
       : {}),

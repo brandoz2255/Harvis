@@ -56,10 +56,14 @@ class SessionMethods:
 
     async def m_session_create(self, rid, params):
         bot = await bots.get_bot(self.pool, self.user_id, str(params.get("bot_id") or ""))
-        if bot is None and params.get("profile"):
+        if bot is None:
             # Bot Mode names its bot by profile, not bot_id; without this every
-            # roster bot (and every group member) spoke as plain Harvis.
-            bot = await profiles.resolve_session_bot(self.pool, self.user_id, params.get("profile"))
+            # roster bot (and every group member) spoke as plain Harvis. A plain
+            # New chat sends profile_source "active" (just the selected profile):
+            # that alone must not carry a bot's persona into it.
+            explicit = bool(params.get("profile")) and params.get("profile_source") != "active"
+            bot = await profiles.resolve_session_bot(
+                self.pool, self.user_id, params.get("profile"), explicit=explicit)
         model = str(params.get("model") or "").strip()
         # A bot speaks on its own model. Anything else named here becomes the saved default,
         # so it has to be a model the picker offers.

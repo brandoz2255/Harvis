@@ -26,6 +26,7 @@ import { $petGenInput, openPetGenerate } from '@/store/pet-generate'
 import {
   $activeGatewayProfile,
   $newChatProfile,
+  $newChatProfilePicked,
   captureNewChatSource,
   ensureGatewayProfile,
   normalizeProfileKey
@@ -848,6 +849,7 @@ export function useSlashCommand(deps: SlashCommandDeps) {
             const key = normalizeProfileKey(match.name)
 
             $newChatProfile.set(key)
+            $newChatProfilePicked.set(true)
             await ensureGatewayProfile(key)
             // Capture the source the swap landed on (null on the v1 profile path)
             // so the draft's owner matches the socket that will mint it.
