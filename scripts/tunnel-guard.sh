@@ -17,6 +17,7 @@
 # the list: Wi-Fi by the SSID it is connected to, anything else by its
 # NetworkManager connection name. No list, no NetworkManager, no default route,
 # or an interface still connecting all count as not allowed. Linux only.
+# HARVIS_TUNNEL_PAUSED=1 in .env keeps it off everywhere (./harvis-start.sh lan).
 #
 # Under the lock the tunnel container has restart policy "no" and is not in
 # COMPOSE_PROFILES, so Docker never starts it by itself; this script does.
@@ -201,8 +202,14 @@ start_tunnel() {
     echo "tunnel started: ${REASON}"
 }
 
+# HARVIS_TUNNEL_PAUSED=1 (.env, set by ./harvis-start.sh lan) keeps the tunnel off on
+# every network, allowed ones included, without touching the lock list.
+paused() { [ "${HARVIS_TUNNEL_PAUSED:-$(env_value HARVIS_TUNNEL_PAUSED)}" = 1 ]; }
+
 enforce() { # $1 = nostart: only ever stop
-  if network_allowed; then
+  if paused; then
+    REASON="tunnel switched off (LAN-only mode)"; stop_tunnel
+  elif network_allowed; then
     [ "${1:-}" = nostart ] || start_tunnel
   else
     stop_tunnel
@@ -310,6 +317,7 @@ uninstall_service() {
 
 status() {
   if network_allowed; then echo "network: allowed — ${REASON}"; else echo "network: not allowed — ${REASON}"; fi
+  if paused; then echo "mode:    LAN only (HARVIS_TUNNEL_PAUSED=1)"; else echo "mode:    LAN + tunnel"; fi
   echo "tunnel:  $(tunnel_state)"
   if [ -f "$SYSTEM_UNIT" ]; then echo "guard:   $(systemctl is-active "$UNIT" 2>/dev/null || echo inactive) (system)"
   else echo "guard:   $(systemctl --user is-active "$UNIT" 2>/dev/null || echo inactive)"; fi
@@ -325,5 +333,5 @@ case "${1:-}" in
   uninstall) uninstall_service ;;
   status) status ;;
   installed) [ -f "$UNIT_DIR/$UNIT" ] || [ -f "$SYSTEM_UNIT" ] ;;
-  *) sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

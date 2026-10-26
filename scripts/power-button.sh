@@ -34,10 +34,23 @@ clear_inbox() {
   $SUDO rm -rf "$INBOX" && $SUDO install -d -o "$BACKEND_UID" -g "$BACKEND_UID" -m 0700 "$INBOX"
 }
 
+# A tunnel started by hand (docker run cloudflare/cloudflared …) is outside Harvis and
+# the network lock; the button takes it down too, whatever its tag.
+stop_stray_tunnels() {
+  command -v docker >/dev/null 2>&1 || return 0
+  local ids
+  ids="$(docker ps --format '{{.ID}} {{.Image}}' 2>/dev/null | awk '$2 ~ /(^|\/)cloudflare\/cloudflared([:@]|$)/ {print $1}')"
+  [ -n "$ids" ] || return 0
+  echo "Shut down from the Harvis button: stopping Cloudflare tunnels running in Docker"
+  # shellcheck disable=SC2086
+  docker stop $ids >/dev/null
+}
+
 fire() {
   clear_inbox
   # Lets the button's answer reach the browser before the backend goes away.
   sleep "${HARVIS_POWER_GRACE:-2}"
+  stop_stray_tunnels
   if [ "$(cat "$K8S_MODE_FILE" 2>/dev/null)" = k8s ] && systemctl cat k3s >/dev/null 2>&1; then
     echo "Shut down from the Harvis button: stopping k3s"
     systemctl disable --now k3s

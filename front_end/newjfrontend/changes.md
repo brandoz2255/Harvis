@@ -1,3 +1,52 @@
+## 2026-10-26 12:00 PDT: ./harvis-start.sh — LAN-only or LAN + tunnel, home networks only
+
+### Problem
+Starting Harvis on the k3s host had one mode (whatever the last ./install.sh --k8s set), k3s came up at boot on any network (e.g. a campus network first), and the public tunnel was being run by hand with `docker run cloudflare/cloudflared`, outside the network lock.
+
+### Root cause
+- No quick way to keep the tunnel off while still hosting on the LAN: the guard starts it on every allowed network.
+- `--start` / `cmd_up` enable k3s at boot, before anything checks the network.
+- The tunnel the cluster secret pointed at had been deleted in Cloudflare (pods: "Tunnel not found"), and the hostname's DNS record pointed at a tunnel with no connector (error 1033/530).
+
+### Solution
+- New `harvis-start.sh` at the repo root: `lan`, `tunnel`, `status`, `stop`. Both start modes refuse to run unless the network passes `tunnel-guard.sh check` (HARVIS_TUNNEL_NETWORKS). They stop any `docker run` cloudflared, start k3s for the session but leave it disabled at boot, refresh the guard and print the node-IP URL.
+- `scripts/tunnel-guard.sh`: `HARVIS_TUNNEL_PAUSED=1` in .env keeps the tunnel off on every network (LAN-only mode); `status` shows the mode.
+- cloudflared stays a pod (non-root, read-only, egress only to nginx:8081, DNS and Cloudflare). systemd runs the guard, not cloudflared.
+- Ops (not code): HARVIS_TUNNEL_TOKEN pointed at the live tunnel and loaded into the `cloudflared-env` secret; the public hostname's service is `http://nginx:8081` with no Host header override, and its CNAME targets that same tunnel. Hand-run Docker tunnels stopped.
+
+### Files
+- `harvis-start.sh` (new)
+- `scripts/tunnel-guard.sh`
+
+### Result
+`./harvis-start.sh status` verified. The public hostname → 302 → `/harvis/` 200 through the k8s tunnel. `lan` / `tunnel` need sudo and were not run in this session.
+
+---
+
+## 2026-10-26 11:05 PDT: K8s would not start after Stop; Stop missed a hand-run tunnel
+
+### Problem
+`./install.sh --k8s --tunnel-networks <home Wi-Fi>` waited 3 minutes and died with "the k3s node never became Ready". Separately, a Cloudflare tunnel started by hand (`docker run cloudflare/cloudflared:latest tunnel run --token …`) while the machine was on a campus network, kept running after the Shut down button / `--stop`.
+
+### Root cause
+- `harvis-k8s.sh up` only installs k3s when it is missing. After `--stop` (or the button) k3s is installed but disabled, so nothing started it and `wait_node_ready` timed out.
+- Stop only disables k3s and kills its containers (or, in Docker mode, this checkout's compose containers). A `docker run` tunnel belongs to neither, and is outside `HARVIS_TUNNEL_NETWORKS` and the tunnel guard.
+- Also seen: k3s is enabled at boot, so after a normal start it comes up on whatever network the machine boots on (and k3s takes that network's IP as its node IP) before anything checks the network. Not fixed here.
+
+### Solution
+- `cmd_up` starts (and re-enables) k3s when it is installed but not running, clearing a stale Shut down press first, same as `--start`.
+- New `stop_stray_tunnels` in `harvis-k8s.sh` (`cmd_stop`) and `power-button.sh` (`fire`): stops every running Docker container whose image is `cloudflare/cloudflared` (any tag or digest).
+
+### Files
+- `scripts/k8s/harvis-k8s.sh`
+- `scripts/power-button.sh`
+- `scripts/test_power_button_sh.py` (expects the tunnel check; new test for a hand-run tunnel)
+
+### Result
+Syntax OK; `scripts/test_power_button_sh.py` 4 passed. The root-owned copy of power-button.sh updates on the next `./install.sh --k8s`.
+
+---
+
 ## 2026-08-18 23:10 PDT: Served OWUI build was stale — rebuilt + Bionic file cards
 
 ### Problem
