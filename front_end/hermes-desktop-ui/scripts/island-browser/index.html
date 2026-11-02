@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>island harness</title>
+<style>
+  body { margin: 0; font-family: system-ui, sans-serif; }
+  #chrome { background: #ccc; padding: 8px; }
+  /* The harness has no Tailwind build; these are the utilities IslandHost relies on. */
+  .absolute { position: absolute; } .fixed { position: fixed; }
+  .inset-0 { inset: 0; } .inset-x-0 { left: 0; right: 0; }
+  .bottom-0 { bottom: 0; } .bottom-4 { bottom: 1rem; } .right-1 { right: .25rem; } .right-4 { right: 1rem; } .right-10 { right: 2.5rem; }
+  .top-1 { top: .25rem; } .top-2 { top: .5rem; }
+  .pointer-events-none { pointer-events: none; } .pointer-events-auto { pointer-events: auto; }
+  .opacity-20 { opacity: .2; }
+  .z-10 { z-index: 10; } .z-\[100\] { z-index: 100; }
+  .hidden { display: none; }
+  .overflow-hidden { overflow: hidden; }
+  .bg-background { background: #0d1117; } .bg-background\/70 { background: rgba(13,17,23,.7); }
+  .bg-background\/85 { background: rgba(13,17,23,.85); } .bg-background\/90 { background: rgba(13,17,23,.9); }
+  .text-muted-foreground { color: #7d8590; } .text-foreground { color: #e6edf3; }
+  .rounded { border-radius: .25rem; } .border { border: 1px solid #30363d; } .border-border { border-color: #30363d; }
+  .px-2 { padding-inline: .5rem; } .px-3 { padding-inline: .75rem; } .py-1 { padding-block: .25rem; }
+  .text-xs { font-size: .75rem; } .text-sm { font-size: .875rem; }
+  .flex { display: flex; } .items-center { align-items: center; } .gap-2 { gap: .5rem; }
+  .underline { text-decoration: underline; }
+  .size-5 { width: 1.25rem; height: 1.25rem; } .inline-flex { display: inline-flex; }
+  .items-center { align-items: center; } .justify-center { justify-content: center; }
+  .group\/island { /* group marker only */ }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="./harness.js"></script>
+</body>
+</html>

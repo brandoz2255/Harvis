@@ -1,0 +1,13 @@
+{
+  "name": "harvis-island-importer",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Turns your own copy of the game into the art folder the Harvis island can use. The output is never committed.",
+  "scripts": {
+    "import": "node import-stardew.mjs"
+  },
+  "dependencies": {
+    "xnb": "^1.3.0-a"
+  }
+}
