@@ -13,6 +13,7 @@ import { compactNumber } from '@/lib/format'
 import { triggerHaptic } from '@/lib/haptics'
 import { formatModifierToken } from '@/lib/keybinds/combo'
 import { cn } from '@/lib/utils'
+import { $islandExplore, $islandVisible } from '@/mods/store'
 import { $hapticsMuted, toggleHapticsMuted } from '@/store/haptics'
 import {
   $fileBrowserOpen,
@@ -140,6 +141,8 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
   const sidebarOpen = useStore($sidebarOpen)
   const assistantLive = useStore($voiceCallLive)
   const harvisOn = useStore($harvisMicOn)
+  const islandOn = useStore($islandVisible)
+  const islandExplore = useStore($islandExplore)
   const unreadCount = useStore($unreadSessionCount)
   const unreadBadge = unreadCount > 0 ? unreadCount : undefined
   const unreadHint = unreadBadge ? ` · ${t.titlebar.unreadSessions(unreadBadge)}` : ''
@@ -206,6 +209,18 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
 
   // Static system tools — always pinned to the screen's right edge.
   const systemTools: TitlebarTool[] = [
+    {
+      // The bot island map, full screen over whatever chat is open. Only the chat view draws it.
+      active: islandExplore,
+      hidden: !islandOn || appViewForPath(location.pathname) !== 'chat',
+      icon: <TitlebarIcon name={islandExplore ? 'map-filled' : 'map'} />,
+      id: 'island-map',
+      label: islandExplore ? t.titlebar.islandMapClose : t.titlebar.islandMap,
+      onSelect: () => {
+        triggerHaptic(islandExplore ? 'close' : 'open')
+        $islandExplore.set(!islandExplore)
+      }
+    },
     {
       // Harvis the assistant: its own voice call that moves around the app.
       // The composer's mic stays the plain talk-to-this-chat call.

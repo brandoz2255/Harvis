@@ -255,7 +255,9 @@ export const en: Translations = {
     layoutEditor: 'Layout editor',
     layoutEditorTitle: mod => `Layout editor — ${mod}-click resets the layout`,
     harvisAssistant: 'Turn Harvis on — shows the Harvis mic at the bottom',
-    harvisAssistantEnd: 'Turn Harvis off — hides the Harvis mic'
+    harvisAssistantEnd: 'Turn Harvis off — hides the Harvis mic',
+    islandMap: 'Open the bot island map',
+    islandMapClose: 'Close the bot island map'
   },
 
   keybinds: {

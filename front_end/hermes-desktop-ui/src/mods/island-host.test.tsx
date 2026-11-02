@@ -148,7 +148,7 @@ describe('IslandHost rendering', () => {
 
   it('explores fullscreen and returns to the faded chat background', () => {
     const { view } = mount()
-    const mountDiv = () => view.container.querySelector('.group\\/island > div') as HTMLElement
+    const mountDiv = () => document.body.querySelector('.group\\/island > div') as HTMLElement
 
     // Faded state: zoomed in and feathered into the chat surface.
     expect(mountDiv().className).toContain('opacity-25')

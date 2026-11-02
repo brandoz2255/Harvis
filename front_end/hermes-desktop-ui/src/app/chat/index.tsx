@@ -14,7 +14,7 @@ import { Backdrop } from '@/components/Backdrop'
 import { AsciiField } from '@/components/chat/ascii-field'
 import { Intro } from '@/components/chat/intro'
 import { IslandHost } from '@/mods/island-host'
-import { $islandVisible } from '@/mods/store'
+import { $islandExplore, $islandVisible } from '@/mods/store'
 import { $openBotChat } from '@/plugins/hermes-bots/bot-state'
 import { $groupChatWorkspace } from '@/plugins/hermes-bots/group-chat'
 import { showBotsIsland } from './bots-island-visibility'
@@ -437,6 +437,7 @@ const ChatViewContent = memo(function ChatViewContent({
   const openBotChat = useStore($openBotChat)
   const groupChat = useStore($groupChatWorkspace)
   const islandEnabled = useStore($islandVisible)
+  const islandExplore = useStore($islandExplore)
   // PERF: ChatView must not subscribe to the view's $messages — the atom is
   // replaced on every streaming delta flush (~30×/s) and a subscription here
   // re-renders the entire chat shell (header, chat bar, thread wrapper) per
@@ -501,6 +502,8 @@ const ChatViewContent = memo(function ChatViewContent({
     islandEnabled,
     isRoutedSessionView
   )
+  // The titlebar's map opens the island full screen over any chat, not just the idle Bots tab.
+  const showIslandMap = !showBotIsland && isPrimary && islandEnabled && islandExplore
 
   // The URL points at a session the store hasn't loaded yet (sidebar / cmd-K /
   // direct nav). Derived in render so the swap reads instantly: the same frame
@@ -673,7 +676,7 @@ const ChatViewContent = memo(function ChatViewContent({
         suppressMessages={routeSessionMismatch}
       >
         <div
-          className={cn("relative min-h-0 max-w-full flex-1 overflow-hidden bg-(--ui-chat-surface-background)", !showBotIsland && "contain-[layout_paint]")}
+          className={cn("relative min-h-0 max-w-full flex-1 overflow-hidden bg-(--ui-chat-surface-background)", !showBotIsland && !showIslandMap && "contain-[layout_paint]")}
           data-slot="composer-bounds"
           {...dropHandlers}
         >
@@ -702,6 +705,7 @@ const ChatViewContent = memo(function ChatViewContent({
               </div>
             </div>
           )}
+          {showIslandMap && <IslandHost />}
           {resumeExhausted && routedSessionId && (
             <div className="absolute inset-0 z-10 grid place-items-center bg-(--ui-chat-surface-background) px-8 py-10">
               <ErrorState

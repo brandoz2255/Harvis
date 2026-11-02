@@ -248,7 +248,9 @@ export const zh: Translations = {
     layoutEditor: '布局编辑器',
     layoutEditorTitle: mod => `布局编辑器 — ${mod} 点击重置布局`,
     harvisAssistant: '打开 Harvis — 在底部显示 Harvis 麦克风',
-    harvisAssistantEnd: '关闭 Harvis（隐藏 Harvis 麦克风）'
+    harvisAssistantEnd: '关闭 Harvis（隐藏 Harvis 麦克风）',
+    islandMap: '打开机器人岛地图',
+    islandMapClose: '关闭机器人岛地图'
   },
 
   keybinds: {
