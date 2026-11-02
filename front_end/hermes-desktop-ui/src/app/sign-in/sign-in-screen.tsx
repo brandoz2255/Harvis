@@ -2,7 +2,9 @@ import { type FormEvent, type ReactNode, useEffect, useId, useRef, useState } fr
 
 import { AsciiField } from '@/components/chat/ascii-field'
 import { HarvisWordmark } from '@/components/chat/harvis-wordmark'
+import { LegalLink } from '@/components/legal-panel'
 import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Field, FieldHint } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import {
@@ -155,6 +157,7 @@ export function SignInScreen({
   const [password, setPassword] = useState('')
   const [setupCode, setSetupCode] = useState('')
   const [note, setNote] = useState('')
+  const [acceptTerms, setAcceptTerms] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<{ message: string; field?: FieldName } | null>(null)
   const firstField = useRef<HTMLInputElement>(null)
@@ -177,7 +180,13 @@ export function SignInScreen({
       .catch(() => {
         // Sign-in still works without the config; only sign-up is hidden.
         if (live) {
-          setConfig({ onboarding: false, signupEnabled: false, setupCodeRequired: false, signupApproval: false })
+          setConfig({
+            onboarding: false,
+            signupEnabled: false,
+            setupCodeRequired: false,
+            signupApproval: false,
+            terms: { required: false, version: null, points: [] }
+          })
         }
       })
 
@@ -216,7 +225,9 @@ export function SignInScreen({
           email,
           password,
           setupCode: mode === 'claim' ? setupCode : undefined,
-          noteToHost: mode === 'signup' ? note : undefined
+          noteToHost: mode === 'signup' ? note : undefined,
+          acceptTerms: showsTerms ? acceptTerms : undefined,
+          termsVersion: showsTerms ? config?.terms.version : undefined
         })
       }
     } catch (err) {
@@ -237,6 +248,7 @@ export function SignInScreen({
     expired && mode === 'signin' ? EXPIRED_COPY.description : waits ? APPROVAL_COPY.description : copy.description
   const needsName = mode !== 'signin'
   const needsCode = mode === 'claim' && Boolean(config?.setupCodeRequired)
+  const showsTerms = mode === 'signup' && Boolean(config?.terms.required)
   const canSignUp = Boolean(config?.signupEnabled) && !config?.onboarding
   const fieldError = (field: FieldName) => (error?.field === field ? error.message : null)
 
@@ -330,6 +342,41 @@ export function SignInScreen({
               </Field>
             )}
 
+            {showsTerms && config && (
+              <div className="grid gap-2">
+                <div className="text-[0.8125rem] font-medium text-foreground" id={id('rules-title')}>
+                  House rules
+                </div>
+                <ul
+                  aria-labelledby={id('rules-title')}
+                  className="grid max-h-40 list-disc gap-1.5 overflow-y-auto rounded-lg border border-(--ui-stroke-tertiary) bg-(--ui-bg-quinary) py-2.5 pr-3 pl-7 text-[0.8125rem] leading-5 text-(--ui-text-secondary)"
+                  tabIndex={0}
+                >
+                  {config.terms.points.map(point => (
+                    <li key={point}>{point}</li>
+                  ))}
+                </ul>
+                <label
+                  className="flex cursor-pointer items-start gap-2.5 text-[0.8125rem] leading-5 text-foreground"
+                  htmlFor={id('terms')}
+                >
+                  <Checkbox
+                    aria-invalid={Boolean(fieldError('terms')) || undefined}
+                    checked={acceptTerms}
+                    className="mt-0.5 border-[color-mix(in_srgb,var(--dt-composer-ring)_55%,transparent)]"
+                    id={id('terms')}
+                    onCheckedChange={v => setAcceptTerms(v === true)}
+                  />
+                  I have read the house rules and agree to them.
+                </label>
+                {fieldError('terms') && <FieldHint error>{fieldError('terms')}</FieldHint>}
+                <p className="text-[0.75rem] text-(--ui-text-tertiary)">
+                  These are this Harvis&apos;s rules. The general <LegalLink>Terms and Acceptable Use</LegalLink> apply
+                  too.
+                </p>
+              </div>
+            )}
+
             {needsCode && (
               <Field htmlFor={id('code')} label="Server code">
                 <Input
@@ -393,6 +440,9 @@ export function SignInScreen({
           </Button>
         </p>
       )}
+      <p className="self-center text-[0.75rem]">
+        <LegalLink />
+      </p>
     </Frame>
   )
 }

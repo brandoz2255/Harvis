@@ -7,6 +7,16 @@ import pytest
 from owui_compat import chat_reach, reach_budget
 
 
+@pytest.fixture(autouse=True)
+def _no_mod_rules(monkeypatch):
+    # The fake pools here cannot hold a mods table, and unreadable mods make every tool ask first.
+    import plugins.mods as mods
+
+    async def none(pool, user_id):
+        return mods.ModRules()
+    monkeypatch.setattr(mods, "rules_for_user", none)
+
+
 def _hit(n):
     return {"title": f"T{n}", "url": f"https://example.org/{n}", "snippet": "postgresql release notes"}
 

@@ -26,13 +26,16 @@ retrying the other shape would only produce a second misleading error.
 SSRF: the backend is dual-homed onto the internal network with pgsql, ollama
 and openclaw on it, so a connection URL is attacker-reachable infrastructure if
 it is left unchecked. ``guard_url`` resolves the host and refuses private,
-loopback and link-local addresses unless ``HARVIS_MCP_ALLOW_PRIVATE_URLS`` is
-set (which a self-hoster pointing at a LAN server legitimately needs). The
+loopback, link-local and shared (100.64.0.0/10, Tailscale) addresses unless ``HARVIS_MCP_ALLOW_PRIVATE_URLS`` is
+set (which a self-hoster pointing at a LAN server legitimately needs). That flag never applies to
+a ``strict`` caller, a non-admin on a shared host (``strict_for``): they get public addresses only,
+and one refusal text for every reason. The
 check runs inside the httpx transport, so every request — including each hop
 of a redirect chain — is vetted against the address it is about to be sent to,
-not just the URL the user typed. It still resolves rather than pins, so a DNS
-rebind between the check and the connect is not defeated — stated plainly
-rather than implied away.
+not just the URL the user typed. The vetting by URL is only an early, readable
+refusal: the socket itself is opened by ``providers.guarded_transport``, which
+resolves the name once and dials the address it vetted, so a DNS rebind between
+the check and the connect cannot redirect the request.
 """
 
 from __future__ import annotations
@@ -47,6 +50,8 @@ from typing import Any, Optional
 from urllib.parse import urljoin, urlsplit
 
 import httpx
+
+from plugins.hermes_ui import providers
 
 from .protocol import (
     _CALL_TIMEOUT,
@@ -82,23 +87,33 @@ class _WrongTransport(McpError):
 # -- SSRF guard ------------------------------------------------------------
 
 
-def _allow_private() -> bool:
+def _allow_private(strict: bool = False) -> bool:
+    """The operator's flag, which never applies to a ``strict`` caller (a non-admin on a
+    shared host): the flag exists for the operator's own LAN servers, not for strangers."""
+    if strict:
+        return False
     return os.getenv("HARVIS_MCP_ALLOW_PRIVATE_URLS", "").strip().lower() not in _FALSY
 
 
-def _classify(ip: str) -> Optional[str]:
+_STRICT_REFUSAL = "that URL is not allowed on a shared server"
+
+
+def _classify(ip: str, strict: bool = False) -> Optional[str]:
     """Return a refusal reason for this address, or None if it is fine."""
     try:
-        addr = ipaddress.ip_address(ip)
+        addr = ipaddress.ip_address(ip.split("%", 1)[0])
     except ValueError:
-        return None
+        return "not a valid address"
+    # ::ffff:10.0.0.1 is the IPv4 address in an IPv6 coat; judge the address underneath.
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
+        addr = addr.ipv4_mapped
     # Cloud metadata lives here. No MCP server ever legitimately does, so this
     # one stays refused even when private addresses are allowed.
     if addr.is_link_local:
         # Cloud metadata lives here and no allow-flag should reach it, so this
         # reason is phrased as final — it is the one refusal with no escape.
         return "a link-local address, which is never allowed"
-    if _allow_private():
+    if _allow_private(strict):
         return None
     if addr.is_loopback:
         return "a loopback address"
@@ -106,11 +121,30 @@ def _classify(ip: str) -> Optional[str]:
         return "a private address"
     if addr.is_reserved or addr.is_multicast:
         return "a reserved address"
+    if not addr.is_global:
+        # Shared address space (100.64.0.0/10: Tailscale, carrier NAT) is neither
+        # private nor global, so the checks above let it through.
+        return "a private address"
     return None
 
 
-def guard_url(url: str) -> str:
-    """Validate a connection URL. Returns it stripped, or raises McpError."""
+def _vet_address(addr: "ipaddress.IPv4Address | ipaddress.IPv6Address") -> None:
+    reason = _classify(str(addr))
+    if reason:
+        raise McpError(f"the server's address is {reason}")
+
+
+def _vet_address_strict(addr: "ipaddress.IPv4Address | ipaddress.IPv6Address") -> None:
+    if _classify(str(addr), strict=True):
+        raise McpError(_STRICT_REFUSAL)
+
+
+def guard_url(url: str, strict: bool = False) -> str:
+    """Validate a connection URL. Returns it stripped, or raises McpError.
+
+    ``strict`` is for a non-admin on a shared host: the operator flag is ignored and every
+    refusal reads the same, so the answer cannot be used to find out which internal names
+    exist."""
     raw = (url or "").strip()
     if not raw:
         raise McpError("remote connections need a URL")
@@ -123,10 +157,14 @@ def guard_url(url: str) -> str:
     try:
         infos = socket.getaddrinfo(host, parts.port or (443 if parts.scheme == "https" else 80))
     except OSError as exc:
+        if strict:
+            raise McpError(_STRICT_REFUSAL) from None
         raise McpError(f"could not resolve '{host}': {exc}") from exc
     for info in infos:
-        reason = _classify(info[4][0])
+        reason = _classify(info[4][0], strict)
         if reason:
+            if strict:
+                raise McpError(_STRICT_REFUSAL)
             hint = (
                 ""
                 if "never allowed" in reason
@@ -137,8 +175,13 @@ def guard_url(url: str) -> str:
     return raw
 
 
-async def guard_url_async(url: str) -> str:
-    return await asyncio.to_thread(guard_url, url)
+async def guard_url_async(url: str, strict: bool = False) -> str:
+    return await asyncio.to_thread(guard_url, url, strict)
+
+
+def strict_for(user_id: int) -> bool:
+    """Whether this user's MCP URLs get the strict guard: a non-admin on a shared host."""
+    return providers.url_guarded(int(user_id))
 
 
 # A redirect chain longer than this is not an MCP endpoint moving house.
@@ -156,22 +199,27 @@ class GuardedTransport(httpx.AsyncBaseTransport):
     tests substitute a mock.
     """
 
-    def __init__(self, inner: Optional[httpx.AsyncBaseTransport] = None) -> None:
-        self._inner = inner or httpx.AsyncHTTPTransport()
+    def __init__(self, inner: Optional[httpx.AsyncBaseTransport] = None, strict: bool = False) -> None:
+        self._strict = strict
+        self._inner = inner or providers.guarded_transport(
+            vet=_vet_address_strict if strict else _vet_address)
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        await guard_url_async(str(request.url))
+        await guard_url_async(str(request.url), self._strict)
         return await self._inner.handle_async_request(request)
 
     async def aclose(self) -> None:
         await self._inner.aclose()
 
 
-def guarded_client(**kwargs) -> httpx.AsyncClient:
-    """An AsyncClient whose every request, redirects included, is SSRF-checked."""
+def guarded_client(*, strict: bool = False, **kwargs) -> httpx.AsyncClient:
+    """An AsyncClient whose every request, redirects included, is SSRF-checked.
+    Environment proxies are ignored: they would carry the request past the guard."""
+    kwargs.setdefault("trust_env", False)
     kwargs.setdefault("follow_redirects", True)
     kwargs.setdefault("max_redirects", _MAX_REDIRECTS)
-    kwargs.setdefault("transport", GuardedTransport())
+    if "transport" not in kwargs:
+        kwargs["transport"] = GuardedTransport(strict=strict)
     return httpx.AsyncClient(**kwargs)
 
 
@@ -224,6 +272,7 @@ class HttpMcpSession(_McpMethods):
         mode: str = STREAMABLE,
         headers: Optional[dict] = None,
         label: str = "mcp",
+        strict: bool = False,
     ) -> None:
         super().__init__()
         self._url = url
@@ -241,6 +290,7 @@ class HttpMcpSession(_McpMethods):
         self._pump: Optional[asyncio.Task] = None
         self._pump_error: Optional[Exception] = None
         self._client = guarded_client(
+            strict=strict,
             timeout=httpx.Timeout(_CALL_TIMEOUT, connect=15.0, read=_CALL_TIMEOUT),
         )
 
@@ -569,20 +619,21 @@ async def open_http_session(
     headers: Optional[dict] = None,
     label: str = "mcp",
     prefer: str = "",
+    strict: bool = False,
 ) -> tuple[HttpMcpSession, list[dict]]:
     """Connect, handshake and list tools. Returns ``(session, tools)``.
 
     Tries the likelier transport first and falls back to the other, because the
     stored transport label is advisory at best.
     """
-    safe_url = await guard_url_async(url)
+    safe_url = await guard_url_async(url, strict)
     path = urlsplit(safe_url).path.rstrip("/")
     sse_first = prefer == LEGACY_SSE or path.endswith("/sse")
     order = [LEGACY_SSE, STREAMABLE] if sse_first else [STREAMABLE, LEGACY_SSE]
 
     first_error: Optional[Exception] = None
     for mode in order:
-        session = HttpMcpSession(safe_url, mode=mode, headers=headers, label=label)
+        session = HttpMcpSession(safe_url, mode=mode, headers=headers, label=label, strict=strict)
         try:
             await session.initialize()
             tools = await session.list_tools()

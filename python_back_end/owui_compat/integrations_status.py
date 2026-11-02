@@ -22,12 +22,6 @@ logger = logging.getLogger(__name__)
 _HTTP_TIMEOUT = httpx.Timeout(3.0)
 
 
-def _openclaw_health_url() -> str:
-    base = os.getenv("OPENCLAW_URL", "ws://openclaw:18789")
-    base = base.replace("wss://", "https://").replace("ws://", "http://").rstrip("/")
-    return f"{base}/health"
-
-
 async def probe_services(request: Request, user) -> tuple[dict, list]:
     """Run all integration readiness probes for `user`; return (services, installed_models).
 
@@ -59,30 +53,37 @@ async def probe_services(request: Request, user) -> tuple[dict, list]:
     except Exception:
         services["ollama"] = {"status": "error"}
 
-    # ── OpenClaw gateway health ──
-    # "Not deployed" and "deployed but broken" are different things and used to look
-    # identical: the core profile doesn't start harvis-openclaw at all, so a stock
-    # install showed a red "Error" on a service the user never asked for. A connect
-    # failure (no DNS entry, connection refused) means the container isn't running —
-    # that's `available`, with a line saying how to start it. `error` is reserved for
-    # a gateway that IS answering and answering badly.
-    try:
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as hc:
-            r = await hc.get(_openclaw_health_url())
-        services["openclaw"] = (
-            {"status": "ready"}
-            if r.status_code < 400
-            else {"status": "error", "detail": f"Gateway returned HTTP {r.status_code}"}
-        )
-    except httpx.ConnectError:
-        services["openclaw"] = {
-            "status": "available",
-            "detail": "Not running — start it with: docker compose --profile engines up -d openclaw",
-        }
-    except httpx.TimeoutException:
-        services["openclaw"] = {"status": "error", "detail": "Gateway did not respond in 3s"}
-    except Exception:
-        services["openclaw"] = {"status": "error"}
+    # ── OpenClaw: OPTIONAL, and only ever the user's OWN gateway. Harvis no longer bundles one,
+    # so there is nothing to health-check here — the status is this user's link state
+    # (owui_compat/openclaw_connect.py): not linked / saved / linked / error. Hermes is the
+    # recommended agent; an unlinked OpenClaw is "available", never a failure.
+    pool = getattr(request.app.state, "pg_pool", None)
+    services["openclaw"] = {
+        "status": "available",
+        "detail": "Optional — link your own OpenClaw (Hermes is recommended)",
+        "reason": "not_linked",
+    }
+    if pool is not None:
+        try:
+            from .openclaw_connect import external_status
+
+            link = await external_status(pool, int(user.id))
+            if link["state"] == "linked":
+                services["openclaw"] = {"status": "ready", "detail": "Linked (optional)", "reason": "linked"}
+            elif link["state"] == "error":
+                services["openclaw"] = {
+                    "status": "error",
+                    "detail": (link.get("last_error") or "Verification failed")[:200],
+                    "reason": "link_error",
+                }
+            elif link["state"] == "saved":
+                services["openclaw"] = {
+                    "status": "needs_setup",
+                    "detail": "Saved, not verified yet (optional)",
+                    "reason": "unverified",
+                }
+        except Exception:
+            pass  # fail-closed: stays "available / not linked"
 
     # ── Hermes: a model/router integration, not a separate daemon. Ready ONLY
     # when an installed Ollama model looks like Hermes (NOT just because Ollama
@@ -98,7 +99,6 @@ async def probe_services(request: Request, user) -> tuple[dict, list]:
     )
 
     # ── per-user DB probes (presence / counts only — NO secrets) ──
-    pool = getattr(request.app.state, "pg_pool", None)
     if pool is not None:
         try:
             async with pool.acquire() as conn:
@@ -163,10 +163,6 @@ async def probe_services(request: Request, user) -> tuple[dict, list]:
     # `connected` is an ADDITIVE signal the Integrations card reads for the chat-usable case.
     # Keyed by service_key so the capability mirror reads them directly.
     _engines = (
-        # "opencode" is deliberately not probed: the sidecar still exists, but the
-        # engine is shelved and its storefront card was removed, so advertising a
-        # readiness state for it would put a lane back in the Build selector that
-        # nothing points at. Add the tuple back to un-shelve it.
         ("codex", "HARVIS_CODEX_CONTAINER", "harvis-codex", True),
         ("claude-code", "HARVIS_CLAUDE_CODE_CONTAINER", "harvis-claude-code", True),
     )

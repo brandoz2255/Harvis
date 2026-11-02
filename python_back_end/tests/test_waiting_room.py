@@ -22,6 +22,7 @@ from starlette.responses import PlainTextResponse
 from starlette.routing import Route, WebSocketRoute
 from starlette.testclient import TestClient
 
+import auth_optimized
 from auth_optimized import ALGORITHM, SECRET_KEY
 from plugins.people import approval, controls, gate, routes, session
 
@@ -70,6 +71,7 @@ def _fresh_caches(monkeypatch):
     monkeypatch.setattr(approval, "_inflight", {})
     monkeypatch.setattr(approval, "_admin_user_ids", lambda: set())
     monkeypatch.setattr(session, "_seen", {})
+    monkeypatch.setattr(auth_optimized, "_cutoffs", {})
     yield
 
 
@@ -118,7 +120,8 @@ def test_migration_is_idempotent_and_keeps_existing_accounts_active():
 # ── the gate ────────────────────────────────────────────────────────────────
 
 class _FakePool:
-    """Answers ``SELECT account_status`` from a dict; a missing id is a deleted account."""
+    """Answers ``SELECT account_status`` from a dict; a missing id is a deleted account.
+    The sign-out cutoff query gets None (no cutoff), not an account status."""
 
     def __init__(self, statuses, delay=0.0):
         self.statuses, self.delay, self.reads = statuses, delay, []
@@ -134,6 +137,8 @@ class _FakePool:
                 return False
 
             async def fetchval(self, sql, uid, timeout=None):
+                if "tokens_valid_after" in sql:
+                    return None  # the sign-out cutoff (auth_optimized.session_cutoff): never set here
                 pool.reads.append(uid)
                 await asyncio.sleep(pool.delay)
                 return pool.statuses.get(uid)

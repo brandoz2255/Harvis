@@ -320,7 +320,7 @@ class McpRuntime:
 
     async def _connect_http(self, cfg: McpServerConfig) -> _Session:
         """A hosted server: no container, no sandbox — just an authorized URL."""
-        from .http_transport import open_http_session
+        from .http_transport import open_http_session, strict_for
 
         headers = await resolve_auth_headers(cfg, self._pool)
         session, tools = await open_http_session(
@@ -328,6 +328,7 @@ class McpRuntime:
             headers=headers,
             label=cfg.server_name,
             prefer=cfg.transport.value,
+            strict=strict_for(cfg.user_id),
         )
         logger.info(
             "mcp: connected %s (%s) over %s — %d tools",

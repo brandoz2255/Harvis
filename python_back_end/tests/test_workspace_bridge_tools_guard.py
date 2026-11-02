@@ -69,7 +69,7 @@ class _Harness:
             return td.WorkspaceSuggestion({"should_suggest": True, "confidence": 0.95,
                                            "task_type": "file", "task_brief": "b", "reason": "r"})
 
-        async def sync(pool, model):
+        async def sync(pool, model, user_id):
             self.synced.append(model)
 
         async def start(**kw):

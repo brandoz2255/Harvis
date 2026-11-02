@@ -31,6 +31,7 @@ import logging
 import os
 import re
 import socket
+import zlib
 from typing import Any, Optional
 from urllib.parse import urljoin, urlparse, urlunparse
 
@@ -143,11 +144,83 @@ def _pinned_request(
     )
     hdrs = dict(headers or {})
     hdrs.setdefault("User-Agent", _USER_AGENT)
+    for k in [k for k in hdrs if k.lower() == "accept-encoding"]:
+        del hdrs[k]
+    hdrs["Accept-Encoding"] = _ACCEPT_ENCODING
     default_port = 443 if parsed.scheme == "https" else 80
     hdrs["Host"] = hostname if port == default_port else f"{hostname}:{port}"
     return client.build_request(
         "GET", pinned, headers=hdrs, extensions={"sni_hostname": hostname}
     )
+
+
+# Encodings we will decode ourselves. httpx would also decode br and zstd, and its
+# decoder runs over a whole raw chunk before any size check, so a ~1.6 KB brotli body
+# can inflate to gigabytes in one step. We ask for gzip/deflate only, refuse anything
+# else, and inflate with zlib under a hard output limit.
+_ACCEPT_ENCODING = "gzip, deflate"
+_INFLATE_STEP = 256 * 1024
+
+
+def _content_encoding(headers) -> str:
+    """The single supported Content-Encoding of a response ('' for none). Raises
+    ReachBlocked for br, zstd, stacked or unknown encodings."""
+    raw = (headers.get("content-encoding") or "").strip().lower()
+    names = [n.strip() for n in raw.split(",") if n.strip()]
+    names = [n for n in names if n != "identity"]
+    if not names:
+        return ""
+    if len(names) > 1:
+        raise ReachBlocked("response uses stacked content encodings")
+    if names[0] in ("gzip", "x-gzip"):
+        return "gzip"
+    if names[0] == "deflate":
+        return "deflate"
+    raise ReachBlocked(f"unsupported content encoding {names[0][:20]!r}")
+
+
+async def _read_capped_body(resp: httpx.Response, cap: int = _MAX_BODY_BYTES) -> tuple[bytes, bool]:
+    """Read a streamed response body, never holding more than ``cap`` decoded bytes.
+
+    Returns ``(body, was_encoded)``. Reads ``aiter_raw()`` (so httpx never decodes) and
+    inflates gzip/deflate here with a per-call output limit. Raises ReachBlocked
+    when the raw or the decoded size passes ``cap``, or for an encoding we do not decode.
+    """
+    encoding = _content_encoding(resp.headers)
+    out = bytearray()
+    raw_total = 0
+    inflater = None
+    first = True
+    async for chunk in resp.aiter_raw():
+        if not chunk:
+            continue
+        raw_total += len(chunk)
+        if raw_total > cap:
+            raise ReachBlocked("response body too large")
+        if not encoding:
+            out += chunk
+            continue
+        if inflater is None:
+            inflater = zlib.decompressobj(31 if encoding == "gzip" else zlib.MAX_WBITS)
+        data = chunk
+        while data and not inflater.eof:
+            try:
+                piece = inflater.decompress(data, min(_INFLATE_STEP, cap - len(out) + 1))
+            except zlib.error as exc:
+                if first and encoding == "deflate":
+                    # Some servers send raw deflate with no zlib header.
+                    inflater = zlib.decompressobj(-zlib.MAX_WBITS)
+                    first = False
+                    continue
+                raise ReachBlocked("response body could not be decompressed") from exc
+            first = False
+            out += piece
+            if len(out) > cap:
+                raise ReachBlocked("response body too large")
+            data = inflater.unconsumed_tail
+        if inflater.eof:
+            break
+    return bytes(out), bool(encoding)
 
 
 async def _safe_get(
@@ -178,28 +251,43 @@ async def _safe_get(
             ips = _resolve_public_ips(
                 parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80)
             )
-            resp = await client.send(_pinned_request(client, current, ips[0], headers))
+            resp = await client.send(
+                _pinned_request(client, current, ips[0], headers), stream=True
+            )
+            try:
+                # Defence in depth: confirm we actually spoke to the pinned address.
+                stream = resp.extensions.get("network_stream")
+                if stream is not None:
+                    peer = stream.get_extra_info("server_addr")
+                    if peer and not _ip_is_public(str(peer[0])):
+                        raise ReachBlocked("connection landed on a non-public address")
 
-            # Defence in depth: confirm we actually spoke to the pinned address.
-            stream = resp.extensions.get("network_stream")
-            if stream is not None:
-                peer = stream.get_extra_info("server_addr")
-                if peer and not _ip_is_public(str(peer[0])):
-                    await resp.aclose()
-                    raise ReachBlocked("connection landed on a non-public address")
+                if resp.is_redirect:
+                    location = resp.headers.get("location") or ""
+                    if not location:
+                        raise ReachBlocked("redirect without a Location header")
+                    current = urljoin(current, location)
+                    continue
 
-            if resp.is_redirect:
-                location = resp.headers.get("location") or ""
+                resp.raise_for_status()
+                declared = resp.headers.get("content-length") or ""
+                if declared.isdigit() and int(declared) > _MAX_BODY_BYTES:
+                    raise ReachBlocked("response body too large")
+                body, was_encoded = await _read_capped_body(resp)
+                # The decoded body is already in memory: hand callers a plain
+                # Response that holds it, minus the headers that described the wire form.
+                headers_out = httpx.Headers(resp.headers)
+                if was_encoded:
+                    headers_out.pop("content-encoding", None)
+                headers_out.pop("content-length", None)
+                return httpx.Response(
+                    resp.status_code,
+                    headers=headers_out,
+                    content=body,
+                    request=resp.request,
+                )
+            finally:
                 await resp.aclose()
-                if not location:
-                    raise ReachBlocked("redirect without a Location header")
-                current = urljoin(current, location)
-                continue
-
-            if len(resp.content) > _MAX_BODY_BYTES:
-                raise ReachBlocked("response body too large")
-            resp.raise_for_status()
-            return resp
     raise ReachBlocked(f"too many redirects (>{_MAX_REDIRECTS})")
 
 

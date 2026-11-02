@@ -89,7 +89,7 @@ const SETTINGS: VoiceNavChild[] = [
     id: 'engines',
     label: 'Coding engines',
     query: 'tab=providers&pview=engines',
-    names: ['coding engines', 'engines', 'claude code', 'codex', 'opencode']
+    names: ['coding engines', 'engines', 'claude code', 'codex']
   },
   {
     id: 'endpoints',

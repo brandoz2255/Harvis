@@ -53,7 +53,7 @@ def test_set_token_gates_requests(monkeypatch):
 
 
 def test_environment_get_has_no_whole_environment_dump(monkeypatch):
-    monkeypatch.setenv("OPENCLAW_GATEWAY_TOKEN", "s3cret")
+    monkeypatch.setenv("HARVIS_GATEWAY_TOKEN", "s3cret")
     with pytest.raises(ValueError):
         run(env_vars.env_get(env_vars.EnvGetArgs()))
     with pytest.raises(ValueError):
@@ -61,7 +61,7 @@ def test_environment_get_has_no_whole_environment_dump(monkeypatch):
 
 
 @pytest.mark.parametrize("key", [
-    "OPENCLAW_GATEWAY_TOKEN", "HARVIS_MCP_SERVER_TOKEN", "POSTGRES_PASSWORD",
+    "HARVIS_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN", "HARVIS_MCP_SERVER_TOKEN", "POSTGRES_PASSWORD",
     "JWT_SECRET", "OPENAI_API_KEY", "FERNET_KEY", "aws_secret_access_key",
 ])
 def test_environment_get_refuses_secret_names(key, monkeypatch):

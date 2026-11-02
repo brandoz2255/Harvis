@@ -41,7 +41,8 @@ MAX_DATA_URL_BYTES = 8 * 1024 * 1024
 MAX_ENTRIES = 2000
 # Above this the UI warns (no hard cap — the user decided): big app installs are the point.
 WARN_BYTES = int(float(os.getenv("HARVIS_SANDBOX_WARN_GB", "20")) * 1024 ** 3)
-META = ".harvis"             # Harvis's notes inside a sandbox (the app link prefix, the GPU switch)
+META = ".harvis"             # the agent's scratch folder in /workspace (logs, the app link prefix note); the runner owns it
+META_ROOT = ".meta"          # beside the u<uid> folders under ROOT, never mounted into a runner: the link secret, the GPU grant
 _SALT = "proxy-salt"         # per-sandbox secret the app links are signed with; deleting the sandbox rotates it
 APP_PREFIX = "/hermes-api/sandbox-app"
 
@@ -89,19 +90,99 @@ def container_name(user_id: int, session_id: str) -> str:
     return "harvis-vc-run-" + "".join(c if c.isalnum() or c in "_.-" else "-" for c in key)[:40]
 
 
+def meta_dir(user_id: int, session_id: str) -> str:
+    """Harvis's private bookkeeping for one sandbox. The runner container only ever
+    mounts ``session_dir``, so nothing in here can be read, replaced or linked by
+    code running in the sandbox."""
+    return os.path.join(ROOT, META_ROOT, f"u{int(user_id)}", _check_sid(session_id))
+
+
+def meta_dir_of_workspace(workspace_path: str) -> Optional[str]:
+    """``meta_dir`` for a path ``ROOT/u<uid>/<session>``; None for any other folder
+    (a Build Space session has no sandbox bookkeeping)."""
+    real = os.path.realpath(workspace_path)
+    user_dir, sid = os.path.split(real)
+    root, user = os.path.split(user_dir)
+    if root != os.path.realpath(ROOT) or not re.fullmatch(r"u\d+", user) or not _SID_RE.match(sid):
+        return None
+    return os.path.join(root, META_ROOT, user, sid)
+
+
+def _ensure_meta(user_id: int, session_id: str) -> str:
+    md = meta_dir(user_id, session_id)
+    os.makedirs(md, mode=0o700, exist_ok=True)
+    return md
+
+
+def _open_notes(base_fd: int) -> Optional[int]:
+    """The agent's ``.harvis`` folder as a real directory. A link or file planted in
+    its place is removed (never followed) and the folder made again."""
+    for _ in range(2):
+        d = _open_dir(META, base_fd)
+        if d is not None:
+            return d
+        try:
+            os.unlink(META, dir_fd=base_fd)
+        except OSError:
+            return None
+    return None
+
+
+def _write_plain(name: str, dir_fd: int, data: str, mode: int = 0o644) -> bool:
+    """Replace the contents of a regular file under dir_fd. Refuses a link, a named
+    pipe, or a file with another name for it (a hard link planted to something the
+    backend can write), and checks before truncating."""
+    try:
+        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, mode, dir_fd=dir_fd)
+    except OSError:
+        return False
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            return False
+        os.ftruncate(fd, 0)
+        os.write(fd, data.encode("utf-8"))
+        return True
+    finally:
+        os.close(fd)
+
+
+def _note_prefix(base: str, prefix: str) -> None:
+    """Tell the agent where its apps are served, in /workspace/.harvis/app-url-prefix."""
+    try:
+        base_fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        return
+    try:
+        notes = _open_notes(base_fd)
+        if notes is None:
+            return
+        try:
+            _write_plain("app-url-prefix", notes, prefix + "\n")
+        finally:
+            os.close(notes)
+    finally:
+        os.close(base_fd)
+
+
 def ensure_dir(user_id: int, session_id: str) -> str:
     """Create the chat's folder (idempotent) with its link secret and a note telling
     the agent where its apps will be served. Returns the folder."""
     base = session_dir(user_id, session_id)
-    meta = os.path.join(base, META)
-    os.makedirs(meta, mode=0o750, exist_ok=True)
-    salt = os.path.join(meta, _SALT)
+    os.makedirs(base, exist_ok=True)
+    salt = os.path.join(_ensure_meta(user_id, session_id), _SALT)
     if not os.path.exists(salt):
-        with open(salt, "w") as f:
+        # Linked into place so a concurrent caller never reads a half-written secret.
+        tmp = f"{salt}.{secrets.token_hex(4)}"
+        with open(tmp, "w") as f:
             f.write(secrets.token_hex(16))
-    prefix = app_prefix(user_id, session_id)
-    with open(os.path.join(meta, "app-url-prefix"), "w") as f:
-        f.write(prefix + "\n")
+        try:
+            os.link(tmp, salt)
+        except FileExistsError:
+            pass
+        finally:
+            os.unlink(tmp)
+    _note_prefix(base, app_prefix(user_id, session_id))
     return base
 
 
@@ -122,7 +203,7 @@ def _sign(user_id: int, session_id: str, salt: str) -> str:
 
 def _salt(user_id: int, session_id: str) -> str:
     try:
-        with open(os.path.join(session_dir(user_id, session_id), META, _SALT)) as f:
+        with open(os.path.join(meta_dir(user_id, session_id), _SALT)) as f:
             return f.read().strip()
     except OSError:
         return ""
@@ -152,13 +233,22 @@ def verify_cap(cap: str) -> Optional[tuple[int, str]]:
 
 
 def gpu_wanted(user_id: int, session_id: str) -> bool:
-    return os.path.exists(os.path.join(session_dir(user_id, session_id), META, "gpu"))
+    return os.path.isfile(os.path.join(meta_dir(user_id, session_id), "gpu"))
+
+
+def gpu_granted(workspace_path: str) -> bool:
+    """Whether the sandbox whose folder is ``workspace_path`` was granted the GPU.
+    Read from the backend-only meta folder, never from the runner-writable mount."""
+    md = meta_dir_of_workspace(workspace_path)
+    return bool(md) and os.path.isfile(os.path.join(md, "gpu"))
 
 
 def set_gpu(user_id: int, session_id: str, on: bool) -> None:
-    marker = os.path.join(ensure_dir(user_id, session_id), META, "gpu")
+    ensure_dir(user_id, session_id)
+    marker = os.path.join(meta_dir(user_id, session_id), "gpu")
     if on:
-        open(marker, "w").close()
+        with open(marker, "w"):
+            pass
     elif os.path.exists(marker):
         os.remove(marker)
 
@@ -180,9 +270,10 @@ def usage_bytes(user_id: int, session_id: str, limit_files: int = 200_000) -> in
 
 def delete_dir(user_id: int, session_id: str) -> None:
     shutil.rmtree(session_dir(user_id, session_id), ignore_errors=True)
+    shutil.rmtree(meta_dir(user_id, session_id), ignore_errors=True)
 
 
-def resolve(user_id: int, vpath: str, *, create: bool = False) -> tuple[str, str, str]:
+def resolve(user_id: int, vpath: str, *, create: bool = False, writing: bool = False) -> tuple[str, str, str]:
     """``/sandbox/<sid>/workspace[/rest]`` → (session_id, real path, path inside the container).
 
     Raises SandboxError for anything that isn't such a path or that would
@@ -196,12 +287,16 @@ def resolve(user_id: int, vpath: str, *, create: bool = False) -> tuple[str, str
     rest = parts[3:]
     if any(p in (".", "..") for p in rest):
         raise SandboxError("path escapes the sandbox")
+    if writing and rest and rest[0] == META:
+        raise SandboxError("that folder belongs to Harvis")
     base = ensure_dir(user_id, sid) if create else session_dir(user_id, sid)
     real = os.path.join(base, *rest)
     base_real = os.path.realpath(base)
     real_real = os.path.realpath(real)
     if real_real != base_real and not real_real.startswith(base_real + os.sep):
         raise SandboxError("path escapes the sandbox")
+    if writing and os.path.relpath(real_real, base_real).split(os.sep)[0] == META:
+        raise SandboxError("that folder belongs to Harvis")
     inner = CONTAINER_DIR + ("/" + "/".join(rest) if rest else "")
     return sid, real_real, inner
 
@@ -222,7 +317,7 @@ def list_dir(user_id: int, vpath: str) -> dict:
             if len(entries) >= MAX_ENTRIES:
                 break
             if real == base and e.name == META:
-                continue  # Harvis's own bookkeeping (link secret, GPU switch) stays out of the tree
+                continue  # the agent's scratch folder stays out of the tree
             try:
                 is_dir = e.is_dir(follow_symlinks=False)
             except OSError:
@@ -261,14 +356,22 @@ def read_data_url(user_id: int, vpath: str) -> dict:
 
 
 def write_text(user_id: int, vpath: str, content: str) -> dict:
-    _, real, _ = resolve(user_id, vpath)
+    _, real, _ = resolve(user_id, vpath, writing=True)
     if len(content.encode("utf-8")) > MAX_TEXT_BYTES:
         raise SandboxError("file is too large to save here")
     if not os.path.isdir(os.path.dirname(real)):
         raise SandboxError("the folder doesn't exist")
     if os.path.isdir(real):
         raise SandboxError("that's a folder")
-    with open(real, "w", encoding="utf-8") as f:
+    try:
+        fd = os.open(real, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o644)
+    except OSError:
+        raise SandboxError("can't save that file")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        st = os.fstat(f.fileno())
+        if not stat.S_ISREG(st.st_mode):
+            raise SandboxError("can't save that file")
+        f.truncate(0)
         f.write(content)
     return {"ok": True, "path": vpath}
 
@@ -460,23 +563,27 @@ def _write_mirrored(name: str, dir_fd: int, text: str) -> bool:
     return True
 
 
-_USER_MIRROR = "user-md-mirror.json"  # in META: the USER.md lines Harvis last wrote
+_USER_MIRROR = "user-md-mirror.json"  # in the meta folder: the USER.md lines Harvis last wrote
 
 
 def _bullets(text: str) -> list[str]:
     return [" ".join(line[2:].split()) for line in text.splitlines() if line.startswith("- ") and line[2:].strip()]
 
 
-def _note_user_mirror(base: int, facts: list[str]) -> None:
-    meta = _open_dir(META, base)
+def _open_meta(user_id: int, session_id: str, create: bool = False) -> Optional[int]:
+    try:
+        md = _ensure_meta(user_id, session_id) if create else meta_dir(user_id, session_id)
+        return os.open(md, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        return None
+
+
+def _note_user_mirror(user_id: int, session_id: str, facts: list[str]) -> None:
+    meta = _open_meta(user_id, session_id, create=True)
     if meta is None:
         return
     try:
-        fd = os.open(_USER_MIRROR, _WRITE_FLAGS, 0o640, dir_fd=meta)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(facts, f)
-    except OSError:
-        pass
+        _write_plain(_USER_MIRROR, meta, json.dumps(facts), 0o600)
     finally:
         os.close(meta)
 
@@ -492,7 +599,7 @@ def user_md_additions(user_id: int, session_id: str, limit: int = 20) -> list[st
         return []
     try:
         text = _read_small("USER.md", base)
-        meta = _open_dir(META, base)
+        meta = _open_meta(user_id, session_id)
         if not text or meta is None:
             return []
         try:
@@ -510,7 +617,7 @@ def user_md_additions(user_id: int, session_id: str, limit: int = 20) -> list[st
         if added:
             # Seen once is enough: if USER.md stops being mirrored (the agent dropped
             # the mark), a memory deleted in Settings must not come back from it.
-            _note_user_mirror(base, [*map(str, written), *added])
+            _note_user_mirror(user_id, session_id, [*map(str, written), *added])
         return added
     finally:
         os.close(base)
@@ -538,7 +645,7 @@ def sync_core_files(user_id: int, session_id: str, soul: str, memories: list[str
     try:
         done = [name for name, text in files.items() if _write_mirrored(name, base, text)]
         if "USER.md" in done:
-            _note_user_mirror(base, facts)
+            _note_user_mirror(user_id, session_id, facts)
         if _read_small(MEMORY_FILE, base) is None:
             try:
                 fd = os.open(MEMORY_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=base)

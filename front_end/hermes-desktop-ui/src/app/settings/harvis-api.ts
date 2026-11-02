@@ -50,9 +50,10 @@ export interface CredentialStatus {
 export interface FreeProvider {
   id: string
   label: string
-  console_url: string
+  /** Null for a server the host runs itself, hidden from other people on a shared host. */
+  console_url: null | string
   note: string
-  base_url?: string
+  base_url?: null | string
   /** A server the user runs (OmniRoute): connect with the key field empty. */
   key_optional?: boolean
   auth: CredentialStatus
@@ -83,7 +84,8 @@ export interface HarvisProviderRow {
   models: string[]
   reason?: null | string
   note: string
-  base_url: string
+  /** Null when the server's own address is hidden from this user (shared host). */
+  base_url: null | string
   console_url: null | string
   auth: CredentialStatus | null
   /** user_api_keys provider name (kind user-api-key). */
@@ -144,6 +146,46 @@ export const connectCredential = (engine: string, credential: string, authMode =
 
 export const disconnectCredential = (engine: string) =>
   post<{ ok: boolean }>(`/api/owui/engine-auth/${encodeURIComponent(engine)}/disconnect`, {})
+
+/** Agents the user runs themselves and links by address + token (Hermes recommended, OpenClaw optional). */
+export type LinkedAgentId = 'hermes' | 'openclaw'
+
+export type LinkedAgentState = 'error' | 'linked' | 'not_linked' | 'saved'
+
+/** What the server keeps for a link. The token is write-only: only `token_saved` ever comes back. */
+export interface LinkedAgentStatus {
+  connected: boolean
+  last_error: null | string
+  token_saved: boolean
+  url: null | string
+  verified_at: null | number
+}
+
+const linkedAgentPath = (id: LinkedAgentId) => `/api/owui/integrations/${id}-external`
+
+export function linkedAgentState(status: LinkedAgentStatus | null | undefined): LinkedAgentState {
+  if (!status?.url) {
+    return 'not_linked'
+  }
+
+  if (status.connected) {
+    return 'linked'
+  }
+
+  return status.last_error ? 'error' : 'saved'
+}
+
+export const fetchLinkedAgent = (id: LinkedAgentId) => harvisFetch<LinkedAgentStatus>(linkedAgentPath(id))
+
+/** Saves the address (and a new token when one is typed); it does not verify. A blank token keeps the saved one. */
+export const saveLinkedAgent = (id: LinkedAgentId, url: string, token: string) =>
+  post<LinkedAgentStatus>(linkedAgentPath(id), token.trim() ? { token: token.trim(), url } : { url })
+
+export const verifyLinkedAgent = (id: LinkedAgentId) =>
+  post<LinkedAgentStatus & { error: null | string; ok: boolean }>(`${linkedAgentPath(id)}/verify`, {})
+
+export const disconnectLinkedAgent = (id: LinkedAgentId) =>
+  post<{ connected: boolean }>(`${linkedAgentPath(id)}/disconnect`, {})
 
 /** Moonshot keys are checked with Moonshot before they are stored (400 when rejected). */
 export const saveUserApiKey = (providerName: string, apiKey: string) =>
@@ -405,11 +447,52 @@ export interface CookbookModel {
 
 const COOKBOOK = '/api/cookbook'
 
+/** One machine in the cookbook, as /api/cookbook/nodes lists it. */
+export interface CookbookNode {
+  name: string
+  /** "main" is the server itself; added computers are "subhost". */
+  role?: string
+  /** Set by the server for nodes from its own config, which cannot be removed. Absent on older servers. */
+  builtin?: boolean
+  /** Null for anyone who is not an admin; the server hides addresses. */
+  llmfit_url?: null | string
+  ollama_url?: null | string
+  /** Whether `llmfit serve` answered its health check. */
+  alive: boolean
+  latency_ms?: null | number
+  /** Why the health check failed, in the server's words. */
+  error?: string
+}
+
+/** What llmfit found on a machine (/api/cookbook/system). Every field can be missing. */
+export interface CookbookSystem {
+  backend?: string
+  cpu_cores?: number
+  cpu_name?: string
+  gpu_name?: string
+  gpu_vram_gb?: number
+  total_ram_gb?: number
+}
+
+export const fetchCookbookNodes = () =>
+  harvisFetch<{ nodes?: CookbookNode[] }>(`${COOKBOOK}/nodes`).then(r => r.nodes ?? [])
+
 /** The machine models are pulled onto: the cookbook node with role "main", else the first one. */
 export const fetchCookbookNode = () =>
-  harvisFetch<{ nodes: { name: string; role?: string }[] }>(`${COOKBOOK}/nodes`).then(
-    r => r.nodes?.find(n => n.role === 'main')?.name ?? r.nodes?.[0]?.name ?? 'main-host'
+  fetchCookbookNodes().then(nodes => nodes.find(n => n.role === 'main')?.name ?? nodes[0]?.name ?? 'main-host')
+
+export const fetchCookbookSystem = (node: string) =>
+  harvisFetch<CookbookSystem & { system?: CookbookSystem }>(`${COOKBOOK}/system?node=${encodeURIComponent(node)}`).then(
+    r => r.system ?? r
   )
+
+/** Admin only. The server checks that llmfit answers at `llmfit_url` before it saves the node. */
+export const addCookbookNode = (node: { name: string; llmfit_url: string; ollama_url?: string }) =>
+  post<CookbookNode>(`${COOKBOOK}/nodes`, node)
+
+/** Admin only. Built-in nodes are refused with a sentence. */
+export const removeCookbookNode = (name: string) =>
+  harvisFetch<{ removed: string }>(`${COOKBOOK}/nodes/${encodeURIComponent(name)}`, { method: 'DELETE' })
 
 export const fetchInstalledModels = (node: string) =>
   harvisFetch<{ models?: InstalledModel[]; error?: string }>(
@@ -528,7 +611,8 @@ export const denyRequest = (id: number, reason?: string) =>
 export interface InferenceNode {
   name: string
   label: string
-  base_url: string
+  /** Null for anyone who is not an admin; the server hides internal addresses. */
+  base_url: null | string
   /** "db" nodes were added in the app and can be removed here; the rest come from the server's setup. */
   source: string
   enabled: boolean

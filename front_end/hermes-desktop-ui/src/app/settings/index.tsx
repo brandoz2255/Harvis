@@ -19,6 +19,7 @@ import {
   Info,
   Keyboard,
   Network,
+  Palette,
   RefreshCw,
   Search,
   Terminal,
@@ -36,7 +37,7 @@ import { useRouteEnumParam } from '../hooks/use-route-enum-param'
 import { OverlayIconButton } from '../overlays/overlay-chrome'
 import { OverlayMain, OverlayNav, type OverlayNavGroup, OverlaySplitLayout } from '../overlays/overlay-split-layout'
 import { OverlayView } from '../overlays/overlay-view'
-import { SKILLS_ROUTE } from '../routes'
+import { COOKBOOK_ROUTE, SKILLS_ROUTE } from '../routes'
 
 import { AboutSettings } from './about-settings'
 import { AccountSettings } from './account-settings'
@@ -50,6 +51,7 @@ import { KeybindSettings } from './keybind-settings'
 import { MemoryLearningSettings } from './memory-learning-settings'
 import { MODEL_VIEW_LABELS, MODEL_VIEWS, type ModelView } from './model-views'
 import { ModelsSettings } from './models-page'
+import { ModsSettings } from './mods-settings'
 import { NotificationsSettings } from './notifications-settings'
 import { PeopleSettings } from './people-settings'
 import { PROVIDER_VIEWS, ProvidersSettings, type ProviderView } from './providers-settings'
@@ -71,6 +73,7 @@ const SETTINGS_VIEWS: readonly SettingsViewId[] = [
   'keybinds',
   'notifications',
   'sessions',
+  'mods',
   'hosting',
   'people',
   'account',
@@ -243,6 +246,13 @@ export function SettingsView({ onClose, onConfigSaved, onMainModelChanged }: Set
         onSelect: () => setActiveView('sessions')
       },
       {
+        active: activeView === 'mods',
+        icon: Palette,
+        id: 'mods',
+        label: 'Mods',
+        onSelect: () => setActiveView('mods')
+      },
+      {
         active: activeView === 'hosting',
         gapBefore: true,
         icon: Network,
@@ -389,7 +399,9 @@ export function SettingsView({ onClose, onConfigSaved, onMainModelChanged }: Set
     ) : activeView === 'harvis-memory' ? (
       <MemoryLearningSettings onClose={onClose} />
     ) : activeView === 'models' ? (
-      <ModelsSettings />
+      <ModelsSettings onOpenCookbook={() => navigate(COOKBOOK_ROUTE)} />
+    ) : activeView === 'mods' ? (
+      <ModsSettings />
     ) : activeView === 'hosting' ? (
       <HostingSettings />
     ) : activeView === 'people' && isAdmin ? (

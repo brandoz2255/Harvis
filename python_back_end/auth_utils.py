@@ -8,7 +8,10 @@ from jose import JWTError, jwt
 from typing import Optional, Dict
 
 # Auth configuration
-SECRET_KEY = os.getenv("JWT_SECRET", "key")
+from jwt_secret import get_jwt_secret
+from auth_optimized import decode_claims, revoked, session_cutoff
+
+SECRET_KEY = get_jwt_secret()
 ALGORITHM = "HS256"
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://pguser:pgpassword@pgsql-db:5432/database")
 
@@ -37,7 +40,7 @@ async def get_current_user(
     
     try:
         # Decode JWT token
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = decode_claims(token, request.url.path if request else None)
         user_id = payload.get("sub")
         
         if user_id is None:
@@ -47,6 +50,13 @@ async def get_current_user(
                 headers={"WWW-Authenticate": "Bearer"},
             )
         
+        if revoked(payload, await session_cutoff(pool, int(user_id))):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Session ended: sign in again",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
         # Get user from database
         import logging
         logger = logging.getLogger(__name__)

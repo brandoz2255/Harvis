@@ -270,6 +270,10 @@ class RVCEngine:
                 logger.error(f"Model file not found: {model_path}")
                 return False
             
+            # A .pth is a pickle. Prove it holds only tensors and plain containers before
+            # the library opens it; anything else (a code-carrying pickle) is refused.
+            torch.load(str(model_file), map_location="cpu", weights_only=True)
+
             # Create RVCInference instance with this model
             logger.info(f"🔄 Loading RVC model: {slug}")
             

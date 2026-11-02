@@ -157,7 +157,11 @@ export const stubs = {
   // ── App shell ────────────────────────────────────────────────────────────
   getVersion: version,
   updates: {
-    check: async () => ({ available: false }),
+    // Nothing is checked here, so say so rather than claim the build is current.
+    check: async () => ({
+      supported: false,
+      message: 'This web version updates on its host: pull the latest Harvis and run the installer again.',
+    }),
     apply: notOk,
     getBranch: async () => ({ branch: '' }),
     setBranch: async () => ({ branch: '' }),

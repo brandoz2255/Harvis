@@ -12,7 +12,8 @@ GET  /status                 supervisor + per-adapter state for the Messaging pa
 POST /resync                 pull settings now instead of waiting for the timer
 POST /send-test              {"key": "telegram:7", "text": "..."} → adapter.send_test
 GET  /webhook/{platform}     provider verification handshake, forwarded by the backend
-POST /webhook/{platform}     provider event payload, forwarded by the backend
+POST /webhook/{platform}     provider event payload, forwarded by the backend; goes to the single
+                             connected adapter whose id the body names
 POST /inject                 stub adapter only (registered by platforms/stub.py)
 """
 
@@ -120,13 +121,16 @@ class ControlServer:
             except ValueError:
                 raise HTTPException(status_code=400, detail="body_b64 is not base64")
             headers = {str(k).lower(): str(v) for k, v in (payload.headers or {}).items()}
-            for adapter in sup.for_platform(platform):
-                handle = getattr(adapter, "handle_webhook", None)
-                if handle is None:
-                    continue
-                accepted = await handle(raw, headers, payload.query or {})
-                if accepted:
-                    return {"ok": True}
+            # An event belongs to the one connected adapter whose id it names; it is
+            # never offered to the others, and an id two adapters claim is refused.
+            claimants = [a for a in sup.for_platform(platform)
+                         if getattr(a, "addressed_by_webhook", None) is not None and a.addressed_by_webhook(raw)]
+            if len(claimants) > 1:
+                logger.warning("webhook for %s refused: adapters %s claim the same id", platform,
+                               sorted(a.key for a in claimants))
+                raise HTTPException(status_code=409, detail="more than one adapter claims this event")
+            if claimants and await claimants[0].handle_webhook(raw, headers, payload.query or {}):
+                return {"ok": True}
             raise HTTPException(status_code=403, detail="no adapter accepted the event")
 
     # ------------------------------------------------------------------

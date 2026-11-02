@@ -82,12 +82,11 @@ def _parse_state(state: str) -> Optional[dict]:
     except Exception:
         return None
 
-def _uid_from_request(request: Request) -> int:
+async def _uid_from_request(request: Request) -> int:
     """Resolve the Harvis user id from EITHER the `access_token` cookie (the OAuth browser
     redirect flow) OR the `Authorization: Bearer` header (owui's fetch calls). Lets the
     status/disconnect endpoints work in owui, which authenticates with a Bearer token in
     localStorage rather than a cookie. Raises 401 if neither validates."""
-    from jose import jwt
     # Fail CLOSED if JWT_SECRET is unset — never fall back to a weak default that would let a
     # forged HS256 token impersonate any user id (IDOR on /status, /disconnect).
     secret = os.getenv("JWT_SECRET")
@@ -100,14 +99,11 @@ def _uid_from_request(request: Request) -> int:
             token = auth[7:].strip()
     if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
-    try:
-        payload = jwt.decode(token, secret, algorithms=["HS256"])
-        sub = payload.get("sub")
-        if sub is None or str(sub).strip() == "":
-            raise ValueError("missing sub")
-        return int(sub)
-    except Exception:
+    from auth_optimized import verified_user_id
+    user_id = await verified_user_id(token, getattr(request.app.state, "pg_pool", None), request.url.path)
+    if user_id is None:
         raise HTTPException(status_code=401, detail="Invalid authentication")
+    return user_id
 
 class GitHubStatusResponse(BaseModel):
     connected: bool
@@ -315,10 +311,7 @@ async def _handle_github_callback(
     encrypted_token = encrypt_token(access_token)
     
     # Get user ID from JWT
-    from jose import jwt
-    SECRET_KEY = os.getenv("JWT_SECRET")  # fail closed — never a weak default
-    ALGORITHM = "HS256"
-    if not SECRET_KEY:
+    if not os.getenv("JWT_SECRET"):  # fail closed — never a weak default
         return RedirectResponse(url=f"{OAUTH_REDIRECT_BASE}?error=invalid_session")
 
     token = request.cookies.get("access_token")
@@ -328,11 +321,10 @@ async def _handle_github_callback(
         logger.error("❌ No VibeCode session found during callback")
         return RedirectResponse(url=f"{OAUTH_REDIRECT_BASE}?error=no_session")
     
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id = int(payload.get("sub"))
-    except Exception as e:
-        logger.error(f"❌ Failed to decode JWT: {e}")
+    from auth_optimized import verified_user_id
+    user_id = await verified_user_id(token, getattr(request.app.state, 'pg_pool', None), request.url.path)
+    if user_id is None:
+        logger.error("❌ GitHub callback: session invalid, expired or signed out")
         return RedirectResponse(url=f"{OAUTH_REDIRECT_BASE}?error=invalid_session")
 
     # Store in database
@@ -370,7 +362,7 @@ async def github_status(request: Request):
     Check if user has connected GitHub account and return user info.
     Auth via JWT cookie (OAuth flow) OR Authorization: Bearer (owui).
     """
-    user_id = _uid_from_request(request)
+    user_id = await _uid_from_request(request)
 
     # No OAuth App configured for this deployment → honestly report it so the UI
     # can hide the Connect button rather than 500 when the user clicks it.
@@ -425,7 +417,7 @@ async def github_disconnect(request: Request):
     Disconnect GitHub account by deleting stored token.
     Auth via JWT cookie (OAuth flow) OR Authorization: Bearer (owui).
     """
-    user_id = _uid_from_request(request)
+    user_id = await _uid_from_request(request)
 
     pool = getattr(request.app.state, 'pg_pool', None)
     if not pool:

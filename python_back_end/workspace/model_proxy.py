@@ -10,7 +10,7 @@ This proxy handles TWO routing paths based on the requested model:
   gpt-oss:*  →  EXTERNAL_OLLAMA_URL/v1       (Cloud Ollama, EXTERNAL_OLLAMA_API_KEY)
 
 Security:
-  1. Verifies the shared OPENCLAW_GATEWAY_TOKEN on every request so only the
+  1. Verifies the shared HARVIS_GATEWAY_TOKEN on every request so only the
      OpenClaw pod can use this proxy.
   2. API keys / upstream URLs never leave the backend pod.
   3. NetworkPolicy on the OpenClaw pod allows egress only to this backend on
@@ -29,6 +29,7 @@ import asyncpg
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from gateway_token import gateway_token
 from workspace import model_pool as _model_pool
 
 
@@ -52,7 +53,7 @@ EXTERNAL_OLLAMA_API_KEY = os.getenv("EXTERNAL_OLLAMA_API_KEY", "")
 
 LOCAL_OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
 
-OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
+GATEWAY_TOKEN = gateway_token()
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 # Pricing constants (USD per million tokens)
@@ -111,12 +112,12 @@ def _verify_token(authorization: str | None) -> None:
     """Verify the request carries the shared internal token."""
     # Both installers generate the token; without one this proxy would be an
     # open, unauthenticated model endpoint, so it refuses instead.
-    if not OPENCLAW_GATEWAY_TOKEN:
-        raise HTTPException(status_code=503, detail="Model proxy is not configured (OPENCLAW_GATEWAY_TOKEN is unset)")
+    if not GATEWAY_TOKEN:
+        raise HTTPException(status_code=503, detail="Model proxy is not configured (HARVIS_GATEWAY_TOKEN is unset)")
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing Authorization header")
     token = authorization[len("Bearer ") :]
-    if not hmac.compare_digest(token.encode(), OPENCLAW_GATEWAY_TOKEN.encode()):
+    if not hmac.compare_digest(token.encode(), GATEWAY_TOKEN.encode()):
         raise HTTPException(status_code=401, detail="Invalid proxy token")
 
 
@@ -179,7 +180,8 @@ async def _get_openclaw_config() -> dict | None:
                 # Use same encryption key derivation as main.py
                 import hashlib
                 import os
-                secret = os.getenv("JWT_SECRET", "harvis-secret-key")
+                from jwt_secret import api_key_encryption_secret
+                secret = api_key_encryption_secret()
                 encryption_key = hashlib.sha256(secret.encode()).digest()
                 fernet_key = base64.urlsafe_b64encode(encryption_key)
                 cipher = Fernet(fernet_key)

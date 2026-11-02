@@ -65,7 +65,7 @@ SIDECAR_ARTIFACT_MCP_URL = os.getenv(
 
 # Same lifetime as the CAD sidecar token: long enough for a slow run, short enough
 # that a token left in a process listing is dead before anyone goes looking.
-SIDECAR_TOKEN_MINUTES = 90
+from jwt_secret import MCP_TOKEN_MINUTES as SIDECAR_TOKEN_MINUTES  # noqa: E402
 
 CONTEXT_HEADER = "x-harvis-artifact-context"
 
@@ -302,14 +302,12 @@ def sidecar_artifact_mcp_server(user_id: int | None, workspace_id: str | None) -
     # Late import: `main` imports the workspace package, so a module-level import
     # would cycle. One signer for every Harvis token.
     try:
-        from main import create_access_token
-        from datetime import timedelta
+        from main import create_mcp_token
     except Exception:
         logger.debug("artifact mcp: token signer unavailable", exc_info=True)
         return None
 
-    token = create_access_token({"sub": str(int(user_id))},
-                                timedelta(minutes=SIDECAR_TOKEN_MINUTES))
+    token = create_mcp_token(user_id)
     ctx = base64.b64encode(
         json.dumps({"workspace_id": str(workspace_id)}).encode("utf-8")).decode("ascii")
     return {SERVER_NAME: {

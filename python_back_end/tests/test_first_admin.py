@@ -118,11 +118,11 @@ def test_claiming_and_existing_users_delete_the_code(monkeypatch):
 
 def test_manual_setup_code_wins(monkeypatch):
     monkeypatch.setenv("HARVIS_EXPOSURE", "lan")
-    monkeypatch.setenv("HARVIS_SETUP_CODE", "fixed-code")
+    monkeypatch.setenv("HARVIS_SETUP_CODE", "fixed-code-0123456789")
     conn = FakeConn()
     run(first_admin.on_startup(conn))
     assert conn.settings == {}
-    assert run(first_admin.check(conn, " fixed-code "))
+    assert run(first_admin.check(conn, " fixed-code-0123456789 "))
     assert not run(first_admin.check(conn, "123456"))
     assert not run(first_admin.check(conn, None))
 

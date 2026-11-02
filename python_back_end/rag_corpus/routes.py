@@ -27,7 +27,9 @@ logger = logging.getLogger(__name__)
 # These were previously unauthenticated entirely: `GET /api/rag/sources` answered
 # 200 to an anonymous caller and `POST /api/rag/sources/config` reached request
 # validation without ever checking a token. Reads are left open for now (changing
-# them is a separate, wider decision); the writes are closed here.
+# them is a separate, wider decision); the writes are closed here. Reads now need a
+# signed-in user, and the ones that expose server paths, URLs or job internals
+# (config, jobs, sources/config) need an admin.
 require_admin = make_require_admin(get_current_user)
 
 router = APIRouter(prefix="/api/rag", tags=["rag-corpus"])
@@ -386,7 +388,7 @@ async def start_rag_update(request: UpdateRagRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/jobs/{job_id}")
+@router.get("/jobs/{job_id}", dependencies=[Depends(require_admin)])
 async def get_job_status(job_id: str):
     """Get the status of a RAG update job."""
     job_manager = get_job_manager()
@@ -398,7 +400,7 @@ async def get_job_status(job_id: str):
     return job.to_dict()
 
 
-@router.get("/jobs")
+@router.get("/jobs", dependencies=[Depends(require_admin)])
 async def list_jobs(limit: int = 10):
     """List recent RAG update jobs."""
     job_manager = get_job_manager()
@@ -419,7 +421,7 @@ async def cancel_job(job_id: str):
     return {"message": f"Job {job_id} cancelled"}
 
 
-@router.get("/sources", response_model=SourceStats)
+@router.get("/sources", response_model=SourceStats, dependencies=[Depends(get_current_user)])
 async def get_source_stats():
     """Get available sources and their index statistics across all collections."""
     adapters = get_all_vectordb_adapters()
@@ -523,7 +525,7 @@ async def clear_source(source: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/health")
+@router.get("/health", dependencies=[Depends(get_current_user)])
 async def rag_health_check():
     """Check health of RAG corpus services (multi-model)."""
     health = {
@@ -574,7 +576,7 @@ async def rag_health_check():
     return health
 
 
-@router.get("/config")
+@router.get("/config", dependencies=[Depends(require_admin)])
 async def get_rag_config():
     """Get current RAG corpus configuration with multi-model setup."""
     # Get dynamic sources if available
@@ -612,7 +614,7 @@ async def get_rag_config():
     }
 
 
-@router.get("/models")
+@router.get("/models", dependencies=[Depends(get_current_user)])
 async def get_ollama_models():
     """
     Get available Ollama models for embedding.
@@ -689,7 +691,7 @@ def get_config_manager_instance():
     return _config_manager
 
 
-@router.get("/sources/config")
+@router.get("/sources/config", dependencies=[Depends(require_admin)])
 async def list_source_configs():
     """
     List all available source configurations.
@@ -732,7 +734,7 @@ async def list_source_configs():
     }
 
 
-@router.get("/sources/config/{source_id}")
+@router.get("/sources/config/{source_id}", dependencies=[Depends(require_admin)])
 async def get_source_config(source_id: str):
     """Get configuration for a specific source."""
     config_mgr = get_config_manager_instance()
@@ -887,7 +889,7 @@ async def reset_source_configs():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/sources/categories")
+@router.get("/sources/categories", dependencies=[Depends(get_current_user)])
 async def get_source_categories():
     """Get available source categories and their descriptions."""
     return {

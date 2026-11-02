@@ -219,6 +219,8 @@ def test_every_catalog_platform_is_listed_and_secrets_are_masked(section, monkey
     # problem() reads the status cache; another test may have left a reason in it.
     monkeypatch.setitem(messaging.messaging_gateway._status_cache, "problem", None)
     monkeypatch.setenv("DISCORD_WORKSPACE_BOT_LEGACY_ENABLED", "true")
+    # The in-process bot only owns Discord when a token reached the backend (_legacy_discord_active).
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token-not-real")
     entries = messaging.catalog()
     assert len(entries) == 33
     telegram = messaging.catalog_entry("telegram")

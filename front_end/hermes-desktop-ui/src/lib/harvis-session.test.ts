@@ -1,11 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { idbArtStore } from '@/mods/island-art'
+import { SESSION_DRAFTS_STORAGE_KEY } from '@/store/composer'
+import { loadTranscriptTail, saveTranscriptTail } from '@/store/transcript-tail-cache'
+
 import {
   $session,
   AuthError,
+  fetchAuthConfig,
   probeSession,
   reportUnauthorized,
   signIn,
+  signOut,
   signUp,
   startSessionWatch
 } from './harvis-session'
@@ -162,6 +168,66 @@ describe('harvis session', () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
+  it('clears the signed-out person\'s drafts, cached chats and session pointers', async () => {
+    const replace = vi.fn()
+    vi.stubGlobal('location', { ...window.location, replace })
+    fetchMock.mockResolvedValueOnce(new Response(null, { status: 200 }))
+
+    saveTranscriptTail('s1', [{ id: 'm1', role: 'user', parts: [{ type: 'text', text: 'private' }] } as never], {
+      connectionId: '',
+      profile: 'default'
+    })
+    expect(loadTranscriptTail('s1', { connectionId: '', profile: 'default' })).not.toBeNull()
+
+    const owned = [
+      SESSION_DRAFTS_STORAGE_KEY,
+      'hermes.desktop.lastSessionId.profile.default',
+      'hermes.desktop.lastRoute.profile.default.remote.x',
+      'hermes.desktop.inflightTurnJournal.v2:s1',
+      'hermes.desktop.terminals.v1',
+      'hermes.desktop.composerQueue.v1'
+    ]
+    owned.forEach(key => window.localStorage.setItem(key, 'private'))
+    window.localStorage.setItem('hermes-desktop-theme-v2', 'midnight')
+
+    await signOut()
+
+    expect(loadTranscriptTail('s1', { connectionId: '', profile: 'default' })).toBeNull()
+    owned.forEach(key => expect(window.localStorage.getItem(key)).toBeNull())
+    expect(window.localStorage.getItem('hermes-desktop-theme-v2')).toBe('midnight')
+    expect(replace).toHaveBeenCalled()
+    window.localStorage.clear()
+  })
+
+  it('drops the island game art on sign-out so the next account on this browser does not get it', async () => {
+    const replace = vi.fn()
+    vi.stubGlobal('location', { ...window.location, replace })
+    const clear = vi.spyOn(idbArtStore, 'clear').mockResolvedValue()
+    fetchMock.mockResolvedValueOnce(json(200, {}))
+
+    await signOut()
+
+    expect(clear).toHaveBeenCalledTimes(1)
+    expect(replace).toHaveBeenCalled()
+    clear.mockRestore()
+  })
+
+  it('still signs out when the art database never answers', async () => {
+    vi.useFakeTimers()
+    const replace = vi.fn()
+    vi.stubGlobal('location', { ...window.location, replace })
+    const clear = vi.spyOn(idbArtStore, 'clear').mockReturnValue(new Promise(() => {}))
+    fetchMock.mockResolvedValueOnce(json(200, {}))
+
+    const done = signOut()
+    await vi.advanceTimersByTimeAsync(600)
+    await done
+
+    expect(replace).toHaveBeenCalled()
+    clear.mockRestore()
+    vi.useRealTimers()
+  })
+
   it('does not blame the email when the server says the email or name is taken', async () => {
     fetchMock.mockResolvedValueOnce(json(409, { detail: 'User with this email or username already exists' }))
 
@@ -169,5 +235,43 @@ describe('harvis session', () => {
 
     expect(err.field).toBeUndefined()
     expect(err.message).toMatch(/email or name is already in use/)
+  })
+
+  it('reads the house rules from the config, tolerating an older server without them', async () => {
+    fetchMock.mockResolvedValueOnce(
+      json(200, { features: { terms: { required: true, version: 'v1', points: ['Be kind.', 7] } } })
+    )
+    expect((await fetchAuthConfig()).terms).toEqual({ required: true, version: 'v1', points: ['Be kind.'] })
+
+    fetchMock.mockResolvedValueOnce(json(200, { features: {} }))
+    expect((await fetchAuthConfig()).terms).toEqual({ required: false, version: null, points: [] })
+  })
+
+  it('needs the house rules ticked when the form showed them, and says so to the server', async () => {
+    await expect(
+      signUp({ name: 'A', email: 'a@x.test', password: 'longenough', acceptTerms: false })
+    ).rejects.toMatchObject({ field: 'terms' })
+    expect(fetchMock).not.toHaveBeenCalled()
+
+    fetchMock.mockResolvedValueOnce(json(200, { id: 2, email: 'a@x.test', name: 'A', role: 'pending' }))
+    await signUp({ name: 'A', email: 'a@x.test', password: 'longenough', acceptTerms: true, termsVersion: 'v1' })
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({ accept_terms: true, terms_version: 'v1' })
+  })
+
+  it('shows the stale rules message rather than a duplicate-account error', async () => {
+    fetchMock.mockResolvedValueOnce(json(409, { detail: 'House rules changed. Reload the page.' }))
+    const err = await signUp({ name: 'A', email: 'a@x.test', password: 'longenough', acceptTerms: true, termsVersion: 'old' }).catch(e => e)
+    expect(err.field).toBe('terms')
+    expect(err.message).toContain('Reload')
+  })
+
+  it('maps the server refusing unticked house rules to the checkbox', async () => {
+    fetchMock.mockResolvedValueOnce(
+      json(400, { detail: 'Read the house rules and tick the box to agree before you sign up.' })
+    )
+
+    const err = await signUp({ name: 'A', email: 'a@x.test', password: 'longenough' }).catch(e => e)
+
+    expect(err.field).toBe('terms')
   })
 })

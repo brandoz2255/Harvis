@@ -15,10 +15,12 @@ from typing import Optional
 
 from fastapi import HTTPException, Request
 
+from gateway_token import bundled_gateway_token, gateway_token
+
 logger = logging.getLogger(__name__)
 
-_BUNDLED_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN_BUNDLED", "")
-_LEGACY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
+_BUNDLED_TOKEN = bundled_gateway_token()
+_LEGACY_TOKEN = gateway_token()  # the shared token; name kept for terminal_routes
 _CACHE_TTL_S = int(os.getenv("OPENCLAW_TOKEN_CACHE_TTL_SECONDS", "60"))
 _token_cache: dict[str, tuple[float, int]] = {}  # token -> (expires_epoch, user_id)
 

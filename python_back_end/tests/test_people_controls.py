@@ -337,7 +337,7 @@ def test_server_endpoints_are_recognised():
             assert await controls.is_server_endpoint(url), url
         # Tailscale addresses are this network; a name that will not resolve is held to the list,
         # and so is no address at all (the call falls back to this server).
-        for url in ("http://100.94.158.55:11434", "http://nothing-here.invalid/v1", "", "not a url"):
+        for url in ("http://100.64.0.10:11434", "http://nothing-here.invalid/v1", "", "not a url"):
             assert await controls.is_server_endpoint(url), url
         for url in ("https://8.8.8.8/v1",):
             assert not await controls.is_server_endpoint(url), url

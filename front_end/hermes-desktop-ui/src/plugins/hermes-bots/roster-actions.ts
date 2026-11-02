@@ -159,7 +159,8 @@ function focusExistingBotTab(bot: RosterRow): null | string {
  *  "Open Bot Chat"). A plain row click is "go to this bot": when its workspace
  *  already holds tabs, the one the user last had active is fronted and no chat
  *  is resolved or opened — see focusExistingBotTab. */
-export async function openRosterBot(bot: RosterRow, { canonical = false } = {}): Promise<boolean> {
+export async function openRosterBot(bot: RosterRow, { canonical = false, isCurrent = (): boolean => true } = {}): Promise<boolean> {
+  if (!isCurrent()) return false
   const generation = bumpBotOpenGeneration()
   const key = botRosterKey(bot)
   const meta = botRosterMeta(bot, $botMeta.get())
@@ -232,7 +233,7 @@ export async function openRosterBot(bot: RosterRow, { canonical = false } = {}):
     // after that by the owner profile's "Bot Chat" title registry.
     await prepareBotSource(bot)
   } catch (error) {
-    if (generation === getBotOpenGeneration()) {
+    if (generation === getBotOpenGeneration() && isCurrent()) {
       $openBotChat.set(null)
       restorePreviousGroup()
       notifyBotOpenFailure(error, bot, `Could not reach ${bot.connectionLabel || 'the gateway'}`)
@@ -241,14 +242,14 @@ export async function openRosterBot(bot: RosterRow, { canonical = false } = {}):
     return false
   }
 
-  if (generation !== getBotOpenGeneration()) {
+  if (generation !== getBotOpenGeneration() || !isCurrent()) {
     return false
   }
 
   try {
-    const opened = await openBotCanonicalChat(bot, () => generation === getBotOpenGeneration())
+    const opened = await openBotCanonicalChat(bot, () => generation === getBotOpenGeneration() && isCurrent())
 
-    if (generation !== getBotOpenGeneration()) {
+    if (generation !== getBotOpenGeneration() || !isCurrent()) {
       return false
     }
 
@@ -269,7 +270,7 @@ export async function openRosterBot(bot: RosterRow, { canonical = false } = {}):
       return true
     }
   } catch (error) {
-    if (generation === getBotOpenGeneration()) {
+    if (generation === getBotOpenGeneration() && isCurrent()) {
       $openBotChat.set(null)
       restorePreviousGroup()
       notifyBotOpenFailure(error, bot, `Could not open ${displayName(bot, meta)}'s chat — try again`)

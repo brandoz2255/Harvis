@@ -25,7 +25,7 @@ from typing import AsyncGenerator
 from owui_compat.system_prompt import with_core
 from owui_compat.workspace_method import DEFAULT_SAFE_LANE
 
-from ..openclaw_client import OpenClawEvent
+from ..events import OpenClawEvent
 from .authz import authorize_action
 
 try:
@@ -62,6 +62,11 @@ from .tools import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Handled inside the runner instead of dispatch_tool (they need the pool or the run).
+_IN_RUNNER_TOOLS = frozenset({
+    "propose_skill", "propose_mod", "list_skills", "read_skill", "generate_image", "screenshot_preview",
+})
 
 # No-progress guard: how many consecutive steps with ZERO file change before we
 # stop a churning sub-agent (the finish-reluctance loop — re-reading/re-writing
@@ -452,6 +457,30 @@ class SubAgentRunner:
     def __init__(self, router: ModelRouter | None = None):
         self.router = router or ModelRouter()
 
+    async def _propose_mod(self, pool, user_id, args: dict) -> str:
+        from plugins.mods import store as mod_store
+
+        if pool is None or user_id is None:
+            return "ERROR: propose_mod needs a signed-in user."
+        args = args or {}
+        manifest, resources = args.get("manifest"), args.get("resources") or {}
+        try:
+            if isinstance(manifest, str):
+                manifest = json.loads(manifest)
+            if isinstance(resources, str):
+                resources = json.loads(resources)
+        except ValueError:
+            return "ERROR: manifest and resources must be JSON objects."
+        if not isinstance(resources, dict) or not all(isinstance(v, str) for v in resources.values()):
+            return "ERROR: resources must map the ui.resource file name to its HTML text."
+        try:
+            saved = await mod_store.install(pool, int(user_id), manifest, resources, "agent")
+        except mod_store.ModError as exc:
+            return f"ERROR: the mod was not saved: {exc.message}"
+        card = saved["approval"]
+        return (f"Saved mod '{card['name']}' {card['version']} as a draft (hash {card['hash'][:12]}). It is off "
+                "until the person approves it in Settings > Mods; tell them that.")
+
     async def _propose_skill(self, pool, user_id, args: dict) -> str:
         """Persist an agent-proposed DRAFT skill (enabled=FALSE, empty audit). The
         draft is uninjectable/unpublishable until a HUMAN marks it 'supported'
@@ -681,8 +710,12 @@ class SubAgentRunner:
         # withholds the computer_* verbs entirely; see the coordinator.
         computer: dict | None = None,
     ) -> AsyncGenerator[OpenClawEvent, None]:
+        mod_rules = None  # loaded below; ev() reads it for the mods' PostToolUse log rules
+
         def ev(etype: str, data: dict) -> OpenClawEvent:
             if etype == "tool_result":
+                if mod_rules:
+                    mod_rules.log_tool("PostToolUse", str(data.get("tool") or ""), ok=bool(data.get("success")))
                 # Everything the run has SEEN becomes followable — page bodies,
                 # search-result lists, file contents, connector output. Exact URLs
                 # only: seeing a link is permission to follow that link, never
@@ -863,6 +896,10 @@ class SubAgentRunner:
             from .toolsets import disabled_tool_names
 
             disabled |= await disabled_tool_names(pool, user_id)
+        # The person's own approved mod rules (plugins.mods): block / ask-first only.
+        from plugins.mods import rules_for_user
+
+        mod_rules = await rules_for_user(pool, user_id)
         # Phase 4: the tracked session tools exist ONLY inside a VibeCode session —
         # non-session runs never even see them in the offered schema (dispatch_tool
         # also refuses them without a session_id; belt-and-braces). Session runs are
@@ -875,7 +912,7 @@ class SubAgentRunner:
         # is uninjectable until a HUMAN 'supported' verdict (gated_skill_blocks), so the
         # agent can never self-approve.
         if launch_mode != "user" or pool is None or user_id is None:
-            disabled |= {"propose_skill", "list_skills", "read_skill"}  # skills: user-launched runs only
+            disabled |= {"propose_skill", "propose_mod", "list_skills", "read_skill"}  # user-launched runs only
         # generate_image rides the SAME flag as /api/harvis/image/generate (never a
         # bypass) and needs a pool to persist the PNG artifact. Unlike propose_skill
         # it is NOT restricted to launch_mode == "user" — it's a benign creative tool
@@ -929,6 +966,11 @@ class SubAgentRunner:
                     + "\n\n".join(skill_blocks)
                 )
             messages[0]["content"] = _base
+        # A run is one task, so both PreSend and SessionStart mod text apply. Added
+        # before with_core so the ground rules still sit above it.
+        _mod_text = mod_rules.context_text(first_turn=True) if mod_rules else ""
+        if _mod_text:
+            messages[0]["content"] = f"{messages[0].get('content') or ''}\n\n{_mod_text}"
 
         # The house ground rules ride on EVERY run — default prompt or custom
         # sub-agent prompt alike. A custom system_prompt replaces _default_system
@@ -1266,56 +1308,16 @@ class SubAgentRunner:
                         })
                         results_text.append(f"{name} DENIED (auto launch)")
                         continue
-                    if name == "propose_skill":
-                        # Agent self-authorship: write a DRAFT skill (enabled=FALSE, empty
-                        # audit) the human must approve. Handled in-runner (not dispatch_tool)
-                        # because it needs the pool/user context; never grants a tool or lane.
-                        out = await self._propose_skill(pool, user_id, args)
-                        yield ev("tool_result", {"tool": name, "output": out, "success": not out.startswith("ERROR")})
-                        results_text.append(out)
-                        continue
-                    if name in ("list_skills", "read_skill"):
-                        # Read-only: approved, enabled skills only (skill_select applies the gate).
-                        from plugins.hermes_ui import skill_select
-
-                        out = (await skill_select.run_list_skills(pool, user_id) if name == "list_skills"
-                               else await skill_select.run_read_skill(pool, user_id, (args or {}).get("name")))
-                        yield ev("tool_result", {"tool": name, "output": out, "success": not out.startswith("ERROR")})
-                        results_text.append(out)
-                        continue
-                    if name == "generate_image":
-                        # Agent-initiated image generation: same flag + provider gate as
-                        # the /api/harvis/image/generate endpoint, PNG saved under THIS
-                        # run. In-runner (not dispatch_tool) because it needs the pool.
-                        image_seq += 1
-                        out, art = await self._generate_image(pool, run_id, args, image_seq)
-                        if art:
-                            # 'artifact' trace event → the Artifacts rail previews the PNG.
-                            yield ev("artifact", art)
-                        yield ev("tool_result", {"tool": name, "output": out, "success": art is not None})
-                        results_text.append(out)
-                        continue
-                    if name == "screenshot_preview":
-                        verify_seq += 1
-                        out, parts, preview_meta = await self._screenshot_preview(
-                            workspace_path, args, verify_seq
-                        )
-                        ok_preview = bool(preview_meta.get("ok"))
-                        if ok_preview:
-                            # Live-only UI event (PNGs not persisted — "for seeing, not keeping").
-                            yield ev("verify_preview", {
-                                "path": str((args or {}).get("path") or ""),
-                                "desktop_b64": preview_meta.get("desktop_b64") or "",
-                                "mobile_b64": preview_meta.get("mobile_b64") or "",
-                                "desktop_viewport": preview_meta.get("desktop_viewport"),
-                                "mobile_viewport": preview_meta.get("mobile_viewport"),
-                                "iteration": verify_seq,
-                            })
-                            vision_parts.extend(parts)
-                        yield ev("tool_result", {
-                            "tool": name, "output": out, "success": ok_preview,
+                    mod_rule = mod_rules.tool_rule(name) if mod_rules else None
+                    if mod_rules:
+                        mod_rules.log_tool("PreToolUse", name)
+                    if mod_rule and mod_rule[0] == "block":
+                        yield ev("decision", {
+                            "tool": name, "lane": lane, "tier": None, "policy": "deny",
+                            "reason": mod_rule[1], "source": "mod_rule",
                         })
-                        results_text.append(out)
+                        yield ev("tool_result", {"tool": name, "output": f"DENIED: {mod_rule[1]}", "success": False})
+                        results_text.append(f"{name} DENIED ({mod_rule[1]})")
                         continue
                     # Lane-unification choke point (Phase 2): authorize_action composes
                     # the structural 6-lane gate with the per-action risk gate. Entered
@@ -1323,7 +1325,10 @@ class SubAgentRunner:
                     # sessions) OR for a lane>3 tool, so lane<=3 with no permission_mode
                     # keeps today's exact control flow: no gating, byte-for-byte
                     # unchanged (clone-mode + the orchestrator pass None).
-                    if permission_mode or lane > DEFAULT_SAFE_LANE:
+                    # Tools the runner handles itself keep their old path (no gate) unless
+                    # a mod asks first for them.
+                    in_runner = name in _IN_RUNNER_TOOLS
+                    if (not in_runner and (permission_mode or lane > DEFAULT_SAFE_LANE)) or mod_rule:
                         decision_payloads: list[dict] = []
                         # A browser verb is judged against the four hard limits
                         # by what it is about to touch (the latest snapshot's
@@ -1343,6 +1348,7 @@ class SubAgentRunner:
                             session_id=session_id,
                             pool=pool,
                             hard_limit=hard_limit,
+                            mod_rule=mod_rule,
                         )
                         # 'decision' trace events ride the normal event pipeline
                         # (workspace_events + SSE), same as tool_call/tool_result.
@@ -1421,6 +1427,64 @@ class SubAgentRunner:
                                     yield ev("tool_result", {"tool": name, "output": "Denied by the user.", "success": False})
                                     results_text.append(f"{name} DENIED by user")
                                 continue
+                    if name == "propose_skill":
+                        # Agent self-authorship: write a DRAFT skill (enabled=FALSE, empty
+                        # audit) the human must approve. Handled in-runner (not dispatch_tool)
+                        # because it needs the pool/user context; never grants a tool or lane.
+                        out = await self._propose_skill(pool, user_id, args)
+                        yield ev("tool_result", {"tool": name, "output": out, "success": not out.startswith("ERROR")})
+                        results_text.append(out)
+                        continue
+                    if name == "propose_mod":
+                        # A DRAFT mod (status draft). Only the person's approve call
+                        # with the card's hash switches one on (plugins/mods/routes.py).
+                        out = await self._propose_mod(pool, user_id, args)
+                        yield ev("tool_result", {"tool": name, "output": out, "success": not out.startswith("ERROR")})
+                        results_text.append(out)
+                        continue
+                    if name in ("list_skills", "read_skill"):
+                        # Read-only: approved, enabled skills only (skill_select applies the gate).
+                        from plugins.hermes_ui import skill_select
+
+                        out = (await skill_select.run_list_skills(pool, user_id) if name == "list_skills"
+                               else await skill_select.run_read_skill(pool, user_id, (args or {}).get("name")))
+                        yield ev("tool_result", {"tool": name, "output": out, "success": not out.startswith("ERROR")})
+                        results_text.append(out)
+                        continue
+                    if name == "generate_image":
+                        # Agent-initiated image generation: same flag + provider gate as
+                        # the /api/harvis/image/generate endpoint, PNG saved under THIS
+                        # run. In-runner (not dispatch_tool) because it needs the pool.
+                        image_seq += 1
+                        out, art = await self._generate_image(pool, run_id, args, image_seq)
+                        if art:
+                            # 'artifact' trace event → the Artifacts rail previews the PNG.
+                            yield ev("artifact", art)
+                        yield ev("tool_result", {"tool": name, "output": out, "success": art is not None})
+                        results_text.append(out)
+                        continue
+                    if name == "screenshot_preview":
+                        verify_seq += 1
+                        out, parts, preview_meta = await self._screenshot_preview(
+                            workspace_path, args, verify_seq
+                        )
+                        ok_preview = bool(preview_meta.get("ok"))
+                        if ok_preview:
+                            # Live-only UI event (PNGs not persisted — "for seeing, not keeping").
+                            yield ev("verify_preview", {
+                                "path": str((args or {}).get("path") or ""),
+                                "desktop_b64": preview_meta.get("desktop_b64") or "",
+                                "mobile_b64": preview_meta.get("mobile_b64") or "",
+                                "desktop_viewport": preview_meta.get("desktop_viewport"),
+                                "mobile_viewport": preview_meta.get("mobile_viewport"),
+                                "iteration": verify_seq,
+                            })
+                            vision_parts.extend(parts)
+                        yield ev("tool_result", {
+                            "tool": name, "output": out, "success": ok_preview,
+                        })
+                        results_text.append(out)
+                        continue
                     if is_docs_tool(name):
                         result, ok = await dispatch_docs_tool(
                             name, args, pool=pool, user_id=user_id,

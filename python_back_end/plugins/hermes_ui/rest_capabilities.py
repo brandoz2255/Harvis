@@ -325,10 +325,10 @@ async def _upsert_server(request: Request, user, *, name: str, transport: str,
         require_build_space(user)
     from plugins.mcp.credentials import merge_env
     if transport != "stdio":
-        from plugins.mcp.http_transport import guard_url_async
+        from plugins.mcp.http_transport import guard_url_async, strict_for
         from plugins.mcp.protocol import McpError as _McpError
         try:
-            await guard_url_async(url or "")
+            await guard_url_async(url or "", strict_for(_uid(user)))
         except _McpError as exc:
             raise HTTPException(400, str(exc)) from exc
     async with _pool(request).acquire() as conn:

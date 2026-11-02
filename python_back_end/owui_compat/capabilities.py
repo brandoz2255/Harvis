@@ -12,10 +12,8 @@ This slice is FRONTEND-DISPLAY / preference ONLY — nothing here changes run-ti
 routing (orchestration profiles / model_proxy are untouched). Backend routing from
 these preferences is the natural Phase D, now unblocked because prefs are server-side.
 
-Phase E1 SUPERSEDES the "routing deferred" note FOR `opencode` ONLY: `opencode` now
-gets a real `service_key` (ready iff the external-engines flag is on + the sidecar runs)
-and the VibeCode `engine` field actually routes Build turns to it. claude-code/codex-app
-stay `service_key=None` (display-only) until E2.
+Phase E1 gave the external Build engines a real `service_key` (ready iff their flag is
+on + the sidecar runs) and the VibeCode `engine` field routes Build turns to them.
 
 `_PROVIDER_MIRROR` + `PREFERABLE_CAPS` mirror the FRONTEND source of truth
 `front_end/owui/src/lib/integrations/catalog.ts` (`provides` / `detect.serviceKey`) and
@@ -88,7 +86,7 @@ def _derive_source(provider_id: str, service_key: Optional[str], status: str, co
         return "configured" if live else "static"
     if service_key == "mcp":
         return "configured" if status not in ("available", "error") else "static"
-    if service_key in ("ollama", "discord", "hermes", "opencode", "codex", "claude-code"):
+    if service_key in ("ollama", "discord", "hermes", "codex", "claude-code"):
         return "detected" if live else "static"
     return "static"
 
@@ -142,10 +140,18 @@ def _build_registry(services: dict, prefs: dict, openclaw_connection: str) -> di
 
 
 async def _openclaw_connection(pool, user_id: int) -> str:
-    """Honest BYO-vs-bundled for the user: 'byo_verified' iff a verified BYO row exists, else 'bundled'.
-    Reuses the read shape of GET /api/workspace/config/openclaw. NEVER returns the url/token."""
+    """Honest BYO-vs-bundled for the user: 'byo_verified' iff the user has a verified OpenClaw of
+    their own — the linked external one (openclaw_connect) or a verified BYO workspace row — else
+    'bundled'. Reuses the read shape of GET /api/workspace/config/openclaw. NEVER returns the url/token."""
     if pool is None:
         return "bundled"
+    try:
+        from owui_compat.openclaw_connect import is_openclaw_linked
+
+        if await is_openclaw_linked(pool, user_id):
+            return "byo_verified"
+    except Exception:
+        pass
     try:
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -220,8 +226,6 @@ def register_capabilities_routes(router: APIRouter, get_current_user: Callable) 
         # "hermes-agent" = the REAL Hermes Agent app engine (sidecar). "hermes-native" =
         # the experimental E4 native engine (keyed under "hermes-engine"). Both are distinct
         # from the "hermes" model-provider status, so flags/gating are read without conflation.
-        # "opencode" is shelved — see integrations_status.py. It has no probe and no
-        # storefront card, so it must not appear in engine_readiness either.
         for _eng, _svc_key in (
             ("codex", "codex"),
             ("claude-code", "claude-code"),

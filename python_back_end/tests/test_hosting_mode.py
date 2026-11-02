@@ -14,9 +14,9 @@ import setup_flow  # noqa: E402
 from plugins.hosting import cluster  # noqa: E402
 from plugins.hosting import describe_hosting, hosting_mode, profile_not_enabled_reason  # noqa: E402
 
-DOCKER_WORDING = "compose profile 'voice' is not enabled"
+DOCKER_WORDING = "compose profile 'advanced-voice' is not enabled"
 K8S_WORDING = (
-    "not deployed in this cluster — add 'voice' to COMPOSE_PROFILES in .env "
+    "not deployed in this cluster — add 'advanced-voice' to COMPOSE_PROFILES in .env "
     "and re-run ./install.sh --k8s"
 )
 
@@ -257,14 +257,14 @@ def _docker_env(monkeypatch):
 
 def test_health_wording_under_docker_is_unchanged(monkeypatch):
     _docker_env(monkeypatch)
-    assert profile_not_enabled_reason("voice") == DOCKER_WORDING
+    assert profile_not_enabled_reason("advanced-voice") == DOCKER_WORDING
     assert setup_flow._not_installed_reason("tts") == f"not installed — {DOCKER_WORDING}"
 
 
 def test_health_wording_switches_under_kubernetes(monkeypatch):
     _docker_env(monkeypatch)
     monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.43.0.1")
-    assert profile_not_enabled_reason("voice") == K8S_WORDING
+    assert profile_not_enabled_reason("advanced-voice") == K8S_WORDING
     assert setup_flow._not_installed_reason("tts") == K8S_WORDING
 
     _docker_env(monkeypatch)

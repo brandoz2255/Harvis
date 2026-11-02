@@ -2,6 +2,7 @@
 API routes for artifacts
 """
 
+import hmac
 import os
 import logging
 from typing import Optional
@@ -41,8 +42,7 @@ async def get_current_user_from_request(request: Request):
     Get current user from request.
     Extracts JWT token from Authorization header and validates it.
     """
-    from jose import JWTError, jwt
-    import os
+    from auth_optimized import verified_user_id
 
     # Get token from Authorization header
     auth_header = request.headers.get("Authorization", "")
@@ -51,17 +51,14 @@ async def get_current_user_from_request(request: Request):
 
     token = auth_header.replace("Bearer ", "")
 
-    try:
-        # Decode JWT token
-        SECRET_KEY = os.getenv("JWT_SECRET", "key")
-        ALGORITHM = "HS256"
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id = int(payload.get("sub"))
-
-        # Create a simple user object
-        return type("User", (), {"id": user_id})()
-    except (JWTError, ValueError, TypeError) as e:
-        raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
+    # The same checks as every other route: signature and expiry, a scoped sidecar
+    # token refused, and a sign-in ended server-side (password changed, signed out
+    # everywhere, blocked) refused.
+    user_id = await verified_user_id(token, getattr(request.app.state, "pg_pool", None), request.url.path)
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    # Create a simple user object
+    return type("User", (), {"id": user_id})()
 
 
 @artifact_router.post("/generate", response_model=dict)
@@ -458,11 +455,13 @@ async def update_build_status(
     Update build job status from executor (internal endpoint).
     This is called by executor pods to report progress.
     """
-    # Verify callback token for security
-    callback_token = request.headers.get("Authorization", "").replace("Bearer ", "")
-    expected_token = os.environ.get("EXECUTOR_CALLBACK_TOKEN", "")
-
-    if expected_token and callback_token != expected_token:
+    # No token configured means nobody may call this: it writes any user's build status.
+    # The executor sends CALLBACK_TOKEN; set the same value as EXECUTOR_CALLBACK_TOKEN here.
+    expected_token = os.environ.get("EXECUTOR_CALLBACK_TOKEN", "").strip()
+    if not expected_token:
+        raise HTTPException(status_code=503, detail="Build callbacks are off: EXECUTOR_CALLBACK_TOKEN is not set")
+    scheme, _, callback_token = request.headers.get("Authorization", "").partition(" ")
+    if scheme != "Bearer" or not hmac.compare_digest(callback_token.encode(), expected_token.encode()):
         raise HTTPException(status_code=401, detail="Invalid callback token")
 
     pool = getattr(request.app.state, "pg_pool", None)
@@ -485,8 +484,10 @@ async def update_build_status(
 
 @artifact_router.get("/builds/active", response_model=dict)
 async def get_active_builds(request: Request):
-    """Get all active build jobs (admin endpoint)"""
-    # This should have admin authentication in production
+    """Active build jobs: every user's for an admin, otherwise the caller's own."""
+    from owui_compat.authz import is_admin
+
+    user = await get_current_user_from_request(request)
     pool = getattr(request.app.state, "pg_pool", None)
 
     if not pool:
@@ -497,6 +498,6 @@ async def get_active_builds(request: Request):
     if not build_manager:
         raise HTTPException(status_code=500, detail="Build manager not initialized")
 
-    builds = await build_manager.get_active_builds()
+    builds = await build_manager.get_active_builds(None if is_admin(user) else user.id)
 
     return {"builds": builds, "count": len(builds)}

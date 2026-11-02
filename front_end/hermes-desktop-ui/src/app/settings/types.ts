@@ -15,6 +15,7 @@ export type SettingsView =
   | 'keybinds'
   | 'keys'
   | 'models'
+  | 'mods'
   | 'notifications'
   | 'people'
   | 'plugins'

@@ -17,10 +17,12 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 from starlette.websockets import WebSocket
 
-from auth_optimized import decode_token_fast
+from auth_optimized import decode_token_fast, predates_revocation, revoked, session_cutoff
 
 from .approval import GONE_MESSAGE, PENDING_MESSAGE, is_gone, is_pending
 from .controls import BLOCKED_MESSAGE, is_blocked
+
+SESSION_ENDED_MESSAGE = "This sign-in has ended. Sign in again."
 
 _OPEN_PATHS = frozenset({
     "/api/v1/auths/signin", "/api/v1/auths/signup", "/api/v1/auths/signout",
@@ -29,9 +31,10 @@ _OPEN_PATHS = frozenset({
 
 # All a person in the waiting room may reach: the session probe (which reports
 # role "pending", so the app shows the waiting room), the public config the
-# sign-in screen reads, and the session check nginx asks before its own paths
-# (which answers 401 for them). Everything else, HTTP or socket, is refused.
-_WAITING_ROOM_GET = frozenset({"/api/v1/auths/", "/api/config", "/api/session/check"})
+# sign-in screen reads, the public legal text it links, and the session check nginx
+# asks before its own paths (which answers 401 for them). Everything else, HTTP or
+# socket, is refused.
+_WAITING_ROOM_GET = frozenset({"/api/v1/auths/", "/api/config", "/api/legal", "/api/session/check"})
 
 
 def _tokens(scope: Scope) -> set[str]:
@@ -55,16 +58,53 @@ def _tokens(scope: Scope) -> set[str]:
     return found
 
 
+def _inspect(scope: Scope) -> tuple[list[dict], bool]:
+    """The claims of every sign-in the request carries that is signed, unexpired and
+    allowed on this path (a scoped sidecar token only on its own MCP endpoint), and
+    whether any other was signed but predates revocation (no issue time, shared
+    server). That one has no id to check, yet some routes decode the signature alone,
+    so it must end the request here, not pass as "no sign-in"."""
+    path = scope.get("path") or ""
+    found = []
+    legacy = False
+    for token in _tokens(scope):
+        payload = decode_token_fast(token, path=path)
+        if payload and payload.get("sub") is not None:
+            found.append(payload)
+        elif not payload and predates_revocation(token):
+            legacy = True
+    return found, legacy
+
+
+def _payloads(scope: Scope) -> list[dict]:
+    return _inspect(scope)[0]
+
+
 def _user_ids(scope: Scope) -> set[int]:
     ids: set[int] = set()
-    for token in _tokens(scope):
-        payload = decode_token_fast(token)
+    for payload in _payloads(scope):
         try:
-            if payload and payload.get("sub") is not None:
-                ids.add(int(payload["sub"]))
+            ids.add(int(payload["sub"]))
         except (TypeError, ValueError):
             continue
     return ids
+
+
+async def live_user_ids(scope: Scope, pool) -> tuple[set[int], bool]:
+    """Ids of the sign-ins that still count, and whether any was ended server-side
+    (password changed, account turned off, "sign out everywhere")."""
+    ids: set[int] = set()
+    payloads, ended = _inspect(scope)
+    for payload in payloads:
+        try:
+            uid = int(payload["sub"])
+        except (TypeError, ValueError):
+            continue
+        if revoked(payload, await session_cutoff(pool, uid)):
+            ended = True
+        else:
+            ids.add(uid)
+    return ids, ended
 
 
 class BlockedAccountGate:
@@ -77,7 +117,12 @@ class BlockedAccountGate:
             return
         app = scope.get("app")
         pool = getattr(getattr(app, "state", None), "pg_pool", None)
-        for uid in _user_ids(scope):
+        ids, ended = await live_user_ids(scope, pool)
+        if ended and not _waiting_room_path(scope):
+            # The sign-in page's own probes (session, config) pass so it can still load.
+            await _sign_out(scope, receive, send, SESSION_ENDED_MESSAGE)
+            return
+        for uid in ids:
             if await is_blocked(pool, uid):
                 await _sign_out(scope, receive, send, BLOCKED_MESSAGE)
                 return

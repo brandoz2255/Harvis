@@ -27,6 +27,8 @@ from urllib.parse import urlparse
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 
+from plugins.hermes_ui import providers
+
 logger = logging.getLogger(__name__)
 
 _KEY = "hermes_external"  # settings.integrations.hermes_external
@@ -54,6 +56,16 @@ def _valid_url(url: str) -> bool:
         return p.scheme in ("http", "https") and bool(p.netloc)
     except Exception:
         return False
+
+
+async def guard_external_url(url: str, user_id) -> None:
+    """On a shared host a non-admin's external Hermes must be a plain public URL: the
+    server makes these calls, so a private address (http://ollama:11434, a LAN box, a
+    query-string trick on one) would turn it into a proxy for the internal network.
+    Admins and local installs are unchecked. Raises EndpointValidationError."""
+    if providers.url_guarded(int(user_id)):
+        providers.plain_http_url(url)
+        await providers.refuse_private_url(url)
 
 
 async def _read_raw(pool, user_id) -> dict:
@@ -124,29 +136,47 @@ async def is_external_active(pool, user_id) -> bool:
 
 
 async def resolve_external_target(pool, user_id) -> Optional[dict]:
-    """{base_url, token} for a verified external Hermes, else None (→ caller uses local sidecar)."""
+    """{base_url, token, guarded} for a verified external Hermes, else None (→ caller uses
+    local sidecar). The saved URL may predate the shared-host rules, so a guarded user's is
+    checked again here; a refused one raises EndpointValidationError rather than quietly
+    falling back to the local sidecar. ``guarded`` tells the caller to dial through the
+    connect-time guard."""
     raw = await _read_raw(pool, user_id)
     if not (raw.get("url") and raw.get("verified_at")):
         return None
+    await guard_external_url(raw["url"], user_id)
     tok = _dec(raw["token_enc"]) if raw.get("token_enc") else None
-    return {"base_url": raw["url"].rstrip("/"), "token": tok}
+    return {"base_url": raw["url"].rstrip("/"), "token": tok, "guarded": providers.url_guarded(int(user_id))}
 
 
-async def _probe(url: str, token: Optional[str]) -> dict:
+_REDIRECT_ERROR = "The URL redirects; enter the final address."
+
+
+async def _probe(url: str, token: Optional[str], guarded: bool = False) -> dict:
     """Probe an external Hermes Agent API server, VALIDATING the key.
 
     Hits the AUTHENTICATED endpoint (/v1/models) first so a missing/wrong token is actually
     caught — /health is usually public and would green-light a keyless connection that then
     401s on the first real chat. /health is only a reachability fallback if /v1/models can't
-    be reached at the transport level (never to override an auth rejection)."""
+    be reached at the transport level (never to override an auth rejection).
+
+    ``guarded`` (non-admin on a shared host) dials only public addresses and follows no redirects,
+    so a 3xx cannot prove the key and is reported instead of counted as success."""
     base = url.rstrip("/")
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     try:
-        async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
+        if guarded:
+            providers.plain_http_url(url)
+            await providers.refuse_private_url(url)
+        client = (providers.guarded_client(timeout=8.0) if guarded
+                  else httpx.AsyncClient(timeout=8.0, follow_redirects=True))
+        async with client:
             models_reached = False
             try:
                 r = await client.get(f"{base}/v1/models", headers=headers)
                 models_reached = True
+                if guarded and 300 <= r.status_code < 400:
+                    return {"ok": False, "error": _REDIRECT_ERROR}
                 if r.status_code in (401, 403):
                     return {"ok": False, "error": "Authentication failed — check the API key."}
                 if r.status_code < 400:
@@ -156,6 +186,8 @@ async def _probe(url: str, token: Optional[str]) -> dict:
             # /v1/models unreachable (not an auth failure) → fall back to /health for liveness.
             try:
                 r = await client.get(f"{base}/health", headers=headers)
+                if guarded and 300 <= r.status_code < 400:
+                    return {"ok": False, "error": _REDIRECT_ERROR}
                 if r.status_code in (401, 403):
                     return {"ok": False, "error": "Authentication failed — check the API key."}
                 if r.status_code < 400:
@@ -167,6 +199,8 @@ async def _probe(url: str, token: Optional[str]) -> dict:
             except httpx.RequestError:
                 pass
             return {"ok": False, "error": "Could not reach the Hermes Agent API at that URL."}
+    except providers.EndpointValidationError as e:
+        return {"ok": False, "error": str(e)}
     except Exception as e:
         return {"ok": False, "error": f"Probe failed: {type(e).__name__}"}
 
@@ -195,6 +229,10 @@ def register_hermes_connect_routes(router: APIRouter, get_current_user: Callable
         if pool is None:
             raise HTTPException(status_code=503, detail="Database not ready")
         uid = int(user.id)
+        try:
+            await guard_external_url(url, uid)
+        except providers.EndpointValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         prior = await _read_raw(pool, uid)
         entry = {"url": url, "verified_at": None, "last_error": None}
         # Token handling: a non-empty string replaces it; explicit null clears it; omitted keeps
@@ -216,7 +254,7 @@ def register_hermes_connect_routes(router: APIRouter, get_current_user: Callable
         if not raw.get("url"):
             raise HTTPException(status_code=400, detail="No external Hermes URL saved")
         token = _dec(raw["token_enc"]) if raw.get("token_enc") else None
-        res = await _probe(raw["url"], token)
+        res = await _probe(raw["url"], token, providers.url_guarded(uid))
         from time import time as _t
         raw["verified_at"] = int(_t()) if res.get("ok") else None
         raw["last_error"] = None if res.get("ok") else res.get("error")

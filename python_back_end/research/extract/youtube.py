@@ -5,6 +5,8 @@ import logging
 import re
 import requests
 
+from research import safe_fetch
+
 logger = logging.getLogger(__name__)
 
 YOUTUBE_HOSTS = ("youtube.com", "youtu.be")
@@ -38,6 +40,15 @@ def extract_youtube(url: str, timeout_s: int) -> Dict[str, Any]:
     - Always try to fetch a title via oEmbed for context.
     """
     vid = _extract_video_id(url)
+    if safe_fetch.enabled() and not safe_fetch.is_youtube_host(url):
+        return {
+            "url": url,
+            "title": "",
+            "text": "",
+            "language": None,
+            "meta": {"kind": "youtube_refused"},
+            "success": False,
+        }
     title = _fetch_oembed_title(url, timeout_s=timeout_s)
 
     # 1) Try youtube-transcript-api (v1.2.x compatible)
@@ -101,7 +112,10 @@ def extract_youtube(url: str, timeout_s: int) -> Dict[str, Any]:
                     track = tracks[0]
                     break
             if track and "url" in track:
-                r = requests.get(track["url"], timeout=timeout_s)
+                if safe_fetch.enabled():
+                    r = safe_fetch.fetch(track["url"], timeout=timeout_s)
+                else:
+                    r = requests.get(track["url"], timeout=timeout_s)
                 r.raise_for_status()
                 vtt = r.text
                 # rough VTT to text

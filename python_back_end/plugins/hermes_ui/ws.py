@@ -10,18 +10,18 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import time
 from typing import Any, Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from auth_optimized import decode_token_fast
+from auth_optimized import auth_optimizer, decode_token_fast, revoked, session_cutoff
 from plugins import people
 
 from . import (attachments, bots, chat, errors, learn, providers, rewind, runs, sandbox, sessions, skill_select, store,
                titles, turn_models, voice_route)
 from .models import DEFAULT_EFFORT, is_hidden_model, ollama_effort, thinking_models
+from .origin import origin_allowed as _origin_allowed
 from .rest import build_model_options
 from .rpc import (ERR_INTERNAL, ERR_INVALID, ERR_METHOD, ERR_PARAMS, ERR_PARSE, ERR_SESSION_BUSY,  # noqa: F401
                   ERR_SESSION_NOT_FOUND, REPLAY_EPOCH, err as _err, ok as _ok)
@@ -44,25 +44,6 @@ def _token_from(ws: WebSocket) -> Optional[str]:
     if auth.lower().startswith("bearer "):
         return auth[7:].strip()
     return None
-
-
-# The socket authenticates from the ambient cookie, so any same-site page (a sandbox
-# preview on another localhost port) could open it as the signed-in user. Browsers
-# always send Origin on a WebSocket handshake; accept only this host, the nginx
-# front door, and operator-listed origins. No Origin means a non-browser client.
-_TRUSTED_NETLOCS = {"localhost:9000", "127.0.0.1:9000"} | {
-    o.strip().split("://", 1)[-1]
-    for o in os.getenv("HARVIS_EXTRA_ORIGINS", "").split(",")
-    if o.strip()
-}
-
-
-def _origin_allowed(ws: WebSocket) -> bool:
-    origin = ws.headers.get("origin")
-    if not origin:
-        return True
-    netloc = origin.split("://", 1)[-1].rstrip("/")
-    return netloc == ws.headers.get("host", "") or netloc in _TRUSTED_NETLOCS
 
 
 def _turn_extra(s: sessions.Live, bot: Optional[dict]) -> dict:
@@ -445,6 +426,9 @@ async def hermes_ws(ws: WebSocket):
         user_id = int(payload.get("sub")) if payload else None
     except (TypeError, ValueError):
         user_id = None
+    if user_id is not None and revoked(
+            payload, await session_cutoff(getattr(ws.app.state, "pg_pool", None) or auth_optimizer.db_pool, user_id)):
+        user_id = None  # signed out server-side: password changed, signed out everywhere, blocked
     if user_id is None:
         await ws.close(code=4401, reason="sign in to Harvis first")
         return

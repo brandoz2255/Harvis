@@ -6,7 +6,7 @@ account (harvisai-dulc3-cmd) without ever holding or printing the GitHub token
 themselves.
 
 Security model:
-  - Verifies OPENCLAW_GATEWAY_TOKEN on every request (only OpenClaw can call this).
+  - Verifies HARVIS_GATEWAY_TOKEN on every request (only OpenClaw can call this).
   - Hard-coded allowlist: only `dulc3/harvis-aidev` may receive PRs.
   - Only the `pulls` and `repos` endpoints are exposed — no arbitrary GitHub API passthrough.
   - HARVIS_GITHUB_TOKEN stays in the backend pod; OpenClaw never sees its value.
@@ -41,7 +41,6 @@ logger = logging.getLogger(__name__)
 # Legacy PAT fallback — empty when GitHub App is configured
 HARVIS_GITHUB_TOKEN = os.getenv("HARVIS_GITHUB_TOKEN", "")
 HARVIS_GITHUB_USER = os.getenv("HARVIS_GITHUB_USER", "HarvisAI[bot]")
-OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 
 # GitHub App credentials (preferred over PAT when available)
 _GITHUB_APP_ID = os.getenv("HARVIS_GITHUB_APP_ID", "")

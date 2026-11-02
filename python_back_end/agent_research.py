@@ -5,6 +5,7 @@ Enhanced research agent using the advanced research pipeline
 import os
 import logging
 import asyncio
+from typing import Optional
 from research import ResearchAgent
 from research.enhanced_research_agent import get_enhanced_research_agent
 
@@ -43,7 +44,7 @@ enhanced_research_agent_instance = get_enhanced_research_agent(
 )
 
 
-def set_research_agent_moonshot_key(api_key: str, base_url: str = ""):
+def set_research_agent_moonshot_key(api_key: str, base_url: str = "", guarded: Optional[bool] = None):
     """
     Set (or CLEAR) the Moonshot credential for research agents.
 
@@ -56,10 +57,14 @@ def set_research_agent_moonshot_key(api_key: str, base_url: str = ""):
 
     base_url carries the verified regional platform (.ai vs .cn). They have
     separate key namespaces, so a key sent to the wrong one just 401s.
+
+    ``guarded`` (see moonshot_api.is_guarded) travels with the URL it governs, so the
+    credential, the URL and the policy are always replaced together.
     """
     for agent in (research_agent_instance, enhanced_research_agent_instance):
         agent.moonshot_api_key = api_key or ""
         agent.moonshot_base_url = base_url or ""
+        agent.moonshot_guarded = guarded
     logger.info(
         "Moonshot credential %s for research agents%s",
         "set" if api_key else "CLEARED",
@@ -90,7 +95,8 @@ class _CloudLLMClient:
     passed to quick_map_reduce / MapReduceProcessor without changes.
     """
 
-    def __init__(self, provider: str, api_key: str, model_id: str, base_url: str = ""):
+    def __init__(self, provider: str, api_key: str, model_id: str, base_url: str = "",
+                 guarded: Optional[bool] = None):
         self.provider = provider   # "nvidia" | "moonshot"
         self.api_key = api_key
         self.model_id = model_id
@@ -98,6 +104,7 @@ class _CloudLLMClient:
         # sent to the wrong one 401s. The region is discovered and stored at
         # save time; this carries it through instead of assuming .ai.
         self.base_url = (base_url or "").rstrip("/")
+        self.guarded = guarded
 
     async def generate(self, prompt: str, model: str = None, **kwargs):
         import time
@@ -133,7 +140,15 @@ class _CloudLLMClient:
                     "stream": False,
                 }
 
-            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
+            if self.provider == "moonshot":
+                from moonshot_api import moonshot_http_client
+
+                client_cm = moonshot_http_client(
+                    self.base_url or "https://api.moonshot.ai/v1", self.guarded,
+                    timeout=httpx.Timeout(120.0, connect=10.0))
+            else:
+                client_cm = httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0))
+            async with client_cm as client:
                 resp = await client.post(url, headers=headers, json=payload)
                 resp.raise_for_status()
                 data = resp.json()
@@ -646,6 +661,7 @@ async def async_research_agent_streaming(
                             base_url=getattr(
                                 enhanced_research_agent_instance, "moonshot_base_url", ""
                             ),
+                            guarded=getattr(enhanced_research_agent_instance, "moonshot_guarded", None),
                         )
                         synthesis_model = get_moonshot_model_id(model)
                     else:

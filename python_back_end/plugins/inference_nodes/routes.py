@@ -58,8 +58,9 @@ class NodeIn(BaseModel):
 @router.get("")
 async def list_nodes(force: bool = False, user=Depends(get_current_user_optimized)):
     states = await probe.snapshot(force=force)
+    show_url = is_admin(user)
     return {
-        "nodes": [st.public() for st in states.values()],
+        "nodes": [st.public(include_url=show_url) for st in states.values()],
         "thinking": thinking_mode(),
         "probed_at": probe.probed_at(),
     }
@@ -69,7 +70,11 @@ async def list_nodes(force: bool = False, user=Depends(get_current_user_optimize
 async def refresh(user=Depends(get_current_user_optimized)):
     probe.invalidate()
     states = await probe.snapshot(force=True)
-    return {"nodes": [st.public() for st in states.values()], "probed_at": probe.probed_at()}
+    show_url = is_admin(user)
+    return {
+        "nodes": [st.public(include_url=show_url) for st in states.values()],
+        "probed_at": probe.probed_at(),
+    }
 
 
 @router.get("/provision-script", response_class=PlainTextResponse)

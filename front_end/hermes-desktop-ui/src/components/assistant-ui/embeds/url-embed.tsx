@@ -13,7 +13,6 @@ import type { EmbedDescriptor } from './providers/types'
 import { RichBoundary } from './rich-boundary'
 
 const FrameEmbedRenderer = lazy(() => import('./frame-embed'))
-const SocialEmbedRenderer = lazy(() => import('./social-embed'))
 const SpotifyEmbedRenderer = lazy(() => import('./spotify-embed'))
 const YouTubeEmbedRenderer = lazy(() => import('./youtube-embed'))
 
@@ -26,12 +25,6 @@ function intrinsicHeight(descriptor: EmbedDescriptor): number {
 }
 
 function LazyRenderer({ descriptor }: { descriptor: EmbedDescriptor }) {
-  // X and Instagram load their official blockquote script in-document. The tweet
-  // check also narrows the union to FrameEmbed for the iframe renderers below.
-  if (descriptor.renderer === 'tweet' || descriptor.provider === 'instagram') {
-    return <SocialEmbedRenderer descriptor={descriptor} />
-  }
-
   if (descriptor.provider === 'youtube') {
     return <YouTubeEmbedRenderer descriptor={descriptor} />
   }

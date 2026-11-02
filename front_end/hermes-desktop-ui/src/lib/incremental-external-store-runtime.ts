@@ -257,6 +257,21 @@ export class IncrementalExternalStoreRuntimeCore extends BaseAssistantRuntimeCor
   }
 }
 
+// assistant-ui's thread-list LazyMemoizeSubject is not connected by its
+// public subscribe method, so repeated reads can return fresh equal objects.
+// React's external-store contract requires a stable snapshot between changes.
+export function createIncrementalAssistantRuntime(core: IncrementalExternalStoreRuntimeCore): AssistantRuntime {
+  const runtime = new AssistantRuntimeImpl(core)
+  const getState = runtime.threads.getState.bind(runtime.threads)
+  let snapshot: ReturnType<typeof getState> | undefined
+  runtime.threads.getState = () => {
+    const next = getState()
+    if (!snapshot || !shallowEqual(snapshot, next)) snapshot = next
+    return snapshot
+  }
+  return runtime
+}
+
 export function useIncrementalExternalStoreRuntime<T extends ThreadMessage>(
   store: ExternalStoreAdapter<T>
 ): AssistantRuntime {
@@ -280,5 +295,5 @@ export function useIncrementalExternalStoreRuntime<T extends ThreadMessage>(
     return runtime.registerModelContextProvider(modelContext)
   }, [modelContext, runtime])
 
-  return useMemo(() => new AssistantRuntimeImpl(runtime), [runtime])
+  return useMemo(() => createIncrementalAssistantRuntime(runtime), [runtime])
 }

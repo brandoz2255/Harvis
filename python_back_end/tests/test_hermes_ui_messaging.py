@@ -134,7 +134,7 @@ def test_whatsapp_needs_public_url(section, gateway, monkeypatch):
     row = _row(run(messaging.messaging_platforms(FakeRequest(), USER)), "whatsapp_cloud")
     assert row["webhook_url"] is None and "HARVIS_PUBLIC_URL" in row["webhook_note"]
     assert [v["key"] for v in row["env_vars"] if v["required"]] == [
-        "WHATSAPP_ACCESS_TOKEN", "WHATSAPP_PHONE_NUMBER_ID", "WHATSAPP_VERIFY_TOKEN"]
+        "WHATSAPP_ACCESS_TOKEN", "WHATSAPP_PHONE_NUMBER_ID", "WHATSAPP_VERIFY_TOKEN", "WHATSAPP_APP_SECRET"]
     monkeypatch.setenv("HARVIS_PUBLIC_URL", "https://harvis.example.com/")
     row = _row(run(messaging.messaging_platforms(FakeRequest(), USER)), "whatsapp_cloud")
     assert row["webhook_url"] == "https://harvis.example.com/api/messaging/webhooks/whatsapp_cloud"

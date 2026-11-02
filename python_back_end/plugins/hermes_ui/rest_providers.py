@@ -56,6 +56,9 @@ async def user_key_status(pool, uid: int, provider: str) -> dict:
             "api_url": (row["api_url"] if row else None)}
 
 
+_PUBLIC_MOONSHOT = {"https://api.moonshot.ai/v1", "https://api.moonshot.cn/v1"}
+
+
 def _local_row(probe: dict, endpoint: dict | None) -> dict:
     server_url = os.getenv("OLLAMA_URL", "http://ollama:11434")
     return {
@@ -112,4 +115,10 @@ async def harvis_providers(request: Request, user=Depends(get_current_user_optim
     if endpoint is not None:
         local["endpoint"]["is_current"] = bool(endpoint.get("_active"))
     kimi = _kimi_row(await user_key_status(pool, uid, "moonshot"))
+    if endpoints.url_guarded(uid):
+        # The server's own addresses (an internal Ollama, a Moonshot proxy) are not for
+        # other people on a shared host; their own endpoint below is still theirs.
+        local["base_url"] = None
+        if kimi["base_url"] not in _PUBLIC_MOONSHOT:
+            kimi["base_url"] = None
     return {"providers": [local, kimi]}

@@ -406,7 +406,8 @@ class ChatHistoryManager:
             metadata=metadata or {}
         )
     
-    async def search_messages(self, user_id: int, query: str, limit: int = 50) -> List[ChatMessage]:
+    async def search_messages(self, user_id: int, query: str, limit: int = 50,
+                              session_id: Optional[UUID] = None) -> List[ChatMessage]:
         """
         Search messages by content (basic implementation).
         
@@ -414,6 +415,7 @@ class ChatHistoryManager:
             user_id: The user ID
             query: Search query
             limit: Maximum number of results
+            session_id: Restrict the search to one of the user's sessions
             
         Returns:
             List[ChatMessage]: Matching messages
@@ -427,9 +429,10 @@ class ChatHistoryManager:
                     JOIN chat_sessions s ON m.session_id = s.id
                     WHERE m.user_id = $1 AND s.is_active = TRUE
                     AND (m.content ILIKE $2 OR m.reasoning ILIKE $2)
+                    AND ($4::uuid IS NULL OR m.session_id = $4::uuid)
                     ORDER BY m.created_at DESC
                     LIMIT $3
-                """, user_id, f"%{query}%", limit)
+                """, user_id, f"%{query}%", limit, session_id)
                 
                 messages = []
                 for row in rows:

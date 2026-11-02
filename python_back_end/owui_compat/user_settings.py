@@ -37,7 +37,7 @@ _SERVER_MANAGED_KEYS = ("harvis", "integrations", "hermes_ui")
 
 # ── settings.harvis subtree ────────────────────────────────────────────────
 HARVIS_TASK_KEYS = ("chat", "build", "research", "notebook", "orchestrated")
-_ENGINES = {"", "native", "opencode", "codex", "claude-code", "hermes-agent", "hermes-native"}
+_ENGINES = {"", "native", "codex", "claude-code", "hermes-agent", "hermes-native"}
 _RUN_MODES = {"auto", "plan"}
 _MAX_PRESETS = 24
 _MAX_PERSONA_CHARS = 8000
@@ -159,10 +159,12 @@ def register_user_settings_routes(router: APIRouter, get_current_user: Callable)
                             int(user.id),
                         )
                         existing = _as_dict(row["settings"]) if row else {}
-                        # Full-blob sync must not drop server-managed subtrees the
-                        # OWUI client doesn't know about (harvis, integrations).
+                        # Server-managed subtrees (harvis, integrations, hermes_ui) are
+                        # never taken from the client: a full-blob sync must not drop
+                        # them, and a user must not forge e.g. pairing requests.
                         for k in _SERVER_MANAGED_KEYS:
-                            if k not in body and k in existing:
+                            merged.pop(k, None)
+                            if k in existing:
                                 merged[k] = existing[k]
                         await conn.execute(
                             "INSERT INTO owui_user_settings (user_id, settings, updated_at) "

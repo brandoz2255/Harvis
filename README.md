@@ -43,7 +43,7 @@ Both installers create the top-level `.env` and generate missing secrets. To con
     # top-level .env (docker-compose reads these):
     JWT_SECRET=<a-long-random-secret>       # REQUIRED — compose fails to start without it
     MOONSHOT_API_KEY=<kimi-key>             # optional — cloud planner/writer (Kimi K2.5)
-    OPENCLAW_GATEWAY_TOKEN=<token>          # optional — OpenClaw agent runtime
+    HARVIS_GATEWAY_TOKEN=<token>            # shared internal bearer (the installer generates it)
 ```
 
 ```powershell
@@ -51,6 +51,8 @@ Both installers create the top-level `.env` and generate missing secrets. To con
 Copy-Item python_back_end/.env.example python_back_end/.env
 ```
 See `docker-compose.yaml` for the full list of variables.
+
+The bundled OpenClaw service was retired on 2026-10-30. Hermes is the recommended agent; OpenClaw is only an optional external link to a gateway you run yourself (`docs/byo-openclaw-setup.md`).
 
 ## 3.  **Run the installer:**
 On **Ubuntu**, use `./install.sh`:

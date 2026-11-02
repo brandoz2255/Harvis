@@ -131,6 +131,97 @@ class EnableHttpsTest(unittest.TestCase):
         self.assertEqual(self.log("k3s.log"), "")
         self.assertTrue(os.path.exists(os.path.join(self.root, "nginx", "tls", "harvis-tls.conf")))
 
+    # ── plain :9000 must stop serving the app and the cookie must be Secure ──
+    # nginx.conf (and so the pod's ConfigMap) includes tls/*.redirect, and the pod
+    # mounts the tls directory as a hostPath, so the redirect file and the cookie
+    # flag are what close the plain lane on Kubernetes as well.
+
+    def env_text(self):
+        path = os.path.join(self.root, ".env")
+        return open(path).read() if os.path.exists(path) else ""
+
+    def test_k8s_writes_the_port_80_redirect_into_the_directory_the_pod_mounts(self):
+        out, rc = self.run_script(True, {"FAKE_HOST_TLS": self.pod_tls, "HARVIS_HTTPS_PORT": "9555"})
+        self.assertEqual(rc, 0, out)
+        path = os.path.join(self.pod_tls, "harvis-https.redirect")
+        self.assertTrue(os.path.exists(path), os.listdir(self.pod_tls))
+        self.assertIn('set $harvis_https_base "https://$host:9555";', open(path).read())
+        self.assertFalse(os.path.exists(os.path.join(self.root, "nginx", "tls", "harvis-https.redirect")))
+
+    def test_k8s_redirect_is_in_place_before_nginx_is_checked_and_restarted(self):
+        # The pod sees the file through the hostPath, so `nginx -t` in the pod only
+        # proves the redirect parses if it is already written when it runs.
+        seen = []
+        real_kc = os.path.join(self.tmp.name, "bin", "k3s")
+        with open(real_kc, "w") as fh:
+            fh.write('#!/bin/sh\n'
+                     'case "$*" in\n'
+                     '  *"volumeMounts[?"*) printf tls ;;\n'
+                     f'  *"volumes[?"*) printf %s "{self.pod_tls}" ;;\n'
+                     '  *"nginx -t"*) test -f "' + os.path.join(self.pod_tls, "harvis-https.redirect") + '" && echo redirect-present >> "$REC/at-check" ;;\n'
+                     'esac\n')
+        out, rc = self.run_script(True)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.log("at-check").strip(), "redirect-present")
+
+    def test_k8s_sets_the_secure_cookie_in_env_the_live_secret_and_restarts_the_backend(self):
+        with open(os.path.join(self.root, ".env"), "w") as fh:
+            fh.write("HARVIS_COOKIE_SECURE=false\nKEEP=1")
+        out, rc = self.run_script(True, {"FAKE_HOST_TLS": self.pod_tls})
+        self.assertEqual(rc, 0, out)
+        env = self.env_text().splitlines()
+        self.assertEqual(env.count("HARVIS_COOKIE_SECURE=true"), 1, env)
+        self.assertNotIn("HARVIS_COOKIE_SECURE=false", env)
+        self.assertIn("KEEP=1", env)
+        calls = self.log("k3s.log").splitlines()
+        patch = next((c for c in calls if "patch secret backend-env" in c), None)
+        self.assertIsNotNone(patch, calls)
+        self.assertIn("-n harvis", patch)
+        self.assertIn('"HARVIS_COOKIE_SECURE":"true"', patch)
+        restart = "kubectl -n harvis rollout restart deploy/backend"
+        self.assertIn(restart, calls)
+        self.assertLess(calls.index("kubectl -n harvis rollout status deploy/nginx --timeout=120s"), calls.index(patch))
+        self.assertLess(calls.index(patch), calls.index(restart))
+        self.assertTrue(any(c.startswith("kubectl -n harvis rollout status deploy/backend") for c in calls), calls)
+
+    def test_k8s_cookie_goes_to_the_env_beside_the_tls_directory_the_pod_mounts(self):
+        other = os.path.join(self.tmp.name, "other-checkout")
+        os.makedirs(os.path.join(other, "nginx", "tls"))
+        open(os.path.join(other, ".env"), "w").write("A=1\n")
+        out, rc = self.run_script(True, {"FAKE_HOST_TLS": os.path.join(other, "nginx", "tls")})
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(open(os.path.join(other, ".env")).read(), "A=1\nHARVIS_COOKIE_SECURE=true\n")
+        self.assertEqual(self.env_text(), "")
+
+    def test_k8s_rejected_config_leaves_no_redirect_and_does_not_touch_the_cookie_or_backend(self):
+        out, rc = self.run_script(True, {"FAKE_HOST_TLS": self.pod_tls, "FAKE_NGINX_T_RC": "1"})
+        self.assertNotEqual(rc, 0, out)
+        self.assertFalse(os.path.exists(os.path.join(self.pod_tls, "harvis-https.redirect")))
+        self.assertNotIn("HARVIS_COOKIE_SECURE", self.env_text())
+        self.assertNotIn("deploy/backend", self.log("k3s.log"))
+
+    def test_k8s_cookie_is_not_set_when_the_nginx_pod_never_becomes_ready(self):
+        out, rc = self.run_script(True, {"FAKE_HOST_TLS": self.pod_tls, "FAKE_STATUS_RC": "1"})
+        self.assertNotEqual(rc, 0, out)
+        self.assertNotIn("HARVIS_COOKIE_SECURE", self.env_text())
+        self.assertNotIn("deploy/backend", self.log("k3s.log"))
+
+    def test_k8s_a_secret_that_cannot_be_patched_is_an_error_not_a_success(self):
+        path = os.path.join(self.tmp.name, "bin", "k3s")
+        body = open(path).read().replace("case \"$*\" in\n", 'case "$*" in\n  *"patch secret"*) exit 1 ;;\n', 1)
+        open(path, "w").write(body)
+        out, rc = self.run_script(True, {"FAKE_HOST_TLS": self.pod_tls})
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("could not be made Secure", out)
+        self.assertNotIn("rollout restart deploy/backend", self.log("k3s.log"))
+
+    def test_plain_docker_writes_the_redirect_and_sets_the_cookie_after_https_answers(self):
+        out, rc = self.run_script(False)
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(os.path.exists(os.path.join(self.root, "nginx", "tls", "harvis-https.redirect")))
+        self.assertIn("HARVIS_COOKIE_SECURE=true", self.env_text().splitlines())
+        self.assertIn("up -d --no-deps backend", self.log("docker.log"))
+
 
 class InstallSummaryTest(unittest.TestCase):
     """The closing guidance in install.sh, checked on its text: the script runs its installer when sourced."""

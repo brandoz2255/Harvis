@@ -52,7 +52,7 @@ _INTERNAL_EVENT_TYPES = frozenset(
 class CreateRunRequest(BaseModel):
     task_brief: str = Field(..., min_length=1)
     chat_history: Optional[list[dict]] = None
-    agent_id: str = "main"
+    agent_id: str = "agent-native"
     model_name: str = ""
     session_id: Optional[str] = None
     live_web: bool = True

@@ -140,6 +140,7 @@ import { $sidebarSessionRankIds } from '@/store/sidebar-sort'
 import {
   type AppView,
   ARTIFACTS_ROUTE,
+  COOKBOOK_ROUTE,
   CRON_ROUTE,
   MESSAGING_ROUTE,
   SIDEBAR_NAV_AREA,
@@ -227,6 +228,13 @@ const SIDEBAR_NAV: SidebarNavItem[] = [
     icon: props => <Codicon name="watch" {...props} />,
     route: CRON_ROUTE,
     keybindActionId: 'nav.cron'
+  },
+  {
+    id: 'cookbook',
+    label: '',
+    icon: props => <Codicon name="beaker" {...props} />,
+    route: COOKBOOK_ROUTE,
+    keybindActionId: 'nav.cookbook'
   }
 ]
 
@@ -1495,6 +1503,7 @@ export function ChatSidebar({
                   (item.id === 'messaging' && currentView === 'messaging') ||
                   (item.id === 'artifacts' && currentView === 'artifacts') ||
                   (item.id === 'cron' && currentView === 'cron') ||
+                  (item.id === 'cookbook' && currentView === 'cookbook') ||
                   // Contributed rows light up at their own route.
                   (Boolean(item.route) && pathname === item.route)
 

@@ -94,6 +94,7 @@ import { openSession, openSessionIntentFromModifiers } from '../open-session'
 import {
   AGENTS_ROUTE,
   ARTIFACTS_ROUTE,
+  COOKBOOK_ROUTE,
   COMMAND_CENTER_ROUTE,
   CRON_ROUTE,
   MESSAGING_ROUTE,
@@ -834,6 +835,14 @@ function CommandPaletteBody({ onExited }: { onExited: () => void }) {
             keywords: ['schedule', 'jobs'],
             label: t.shell.statusbar.cron,
             run: go(CRON_ROUTE)
+          },
+          {
+            action: 'nav.cookbook',
+            icon: Cpu,
+            id: 'nav-cookbook',
+            keywords: ['models', 'download', 'hardware', 'gpu', 'llmfit', 'ollama'],
+            label: t.sidebar.nav.cookbook,
+            run: go(COOKBOOK_ROUTE)
           },
           { action: 'nav.profiles', icon: Users, id: 'nav-profiles', label: t.profiles.title, run: go(PROFILES_ROUTE) },
           { action: 'nav.agents', icon: Cpu, id: 'nav-agents', label: t.agents.title, run: go(AGENTS_ROUTE) },

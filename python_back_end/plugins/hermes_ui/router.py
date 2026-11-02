@@ -14,6 +14,8 @@ from .rest_docs import router as docs_router
 from .rest_git import router as git_router
 from .rest_harvis import router as harvis_router
 from .rest_mcp import router as mcp_router
+from .rest_plugins import BACKENDS as plugin_backends
+from .rest_plugins import router as plugins_router
 from .rest_providers import router as providers_router
 from .rest_sandbox import router as sandbox_router
 from .rest_sandbox_apps import router as sandbox_apps_router
@@ -41,5 +43,8 @@ router.include_router(providers_router)
 router.include_router(bots_router)
 router.include_router(voice_router)
 router.include_router(git_router)
+for _backend in plugin_backends.values():
+    router.include_router(_backend)
+router.include_router(plugins_router)
 router.include_router(rest_router)
 router.include_router(ws_router)

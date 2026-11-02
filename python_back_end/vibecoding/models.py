@@ -10,8 +10,11 @@ from pydantic import BaseModel
 # Import auth dependencies
 from auth_utils import get_current_user
 from model_manager import unload_all_models
+from owui_compat.authz import make_require_admin
 
 logger = logging.getLogger(__name__)
+
+require_admin = make_require_admin(get_current_user)
 
 router = APIRouter(prefix="/api/models", tags=["vibe-models"])
 
@@ -36,7 +39,7 @@ class UnloadRequest(BaseModel):
 @router.post("/unload")
 async def unload_models_endpoint(
     request: UnloadRequest,
-    user: Dict = Depends(get_current_user)
+    user: Dict = Depends(require_admin)
 ):
     """Unload models to free RAM"""
     try:
@@ -245,7 +248,7 @@ async def get_models_status(
 @router.post("/load/{model_name}")
 async def load_model(
     model_name: str,
-    user: Dict = Depends(get_current_user)
+    user: Dict = Depends(require_admin)
 ):
     """Load a specific model in Ollama"""
     try:

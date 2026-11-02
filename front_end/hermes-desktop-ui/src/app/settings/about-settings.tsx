@@ -2,6 +2,7 @@ import { useStore } from '@nanostores/react'
 import { useEffect, useState } from 'react'
 
 import { BrandMark } from '@/components/brand-mark'
+import { LegalLink } from '@/components/legal-panel'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
 import { type Translations, useI18n } from '@/i18n'
@@ -45,6 +46,9 @@ function relativeTime(ms: number | undefined, a: Translations['settings']['about
 
   return a.daysAgo(Math.round(diff / 86_400_000))
 }
+
+// The browser build installs a stub bridge whose update check never finds anything.
+const isWebShell = () => (window as { hermesDesktop?: { webShell?: boolean } }).hermesDesktop?.webShell === true
 
 export function AboutSettings() {
   const { t } = useI18n()
@@ -199,11 +203,15 @@ export function AboutSettings() {
           </div>
         </div>
 
-        <ListRow
-          description={a.automaticUpdatesDesc}
-          hint={a.branchCommit(status?.branch ?? 'unknown', status?.currentSha?.slice(0, 7) ?? 'unknown')}
-          title={a.automaticUpdates}
-        />
+        {!isWebShell() && (
+          <ListRow
+            description={a.automaticUpdatesDesc}
+            hint={a.branchCommit(status?.branch ?? 'unknown', status?.currentSha?.slice(0, 7) ?? 'unknown')}
+            title={a.automaticUpdates}
+          />
+        )}
+
+        <ListRow action={<LegalLink>{a.legalOpen}</LegalLink>} description={a.legalDesc} title={a.legal} />
 
         <UninstallSection />
       </div>

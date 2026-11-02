@@ -25,10 +25,22 @@
 #
 # Exits non-zero if the footprint is over budget or an assertion fails. Two
 # steps at the end need human eyes and are printed, not asserted.
+#
+# Each run also appends one JSON line (date, commit, OS, docker, image/volume/repo
+# GB, per-image sizes) to a history file OUTSIDE the repo, so a new device's size
+# can be tracked over time:
+#   INSTALL_SIZE_HISTORY  file to append to (default
+#                         ~/.local/share/harvis/install-size-history.jsonl;
+#                         set it empty to record nothing)
+#   INSTALL_SIZE_DEVICE   label for this machine (default: its hostname)
+#   INSTALL_SIZE_NOTE     free text, e.g. "Pi 5 8 GB, first boot"
+# Recording never changes the exit status. Estimate it on a dev box beforehand
+# with scripts/install-size.py.
 
 set -uo pipefail
 
 BUDGET_GB="${BUDGET_GB:-7.0}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UI_URL="${UI_URL:-http://localhost:9000}"
 FAILED=0
 
@@ -70,11 +82,13 @@ GIT_KB=0
 [ -d .git ] && GIT_KB=$(du -sk .git 2>/dev/null | cut -f1)
 REPO_KB=$(( ${REPO_KB:-0} - ${GIT_KB:-0} ))
 
-python3 - "$BUDGET_GB" "$REPO_KB" <<'PY'
+python3 - "$BUDGET_GB" "$REPO_KB" "$SCRIPT_DIR/install-size.py" "$PRE_IMAGES" <<'PY'
 import json, subprocess, sys
 
 budget = float(sys.argv[1])
 repo_gb = int(sys.argv[2]) / 1024 / 1024
+recorder = sys.argv[3]
+images_on_host = int(sys.argv[4])
 
 def to_gb(s):
     s = s.split("(")[0].strip()
@@ -101,6 +115,32 @@ print(f"  local volumes   {volumes_gb:6.2f} GB")
 print(f"  repo checkout   {repo_gb:6.2f} GB   (excluding .git)")
 print(f"  {'-'*38}")
 print(f"  on-disk total   {total:6.2f} GB   budget {budget:.2f} GB")
+
+# The ledger. Build cache and stopped containers are recorded but kept out of the
+# total above (the budget has never counted them): a new device that built its own
+# images carries the BuildKit cache too, and that is worth seeing over time.
+# Nothing in here may change the verdict.
+try:
+    detail = json.loads(subprocess.run(
+        ["docker", "system", "df", "-v", "--format", "json"],
+        capture_output=True, text=True, check=True).stdout)
+    per_image = [{"image": f"{i['Repository']}:{i['Tag']}", "id": i["ID"][:19],
+                  "size_gb": round(to_gb(i["Size"]), 3),
+                  "unique_gb": round(to_gb(i["UniqueSize"]), 3) if i["UniqueSize"] != "N/A" else None}
+                 for i in detail.get("Images", [])]
+    record = {
+        "images_gb": round(images_gb, 3), "volumes_gb": round(volumes_gb, 3), "repo_gb": round(repo_gb, 3),
+        "total_gb": round(total, 3), "budget_gb": budget, "within_budget": total <= budget,
+        "image_count": int(by_type["Images"]["TotalCount"]), "images_on_host": images_on_host,
+        "build_cache_gb": round(to_gb(by_type["Build Cache"]["Size"]), 3) if "Build Cache" in by_type else None,
+        "containers_gb": round(to_gb(by_type["Containers"]["Size"]), 3) if "Containers" in by_type else None,
+        "per_image": sorted(per_image, key=lambda r: r["image"]),
+    }
+    done = subprocess.run([sys.executable, recorder, "--append-measurement"], input=json.dumps(record),
+                          capture_output=True, text=True)
+    print(f"  ledger          {done.stdout.strip() or done.stderr.strip()[-200:]}")
+except Exception as err:
+    print(f"  ledger          not recorded ({type(err).__name__}: {err})")
 
 if total > budget:
     print(f"\n  FAIL  over budget by {total - budget:.2f} GB")
@@ -129,8 +169,11 @@ say "Check 2a — the default set is actually up"
 # the per-chat sandbox image. `owui-builder` left on 2026-10-01 when Hermes
 # became the only frontend. `sandbox` (2026-10-21) runs model-written document
 # code away from the backend's secrets; without it document generation fails
-# closed. Update this list when that file changes.
-EXPECTED="artifact-init backend browser-runner harvis-mcp hermes-ui-builder llmfit nginx pgsql preview-runner repo-sandbox-image sandbox voice-onnx"
+# closed. `harvis-messaging-gateway` came back to the default set on 2026-10-01
+# (commit e7627784): chatting from Slack or Discord is a core feature, so the
+# gateway is up on every install and idles until a platform is connected.
+# Update this list when that file changes.
+EXPECTED="artifact-init backend browser-runner harvis-mcp harvis-messaging-gateway hermes-ui-builder llmfit nginx pgsql preview-runner repo-sandbox-image sandbox voice-onnx"
 # -f pins this to the file we SHIP. Without it Compose silently merges
 # docker-compose.override.yml, which is gitignored and personal — on a
 # developer box that makes this check measure their machine, not the deploy.
@@ -145,7 +188,7 @@ fi
 
 # artifact-init and hermes-ui-builder are one-shot: they populate a bind mount and
 # exit 0. Treating their absence from `ps` as a failure would be wrong.
-for svc in backend browser-runner harvis-mcp llmfit nginx pgsql preview-runner sandbox voice-onnx; do
+for svc in backend browser-runner harvis-mcp harvis-messaging-gateway llmfit nginx pgsql preview-runner sandbox voice-onnx; do
   state=$(docker compose ps --format '{{.Service}} {{.State}}' 2>/dev/null | awk -v s="$svc" '$1==s {print $2}')
   case "$state" in
     running) pass "$svc running" ;;
@@ -270,7 +313,7 @@ cat <<'EOF'
 
      Be skeptical here. /api/ollama-models builds its list by contacting each
      backend in turn and swallowing every connection error as a warning
-     (python_back_end/main.py:7132, :7147, :7164), so "nothing reachable"
+     (get_ollama_models in python_back_end/main.py), so "nothing reachable"
      and "reachable but no models installed" produce the same empty list.
      This repo has a documented history of that exact shape — an error
      rendered as an empty state. If the picker is just empty, the honest
@@ -280,7 +323,7 @@ cat <<'EOF'
 
      It should have said, near the end:
        "Model server: none detected — Harvis will start and report no provider."
-     (install.sh:512, with the WARN row at :197.)
+     (launch() in install.sh, with the "model server" WARN row from detect_provider.)
 
      And it should have asked you NOTHING. A single prompt is a failure of
      "one command, no questions asked."

@@ -115,7 +115,14 @@ class ModelRouter:
 
         with lease(body["model"]) as pooled:
             body["model"] = pooled
-            async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0)) as client:
+            if route is not None and route.provider == "moonshot":
+                from moonshot_api import moonshot_http_client
+
+                client_cm = moonshot_http_client(
+                    route.base_url, route.guarded, timeout=httpx.Timeout(timeout, connect=10.0))
+            else:
+                client_cm = httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0))
+            async with client_cm as client:
                 data = await _post_with_backoff(
                     client, target_url, body, headers, model_name=model_name
                 )

@@ -476,3 +476,34 @@ def test_read_turn_check_respects_the_flag_and_never_raises(monkeypatch):
                                                  registry=Broken([]))) is False
     assert run(chat_tools.is_connector_read_turn(request(), body("show my GitHub issues"), None,
                                                  registry=reg)) is False
+
+
+# ── the user's mod rules ───────────────────────────────────────────────────
+@pytest.mark.parametrize("action", ["block", "require-approval"])
+def test_a_mod_rule_stops_the_lookup_and_the_note_says_so(listing, monkeypatch, action):
+    import plugins.mods as mods
+    from plugins.mods.rules import ModRules
+
+    async def rules(pool, uid):
+        return ModRules([("careful", {"event": "PreToolUse", "action": action, "match": "tool:mcp__github__*"})])
+
+    monkeypatch.setattr(mods, "rules_for_user", rules)
+    listing.script = [call("mcp__github__list_issues", {"state": "open"})]
+    req, b = run_turn(listing, "list my open GitHub issues", [tool("list_issues", True)])
+    assert listing.dispatched == []
+    text = user_text(b)
+    assert "<connector_note>" in text and "mod rules stopped" in text and "careful" in text
+    assert not getattr(req.state, "harvis_connectors_used", None)
+
+
+def test_mods_that_cannot_be_loaded_stop_lookups_instead_of_skipping_rules(listing, monkeypatch):
+    import plugins.mods as mods
+    from plugins.mods.rules import ModRules
+
+    async def rules(pool, uid):
+        return ModRules(unavailable=True)
+
+    monkeypatch.setattr(mods, "rules_for_user", rules)
+    listing.script = [call("mcp__github__list_issues", {"state": "open"})]
+    run_turn(listing, "list my open GitHub issues", [tool("list_issues", True)])
+    assert listing.dispatched == []

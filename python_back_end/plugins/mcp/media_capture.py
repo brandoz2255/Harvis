@@ -19,10 +19,15 @@ into our database would be pointless duplication. The test is deliberately
 narrow: a hostname with no dot cannot be a public name, and loopback/private
 addresses resolve in the browser but to the wrong machine.
 
-**This is not an SSRF hole.** The URL comes from a tool the user themself
-connected, not from fetched web content, and nothing here follows redirects,
-reads content types outside image/video/audio, or returns the body to the model.
-The fetch is capped in size, time and count.
+This fetch only ever goes to addresses a browser could not use: it reaches the
+server's own network by design. That is fine for the operator and for an admin, and
+it is not fine for a stranger on a shared host, whose MCP server picks the URLs
+(``http://169.254.169.254/x.png``, ``http://pgsql:5432/a.png``) and gets the bytes
+back as an artifact. So for a guarded caller (``providers.url_guarded``: a non-admin
+on a shared host) nothing is mirrored. The same caller could also name any run id in
+the ``X-Harvis-Run`` header, so skipping the write closes that too. Nothing here
+follows redirects, reads content types outside image/video/audio, or returns the
+body to the model, and the fetch is capped in size, time and count.
 """
 
 from __future__ import annotations
@@ -179,8 +184,19 @@ async def _fetch(url: str, name: str) -> Optional[bytes]:
         return None
 
 
+def _mirroring_allowed(user_id: Optional[int]) -> bool:
+    """False for a guarded caller. With no user to judge, a shared host says no."""
+    if user_id:
+        from plugins.hermes_ui.providers import url_guarded
+
+        return not url_guarded(int(user_id))
+    from plugins.exposure import shared
+
+    return not shared()
+
+
 async def mirror_media_urls(
-    text: str, *, pool, workspace_id: str
+    text: str, *, pool, workspace_id: str, user_id: Optional[int] = None
 ) -> tuple[str, list[dict]]:
     """Rewrite unreachable media URLs in `text` to same-origin artifact links.
 
@@ -190,6 +206,8 @@ async def mirror_media_urls(
     silently dropping the only pointer to the result.
     """
     if not text or pool is None or not workspace_id:
+        return text, []
+    if not _mirroring_allowed(user_id):
         return text, []
 
     # Late import: workspace_router imports this package's siblings, so a

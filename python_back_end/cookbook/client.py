@@ -29,8 +29,10 @@ async def health(llmfit_url: str) -> Dict[str, Any]:
         return {"alive": False, "latency_ms": None, "error": str(e)[:200]}
 
 
-async def get_json(llmfit_url: str, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
-    """Proxy a GET to the node's llmfit and return parsed JSON. Raises HTTP 502 on failure."""
+async def get_json(
+    llmfit_url: str, path: str, params: Optional[Dict[str, Any]] = None, service: str = "llmfit"
+) -> Any:
+    """Proxy a GET to the node's llmfit (or ``service``) and return parsed JSON. Raises HTTP 502 on failure."""
     from fastapi import HTTPException
 
     clean = {k: v for k, v in (params or {}).items() if v is not None}
@@ -38,13 +40,14 @@ async def get_json(llmfit_url: str, path: str, params: Optional[Dict[str, Any]] 
         async with httpx.AsyncClient(timeout=config.PROXY_TIMEOUT) as cli:
             r = await cli.get(f"{llmfit_url}{path}", params=clean)
     except httpx.RequestError as e:
-        raise HTTPException(status_code=502, detail=f"llmfit unreachable at {llmfit_url}: {e}")
+        logger.warning("cookbook: %s unreachable at %s: %s", service, llmfit_url, e)
+        raise HTTPException(status_code=502, detail=f"{service} unreachable: {type(e).__name__}")
     if r.status_code >= 400:
-        raise HTTPException(status_code=502, detail=f"llmfit {path} -> {r.status_code}: {r.text[:300]}")
+        raise HTTPException(status_code=502, detail=f"{service} {path} -> {r.status_code}: {r.text[:300]}")
     try:
         return r.json()
     except ValueError:
-        raise HTTPException(status_code=502, detail=f"llmfit {path} returned non-JSON")
+        raise HTTPException(status_code=502, detail=f"{service} {path} returned non-JSON")
 
 
 async def ollama_pull_stream(ollama_url: str, model: str):
@@ -64,6 +67,7 @@ async def ollama_pull_stream(ollama_url: str, model: str):
                         # llmfit/Ollama NDJSON object passes straight through as one SSE event
                         yield f"data: {line}\n\n"
     except httpx.RequestError as e:
-        yield f"data: {json.dumps({'error': f'ollama unreachable at {ollama_url}: {e}'})}\n\n"
+        logger.warning("cookbook: ollama unreachable at %s: %s", ollama_url, e)
+        yield f"data: {json.dumps({'error': f'ollama unreachable: {type(e).__name__}'})}\n\n"
         return
     yield f"data: {json.dumps({'status': 'done', 'final': True})}\n\n"

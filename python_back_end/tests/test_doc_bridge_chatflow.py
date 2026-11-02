@@ -41,7 +41,7 @@ def test_the_users_persona_survives_a_document_turn_and_the_document_prompt_is_a
 def test_project_instructions_survive_a_document_turn():
     from owui_compat import persistence
 
-    async def folder_prompt(pool, chat_id):
+    async def folder_prompt(pool, chat_id, user_id):
         return "Always cite the CSUSB handbook."
 
     real = persistence.get_chat_folder_system_prompt
@@ -50,7 +50,7 @@ def test_project_instructions_survive_a_document_turn():
         body = {"chat_id": "c1", "messages": [{"role": "user", "content": "write a report on the lab network"}]}
         request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(pg_pool=object())))
         assert maybe_prepare_doc_turn(body) == "doc"
-        asyncio.run(chat_completion._inject_project_instructions(request, body))
+        asyncio.run(chat_completion._inject_project_instructions(request, body, user_id=7))
         _inject_like_a_chat_turn(body)
     finally:
         persistence.get_chat_folder_system_prompt = real

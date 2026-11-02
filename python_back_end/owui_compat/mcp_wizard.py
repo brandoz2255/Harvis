@@ -121,17 +121,31 @@ def _ip_is_blocked(ip_str: str) -> bool:
     )
 
 
-async def _assert_url_allowed(url: str) -> str:
+async def _assert_url_allowed(url: str, guarded: bool = False) -> str:
     """Validate scheme + resolve host; raise HTTPException(400) on anything
     private/loopback/link-local unless the host is a known internal service.
-    Returns the hostname. NOTE: httpx re-resolves at request time (small
-    TOCTOU window) — acceptable for a 5s HEAD probe, documented here."""
+    Returns the hostname. NOTE: for an unguarded caller httpx re-resolves at
+    request time (small TOCTOU window) — acceptable for a 5s HEAD probe. A
+    ``guarded`` caller (a non-admin on a shared host) gets no internal-service
+    exemption and public addresses only, and the probe itself is dialled through
+    ``providers.guarded_client``, which closes that window."""
     parsed = urlparse(url or "")
     if parsed.scheme not in ("http", "https"):
         raise HTTPException(status_code=400, detail="Only http(s) URLs can be tested.")
     host = parsed.hostname
     if not host:
         raise HTTPException(status_code=400, detail="URL has no hostname.")
+    if guarded:
+        from plugins.hermes_ui import providers
+
+        try:
+            await providers.refuse_private_url(url)
+        except providers.EndpointValidationError:
+            raise HTTPException(
+                status_code=400,
+                detail="Blocked: that address is on this server's own network. Only public servers can be tested here.",
+            ) from None
+        return host
     if host.lower() in _INTERNAL_HOSTS:
         return host
     # Literal IP → check directly; hostname → resolve every address.
@@ -168,7 +182,7 @@ def _config_set() -> str:
 
 
 def _config_file_candidates() -> list[Path]:
-    base = Path(os.getenv("HARVIS_OPENCLAW_CONFIG_DIR") or "/app/openclaw_config")
+    base = Path(os.getenv("HARVIS_OPENCLAW_CONFIG_DIR") or "/app/engine_config")
     return [base / _config_set() / "openclaw.json", base / "openclaw.json"]
 
 
@@ -397,7 +411,7 @@ def _build_preview(skills, conns, mask: bool = True, require_verdict: bool = Tru
         "skipped_unverified": skipped_unverified,
         "skills": {
             "target_dir": str(sdir) if sdir else None,
-            "target_dir_note": f"host: openclaw/skills/{cs}/ (mounted into every engine sidecar at /skills)",
+            "target_dir_note": f"host: engine-skills/{cs}/ (mounted into every engine sidecar at /skills)",
             "items": skill_items,
         },
         "mcp": {
@@ -514,14 +528,18 @@ def register_mcp_wizard_routes(router: APIRouter, get_current_user: Callable) ->
             }
         if not (url or "").strip():
             raise HTTPException(status_code=400, detail="A server URL is required to test.")
-        await _assert_url_allowed(url)
+        from plugins.hermes_ui import providers
+
+        guarded = providers.url_guarded(int(user.id))
+        await _assert_url_allowed(url, guarded)
         started = time.monotonic()
         status: Optional[int] = None
         detail = ""
         ok = False
         try:
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(5.0), follow_redirects=False
+            async with (
+                providers.guarded_client(timeout=httpx.Timeout(5.0)) if guarded
+                else httpx.AsyncClient(timeout=httpx.Timeout(5.0), follow_redirects=False)
             ) as hc:
                 r = await hc.head(url)
                 status = r.status_code
@@ -530,6 +548,8 @@ def register_mcp_wizard_routes(router: APIRouter, get_current_user: Callable) ->
                         status = gr.status_code
                 ok = 200 <= (status or 0) < 400
                 detail = "Server responded." if ok else f"Server answered HTTP {status}."
+        except providers.EndpointValidationError:
+            detail = "Blocked: that address is on this server's own network."
         except httpx.TimeoutException:
             detail = "Timed out after 5s — host unreachable or not answering."
         except httpx.HTTPError as e:

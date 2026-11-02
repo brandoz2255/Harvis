@@ -23,6 +23,6 @@
       "@hermes/shared": ["../hermes-shared/src/index.ts"]
     }
   },
-  "include": ["src", "../hermes-shared/src"],
+  "include": ["src"],
   "exclude": ["e2e", "electron", "playwright.config.ts"]
 }

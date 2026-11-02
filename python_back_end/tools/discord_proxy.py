@@ -3,7 +3,7 @@ Discord posting proxy — lets OpenClaw agents (including heartbeat) post
 to designated Discord channels via the Harvis bot.
 
 Security:
-- Requires OPENCLAW_GATEWAY_TOKEN auth
+- Requires HARVIS_GATEWAY_TOKEN auth
 - Channel names resolved server-side from env vars
 - Agent never sees DISCORD_BOT_TOKEN
 - Messages truncated to Discord's 2000-char limit
@@ -25,7 +25,6 @@ logger = logging.getLogger(__name__)
 discord_proxy_router = APIRouter(prefix="/api/tools/discord", tags=["discord-proxy"])
 
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "")
-OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 
 # Channel name → channel ID mapping (resolved from env vars at startup)
 DISCORD_CHANNELS: dict[str, str] = {

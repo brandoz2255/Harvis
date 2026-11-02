@@ -16,8 +16,8 @@ from typing import AsyncGenerator
 
 import httpx
 
-from moonshot_api import MoonshotClient, MOONSHOT_BASE_URL, get_moonshot_model_id
-from .openclaw_client import OpenClawEvent
+from moonshot_api import MoonshotClient, MOONSHOT_BASE_URL, get_moonshot_model_id, user_guarded
+from .events import OpenClawEvent
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +141,7 @@ async def stream_kimi_workspace(
         return
 
     base_url = api_url or MOONSHOT_BASE_URL
-    client = MoonshotClient(api_key=api_key, base_url=base_url)
+    client = MoonshotClient(api_key=api_key, base_url=base_url, guarded=user_guarded(user_id))
     user_msg, skipped = await _user_message(task_message, chat_history, attachments, user_id)
     for _line in skipped:
         yield OpenClawEvent("log", {"message": f"Attachment not sent — {_line}"})
@@ -460,6 +460,7 @@ async def _plan_subtasks(
     api_url: str = "",
     model: str = "",
     provider: str = "local",
+    user_id: int = 0,
 ) -> list[dict]:
     """
     Ask the model to split the task into parallel sub-tasks.
@@ -476,7 +477,8 @@ async def _plan_subtasks(
 
     try:
         if provider == "kimi" and api_key:
-            client = MoonshotClient(api_key=api_key, base_url=api_url or MOONSHOT_BASE_URL)
+            client = MoonshotClient(api_key=api_key, base_url=api_url or MOONSHOT_BASE_URL,
+                                    guarded=user_guarded(user_id))
             planner_model = get_moonshot_model_id(model) if model else "kimi-k2.5"
             parts: list[str] = []
             async for chunk in client.chat_completion_stream(model=planner_model, messages=messages):
@@ -633,7 +635,7 @@ async def stream_parallel_workspace(
 
     subtasks = await _plan_subtasks(
         task_message, chat_history,
-        api_key=api_key, api_url=api_url, model=model, provider=provider,
+        api_key=api_key, api_url=api_url, model=model, provider=provider, user_id=user_id,
     )
 
     if len(subtasks) == 1:

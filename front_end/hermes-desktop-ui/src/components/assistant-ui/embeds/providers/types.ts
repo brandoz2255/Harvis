@@ -6,7 +6,7 @@ export type EmbedProvider =
   'googlemaps' | 'instagram' | 'openstreetmap' | 'pinterest' | 'spotify' | 'tiktok' | 'twitter' | 'vimeo' | 'youtube'
 
 /** Which lazy renderer materialises the descriptor. */
-export type EmbedRenderer = 'frame' | 'tweet'
+export type EmbedRenderer = 'frame'
 
 interface EmbedLayout {
   /** Frame aspect ratio (width / height). For video/maps. */
@@ -35,13 +35,7 @@ export interface FrameEmbed extends BaseEmbed {
   renderer: 'frame'
 }
 
-/** Twitter/X ships no iframe URL — only a widget script (see social-embed.tsx). */
-export interface TweetEmbed extends BaseEmbed {
-  renderer: 'tweet'
-  tweetId: string
-}
-
-export type EmbedDescriptor = FrameEmbed | TweetEmbed
+export type EmbedDescriptor = FrameEmbed
 
 /** A provider matcher. Receives a parsed http(s) URL; returns null if unmatched. */
 export type EmbedMatcher = (url: URL) => EmbedDescriptor | null

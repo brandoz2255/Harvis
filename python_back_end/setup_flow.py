@@ -23,6 +23,8 @@ from plugins.hosting import MODE_KUBERNETES, hosting_mode, profile_not_enabled_r
 logger = logging.getLogger(__name__)
 
 _HTTP_TIMEOUT = httpx.Timeout(5.0)
+# Held for the whole embedder pull so signed-in users cannot stack parallel downloads.
+_embedder_pull_lock = asyncio.Lock()
 _MODEL_TIMEOUT = httpx.Timeout(120.0, connect=10.0)
 
 
@@ -36,15 +38,14 @@ def _tick(ready: bool, reason: str, probe: str, skipped: bool = False) -> dict[s
 
 
 # Optional capabilities live behind compose profiles, and profiles are opt-in — a
-# correct default install starts neither openclaw nor tts-service. The backend
+# correct default install starts neither the engines profile nor tts-service. The backend
 # cannot see `docker compose --profile`, so compose passes the enabled set in via
 # HARVIS_ENABLED_PROFILES. Without that we cannot tell "the operator turned this
 # off" from "it crashed", and the safe reading is the former: calling a correct
 # install degraded teaches people to ignore the health page.
 _SERVICE_PROFILE = {
-    "openclaw": "engines",
-    "tts": "voice",
-    "tts-service": "voice",
+    "tts": "advanced-voice",
+    "tts-service": "advanced-voice",
     # Notebooks ships as an opt-in pack. Without these entries a CORRECT default
     # install reported Notebooks as broken (nginx 502s /onb because the upstream
     # container does not exist) instead of "not installed" — the exact failure the
@@ -115,17 +116,6 @@ async def _probe_ollama() -> dict[str, Any]:
         return _tick(False, str(exc)[:200], probe)
 
 
-async def _openclaw_reachable() -> tuple[bool, str]:
-    base = os.getenv("OPENCLAW_URL", "ws://openclaw:18789")
-    base = base.replace("wss://", "https://").replace("ws://", "http://").rstrip("/")
-    try:
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as hc:
-            r = await hc.get(f"{base}/health")
-        return (r.status_code < 400, f"HTTP {r.status_code}")
-    except Exception as exc:
-        return (False, str(exc)[:120])
-
-
 async def _container_running(name: str) -> bool | None:
     """True/False if the daemon answered, None if we cannot ask (no socket, k8s).
 
@@ -172,7 +162,7 @@ async def _probe_engines(request: Request, user_id: int) -> dict[str, Any]:
     support questions — a verified key with no sidecar ("isn't installed on this
     Harvis") and a present sidecar with an unverified key (a 401 mid-run).
     """
-    probe = "user_engine_auth.verified_at + docker ps <sidecar> + openclaw /health"
+    probe = "user_engine_auth.verified_at + docker ps <sidecar>"
     pool = getattr(request.app.state, "pg_pool", None)
     engines: list[dict[str, Any]] = []
     try:
@@ -218,19 +208,6 @@ async def _probe_engines(request: Request, user_id: int) -> dict[str, Any]:
                 )
         engines.append(entry)
 
-    oc_ok, oc_detail = await _openclaw_reachable()
-    engines.append({
-        "id": "openclaw",
-        "label": "OpenClaw (local agent runtime)",
-        "service": "openclaw",
-        "container": "harvis-openclaw",
-        "has_key": False,
-        "verified": oc_ok,
-        "can_probe": False,
-        "state": "ready" if oc_ok else ("not_installed" if not service_expected("openclaw") else "unreachable"),
-        "detail": oc_detail if oc_ok or service_expected("openclaw") else _not_installed_reason("openclaw"),
-    })
-
     ready = [e for e in engines if e["state"] == "ready"]
     if ready:
         return _tick(True, "ready: " + ", ".join(e["label"] for e in ready), probe) | {"engines": engines}
@@ -267,13 +244,14 @@ async def _probe_engines(request: Request, user_id: int) -> dict[str, Any]:
 async def _probe_speech() -> dict[str, Any]:
     """The speech path a default install actually runs: voice-onnx (sherpa/kokoro).
 
-    NOT tts-service. That one is the SpeechT5 sidecar behind the `voice` profile,
+    NOT tts-service. That one is the SpeechT5 sidecar behind the `advanced-voice` profile,
     used for notebook podcasts — probing it made a working install report speech
     as not installed, because voice-onnx (torch-free, in the DEFAULT service set
     since the core trim) is what HARVIS_TTS_URL/HARVIS_STT_URL point at.
 
-    voice-onnx downloads its bundles lazily on first use, and /health deliberately
-    answers `status: ok` during that download so a first-run fetch doesn't read as
+    voice-onnx downloads its bundles at start-up (VOICE_PREFETCH, on by default) or
+    on first use when that is off, and /health deliberately answers `status: ok`
+    during that download so a first-run fetch doesn't read as
     an outage — which means the status code alone overstates readiness. The real
     signal is the nested `models.{tts,asr}.downloaded`. Measured on a 4-vCPU VM
     with no GPU: the first synth paid ~60 s for the kokoro download, then ran at
@@ -348,7 +326,7 @@ async def _probe_notebooks() -> dict[str, Any]:
         # the container may be absent (profile off) or crashed (profile on).
         # HARVIS_ENABLED_PROFILES is the only signal that separates them, and it
         # is empty on installs that predate it — so an unset env reads as "not
-        # installed", matching the openclaw/tts convention above.
+        # installed", matching the tts convention above.
         if not service_expected("open-notebook-ui"):
             return _tick(
                 False, _not_installed_reason("open-notebook-ui"), probe, skipped=True
@@ -475,9 +453,8 @@ def create_setup_router(
                     "SELECT value FROM instance_settings WHERE key = 'setup_complete'"
                 )
         except Exception as exc:
-            raise HTTPException(
-                status_code=503, detail=f"database unavailable: {str(exc)[:200]}"
-            )
+            logger.warning("setup status: database unavailable: %s", exc)
+            raise HTTPException(status_code=503, detail="database unavailable")
         return {
             "needs_setup": int(user_count or 0) == 0,
             "setup_complete": (complete or "").strip().lower() in {"1", "true", "yes"},
@@ -709,8 +686,19 @@ def create_setup_router(
         if st["state"] != "not_installed":
             raise HTTPException(status_code=400, detail=st["reason"])
         url = os.getenv("OLLAMA_URL", "http://host.docker.internal:11434").rstrip("/")
+        if _embedder_pull_lock.locked():
+            raise HTTPException(status_code=409, detail="The embedding model download is already running")
+        await _embedder_pull_lock.acquire()
+
+        async def one_at_a_time():
+            try:
+                async for chunk in ollama_pull_stream(url, EMBEDDER_TAG):
+                    yield chunk
+            finally:
+                _embedder_pull_lock.release()
+
         return StreamingResponse(
-            ollama_pull_stream(url, EMBEDDER_TAG),
+            one_at_a_time(),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )

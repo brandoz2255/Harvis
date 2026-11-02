@@ -427,7 +427,7 @@ def check_files(files: dict) -> dict:
 # them, so a change to one is impossible to make without seeing the other.
 #
 # Until now only the native lane had any of this. The CLI lanes (claude-code,
-# kimi-code, codex, opencode, hermes-agent) launched with the user's brief and
+# kimi-code, codex, hermes-agent) launched with the user's brief and
 # NOTHING else — no layout guidance and no gate — which is why a Claude Build turn
 # answered every request with one self-contained index.html and nobody ever caught
 # the dead links inside it.

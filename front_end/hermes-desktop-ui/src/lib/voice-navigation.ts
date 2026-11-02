@@ -64,6 +64,12 @@ const CORE: VoiceDestination[] = [
       'automations'
     ]
   },
+  {
+    id: 'cookbook',
+    label: 'Cookbook',
+    path: '/cookbook',
+    names: ['cookbook', 'cook book', 'model cookbook', 'models']
+  },
   { id: 'profiles', label: 'Profiles', path: '/profiles', names: ['profiles', 'profile', 'personas'] },
   { id: 'agents', label: 'Agents', path: '/agents', names: ['agents'] },
   { id: 'starmap', label: 'Star Map', path: '/starmap', names: ['star map', 'starmap'] }

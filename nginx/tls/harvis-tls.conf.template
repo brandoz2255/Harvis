@@ -27,10 +27,14 @@ server {
     ssl_session_timeout 1h;
     ssl_session_tickets off;
 
-    # No HSTS. A self-signed certificate plus HSTS would pin this browser to
-    # HTTPS for this host permanently, and there is no way for the user to click
-    # past it afterwards — on a LAN address that is a trap, not a hardening step.
-    # Add HSTS only alongside a certificate a browser actually trusts.
+    # HSTS tells a browser to refuse plain http for this name from now on. It is
+    # scoped to the host only (no includeSubDomains, no preload) and runs 180 days.
+    # Browsers ignore it for a bare IP address, so it bites only when Harvis is
+    # reached by a name. With this self-signed certificate the cost is that a
+    # browser holding it cannot click past a certificate warning for that name
+    # while it lasts: keep harvis.crt rather than regenerating it, or clear the
+    # entry (chrome://net-internals/#hsts) after replacing it.
+    add_header Strict-Transport-Security "max-age=15552000" always;
 
     # Tunnel traffic belongs on 8081, behind the Access check. See the
     # listen 80 block in nginx.conf.

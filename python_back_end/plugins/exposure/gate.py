@@ -37,7 +37,6 @@ ADMIN_ONLY_PREFIXES = (
     "/api/run-command",
     "/api/kubectl/",
     "/api/cad/",
-    "/api/opencode/",
     "/api/openclaw/",
     "/api/remote/ssh/",
     "/api/owui/engine-auth/",

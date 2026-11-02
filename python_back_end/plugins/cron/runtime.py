@@ -231,13 +231,13 @@ def _make_dispatch(app):
             req = Request(scope={"type": "http", "app": app})
             # Automations created from Agent Studio carry metadata.agent_id =
             # "orchestrated" so the scheduled run fans out into the multi-agent
-            # orchestrator (same path as a chat Orchestrate run). Default "main"
-            # keeps any pre-existing jobs on the single-agent path.
+            # orchestrator (same path as a chat Orchestrate run). Everything else,
+            # including old jobs saved as "main", runs one Harvis agent.
             await launch_workspace_internal(
                 request=req,
                 user_id=job.user_id,
                 task_brief=job.prompt,
-                agent_id=str(meta.get("agent_id") or "main"),
+                agent_id=str(meta.get("agent_id") or "agent-native"),
                 model_name=admitted.model or str(meta.get("model_name") or ""),
                 # Tag every fire with a stable per-job session so the Automations
                 # dashboard can aggregate real run outcomes (Successful/Failed 7d)

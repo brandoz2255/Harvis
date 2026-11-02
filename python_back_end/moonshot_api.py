@@ -58,8 +58,54 @@ def _explain_error(status: int, body: str, base_url: str) -> str:
 MOONSHOT_PLATFORMS = ("https://api.moonshot.ai/v1", "https://api.moonshot.cn/v1")
 
 
+def _is_official(base_url: str) -> bool:
+    """One of Moonshot's own platforms or the operator's MOONSHOT_BASE_URL: names no user chose."""
+    return (base_url or "").strip().rstrip("/") in (*MOONSHOT_PLATFORMS, MOONSHOT_BASE_URL)
+
+
+_ENDPOINT_REFUSED = "That Moonshot endpoint is not allowed on a shared server."
+
+
+def _endpoint_refused() -> type:
+    from plugins.hermes_ui.providers import EndpointValidationError
+
+    return EndpointValidationError
+
+
+def user_guarded(user_id: Optional[int]) -> Optional[bool]:
+    """``is_guarded``'s input for a known user; ``None`` (fail closed on a shared host) when there is none."""
+    if not user_id:
+        return None
+    from plugins.hermes_ui.providers import url_guarded
+
+    return url_guarded(int(user_id))
+
+
+def is_guarded(guarded: Optional[bool]) -> bool:
+    """Must this caller's URL pass the SSRF guard? Callers that know the user pass
+    ``providers.url_guarded(user_id)`` (an admin is exempt). ``None`` means the caller
+    does not know the user, so a shared host guards it rather than trusting it."""
+    if guarded is not None:
+        return guarded
+    from plugins.exposure import shared
+
+    return shared()
+
+
+def moonshot_http_client(base_url: str, guarded: Optional[bool] = None, **kwargs: Any) -> httpx.AsyncClient:
+    """The one HTTP client for a Moonshot base URL. A user-chosen URL (``user_api_keys.api_url``
+    can be set by any user) is dialled through the connect-time guard for a guarded caller:
+    public addresses only, no environment proxies, no redirects. Moonshot's own platforms and
+    the operator's configured URL are not user input and keep the plain client."""
+    if is_guarded(guarded) and not _is_official(base_url):
+        from plugins.hermes_ui.providers import guarded_client
+
+        return guarded_client(**kwargs)
+    return httpx.AsyncClient(**kwargs)
+
+
 async def verify_moonshot_key(
-    api_key: str, preferred_base_url: Optional[str] = None
+    api_key: str, preferred_base_url: Optional[str] = None, guarded: Optional[bool] = None
 ) -> tuple[bool, str, str]:
     """Check a Moonshot key against the live API. Returns ``(ok, base_url, error)``.
 
@@ -73,6 +119,10 @@ async def verify_moonshot_key(
     requests error out) is reported as unverified rather than invalid — an outage is not
     evidence against the credential, and refusing to store a good key during a network
     blip would be worse than storing an unproven one.
+
+    A ``guarded`` caller (see ``is_guarded``) probes a custom URL only at a public address,
+    and is told the status code, never the body: the answer must not be a way to read
+    what a server on the private network says.
     """
     candidates: list[str] = []
     for url in ([preferred_base_url] if preferred_base_url else []) + list(MOONSHOT_PLATFORMS):
@@ -82,27 +132,31 @@ async def verify_moonshot_key(
 
     rejected: list[str] = []
     unreachable: list[str] = []
-    async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=8.0)) as client:
-        for base in candidates:
-            try:
+    for base in candidates:
+        try:
+            async with moonshot_http_client(
+                base, guarded, timeout=httpx.Timeout(15.0, connect=8.0)
+            ) as client:
                 r = await client.get(
                     f"{base}/models", headers={"Authorization": f"Bearer {api_key}"}
                 )
-            except Exception as exc:
-                logger.debug("verify_moonshot_key: %s unreachable (%s)", base, type(exc).__name__)
-                unreachable.append(base)
-                continue
-            if r.status_code == 200:
-                logger.info(
-                    "verify_moonshot_key: key accepted at %s (%s)", base, _key_fingerprint(api_key)
-                )
-                return True, base, ""
-            if r.status_code in (401, 403):
-                rejected.append(base)
-                continue
-            # Anything else (429 quota, 5xx) is about the account or the service, not the
-            # key's validity — surface it verbatim rather than calling the key invalid.
-            return False, "", _explain_error(r.status_code, r.text, base)
+        except Exception as exc:
+            logger.debug("verify_moonshot_key: %s unreachable (%s)", base, type(exc).__name__)
+            unreachable.append(base)
+            continue
+        if r.status_code == 200:
+            logger.info(
+                "verify_moonshot_key: key accepted at %s (%s)", base, _key_fingerprint(api_key)
+            )
+            return True, base, ""
+        if r.status_code in (401, 403):
+            rejected.append(base)
+            continue
+        # Anything else (429 quota, 5xx) is about the account or the service, not the
+        # key's validity — surface it verbatim rather than calling the key invalid.
+        if is_guarded(guarded) and not _is_official(base):
+            return False, "", f"The endpoint answered HTTP {r.status_code}, so the key was not saved."
+        return False, "", _explain_error(r.status_code, r.text, base)
 
     if rejected and not unreachable:
         return False, "", (
@@ -121,13 +175,27 @@ async def verify_moonshot_key(
 class MoonshotClient:
     """Client for interacting with Moonshot AI API (Kimi models)."""
 
-    def __init__(self, api_key: str, base_url: str = MOONSHOT_BASE_URL):
+    def __init__(self, api_key: str, base_url: str = MOONSHOT_BASE_URL, guarded: Optional[bool] = None):
         self.api_key = api_key
         self.base_url = base_url
+        self.guarded = guarded  # see is_guarded()
         self.headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
+
+    def _hidden(self) -> bool:
+        """Error text names the endpoint and echoes its body; a guarded caller sees that
+        only for Moonshot's own platforms, never an operator's proxy or their own URL."""
+        return is_guarded(self.guarded) and (self.base_url or "").strip().rstrip("/") not in MOONSHOT_PLATFORMS
+
+    def _error_text(self, status: int, body: str) -> str:
+        if self._hidden():
+            return f"The Moonshot endpoint answered HTTP {status}."
+        return _explain_error(status, body, self.base_url)
+
+    def _exc_text(self, exc: Exception) -> str:
+        return type(exc).__name__ if self._hidden() else str(exc)
 
     def _filter_empty_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
@@ -207,8 +275,8 @@ class MoonshotClient:
             payload["max_tokens"] = max_tokens
 
         try:
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(120.0, connect=30.0)
+            async with moonshot_http_client(
+                self.base_url, self.guarded, timeout=httpx.Timeout(120.0, connect=30.0)
             ) as client:
                 response = await client.post(
                     f"{self.base_url}/chat/completions",
@@ -225,7 +293,7 @@ class MoonshotClient:
                     )
                     raise HTTPException(
                         status_code=response.status_code if response.status_code in (401, 403, 429) else 502,
-                        detail=_explain_error(response.status_code, error_text, self.base_url),
+                        detail=self._error_text(response.status_code, error_text),
                     )
 
                 data = response.json()
@@ -236,10 +304,15 @@ class MoonshotClient:
             raise HTTPException(
                 status_code=504, detail="Moonshot API request timed out"
             )
+        except _endpoint_refused() as e:
+            logger.warning("Moonshot endpoint refused for a guarded caller: %s", e)
+            raise HTTPException(status_code=400, detail=_ENDPOINT_REFUSED) from None
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Error calling Moonshot API: {e}")
             raise HTTPException(
-                status_code=500, detail=f"Error calling Moonshot API: {str(e)}"
+                status_code=500, detail=f"Error calling Moonshot API: {self._exc_text(e)}"
             )
 
     async def chat_completion_stream(
@@ -278,8 +351,8 @@ class MoonshotClient:
                 self.base_url, model, len(filtered_messages), _key_fingerprint(self.api_key),
             )
 
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(120.0, connect=30.0)
+            async with moonshot_http_client(
+                self.base_url, self.guarded, timeout=httpx.Timeout(120.0, connect=30.0)
             ) as client:
                 async with client.stream(
                     "POST",
@@ -296,7 +369,7 @@ class MoonshotClient:
                         )
                         raise HTTPException(
                             status_code=response.status_code if response.status_code in (401, 403, 429) else 502,
-                            detail=_explain_error(response.status_code, error_text, self.base_url),
+                            detail=self._error_text(response.status_code, error_text),
                         )
 
                     async for line in response.aiter_lines():
@@ -313,17 +386,22 @@ class MoonshotClient:
                             except json.JSONDecodeError:
                                 continue
 
+        except _endpoint_refused() as e:
+            logger.warning("Moonshot endpoint refused for a guarded caller: %s", e)
+            raise HTTPException(status_code=400, detail=_ENDPOINT_REFUSED) from None
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Error streaming from Moonshot API: {e}")
             raise HTTPException(
-                status_code=500, detail=f"Error streaming from Moonshot API: {str(e)}"
+                status_code=500, detail=f"Error streaming from Moonshot API: {self._exc_text(e)}"
             )
 
 
-def get_moonshot_client(api_key: str, base_url: Optional[str] = None) -> MoonshotClient:
+def get_moonshot_client(api_key: str, base_url: Optional[str] = None, guarded: Optional[bool] = None) -> MoonshotClient:
     """Create a Moonshot client. ``base_url`` should be the platform stored alongside the
     user's key (``user_api_keys.api_url``); omitting it falls back to the env default."""
-    return MoonshotClient(api_key, base_url or MOONSHOT_BASE_URL)
+    return MoonshotClient(api_key, base_url or MOONSHOT_BASE_URL, guarded)
 
 
 # Moonshot model mapping. kimi-k3 = the 2.8T MoE flagship (1M ctx, released 2026-07-16);

@@ -47,7 +47,12 @@ function LocalOllamaRow({ onChanged, row }: { onChanged: () => void; row: Harvis
       }
       description={
         <span>
-          {row.note} Server address: <span className="font-mono">{row.base_url}</span>.{' '}
+          {row.note}{' '}
+          {row.base_url && (
+            <>
+              Server address: <span className="font-mono">{row.base_url}</span>.{' '}
+            </>
+          )}
           {row.status === 'online' ? modelSummary(row.models) : row.reason || 'Not reachable right now.'}
         </span>
       }

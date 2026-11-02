@@ -12,9 +12,15 @@ import { Thread } from '@/components/assistant-ui/thread'
 import { TranscriptWindowProvider } from '@/components/assistant-ui/thread/transcript-window'
 import { Backdrop } from '@/components/Backdrop'
 import { AsciiField } from '@/components/chat/ascii-field'
+import { Intro } from '@/components/chat/intro'
+import { IslandHost } from '@/mods/island-host'
+import { $islandVisible } from '@/mods/store'
+import { $openBotChat } from '@/plugins/hermes-bots/bot-state'
+import { $groupChatWorkspace } from '@/plugins/hermes-bots/group-chat'
+import { showBotsIsland } from './bots-island-visibility'
 import { COMPOSER_HEART_CONFIG, HeartField } from '@/components/chat/vibe-hearts'
 import { usePaneVisible } from '@/components/pane-shell/pane-visibility'
-import { $sessionTileDragging, $sessionTileEdgeHover } from '@/components/pane-shell/tree/store'
+import { $paneVisible, $sessionTileDragging, $sessionTileEdgeHover } from '@/components/pane-shell/tree/store'
 import { PromptOverlays } from '@/components/prompt-overlays'
 import { Button } from '@/components/ui/button'
 import { ErrorState } from '@/components/ui/error-state'
@@ -427,6 +433,10 @@ const ChatViewContent = memo(function ChatViewContent({
   const introPersonality = useStore($introPersonality)
   const introSeed = useStore($introSeed)
   const introSplash = useStore($introSplash)
+  const botsPaneVisible = useStore($paneVisible('hermes-bots:pane'))
+  const openBotChat = useStore($openBotChat)
+  const groupChat = useStore($groupChatWorkspace)
+  const islandEnabled = useStore($islandVisible)
   // PERF: ChatView must not subscribe to the view's $messages — the atom is
   // replaced on every streaming delta flush (~30×/s) and a subscription here
   // re-renders the entire chat shell (header, chat bar, thread wrapper) per
@@ -483,6 +493,14 @@ const ChatViewContent = memo(function ChatViewContent({
   // A tile IS its session — no route involved, never "mismatched".
   const routedSessionId = isPrimary ? routeSessionId(location.pathname) : selectedSessionId
   const isRoutedSessionView = Boolean(routedSessionId)
+  const showBotIsland = showBotsIsland(
+    isPrimary,
+    botsPaneVisible,
+    Boolean(openBotChat),
+    Boolean(groupChat),
+    islandEnabled,
+    isRoutedSessionView
+  )
 
   // The URL points at a session the store hasn't loaded yet (sidebar / cmd-K /
   // direct nav). Derived in render so the swap reads instantly: the same frame
@@ -493,7 +511,7 @@ const ChatViewContent = memo(function ChatViewContent({
   // The compact new-session pop-out skips the wordmark/tagline intro — it's a
   // scratch window, not the full-height empty state. The Appearance toggle
   // turns it off everywhere else.
-  const showIntro = shouldShowIntro({
+  const introState = {
     activeSessionId,
     auxiliaryWindow: isAuxiliaryWindow(),
     enabled: introSplash,
@@ -502,7 +520,8 @@ const ChatViewContent = memo(function ChatViewContent({
     primary: isPrimary,
     routedSessionView: isRoutedSessionView,
     selectedSessionId
-  })
+  }
+  const showIntro = shouldShowIntro(introState)
 
   // Session is still loading if the route references a session we haven't
   // resumed yet. Brand-new routed drafts are empty on purpose once a runtime
@@ -654,7 +673,7 @@ const ChatViewContent = memo(function ChatViewContent({
         suppressMessages={routeSessionMismatch}
       >
         <div
-          className="relative min-h-0 max-w-full flex-1 overflow-hidden bg-(--ui-chat-surface-background) contain-[layout_paint]"
+          className={cn("relative min-h-0 max-w-full flex-1 overflow-hidden bg-(--ui-chat-surface-background)", !showBotIsland && "contain-[layout_paint]")}
           data-slot="composer-bounds"
           {...dropHandlers}
         >
@@ -674,6 +693,15 @@ const ChatViewContent = memo(function ChatViewContent({
             sessionId={activeSessionId}
             sessionKey={threadKey}
           />
+          {showBotIsland && (
+            <div className="absolute inset-0 z-20 overflow-hidden bg-(--ui-chat-surface-background)" data-slot="bots-island-view">
+              <IslandHost />
+              <AsciiField className="pointer-events-none absolute inset-0" clear={0.18} />
+              <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
+                <Intro personality={introPersonality} pixelWordmark seed={introSeed} />
+              </div>
+            </div>
+          )}
           {resumeExhausted && routedSessionId && (
             <div className="absolute inset-0 z-10 grid place-items-center bg-(--ui-chat-surface-background) px-8 py-10">
               <ErrorState

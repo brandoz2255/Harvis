@@ -24,6 +24,9 @@ class OwuiSignupBody(BaseModel):
     profile_image_url: Optional[str] = None
     # Shown to the admin beside an account waiting for approval.
     note_to_host: Optional[str] = None
+    # Ticked the house rules (plugins/people/terms.py).
+    accept_terms: bool = False
+    terms_version: Optional[str] = None
 
 
 class OwuiChatNewBody(BaseModel):

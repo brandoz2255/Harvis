@@ -45,17 +45,80 @@ def _autolink_urls(md_text: str) -> str:
     )
 
 
+_SAFE_URL_SCHEMES = ("http://", "https://", "mailto:", "#")
+
+# Report markup is generated from markdown only (raw HTML is escaped), so this is a
+# defence-in-depth allowlist: any attribute not listed for its tag is dropped, which
+# removes every on* handler, style, srcset and formaction even if a markdown
+# extension is ever re-enabled that can write arbitrary attributes.
+_ALLOWED_TAGS = frozenset({
+    "a", "abbr", "b", "blockquote", "br", "code", "dd", "del", "div", "dl", "dt", "em",
+    "h1", "h2", "h3", "h4", "h5", "h6", "hr", "i", "img", "li", "ol", "p", "pre",
+    "s", "span", "strong", "sub", "sup", "table", "tbody", "td", "th", "thead", "tr", "ul",
+})
+_DROP_TAGS = frozenset({
+    "script", "style", "iframe", "frame", "frameset", "object", "embed", "applet", "form",
+    "input", "button", "textarea", "select", "svg", "math", "link", "meta", "base",
+    "template", "noscript", "audio", "video", "source", "track", "title",
+})
+_GLOBAL_ATTRS = frozenset({"class", "id", "title"})
+_TAG_ATTRS = {
+    "a": frozenset({"href"}),
+    "img": frozenset({"src", "alt"}),
+    "td": frozenset({"colspan", "rowspan", "align"}),
+    "th": frozenset({"colspan", "rowspan", "align"}),
+}
+
+
+def _is_safe_url(value) -> bool:
+    # Browsers ignore tabs, newlines and control chars inside a scheme.
+    cleaned = re.sub(r"[\x00-\x20]+", "", html.unescape(str(value))).lower()
+    return cleaned.startswith(_SAFE_URL_SCHEMES)
+
+
+def _sanitize_report_html(result: str) -> str:
+    """Allowlist tags and attributes, and keep only http(s)/mailto/anchor href and src."""
+    soup = BeautifulSoup(result, "html.parser")
+    for tag in soup.find_all(True):
+        if tag.decomposed:
+            continue
+        if tag.name in _DROP_TAGS:
+            tag.decompose()
+            continue
+        if tag.name not in _ALLOWED_TAGS:
+            tag.unwrap()
+            continue
+        allowed = _GLOBAL_ATTRS | _TAG_ATTRS.get(tag.name, frozenset())
+        for attr in list(tag.attrs):
+            if attr.lower() not in allowed:
+                del tag[attr]
+            elif attr in ("href", "src") and not _is_safe_url(tag[attr]):
+                del tag[attr]
+    return str(soup)
+
+
 def _md_to_html(md_text: str) -> str:
-    """Convert markdown to HTML with common extensions."""
+    """Convert markdown to HTML with common extensions.
+
+    The report is model output built from web pages the model read, and it is
+    served on the app origin, so raw HTML must come out escaped, not live.
+    ``extra`` is spelled out without attr_list (which lets markdown set any
+    attribute, e.g. ``{: onerror=... }``) and without md_in_html.
+    """
     md_text = _autolink_urls(md_text)
-    result = markdown.markdown(
-        md_text,
-        extensions=["extra", "codehilite", "toc", "tables", "sane_lists"],
+    converter = markdown.Markdown(
+        extensions=[
+            "abbr", "def_list", "fenced_code", "footnotes",
+            "codehilite", "toc", "tables", "sane_lists",
+        ],
         extension_configs={
             "codehilite": {"css_class": "code", "guess_lang": False},
             "toc": {"marker": "", "toc_depth": "2-3"},
         },
     )
+    converter.preprocessors.deregister("html_block")
+    converter.inlinePatterns.deregister("html")
+    result = _sanitize_report_html(converter.convert(md_text))
     # Make external links open in new tab
     result = re.sub(
         r'<a href="(https?://)',
@@ -1767,8 +1830,9 @@ def generate_visual_report(
                     domain = domain[4:]
             except Exception:
                 domain = url
+            href = html.escape(url) if _is_safe_url(url) and not url.startswith("#") else "#"
             items.append(
-                f'<a href="{html.escape(url)}" target="_blank" rel="noopener noreferrer">'
+                f'<a href="{href}" target="_blank" rel="noopener noreferrer">'
                 f'<span class="snum">{i}.</span>'
                 f'<span>{title}</span>'
                 f'<span class="sdomain">{html.escape(domain)}</span>'

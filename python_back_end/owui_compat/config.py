@@ -14,9 +14,19 @@ streams tokens over HTTP SSE instead. See ``owui_compat`` package docstring.
 from __future__ import annotations
 
 import os
+from pathlib import Path
+
+
+def _shipped_version() -> str:
+    """python_back_end/VERSION, stamped from the repo's root VERSION by scripts/versions."""
+    try:
+        return (Path(__file__).resolve().parent.parent / "VERSION").read_text().strip() or "0.0.0"
+    except OSError:
+        return "0.0.0"
+
 
 HARVIS_OWUI_NAME = os.getenv("HARVIS_OWUI_NAME", "Harvis")
-HARVIS_OWUI_VERSION = os.getenv("HARVIS_OWUI_VERSION", "0.2.0")
+HARVIS_OWUI_VERSION = os.getenv("HARVIS_OWUI_VERSION") or _shipped_version()
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -85,6 +95,15 @@ def _signup_approval() -> bool:
         return False
 
 
+def _terms(onboarding) -> dict:
+    try:
+        from plugins.people.terms import config
+
+        return config(bool(onboarding))
+    except Exception:  # noqa: BLE001 — config must render even if the plugin is absent
+        return {"required": False, "version": None, "points": []}
+
+
 def build_config(
     onboarding: bool = False,
     signup_enabled: bool | None = None,
@@ -143,6 +162,9 @@ def build_config(
             # New accounts wait for the admin's approval (plugins/people/approval.py);
             # the sign-up form then asks for a note to the host.
             "signup_approval": _signup_approval(),
+            # The house rules the sign-up form lists with a required checkbox
+            # (plugins/people/terms.py); main.py refuses a sign-up without it.
+            "terms": _terms(onboarding),
             "enable_login_form": True,
             # OPTION A: HTTP-SSE chat, no Socket.IO. Do not flip without also
             # implementing an OWUI-compatible Socket.IO server (owui_compat).
@@ -211,7 +233,7 @@ def build_config(
             # Harvis: VibeCode page = the Claude-Code-desktop layout (session list /
             # attach-repo run + diffs + Create-PR / plan + tasks). Off → the stub.
             "enable_harvis_vibecode": _env_bool("HARVIS_OWUI_VIBECODE", True),
-            # Phase E1: external code engines (OpenCode sidecar) — gates the Build engine
+            # Phase E1: external code engines (Codex / Claude Code sidecars) — gates the Build engine
             # selector. Default OFF; the engine only runs when the sidecar is deployed.
             "enable_harvis_external_engines": _env_bool("HARVIS_OWUI_EXTERNAL_ENGINES", False),
             # Whether a folder picked via the host browser may be edited IN-PLACE (real files).

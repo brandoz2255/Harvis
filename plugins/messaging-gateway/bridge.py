@@ -7,7 +7,7 @@ The gateway sidecar uses this client to:
   * file pairing requests for unknown senders via /api/messaging/gateway/pairing-request
 
 Authentication is a shared secret in the X-Gateway-Token header (matches the
-existing OPENCLAW_GATEWAY_TOKEN pattern in tools/discord_proxy.py).
+existing HARVIS_GATEWAY_TOKEN pattern in tools/discord_proxy.py).
 """
 
 from __future__ import annotations

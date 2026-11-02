@@ -38,7 +38,9 @@ KEY="$CERT_DIR/harvis.key"
 TEMPLATE="$TLS_DIR/harvis-tls.conf.template"
 ACTIVE="$TLS_DIR/harvis-tls.conf"
 
-HTTPS_PORT="${HARVIS_HTTPS_PORT:-9443}"
+# The port people type after the address, so the plain lane's redirect lands on it.
+HTTPS_PORT="${HARVIS_HTTPS_PORT:-$( { grep '^HARVIS_HTTPS_PORT=' .env 2>/dev/null || true; } | tail -1 | cut -d= -f2- | tr -d "\"' \r")}"
+HTTPS_PORT="${HTTPS_PORT:-9443}"
 
 say()  { printf '%s\n' "$*"; }
 fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -68,6 +70,13 @@ if [ "$(cat "$K8S_MODE_FILE" 2>/dev/null || true)" = "k8s" ]; then
     CRT="$CERT_DIR/harvis.crt"
     KEY="$CERT_DIR/harvis.key"
     ACTIVE="$TLS_DIR/harvis-tls.conf"
+fi
+REDIRECT="$TLS_DIR/harvis-https.redirect"
+# The .env that holds the cookie flag: this checkout's, or, on Kubernetes, the one
+# beside the tls directory the pod mounts (the checkout Harvis was installed from).
+ENV_FILE=".env"
+if [ "$K8S" = "1" ] && [ "${TLS_DIR%/nginx/tls}" != "$TLS_DIR" ] && [ -f "${TLS_DIR%/nginx/tls}/.env" ]; then
+    ENV_FILE="${TLS_DIR%/nginx/tls}/.env"
 fi
 
 command -v openssl >/dev/null 2>&1 || fail "openssl is not installed. Install it and run this again."
@@ -181,7 +190,30 @@ fi
 # ── Activate the listener ───────────────────────────────────────────────────
 cp "$TEMPLATE" "$ACTIVE"
 say "Enabled the HTTPS listener ($ACTIVE)"
+
+# From here the plain http lane (:9000) only redirects to https, so a password or
+# the session cookie never crosses the network in the clear. nginx.conf includes
+# this file; only the crawler policy and the installer's two health probes stay
+# on http. `rm` this file and reload nginx to put :9000 back to serving the app.
+# The Kubernetes pod builds its config from the same nginx.conf and mounts this
+# directory as a hostPath, so it reads the file too.
+printf '%s\n' \
+    '# Written by scripts/enable-https.sh. nginx.conf reads it in the port-80 server block.' \
+    "set \$harvis_https_base \"https://\$host:${HTTPS_PORT}\";" > "$REDIRECT"
+say "Plain http now redirects to https ($REDIRECT)"
 say ""
+
+# HARVIS_COOKIE_SECURE=true in the .env that the next start reads. Done only once
+# https answers: a Secure cookie is never sent over plain http, so setting it
+# earlier would lock sign-in out. Returns 1 when it was already set.
+set_cookie_secure_env() {
+    grep -qx 'HARVIS_COOKIE_SECURE=true' "$ENV_FILE" 2>/dev/null && return 1
+    touch "$ENV_FILE"
+    sed -i '/^HARVIS_COOKIE_SECURE=/d' "$ENV_FILE"
+    [ -s "$ENV_FILE" ] && [ -n "$(tail -c1 "$ENV_FILE")" ] && printf '\n' >> "$ENV_FILE"
+    printf 'HARVIS_COOKIE_SECURE=true\n' >> "$ENV_FILE"
+    return 0
+}
 
 # ── Bring it up ─────────────────────────────────────────────────────────────
 # `restart` is not enough: this adds a published port and two bind mounts, and
@@ -190,7 +222,7 @@ if [ "$K8S" = "1" ]; then
     # The running pod already sees the new files through its hostPath, and every
     # Deployment here uses Recreate: a config nginx rejects would take :9000 down too.
     if ! check="$(kc -n "$NS" exec deploy/nginx -- nginx -t 2>&1)"; then
-        rm -f "$ACTIVE"
+        rm -f "$ACTIVE" "$REDIRECT"
         say "nginx rejected the new configuration, or its pod is not running. Details:"
         say "$check"
         fail "HTTPS was not enabled; the listener file was removed so nginx keeps starting."
@@ -201,6 +233,17 @@ if [ "$K8S" = "1" ]; then
         || fail "the nginx pod did not become ready. See: sudo k3s kubectl -n $NS logs deploy/nginx"
     say ""
     say "HTTPS is on."
+    # The backend's environment lives in the Secret backend-env, which harvis-k8s.sh
+    # renders from .env on every `up`. Both are set: .env so a re-render keeps the
+    # flag, the live Secret and a backend restart so it takes effect now.
+    set_cookie_secure_env || true
+    say "Set HARVIS_COOKIE_SECURE=true in $ENV_FILE; restarting the backend to apply it..."
+    if ! kc -n "$NS" patch secret backend-env --type merge -p '{"stringData":{"HARVIS_COOKIE_SECURE":"true"}}' >/dev/null; then
+        fail "HTTPS is on, but the session cookie could not be made Secure (the backend-env Secret was not patched). Run ./harvis-start.sh again, or: sudo k3s kubectl -n $NS patch secret backend-env --type merge -p '{\"stringData\":{\"HARVIS_COOKIE_SECURE\":\"true\"}}' && sudo k3s kubectl -n $NS rollout restart deploy/backend"
+    fi
+    kc -n "$NS" rollout restart deploy/backend >/dev/null || fail "could not restart the backend pod, so the Secure cookie is not applied yet. Run: sudo k3s kubectl -n $NS rollout restart deploy/backend"
+    kc -n "$NS" rollout status deploy/backend --timeout=180s >/dev/null 2>&1 \
+        || fail "the backend pod did not become ready. See: sudo k3s kubectl -n $NS logs deploy/backend"
     # Kubernetes publishes the front door on every address (./install.sh --k8s sets it).
     PUBLIC_BIND=0.0.0.0
 elif command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
@@ -220,10 +263,18 @@ elif command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1
             say ""
             say "nginx rejected the new configuration. Details:"
             docker compose exec -T nginx nginx -t || true
-            fail "HTTPS was not enabled."
+            rm -f "$ACTIVE" "$REDIRECT"
+            fail "HTTPS was not enabled; the listener and redirect files were removed."
         fi
         say ""
         say "HTTPS is on."
+        # Only now, with https answering: a Secure cookie is never sent over plain
+        # http, so setting it before the listener works would lock sign-in out. The
+        # backend reads it at start, so it is recreated alone to pick it up.
+        if set_cookie_secure_env; then
+            say "Set HARVIS_COOKIE_SECURE=true in .env; restarting the backend to apply it..."
+            docker compose up -d --no-deps backend || say "Could not restart the backend; run: docker compose up -d backend"
+        fi
     else
         fail "docker compose up -d nginx failed. Fix the error above and run it again."
     fi
@@ -253,7 +304,7 @@ say "itself. Click Advanced, then Proceed."
 say ""
 if [ "$PUBLIC_BIND" = "0.0.0.0" ]; then
     say "After that the microphone works from other devices, which it cannot over"
-    say "plain http. Plain http on port 9000 keeps working. Nothing was taken away."
+    say "plain http. Port 9000 now sends people to https, and sign-ins are https-only."
 elif [ "$EXPOSURE" = "tunnel" ]; then
     say "Visitors from the internet already get HTTPS from Cloudflare; this certificate"
     say "only matters on this computer."

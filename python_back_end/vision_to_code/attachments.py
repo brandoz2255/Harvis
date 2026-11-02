@@ -335,7 +335,7 @@ async def resolve_attachment_bytes(
 
 
 # ── Staging attachments on disk (for engines that read files, not image parts) ──
-# The CLI engines (Claude Code, Kimi Code, Codex, OpenCode, Hermes) drive their own
+# The CLI engines (Claude Code, Kimi Code, Codex, Hermes) drive their own
 # tool loop inside a sidecar container. They cannot be handed a multimodal part and
 # they cannot reach the Harvis API — the sidecars mount /data/artifacts and nothing
 # else. So the bytes have to BE THERE, on the working tree, before the CLI starts.

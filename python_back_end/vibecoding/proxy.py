@@ -5,6 +5,7 @@ This proxy keeps code-server unexposed to the public network and enforces authZ.
 
 import logging
 from typing import Dict, Optional
+from urllib.parse import parse_qsl, urlencode
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, WebSocket
@@ -15,6 +16,7 @@ from fastapi.responses import StreamingResponse
 
 from auth_utils import get_current_user
 from .containers import get_container_manager
+from .terminal import authenticate_websocket
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +42,8 @@ async def _resolve_target_base_url(session_id: str, current_user: Dict) -> str:
     """Resolve target base URL for the session's code-server.
 
     Requires that the container was created with a published host port label
-    (vibecode_host_port). Verifies ownership via user_id label.
+    (vibecode_host_port). Verifies ownership via user_id label; a container with
+    no user_id label is refused, since code-server itself runs with --auth none.
     """
     container_manager = get_container_manager()
     container = await container_manager.get_container(session_id)
@@ -48,7 +51,7 @@ async def _resolve_target_base_url(session_id: str, current_user: Dict) -> str:
         raise HTTPException(status_code=404, detail="Container not found")
 
     user_id_label = container.labels.get("user_id")
-    if user_id_label and str(current_user["id"]) != user_id_label:
+    if not user_id_label or str(current_user["id"]) != user_id_label:
         raise HTTPException(status_code=403, detail="Unauthorized")
 
     host_port = container.labels.get("vibecode_host_port")
@@ -112,19 +115,29 @@ async def proxy_websocket(
     session_id: str,
     path: str,
 ):
-    """WebSocket proxy for code-server. Authentication is expected via query token or cookie
-    on the page embedding the IDE; enforce it by requiring a valid session cookie on the iframe
-    page that serves this websocket URL. If needed, this can be extended to validate JWT here.
+    """WebSocket proxy for code-server. The caller must present the same JWT the terminal
+    websocket takes (``token`` query parameter, or the ``token`` cookie) and own the
+    session's container; code-server runs with --auth none, so this is the only gate.
     """
-    await websocket.accept()
     try:
-        # Resolve target without user context; rely on page/session auth. For stricter control,
-        # add token validation and lookup user.
+        user = await authenticate_websocket(
+            token=websocket.query_params.get("token"), cookies=dict(websocket.cookies)
+        )
+    except HTTPException:
+        await websocket.close(code=1008)
+        return
+
+    try:
         container_manager = get_container_manager()
         container = await container_manager.get_container(session_id)
         if not container:
             await websocket.close(code=4404)
             return
+        user_id_label = container.labels.get("user_id")
+        if not user_id_label or str(user["id"]) != user_id_label:
+            await websocket.close(code=1008)
+            return
+        await websocket.accept()
         host_port = container.labels.get("vibecode_host_port")
         internal_port = container.labels.get("vibecode_internal_port", "8080")
         if host_port:
@@ -140,8 +153,11 @@ async def proxy_websocket(
                 await websocket.close(code=1011)
                 return
 
-        # Preserve original query string if present
-        query = websocket.scope.get("query_string", b"").decode()
+        # Preserve the original query string, minus our own JWT: code-server must not see it.
+        query = urlencode(
+            [(k, v) for k, v in parse_qsl(websocket.scope.get("query_string", b"").decode(),
+                                          keep_blank_values=True) if k != "token"]
+        )
         target_url = f"{base_ws}/{path}" + (f"?{query}" if query else "")
 
         async with websockets.connect(target_url, ping_interval=None) as target_ws:

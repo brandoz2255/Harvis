@@ -7,7 +7,6 @@ extracted from main.py to keep the vibe coding logic organized.
 import os
 import uuid
 import tempfile
-import soundfile as sf
 import shlex
 import subprocess
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, UploadFile, File
@@ -15,6 +14,8 @@ from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import logging
 
+import private_audio
+import voice_paths
 from auth_utils import get_current_user
 from .core import execute_vibe_coding_with_model_management
 from model_manager import generate_speech_optimized, reload_models_if_needed
@@ -70,7 +71,7 @@ async def websocket_vibe_endpoint(websocket: WebSocket):
     await websocket.close(code=1008, reason="disabled")
 
 @router.post("/api/vibe-coding", tags=["vibe-coding"])
-async def vibe_coding(req: VibeCodingRequest, _user: Dict = Depends(get_current_user)):
+async def vibe_coding(req: VibeCodingRequest, current_user: Dict = Depends(get_current_user)):
     """
     Voice-enabled vibe coding with intelligent model management.
     Unloads models → Executes vibe agent → Generates TTS response → Reloads models.
@@ -87,7 +88,7 @@ async def vibe_coding(req: VibeCodingRequest, _user: Dict = Depends(get_current_
         )
         
         # Generate TTS response
-        audio_prompt_path = req.audio_prompt or HARVIS_VOICE_PATH
+        audio_prompt_path = voice_paths.resolve_voice_prompt(req.audio_prompt) or HARVIS_VOICE_PATH
         if not os.path.isfile(audio_prompt_path):
             audio_prompt_path = None
         
@@ -104,16 +105,15 @@ async def vibe_coding(req: VibeCodingRequest, _user: Dict = Depends(get_current_
             cfg_weight=req.cfg_weight,
         )
         
-        # Save audio file
+        # Save into the caller's private namespace, the only place /api/audio serves from
         filename = f"vibe_coding_{uuid.uuid4()}.wav"
-        filepath = os.path.join(tempfile.gettempdir(), filename)
-        sf.write(filepath, wav, sr)
+        audio_path = private_audio.write_private_wav(current_user["id"], filename, wav, sr)
         
         logger.info("✅ Vibe coding complete - all models restored")
         return {
             "response": vibe_response,
             "steps": steps,
-            "audio_path": f"/api/audio/{filename}",
+            "audio_path": audio_path,
             "model_used": req.model,
             "processing_stages": {
                 "vibe_agent": "✅ Completed",
@@ -127,6 +127,9 @@ async def vibe_coding(req: VibeCodingRequest, _user: Dict = Depends(get_current_
         reload_models_if_needed()
         raise HTTPException(500, str(e)) from e
 
+_MAX_VOICE_UPLOAD = 50 * 1024 * 1024
+
+
 @router.post("/api/voice-transcribe", tags=["vibe-coding"])
 async def voice_transcribe(file: UploadFile = File(...), model: str = DEFAULT_MODEL,
                            _user: Dict = Depends(get_current_user)):
@@ -134,22 +137,24 @@ async def voice_transcribe(file: UploadFile = File(...), model: str = DEFAULT_MO
     Transcribe voice input for vibe coding with model management.
     """
     try:
-        # Save uploaded file to temp
-        contents = await file.read()
-        tmp_path = os.path.join(tempfile.gettempdir(), f"vibe_{uuid.uuid4()}.wav")
-        with open(tmp_path, "wb") as f:
-            f.write(contents)
-        
-        # Whichever provider HARVIS_STT_PROVIDER selects; `local` is the
-        # VRAM-optimized in-process Whisper this used to call directly.
-        result = transcribe_audio(tmp_path)
-        transcription = (result or {}).get("text", "").strip()
+        contents = await file.read(_MAX_VOICE_UPLOAD + 1)
+        if len(contents) > _MAX_VOICE_UPLOAD:
+            raise HTTPException(413, "Audio upload is too large")
+        # A private 0700 folder, not a file in the shared temp root; removed on every exit path.
+        with tempfile.TemporaryDirectory(prefix="harvis-voice-") as tmp_dir:
+            tmp_path = os.path.join(tmp_dir, "upload.wav")
+            with open(tmp_path, "wb") as f:
+                f.write(contents)
 
-        # Clean up temp file
-        os.remove(tmp_path)
+            # Whichever provider HARVIS_STT_PROVIDER selects; `local` is the
+            # VRAM-optimized in-process Whisper this used to call directly.
+            result = transcribe_audio(tmp_path)
+        transcription = (result or {}).get("text", "").strip()
 
         logger.info(f"🎤 Voice transcribed for vibe coding: {transcription}")
         return {"transcription": transcription, "model_used": "whisper-base"}
+    except HTTPException:
+        raise
     except TranscriptionUnavailable as e:
         logger.warning("🎤 Voice transcription unavailable: %s", e)
         raise HTTPException(503, str(e)) from e

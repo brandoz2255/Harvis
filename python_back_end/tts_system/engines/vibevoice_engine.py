@@ -19,6 +19,8 @@ import numpy as np
 import soundfile as sf
 import librosa
 
+from ..security import safe_child
+
 logger = logging.getLogger(__name__)
 
 # torchaudio is optional - use librosa/soundfile as fallback
@@ -518,7 +520,10 @@ class VibeVoiceEngine:
     
     async def get_voice(self, voice_id: str) -> Optional[Dict[str, Any]]:
         """Get a specific voice by ID"""
-        voice_dir = VOICES_DIR / voice_id
+        try:
+            voice_dir = safe_child(VOICES_DIR, voice_id)
+        except ValueError:
+            return None
         metadata_path = voice_dir / "metadata.json"
         
         if metadata_path.exists():
@@ -539,7 +544,10 @@ class VibeVoiceEngine:
     
     async def delete_voice(self, voice_id: str) -> bool:
         """Delete a user voice"""
-        voice_dir = VOICES_DIR / voice_id
+        try:
+            voice_dir = safe_child(VOICES_DIR, voice_id)
+        except ValueError:
+            return False
         
         if not voice_dir.exists():
             return False
@@ -600,7 +608,11 @@ class VibeVoiceEngine:
                 reference_path = None
             else:
                 # Load voice reference (only required for voice-cloning engines)
-                voice_dir = VOICES_DIR / voice_id
+                try:
+                    voice_dir = safe_child(VOICES_DIR, voice_id)
+                except ValueError:
+                    logger.error("Rejected voice id")
+                    return None, None
                 reference_path = voice_dir / "reference.wav"
 
             # Only require reference for voice-cloning engines
@@ -631,7 +643,7 @@ class VibeVoiceEngine:
                 if voice_dir is not None:
                     emb_path = voice_dir / "embedding.pt"
                     if emb_path.exists():
-                        speaker_embedding = torch.load(emb_path, map_location=self.device)
+                        speaker_embedding = torch.load(emb_path, map_location=self.device, weights_only=True)
                     elif reference_path is not None and reference_path.exists():
                         ref_wave, ref_sr = self._load_audio(str(reference_path))
                         if ref_sr != self.sample_rate:
@@ -827,7 +839,10 @@ class VibeVoiceEngine:
                         voice_id = "__default__"
 
                 if voice_id != "__default__":
-                    voice_dir = VOICES_DIR / voice_id
+                    try:
+                        voice_dir = safe_child(VOICES_DIR, voice_id)
+                    except ValueError:
+                        continue
                     if not voice_dir.exists():
                         if needs_voice_ref:
                             logger.warning(f"Voice not found for speaker {speaker}: {voice_id}")

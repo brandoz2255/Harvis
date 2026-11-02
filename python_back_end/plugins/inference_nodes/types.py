@@ -65,12 +65,16 @@ class NodeSpec:
             h["Authorization"] = f"Bearer {self.token}"
         return h
 
-    def public(self) -> dict:
-        """What the API and the picker may see. The token is a boolean here, on purpose."""
+    def public(self, *, include_url: bool = True) -> dict:
+        """What the API and the picker may see. The token is a boolean here, on purpose.
+
+        ``include_url=False`` nulls ``base_url`` (an internal LAN address) for callers
+        who are not admins; the key stays so the response shape does not change.
+        """
         return {
             "name": self.name,
             "label": self.label,
-            "base_url": self.base_url,
+            "base_url": self.base_url if include_url else None,
             "dialect": self.dialect,
             "hardware": self.hardware,
             "source": self.source,
@@ -104,8 +108,8 @@ class NodeState:
     def has(self, model: str) -> bool:
         return bool(model) and model in self.models
 
-    def public(self) -> dict:
-        out = self.spec.public()
+    def public(self, *, include_url: bool = True) -> dict:
+        out = self.spec.public(include_url=include_url)
         out.update(
             reachable=self.reachable,
             error=self.error,

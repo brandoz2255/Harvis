@@ -28,8 +28,7 @@ ENGINES = (
     ("claude-code", "Claude Code", "Anthropic's coding agent. API key or Claude subscription token.", "claude-code"),
     ("kimi-code", "Kimi Code", "Kimi coding membership, run through the Claude Code sidecar.", "kimi-code"),
     ("codex", "Codex", "OpenAI's coding agent. Needs an OpenAI API key.", "codex"),
-    ("opencode", "OpenCode", "Open-source coding agent on your local models. No key needed.", None),
-    ("hermes-agent", "Hermes Agent", "Nous Research's agent on your local Ollama. No key needed.", None),
+    ("hermes-agent", "Hermes Agent", "Recommended. Nous Research's agent on your local Ollama. No key needed.", None),
 )
 
 
@@ -87,10 +86,15 @@ async def free_providers(request: Request, user=Depends(get_current_user_optimiz
 
     pool, uid = request.app.state.pg_pool, _uid(user)
     saved, active_id = await providers.list_endpoints(pool, uid) if pool is not None else ([], None)
+    # A server the host runs itself (OmniRoute) has an internal address and dashboard that
+    # other people on a shared host should not see; the hosted vendors' URLs are public.
+    hide_own = providers.url_guarded(uid)
     rows = []
     for p in FREE_PROVIDERS:
-        row = {"id": p.engine, "label": p.name, "console_url": p.console_url,
-               "note": p.free_note, "base_url": p.base_url, "key_optional": p.key_optional,
+        own = p.key_optional and hide_own
+        row = {"id": p.engine, "label": p.name, "console_url": None if own else p.console_url,
+               "note": p.free_note, "base_url": None if own else p.base_url,
+               "key_optional": p.key_optional,
                "auth": await _auth_status(pool, uid, p.engine), "endpoint": None, "endpoint_id": None}
         if p.key_optional:
             # A server the user runs (OmniRoute) lives wherever they put it, so it is kept as

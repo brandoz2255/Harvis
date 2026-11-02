@@ -40,6 +40,8 @@ import { isMessagingSource } from '@/lib/session-source'
 import { latestSessionTodos } from '@/lib/todos'
 import { activateWakeIndicator } from '@/lib/wake-indicator'
 import { playWakeSound } from '@/lib/wake-sound'
+import { ModSlot } from '@/mods/mod-slot'
+import { ModsRuntime } from '@/mods/mods-runtime'
 import { $billingSettingsRequest } from '@/store/billing-block'
 import { $desktopBoot } from '@/store/boot'
 import { requestVoiceConversationStart } from '@/store/composer'
@@ -1247,6 +1249,11 @@ export function ContribWiring({ children }: { children: ReactNode }) {
       {/* Petdex floating mascot — renders nothing unless installed + enabled.
           Never in the HUD: that window is the chat bar and nothing else. */}
       {!isHudWindow() && !isBrowserWindow() && <FloatingPet />}
+
+      {/* Per-user mods: list, looks, bar + side-panel slots. The pet and island slots float. */}
+      {!isHudWindow() && !isBrowserWindow() && <ModsRuntime />}
+      {!isHudWindow() && !isBrowserWindow() && <ModSlot slot="pet" />}
+      {!isHudWindow() && !isBrowserWindow() && <ModSlot slot="island" />}
 
       {/* The Harvis pill at the bottom of every non-chat page: move around by
           saying where to go, or ask Harvis without leaving the page. */}

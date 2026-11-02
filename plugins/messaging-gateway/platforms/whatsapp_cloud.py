@@ -8,7 +8,9 @@
 # platform needs a public HTTPS URL.
 #
 # Preserved behaviours:
-#   - X-Hub-Signature-256 verification against the app secret
+#   - X-Hub-Signature-256 verification against the app secret (required for
+#     settings-sourced adapters: the webhook route is public and an unsigned
+#     body that names a phone number id is otherwise accepted from anyone)
 #   - routing by metadata.phone_number_id so several numbers can coexist
 #   - replies quote the inbound message via ``context.message_id``
 #   - 4096-char message splitting
@@ -92,6 +94,11 @@ class WhatsAppCloudAdapter(BasePlatformAdapter):
         self._client: Optional[httpx.AsyncClient] = None
         self._seen: list[str] = []
 
+    @property
+    def _signature_required(self) -> bool:
+        # Only the host's own env-configured adapter may run unsigned (installs that predate the app secret).
+        return self.spec.source != "env"
+
     def allowed_senders(self) -> frozenset[str]:
         # Meta sends wa_id as bare digits; people type "+1 555-123 4567".
         return frozenset(_digits(n) for n in super().allowed_senders() if _digits(n))
@@ -101,8 +108,11 @@ class WhatsAppCloudAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
-        missing = [k for k, v in (("WHATSAPP_ACCESS_TOKEN", self._token), ("WHATSAPP_PHONE_NUMBER_ID", self._phone_id),
-                                  ("WHATSAPP_VERIFY_TOKEN", self._verify_token)) if not v]
+        required = [("WHATSAPP_ACCESS_TOKEN", self._token), ("WHATSAPP_PHONE_NUMBER_ID", self._phone_id),
+                    ("WHATSAPP_VERIFY_TOKEN", self._verify_token)]
+        if self._signature_required:
+            required.append(("WHATSAPP_APP_SECRET", self._app_secret))
+        missing = [k for k, v in required if not v]
         if missing:
             self._mark_error(f"missing {', '.join(missing)}.")
             return
@@ -149,7 +159,27 @@ class WhatsAppCloudAdapter(BasePlatformAdapter):
             return None
         return str(query.get("hub.challenge") or "")
 
+    def addressed_by_webhook(self, raw: bytes) -> bool:
+        """Whether a webhook body names this adapter's phone number id.
+
+        The control port uses it to pick the one adapter an event belongs to
+        before any adapter acts on it. Only a connected adapter, which proved
+        its token against Meta, can claim an id.
+        """
+        if not self._connected or not self._phone_id:
+            return False
+        try:
+            payload = json.loads(raw.decode("utf-8") or "{}")
+        except ValueError:
+            return False
+        return parse_events(payload, self._phone_id)[0] if isinstance(payload, dict) else False
+
     async def handle_webhook(self, raw: bytes, headers: dict, query: dict) -> bool:
+        if not self._connected:
+            return False
+        if self._signature_required and not self._app_secret:
+            logger.warning("[whatsapp_cloud] no WHATSAPP_APP_SECRET; dropping unsigned webhook")
+            return False
         if self._app_secret and not verify_signature(raw, headers.get("x-hub-signature-256", ""), self._app_secret):
             logger.warning("[whatsapp_cloud] webhook signature mismatch; dropping")
             return False

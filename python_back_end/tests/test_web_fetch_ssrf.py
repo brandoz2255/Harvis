@@ -10,7 +10,7 @@ from fastapi import HTTPException
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from tools import openclaw_proxy as proxy  # noqa: E402
+from tools import url_safety as proxy  # noqa: E402
 
 
 @pytest.mark.parametrize("ip", ["10.0.0.5", "172.17.0.1", "192.168.4.1", "127.0.0.1", "169.254.169.254",

@@ -14,12 +14,9 @@ export interface HermesApiRequest {
   timeoutMs?: number
 }
 
-// Hermes' own call sites already spell their paths as `/api/config`,
-// `/api/cron/jobs`, … (grep `path: '/` under src/api/). So the base is EMPTY and
-// the path is used verbatim — prefixing '/api' here would produce `/api/api/…`.
-// The knob exists so a later phase can swing every call onto a `/hermes-api/`
-// compat facade without touching the vendored tree.
-const API_BASE: string = (import.meta as any).env?.VITE_HERMES_API_BASE ?? ''
+// Desktop paths already start with /api; Harvis mounts the facade at /hermes-api.
+// Keep the override for environments that explicitly provide a different base.
+const API_BASE: string = (import.meta as any).env?.VITE_HERMES_API_BASE ?? '/hermes-api'
 
 const DEFAULT_TIMEOUT_MS = 60_000
 

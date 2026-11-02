@@ -6,11 +6,17 @@ records are returned directly to the browser settings page.
 """
 from __future__ import annotations
 
+import asyncio
+import ipaddress
 import json
 import re
+import socket
 import uuid
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
+
+import httpcore
+import httpx
 
 SETTINGS_KEY = "hermes_ui"
 ENDPOINTS_KEY = "custom_endpoints"
@@ -44,13 +50,164 @@ def _endpoint_id(value: Any, name: str) -> str:
     return candidate
 
 
-def _base_url(value: Any) -> str:
+def plain_http_url(value: Any) -> str:
     url = _text(value, "Endpoint URL", 512).rstrip("/")
     parsed = urlparse(url)
     if (parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password
             or parsed.query or parsed.fragment):
         raise EndpointValidationError("Endpoint URL must be a plain http(s) URL")
     return url
+
+
+def url_guarded(user_id: int) -> bool:
+    """True when this user's endpoint URLs must pass the SSRF guard: anyone but
+    an admin on a shared host. A laptop owner pointing at their own LAN box is
+    normal, so a local install and admins keep private targets."""
+    from owui_compat.authz import is_admin  # lazy: authz pulls in the OWUI translate layer
+    from plugins.exposure import shared
+
+    return shared() and not is_admin({"id": user_id})
+
+
+_REFUSED = "Endpoint URL not allowed on a shared server: it points at this server or its private network"
+
+
+async def refuse_private_url(base_url: str) -> None:
+    """Raise unless ``base_url`` is a public address. Anything that is not global
+    (loopback, LAN, docker, Tailscale 100.64/10, link-local), a local-looking name,
+    or a name that does not resolve is refused. This does not honour
+    HARVIS_MCP_ALLOW_PRIVATE_URLS: that flag is for the operator's own connectors."""
+    from plugins.people.controls import is_server_endpoint
+
+    if await is_server_endpoint(base_url):
+        raise EndpointValidationError(_REFUSED)
+
+
+def _require_global(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> None:
+    if not ip.is_global:
+        raise EndpointValidationError(_REFUSED)
+
+
+def _vetted_addresses(infos, vet: Callable[[Any], None]) -> list[str]:
+    """The distinct addresses of a lookup, after ``vet`` has accepted every one."""
+    vetted: list[str] = []
+    for info in infos:
+        text = info[4][0].split("%", 1)[0]
+        try:
+            ip = ipaddress.ip_address(text)
+        except ValueError:
+            raise EndpointValidationError(_REFUSED) from None
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+            ip = ip.ipv4_mapped
+        vet(ip)
+        if text not in vetted:
+            vetted.append(text)
+    if not vetted:
+        raise EndpointValidationError(_REFUSED)
+    return vetted
+
+
+class _GuardedBackend(httpcore.AsyncNetworkBackend):
+    """Resolves the name itself and dials only an address it has vetted.
+
+    ``refuse_private_url`` resolves once and httpx resolves again to connect, so a
+    name that answers public and then private would deliver the request to an
+    internal host. Here the vetted address is the one dialled. httpcore still passes
+    the origin host to ``start_tls``, so certificates are checked against the name."""
+
+    def __init__(self, inner: httpcore.AsyncNetworkBackend, vet: Callable[[Any], None] = _require_global) -> None:
+        self._inner = inner
+        self._vet = vet  # raises to refuse an address; sees IPv4-mapped IPv6 already unwrapped
+
+    async def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+        try:
+            infos = await asyncio.wait_for(
+                asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM), timeout)
+        except TimeoutError as exc:
+            raise httpcore.ConnectTimeout(str(exc)) from exc
+        except OSError as exc:
+            raise httpcore.ConnectError(str(exc)) from exc
+        failure: Exception | None = None
+        for text in _vetted_addresses(infos, self._vet):
+            try:
+                return await self._inner.connect_tcp(
+                    text, port, timeout=timeout, local_address=local_address, socket_options=socket_options)
+            except (httpcore.ConnectError, httpcore.ConnectTimeout) as exc:
+                failure = exc
+        raise failure  # type: ignore[misc]  # vetted is non-empty, so a failure was recorded
+
+    async def connect_unix_socket(self, path, timeout=None, socket_options=None):
+        raise EndpointValidationError(_REFUSED)
+
+    async def sleep(self, seconds: float) -> None:
+        await self._inner.sleep(seconds)
+
+
+class _GuardedSyncBackend(httpcore.NetworkBackend):
+    """``_GuardedBackend`` for blocking callers (the research fetchers run in threads)."""
+
+    def __init__(self, inner: httpcore.NetworkBackend, vet: Callable[[Any], None] = _require_global) -> None:
+        self._inner = inner
+        self._vet = vet
+
+    def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+        try:
+            infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        except OSError as exc:
+            raise httpcore.ConnectError(str(exc)) from exc
+        failure: Exception | None = None
+        for text in _vetted_addresses(infos, self._vet):
+            try:
+                return self._inner.connect_tcp(
+                    text, port, timeout=timeout, local_address=local_address, socket_options=socket_options)
+            except (httpcore.ConnectError, httpcore.ConnectTimeout) as exc:
+                failure = exc
+        raise failure  # type: ignore[misc]
+
+    def connect_unix_socket(self, path, timeout=None, socket_options=None):
+        raise EndpointValidationError(_REFUSED)
+
+    def sleep(self, seconds: float) -> None:
+        self._inner.sleep(seconds)
+
+
+def guarded_transport(network_backend: httpcore.AsyncNetworkBackend | None = None,
+                      vet: Callable[[Any], None] = _require_global) -> httpx.AsyncHTTPTransport:
+    """An httpx transport that refuses to connect to anything but public addresses
+    (or whatever ``vet`` allows: the MCP client lets a self-hoster reach their LAN).
+    httpx 0.28 takes no network backend, so it is set on the transport's pool; if a
+    dependency bump moves that attribute this raises instead of leaving it unguarded."""
+    transport = httpx.AsyncHTTPTransport()
+    pool = getattr(transport, "_pool", None)
+    inner = network_backend or getattr(pool, "_network_backend", None)
+    if inner is None or not hasattr(pool, "_network_backend"):
+        raise RuntimeError("httpx/httpcore changed: cannot install the connect-time SSRF guard")
+    pool._network_backend = _GuardedBackend(inner, vet)
+    return transport
+
+
+def guarded_client(**kwargs: Any) -> httpx.AsyncClient:
+    """A client for a user-supplied URL on a shared host. No environment proxies
+    (they would take the request past the guard) and no redirects (a 3xx could point
+    at an internal host the caller never vetted)."""
+    return httpx.AsyncClient(transport=guarded_transport(), trust_env=False, follow_redirects=False, **kwargs)
+
+
+def guarded_sync_client(network_backend: httpcore.NetworkBackend | None = None,
+                        vet: Callable[[Any], None] = _require_global, **kwargs: Any) -> httpx.Client:
+    """The blocking twin of ``guarded_client``: same connect-time vetting, no proxies, no redirects."""
+    transport = httpx.HTTPTransport()
+    pool = getattr(transport, "_pool", None)
+    inner = network_backend or getattr(pool, "_network_backend", None)
+    if inner is None or not hasattr(pool, "_network_backend"):
+        raise RuntimeError("httpx/httpcore changed: cannot install the connect-time SSRF guard")
+    pool._network_backend = _GuardedSyncBackend(inner, vet)
+    return httpx.Client(transport=transport, trust_env=False, follow_redirects=False, **kwargs)
+
+
+async def check_base_url(base_url: str, user_id: int) -> None:
+    if url_guarded(user_id):
+        await refuse_private_url(base_url)
 
 
 def _models(value: Any) -> list[str]:
@@ -97,7 +254,7 @@ def normalize_endpoint(payload: dict[str, Any], *, require_model: bool = True) -
     return {
         "id": _endpoint_id(payload.get("id"), name),
         "name": name,
-        "base_url": _base_url(payload.get("base_url")),
+        "base_url": plain_http_url(payload.get("base_url")),
         "model": model,
         "models": _models(payload.get("models")),
         "discover_models": bool(payload.get("discover_models", True)),
@@ -181,6 +338,7 @@ async def custom_endpoints_payload(pool, user_id: int, fallback: dict[str, str])
 
 async def save_endpoint(pool, user_id: int, payload: dict[str, Any]) -> dict[str, Any]:
     endpoint = normalize_endpoint(payload)
+    await check_base_url(endpoint["base_url"], user_id)
     section = await _read_section(pool, user_id)
     endpoints = _endpoint_list(section)
     existing = next((row for row in endpoints if row.get("id") == endpoint["id"]), None)
@@ -232,7 +390,7 @@ async def delete_endpoint(pool, user_id: int, endpoint_id: str) -> None:
     await _write_section(pool, user_id, section)
 
 
-async def resolve_endpoint(pool, user_id: int, endpoint_id: str) -> dict[str, str] | None:
+async def resolve_endpoint(pool, user_id: int, endpoint_id: str) -> dict[str, Any] | None:
     endpoints, _ = await list_endpoints(pool, user_id)
     endpoint = next((row for row in endpoints if row.get("id") == endpoint_id), None)
     if not endpoint:
@@ -243,9 +401,10 @@ async def resolve_endpoint(pool, user_id: int, endpoint_id: str) -> dict[str, st
         "base_url": str(endpoint.get("base_url") or ""),
         "model": str(endpoint.get("model") or ""),
         "api_key": _decrypt(encrypted) if isinstance(encrypted, str) and encrypted else "",
+        "guarded": url_guarded(user_id),
     }
 
 
-async def resolve_active_endpoint(pool, user_id: int) -> dict[str, str] | None:
+async def resolve_active_endpoint(pool, user_id: int) -> dict[str, Any] | None:
     _, active_id = await list_endpoints(pool, user_id)
     return await resolve_endpoint(pool, user_id, active_id) if active_id else None

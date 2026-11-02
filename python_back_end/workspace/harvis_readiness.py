@@ -126,10 +126,13 @@ async def provider_catalog(request: Request, user=Depends(get_current_user_optim
     try:
         from .openclaw_resolver import resolve_openclaw_config
         cfg = await resolve_openclaw_config(pool, uid)
-        providers.append({
-            "kind": "agent_runtime", "id": "openclaw", "mode": cfg.mode, "ready": True,
-            "capabilities": sorted(cfg.allowed_capabilities),
-        })
+        if cfg is None:
+            providers.append({"kind": "agent_runtime", "id": "openclaw", "ready": False, "reason": "not linked (optional)"})
+        else:
+            providers.append({
+                "kind": "agent_runtime", "id": "openclaw", "mode": cfg.mode, "ready": True,
+                "capabilities": sorted(cfg.allowed_capabilities),
+            })
     except Exception as exc:  # noqa: BLE001
         providers.append({"kind": "agent_runtime", "id": "openclaw", "ready": False, "reason": str(exc)})
 

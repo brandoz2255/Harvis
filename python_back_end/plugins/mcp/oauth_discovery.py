@@ -47,8 +47,11 @@ class OAuthError(McpError):
         self.code = code
 
 
-def _client() -> httpx.AsyncClient:
-    """The one place an HTTP client is made — tests swap this for a mock transport."""
+def _client(strict: bool = False) -> httpx.AsyncClient:
+    """The one place an HTTP client is made — tests swap this for a mock transport.
+    ``strict``: a non-admin on a shared host, for whom the operator's private-URL flag is off."""
+    if strict:
+        return guarded_client(strict=True, timeout=HTTP_TIMEOUT)
     return guarded_client(timeout=HTTP_TIMEOUT)
 
 
@@ -129,7 +132,8 @@ def _authorization_server_candidates(issuer: str) -> list[str]:
             f"{origin}{path}/.well-known/openid-configuration"]
 
 
-async def discover(resource_url: str, *, www_authenticate: Optional[str] = None) -> dict:
+async def discover(resource_url: str, *, www_authenticate: Optional[str] = None,
+                   strict: bool = False) -> dict:
     """Metadata for the server behind ``resource_url``.
 
     Returns the authorization server's metadata plus ``resource`` (the audience
@@ -138,7 +142,7 @@ async def discover(resource_url: str, *, www_authenticate: Optional[str] = None)
     parts = urlsplit(resource_url)
     origin, path = origin_of(resource_url), parts.path.rstrip("/")
 
-    async with _client() as client:
+    async with (_client(strict=True) if strict else _client()) as client:
         challenge = parse_www_authenticate(www_authenticate) if www_authenticate \
             else await probe_challenge(client, resource_url)
 
@@ -187,7 +191,7 @@ async def discover(resource_url: str, *, www_authenticate: Optional[str] = None)
     return meta
 
 
-async def register_client(meta: dict, redirect_uri: str) -> dict:
+async def register_client(meta: dict, redirect_uri: str, *, strict: bool = False) -> dict:
     """RFC 7591 dynamic registration as a public client (PKCE, no secret)."""
     endpoint = meta.get("registration_endpoint")
     if not endpoint:
@@ -202,7 +206,7 @@ async def register_client(meta: dict, redirect_uri: str) -> dict:
     }
     if meta.get("scopes"):
         body["scope"] = meta["scopes"]
-    async with _client() as client:
+    async with (_client(strict=True) if strict else _client()) as client:
         try:
             resp = await client.post(endpoint, json=body)
         except httpx.HTTPError as exc:

@@ -144,7 +144,7 @@ def main() -> int:
     ap.add_argument("--target", choices=["ollama", "proxy"], default="ollama")
     ap.add_argument("--ollama-url", default=os.getenv("HARNESS_OLLAMA_URL", "http://your-ollama-host:11434"))
     ap.add_argument("--proxy-url", default=os.getenv("HARNESS_PROXY_URL", "http://localhost:8000"))
-    ap.add_argument("--token", default=os.getenv("OPENCLAW_GATEWAY_TOKEN"))
+    ap.add_argument("--token", default=os.getenv("HARVIS_GATEWAY_TOKEN") or os.getenv("OPENCLAW_GATEWAY_TOKEN"))
     ap.add_argument("--runs", type=int, default=10)
     ap.add_argument("--num-ctx", type=int, default=24576)
     ap.add_argument("--think", action="store_true", help="Enable thinking (default off)")

@@ -148,7 +148,7 @@ async def dispatch_mcp_tool(
             from .media_capture import mirror_media_urls
 
             text, _saved = await mirror_media_urls(
-                text, pool=pool, workspace_id=workspace_id,
+                text, pool=pool, workspace_id=workspace_id, user_id=user_id,
             )
         except Exception:
             logger.exception("mcp: media mirroring failed for %s", wire_tool_name)

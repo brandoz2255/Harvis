@@ -16,7 +16,7 @@ Endpoints (registered in owui_compat/router.py):
 `{engine}` ∈ AUTH_ENGINES = {codex, claude-code} + the free-tier providers registered in
 `free_providers.py` (groq, cerebras, gemini, nvidia, openrouter, mistral). `codex` covers the Codex GPT
 engine; `claude-code` covers Claude Code; the free-tier ids are chat-only OpenAI-compatible
-vendors. (OpenCode is local + needs no key, so it has no auth row.)
+vendors.
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ def _drop_free_model_cache(engine: str) -> None:
     if prov:
         invalidate_model_cache(prov.id)
 
-# Auth-bearing engines (NOT opencode — it's local, no key). Maps the auth-row engine id
+# Auth-bearing engines. Maps the auth-row engine id
 # to the vendor verify contract.
 # The free-tier OpenAI-compatible providers (Groq, Cerebras, Gemini, NVIDIA, OpenRouter, Mistral)
 # register themselves from FREE_PROVIDERS so adding one stays a single table row.

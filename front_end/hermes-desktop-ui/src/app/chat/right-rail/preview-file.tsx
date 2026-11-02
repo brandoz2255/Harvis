@@ -17,6 +17,7 @@ import { RichCodeBlock } from '@/components/assistant-ui/embeds'
 import { CodeEditor } from '@/components/chat/code-editor'
 import { FileDiffPanel } from '@/components/chat/diff-lines'
 import { chunkTextLines, useFixedRowWindow } from '@/components/chat/fixed-row-window'
+import { RemoteImageGate } from '@/components/chat/remote-image-gate'
 import { LazyShiki as ShikiHighlighter } from '@/components/chat/shiki-highlighter'
 import { PageLoader } from '@/components/page-loader'
 import { Tip } from '@/components/ui/tooltip'
@@ -382,12 +383,14 @@ function MarkdownTable({ className, ...rest }: ComponentProps<'table'>) {
 
 function MarkdownImage({ alt, src, ...rest }: ComponentProps<'img'>) {
   return (
-    <img
-      alt={alt ?? ''}
-      className="my-3 max-h-96 w-auto max-w-full rounded-lg border border-border object-contain shadow-sm"
-      src={src}
-      {...rest}
-    />
+    <RemoteImageGate src={typeof src === 'string' ? src : ''}>
+      <img
+        alt={alt ?? ''}
+        className="my-3 max-h-96 w-auto max-w-full rounded-lg border border-border object-contain shadow-sm"
+        src={src}
+        {...rest}
+      />
+    </RemoteImageGate>
   )
 }
 

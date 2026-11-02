@@ -5,7 +5,7 @@ OpenClaw agents call this to search the Harvis vector database without
 needing direct database access.
 
 Security model:
-  - Verifies OPENCLAW_GATEWAY_TOKEN on every request (only OpenClaw can call this).
+  - Verifies HARVIS_GATEWAY_TOKEN on every request (only OpenClaw can call this).
   - Read-only: no writes to the vector database.
   - Returns text chunks and metadata; no raw embeddings exposed.
 
@@ -31,7 +31,6 @@ from .gateway_auth import resolve_gateway_caller
 
 logger = logging.getLogger(__name__)
 
-OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
 EMBED_NOMIC_URL = os.getenv("EMBED_NOMIC_URL", OLLAMA_URL)   # port 8081, nomic-embed-text (llama.cpp)
 EMBED_QW3_URL = os.getenv("EMBED_QW3_URL", OLLAMA_URL)        # port 8082, Qwen3-Embedding-4B (llama.cpp)

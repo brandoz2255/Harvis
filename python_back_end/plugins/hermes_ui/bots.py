@@ -305,6 +305,7 @@ async def _retrieve(pool, user_id: int, notebook_ids: list[str], query: str, top
     if not notebook_ids or not query.strip():
         return []
     from uuid import UUID
+    from notebooks.access import NEEDS, resolve_access
     from notebooks.ingestion import IngestionService
     from notebooks.manager import NotebookManager, NotebookNotFoundError
     manager = NotebookManager(pool)
@@ -314,7 +315,12 @@ async def _retrieve(pool, user_id: int, notebook_ids: list[str], query: str, top
     found: list[dict] = []
     for nid in notebook_ids:
         try:
-            nb = await manager.get_notebook(UUID(nid), user_id)
+            # A bot answers by chatting over the notebook, so it needs a role that may chat; the
+            # check runs on every turn, so a revoked share stops feeding the bot at once.
+            access = await resolve_access(manager, UUID(nid), user_id)
+            if access is None or access.role not in NEEDS["chat"]:
+                continue
+            nb = await manager.get_notebook(UUID(nid), access.owner_id)
             hits = await manager.search_chunks(nb.id, embedding, top_k)
         except NotebookNotFoundError:
             continue

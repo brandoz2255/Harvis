@@ -17,18 +17,21 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
 import asyncio, uvicorn, os, sys, tempfile, uuid, base64, io, logging, re, requests, random, json, httpx
 import hmac
+import voice_paths
 from PIL import Image
 
-# Import optimized auth module
-from auth_optimized import get_current_user_optimized, auth_optimizer, get_auth_stats
-
-# Load environment variables from .env file
+# Load environment variables before importing modules that read configuration.
+# In particular, auth_optimized requires JWT_SECRET at import time.
 try:
     from dotenv import load_dotenv
 
     load_dotenv()
 except ImportError:
     pass  # Will log after logger is set up
+
+# Import optimized auth module after loading its required configuration.
+from auth_optimized import (MCP_AUDIENCE, MCP_SCOPE, MCP_TOKEN_MINUTES, decode_claims, get_current_user_optimized, auth_optimizer,
+                            get_auth_stats, get_db_pool, mint_token, revoke_sessions, revoked, session_cutoff, _read_cutoff)
 
 # ─── Canonical model-provider base URL (plug-and-play) ─────────────────────────
 # The bundled `ollama` compose service is gone (phase A5): the user brings their
@@ -69,6 +72,7 @@ from moonshot_api import (
     get_moonshot_model_id,
     MOONSHOT_BASE_URL,
     _key_fingerprint,
+    user_guarded,
 )
 from typing import List, Optional, Dict, Any, Union
 from vison_models.llm_connector import (
@@ -96,7 +100,7 @@ from image.harvis_image import harvis_image_router  # Image-gen v0: gated txt2im
 from vibecoding.terminal_sessions import router as harvis_terminal_sessions_router
 
 # Import tools routers
-from tools import maps_router, openclaw_proxy_router, browser_proxy_router, opencode_llm_router, discord_proxy_router
+from tools import maps_router, openclaw_proxy_router, browser_proxy_router, discord_proxy_router
 
 # Import vibecoding routers
 from vibecoding import (
@@ -156,22 +160,30 @@ import soundfile as sf
 from model_manager import torch
 
 # ─── Authentication Setup ──────────────────────────────────────────────────────
-SECRET_KEY = os.getenv("JWT_SECRET", "key")
+from jwt_secret import (  # noqa: F401 — the password minimums are re-exported for callers of main
+    MIN_PASSWORD_LENGTH, SHARED_MIN_PASSWORD_LENGTH, access_token_minutes, get_jwt_secret,
+    is_shared as _is_shared, min_password_length,
+)
+SECRET_KEY = get_jwt_secret()
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "10080"))  # 7 days
+# A week on a laptop, a day on a shared server; ACCESS_TOKEN_EXPIRE_MINUTES overrides either.
+ACCESS_TOKEN_EXPIRE_MINUTES = access_token_minutes()
 
 # Temporary logging to verify JWT secret is loaded
-print(f"Backend JWT_SECRET loaded: {'set' if SECRET_KEY and SECRET_KEY != 'key' else 'MISSING/DEFAULT'} (len {len(SECRET_KEY)})")
+print(f"Backend JWT_SECRET loaded: {'set' if os.getenv('JWT_SECRET') else 'MISSING (random per-process)'} (len {len(SECRET_KEY)})")
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Checked for unknown emails so a miss costs the same bcrypt time as a wrong password.
+_DUMMY_PASSWORD_HASH = pwd_context.hash("harvis-unknown-account-timing-pad")
 
 # ─── API Key Encryption Setup ──────────────────────────────────────────────────
 from cryptography.fernet import Fernet
 import hashlib
 
 # Generate or load encryption key for API keys
-# Use JWT_SECRET as base to derive encryption key (ensures it's consistent across restarts)
-API_KEY_ENCRYPTION_SECRET = os.getenv("API_KEY_ENCRYPTION_SECRET", SECRET_KEY)
+# API_KEY_ENCRYPTION_SECRET, else JWT_SECRET (jwt_secret.py); model_proxy.py derives the same key
+from jwt_secret import api_key_encryption_secret
+API_KEY_ENCRYPTION_SECRET = api_key_encryption_secret()
 # Derive a 32-byte key using SHA-256
 _api_key_encryption_key = hashlib.sha256(API_KEY_ENCRYPTION_SECRET.encode()).digest()
 # Create Fernet key (base64 encoded 32-byte key)
@@ -280,11 +292,15 @@ class SignupRequest(BaseModel):
     password: str
     # The sign-up form's "note to the host" (plugins/people/approval.py).
     note_to_host: Optional[str] = None
+    # Ticked the house rules on the sign-up form (plugins/people/terms.py).
+    accept_terms: bool = False
+    terms_version: Optional[str] = None
 
 
-# New passwords: casual use, so short is fine; very long is refused before bcrypt
-# (which only reads 72 bytes anyway). Existing passwords are never re-checked.
-MIN_PASSWORD_LENGTH = 6
+# New passwords: casual use, so short is fine on a laptop; a shared server asks for 12.
+# Very long is refused before bcrypt (which only reads 72 bytes anyway). Existing
+# passwords are never re-checked.
+# (The minimums live in jwt_secret so owui_compat/account.py applies the same ones.)
 MAX_PASSWORD_LENGTH = 128
 
 class TokenResponse(BaseModel):
@@ -316,14 +332,18 @@ def get_password_hash(password):
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
-    to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(minutes=15)
-    to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
+    # Carries `iat`, which server-side revocation compares (auth_optimized.revoked).
+    return mint_token(data.copy(), expires_delta)
+
+
+
+def create_mcp_token(user_id: int, minutes: Optional[int] = None) -> str:
+    """A sidecar's token for the MCP endpoints, and nothing else: it carries
+    scope "mcp" and audience "harvis-mcp", which every other route refuses."""
+    return create_access_token(
+        {"sub": str(int(user_id)), "scope": MCP_SCOPE, "aud": MCP_AUDIENCE},
+        timedelta(minutes=minutes or MCP_TOKEN_MINUTES),
+    )
 
 
 # Removed get_db_connection() - using connection pool instead
@@ -353,7 +373,7 @@ async def get_current_user(
         raise credentials_exception
 
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = decode_claims(token, request.url.path)
         # Claim names only — the payload itself can carry more than the subject.
         logger.debug("JWT payload claims: %s", sorted(payload))
         user_id_str: str = payload.get("sub")
@@ -368,6 +388,9 @@ async def get_current_user(
     # Use connection pool instead of individual connections
     pool = getattr(request.app.state, "pg_pool", None)
     if pool:
+        if revoked(payload, await session_cutoff(pool, user_id)):
+            logger.info("get_current_user: sign-in for user %s was ended server-side", user_id)
+            raise credentials_exception
         async with pool.acquire() as conn:
             user = await conn.fetchrow(
                 "SELECT id, username, email, avatar, name, bio, gender, date_of_birth "
@@ -384,6 +407,8 @@ async def get_current_user(
         logger.warning("Connection pool unavailable, using direct connection")
         conn = await asyncpg.connect(DATABASE_URL, timeout=10)
         try:
+            if revoked(payload, await _read_cutoff(conn, user_id)):
+                raise credentials_exception
             user = await conn.fetchrow(
                 "SELECT id, username, email, avatar, name, bio, gender, date_of_birth "
                 "FROM users WHERE id = $1",
@@ -502,23 +527,6 @@ def safe_generate_speech_optimized(
         return None, None
 
 
-def safe_save_audio(sr, wav, prefix="response"):
-    """Safely save audio to file, returning filepath or None if TTS unavailable"""
-    if sr is None or wav is None:
-        logger.warning("⚠️ TTS unavailable - no audio to save")
-        return None
-
-    try:
-        filename = f"{prefix}_{uuid.uuid4()}.wav"
-        filepath = os.path.join(tempfile.gettempdir(), filename)
-        sf.write(filepath, wav, sr)
-        logger.info("Audio written to %s", filepath)
-        return f"/api/audio/{filename}"
-    except Exception as e:
-        logger.error(f"❌ Failed to save audio file: {e}")
-        return None
-
-
 from chat_history_module import (
     ChatHistoryManager,
     ChatMessage,
@@ -618,6 +626,8 @@ async def lifespan(app: FastAPI):
             max_inactive_connection_lifetime=300,  # 5 minutes - clean up stale connections
         )
         logger.info("✅ Database connection pool created")
+        # Auth checks that run outside a request (sockets) read revocation through this pool.
+        auth_optimizer.db_pool = app.state.pg_pool
 
         # Repo Runner: periodically reap idle / finished preview sandboxes so the
         # advertised idle-teardown actually fires (only when the feature is on).
@@ -692,6 +702,16 @@ async def lifespan(app: FastAPI):
                 # regression. It is a plain CREATE TABLE/INDEX IF NOT EXISTS plus a
                 # CREATE OR REPLACE FUNCTION and a DROP-then-CREATE trigger.
                 _mig_dir = os.path.join(os.path.dirname(__file__), "migrations")
+                # 018 and 019 ALTER owui_subagents, which the OWUI block further
+                # down is the only thing to create. On an empty database that put
+                # both after a table that did not exist yet, so teammates, bots and
+                # agent_action_audit only appeared on the SECOND boot.
+                try:
+                    from owui_compat import CREATE_OWUI_SUBAGENTS_SQL as _subagents_first
+
+                    await conn.execute(_subagents_first)
+                except Exception as _e:
+                    logger.warning("owui_subagents pre-create skipped: %s", _e)
                 for _mig_name in (
                     "010_user_openclaw_config.sql",
                     "011_messaging_platforms.sql",
@@ -706,6 +726,10 @@ async def lifespan(app: FastAPI):
                     "020_user_controls.sql",
                     "021_model_requests.sql",
                     "023_account_status.sql",
+                    "024_terms_acceptance.sql",
+                    "025_user_mods.sql",
+                    "026_messaging_bot_scope.sql",
+                    "027_session_cutoff.sql",
                 ):
                     _mig_path = os.path.join(_mig_dir, _mig_name)
                     try:
@@ -730,7 +754,7 @@ async def lifespan(app: FastAPI):
                             _mig_name,
                             _mig_err,
                         )
-                logger.info("✅ Idempotent migrations 010-020 ensured")
+                logger.info("✅ Idempotent migrations 010-027 ensured")
 
                 # vibecoding_sessions. The /api/vibecode/sessions* routes are
                 # mounted on every boot and every one of them queries this table,
@@ -1008,6 +1032,17 @@ async def lifespan(app: FastAPI):
                     logger.info("✅ Cookbook nodes ensured (%d persisted)", _n)
                 except Exception as _cb_exc:  # noqa: BLE001
                     logger.warning("⚠️ Cookbook node load failed: %s", _cb_exc)
+
+                # Notebook summaries run in-process, so one that was pending when the
+                # backend last stopped will never finish; mark it failed so the UI stops
+                # showing a spinner (the person can re-index the source).
+                try:
+                    from notebooks.auto_insights import fail_stuck_insights
+                    _stuck = await fail_stuck_insights(app.state.pg_pool)
+                    if _stuck:
+                        logger.info("Marked %d interrupted notebook summaries as failed", _stuck)
+                except Exception as _ins_exc:  # noqa: BLE001
+                    logger.warning("⚠️ Stuck notebook insights sweep failed: %s", _ins_exc)
         except Exception as e:
             logger.warning("⚠️ Failed to init OpenClaw audit/prefs schema: %s", e)
 
@@ -1274,6 +1309,29 @@ async def lifespan(app: FastAPI):
         logger.warning(f"⚠️ VibeCode preview sweeper failed to start: {e}")
         app.state.vibecode_sandbox_sweeper_task = None
 
+    # Shared browser lock sweeper — closes a non-admin's watchable browser once the
+    # egress lock is off or the owner is demoted, even if nobody calls the API. A
+    # local install bars nobody, so it only runs where other people can reach Harvis.
+    app.state.computer_lock_sweeper_task = None
+    try:
+        from plugins.exposure import shared as _exposure_shared
+        if _exposure_shared():
+            from plugins.agents import computer as _agent_computer
+            app.state.computer_lock_sweeper_task = asyncio.create_task(_agent_computer.run_lock_sweeper())
+            logger.info("🧹 Shared browser lock sweeper started")
+    except Exception as e:
+        logger.warning(f"⚠️ Shared browser lock sweeper failed to start: {e}")
+
+    # Reap expired private TTS clips (owner namespaces under $TMPDIR). The
+    # chat payload a clip was rendered from is the durable record; the wav is
+    # a read-back-once artifact and must not accumulate in /tmp forever.
+    try:
+        import private_audio as _private_audio
+
+        _private_audio.cleanup_private_audio()
+    except Exception as _pa_exc:  # noqa: BLE001
+        logger.warning("private-audio cleanup failed: %s", _pa_exc)
+
     yield
 
     # Shutdown: stop repo-sandbox sweeper
@@ -1281,6 +1339,9 @@ async def lifespan(app: FastAPI):
         sweeper_task = getattr(app.state, "repo_sandbox_sweeper_task", None)
         if sweeper_task is not None:
             sweeper_task.cancel()
+        lock_task = getattr(app.state, "computer_lock_sweeper_task", None)
+        if lock_task is not None:
+            lock_task.cancel()
         vibe_task = getattr(app.state, "vibecode_sandbox_sweeper_task", None)
         if vibe_task is not None:
             vibe_task.cancel()
@@ -1318,7 +1379,11 @@ async def lifespan(app: FastAPI):
         logger.warning(f"⚠️ Job queue shutdown error: {e}")
 
 
-app = FastAPI(lifespan=lifespan)
+# The API schema pages describe every route to whoever can reach the backend port
+# (the sandbox networks can). Nginx already turns them away; a shared server also
+# stops serving them.
+_API_DOCS_OFF = {"docs_url": None, "redoc_url": None, "openapi_url": None} if _is_shared() else {}
+app = FastAPI(lifespan=lifespan, **_API_DOCS_OFF)
 
 
 def _pretty_ollama_name(name: str) -> str:
@@ -1750,11 +1815,20 @@ if startup_problems():
 
 app.add_middleware(BuildSpaceGate)
 app.add_middleware(BlockedAccountGate)
+# Outside the gates: a locked-out email is refused before anything else runs.
+from plugins.people.login_limiter import LoginThrottleGate  # noqa: E402
+
+app.add_middleware(LoginThrottleGate)
 
 # nginx's auth_request for the paths it serves itself (plugins/people/session.py).
 from plugins.people.session import router as _session_check_router  # noqa: E402
 
 app.include_router(_session_check_router)
+
+# Terms of Use, Acceptable Use and the house rules, public like /api/config (plugins/people/legal.py).
+from plugins.people.legal import router as _legal_router  # noqa: E402
+
+app.include_router(_legal_router)
 if tunnel_on():
     # Experimental, and loaded only in a tunnel mode. Added last, so Cloudflare
     # traffic without an Access sign-in never reaches an account check.
@@ -1797,11 +1871,17 @@ _CSRF_ALLOWED_NETLOCS = {
     "frontend:3000", "nginx-proxy:80", "localhost:8000", "127.0.0.1:8000",
 }
 _CSRF_UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+_CSRF_GUARDED_PREFIXES = ("/api/", "/hermes-api/", "/onb-api/", "/onb/api/")
 
 
 @app.middleware("http")
 async def csrf_origin_guard(request: Request, call_next):
-    if request.method in _CSRF_UNSAFE_METHODS and request.url.path.startswith(("/api/", "/hermes-api/")):
+    # Any state-changing request that arrives with a sign-in cookie is checked, whatever
+    # its path: /onb-api takes multipart form posts a hostile page can auto-submit.
+    if request.method in _CSRF_UNSAFE_METHODS and (
+        request.url.path.startswith(_CSRF_GUARDED_PREFIXES)
+        or "access_token" in request.cookies or "token" in request.cookies
+    ):
         origin = request.headers.get("origin")
         if origin:
             netloc = origin.split("://", 1)[-1]  # strip scheme → host[:port]
@@ -1927,9 +2007,6 @@ app.include_router(maps_router)
 # Include OpenClaw tool proxy (web-fetch + document-save — internal service auth)
 app.include_router(openclaw_proxy_router)
 app.include_router(browser_proxy_router)
-
-# Include OpenCode LLM proxy (for OpenCode to use Kimi K2.5)
-app.include_router(opencode_llm_router)
 
 # Include Discord tools proxy (heartbeat → Discord posting, internal service auth)
 app.include_router(discord_proxy_router)
@@ -2675,7 +2752,7 @@ class ResearchChatRequest(BaseModel):
     model: str = Field(default_factory=_default_model_field)
     session_id: Optional[str] = None  # Chat session ID for history persistence
     enableWebSearch: bool = True
-    live_web: bool = False  # When True, route research through OpenClaw with unrestricted web access
+    live_web: bool = False  # Accepted for old clients; research always searches the web natively
     audio_prompt: Optional[str] = None  # overrides HARVIS_VOICE_PATH if provided
     exaggeration: float = 0.5
     temperature: float = 0.5  # Lower temp = more stable TTS output
@@ -2868,9 +2945,46 @@ async def health_check():
     return {"status": "healthy", "timestamp": time.time()}
 
 
+# Who may read the per-service report on a shared server. Everyone else gets the
+# overall status only, from a copy refreshed at most every _HEALTH_BRIEF_TTL
+# seconds so an anonymous caller cannot make the backend probe every service per hit.
+_HEALTH_BRIEF_TTL = 15.0
+_health_brief: dict = {"at": 0.0, "status": "healthy"}
+_health_brief_lock = asyncio.Lock()
+
+
+async def _health_reader_is_trusted(request: Request) -> bool:
+    if not _is_shared():
+        return True
+    # A call from inside the backend container itself (the installer's `docker compose exec`).
+    # Behind nginx the peer is the proxy's address, never loopback.
+    if request.client and request.client.host in ("127.0.0.1", "::1"):
+        return True
+    header = request.headers.get("authorization") or ""
+    if "access_token" not in request.cookies and header[:7].lower() != "bearer ":
+        return False
+    credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=header[7:].strip()) if header[:7].lower() == "bearer " else None
+    try:
+        await get_current_user(request, credentials)
+        return True
+    except HTTPException:
+        return False
+
+
 @app.get("/api/health/services", tags=["health"])
-async def health_services():
-    """Check reachability of backend services (model provider, pgsql, openclaw,
+async def health_services(request: Request = None):
+    # No request = called from Python (tests, in-process), never from the network.
+    if request is None or await _health_reader_is_trusted(request):
+        return await _health_services_full()
+    async with _health_brief_lock:
+        if time.monotonic() - _health_brief["at"] > _HEALTH_BRIEF_TTL:
+            _health_brief["status"] = (await _health_services_full())["status"]
+            _health_brief["at"] = time.monotonic()
+        return {"status": _health_brief["status"]}
+
+
+async def _health_services_full():
+    """Check reachability of backend services (model provider, pgsql,
     browser-runner, tts-service, voice-onnx, sandbox).
 
     The model provider is NOT a compose service any more (plug-and-play: the
@@ -2911,7 +3025,8 @@ async def health_services():
                     "reason": profile_not_enabled_reason(_SERVICE_PROFILE[name]),
                 }
             else:
-                results[name] = {"status": "down", "error": str(exc)[:200]}
+                logger.warning("health: %s unreachable: %s", name, exc)
+                results[name] = {"status": "down"}
                 overall = "degraded"
 
     # Model provider — the user's own server, not a compose service. Use the
@@ -2928,44 +3043,33 @@ async def health_services():
             async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
                 r = await client.get(url)
             if r.status_code < 400:
-                results["model_provider"] = {
-                    "status": "up", "code": r.status_code, "url": _ollama_base,
-                }
+                results["model_provider"] = {"status": "up", "code": r.status_code}
             else:
-                results["model_provider"] = {
-                    "status": "degraded", "code": r.status_code, "url": _ollama_base,
-                }
+                results["model_provider"] = {"status": "degraded", "code": r.status_code}
                 overall = "degraded"
         except Exception as exc:
             if LLM_PROVIDER_EXPLICITLY_CONFIGURED:
                 # The operator pointed us at a server and it does not answer —
                 # a real fault.
-                results["model_provider"] = {
-                    "status": "down", "url": _ollama_base,
-                    "error": str(exc)[:200],
-                }
+                logger.warning("health: model provider unreachable: %s", exc)
+                results["model_provider"] = {"status": "down"}
                 overall = "degraded"
             else:
                 # Supported no-provider install: nothing configured, nothing on
                 # the conventional host port. Healthy — just no models yet.
                 results["model_provider"] = {
-                    "status": "not_configured", "url": _ollama_base,
+                    "status": "not_configured",
                     "reason": (
-                        f"no model provider configured and nothing answers at {_ollama_base} — "
+                        "no model provider configured and nothing answers at the default address — "
                         "start a model server and re-run ./install.sh, or set HARVIS_LLM_BASE_URL"
                     ),
                 }
-
-    # OpenClaw — HTTP health endpoint (WS gateway also serves /health over HTTP)
-    _openclaw_ws = os.getenv("OPENCLAW_URL", "ws://openclaw:18789")
-    _openclaw_http = _openclaw_ws.replace("ws://", "http://").replace("wss://", "https://")
 
     _tts_base = os.getenv("TTS_SERVICE_URL", "http://tts-service:8001").rstrip("/")
     _sandbox_base = os.getenv("CODE_EXECUTOR_URL", "http://sandbox:8080").rstrip("/")
 
     await asyncio.gather(
         _check_model_provider(),
-        _check("openclaw", f"{_openclaw_http}/health"),
         _check("browser-runner", "http://browser-runner:8765/health", timeout=8.0),
         _check("tts-service", f"{_tts_base}/health"),
         # The service by name, not HARVIS_TTS_URL: speech pointed at an outside
@@ -2982,10 +3086,11 @@ async def health_services():
                 await conn.fetchval("SELECT 1")
             results["database"] = {"status": "up"}
         else:
-            results["database"] = {"status": "unknown", "error": "no connection pool"}
+            results["database"] = {"status": "unknown"}
             overall = "degraded"
     except Exception as exc:
-        results["database"] = {"status": "down", "error": str(exc)[:200]}
+        logger.warning("health: database unreachable: %s", exc)
+        results["database"] = {"status": "down"}
         overall = "degraded"
 
     return {
@@ -3151,10 +3256,16 @@ async def search_messages(
 ):
     """Search messages by content"""
     try:
+        try:
+            session_uuid = UUID(session_id) if session_id else None
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid session_id")
         messages = await chat_history_manager.search_messages(
-            user_id=current_user.id, query=query, session_id=session_id, limit=limit
+            user_id=current_user.id, query=query, session_id=session_uuid, limit=limit
         )
         return messages
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error searching messages: {e}")
         raise HTTPException(status_code=500, detail="Failed to search messages")
@@ -3256,10 +3367,11 @@ async def _signup_with_connection(request: SignupRequest, conn, setup_code: str 
 
     try:
         await _shared_signup.before_signup(request.email, headers)
-        if not MIN_PASSWORD_LENGTH <= len(request.password or "") <= MAX_PASSWORD_LENGTH:
+        _min_len = min_password_length()
+        if not _min_len <= len(request.password or "") <= MAX_PASSWORD_LENGTH:
             raise HTTPException(
                 status_code=400,
-                detail=f"Use a password of {MIN_PASSWORD_LENGTH} to {MAX_PASSWORD_LENGTH} characters.",
+                detail=f"Use a password of {_min_len} to {MAX_PASSWORD_LENGTH} characters.",
             )
         # The first-admin code is checked in a transaction of its own so a wrong
         # guess is counted even though this sign-up then fails. None = not checked.
@@ -3286,6 +3398,12 @@ async def _signup_with_connection(request: SignupRequest, conn, setup_code: str 
                 if _first_admin.required() and code_ok is not True:
                     if code_ok is None:
                         detail = "Someone else just set this server up. Reload the page and sign in."
+                    elif _first_admin.manual_code_refused():
+                        detail = ("HARVIS_SETUP_CODE is shorter than 16 characters, so this shared server "
+                                  "will not accept it. Set a longer one in .env and restart the backend.")
+                    elif retired and _first_admin.manual_code():
+                        detail = ("Too many wrong codes, so HARVIS_SETUP_CODE is locked. Restart the "
+                                  "backend on the server to try again.")
                     elif retired:
                         detail = ("Too many wrong codes, so that code no longer works. On the server, "
                                   "run ./install.sh --admin-code to get a new one.")
@@ -3319,18 +3437,23 @@ async def _signup_with_connection(request: SignupRequest, conn, setup_code: str 
             # approves them (plugins/people/approval.py). Status is written in
             # the same INSERT, so an account can never exist without it.
             from plugins.people import approval as _approval
+            from plugins.people import terms as _terms
 
+            terms_version = _terms.accepted_version(request.accept_terms, user_count, request.terms_version)
             await _approval.forget_stale(conn)
             waits = user_count > 0 and _approval.approval_required()
             hashed_password = get_password_hash(request.password)
             user_id = await conn.fetchval(
-                "INSERT INTO users (username, email, password, account_status, note_to_host) "
-                "VALUES ($1, $2, $3, $4, $5) RETURNING id",
+                "INSERT INTO users (username, email, password, account_status, note_to_host, "
+                "terms_version, terms_accepted_at) "
+                "VALUES ($1, $2, $3, $4, $5, $6::text, CASE WHEN $6::text IS NULL THEN NULL ELSE NOW() END) "
+                "RETURNING id",
                 request.username,
                 request.email,
                 hashed_password,
                 _approval.PENDING_STATUS if waits else _approval.ACTIVE_STATUS,
                 _approval.clean_note(request.note_to_host),
+                terms_version,
             )
             if waits:
                 _approval.note_status(int(user_id), _approval.PENDING_STATUS)
@@ -3365,6 +3488,20 @@ async def _signup_with_connection(request: SignupRequest, conn, setup_code: str 
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+@app.post("/api/auth/signout-all", tags=["auth"])
+async def signout_everywhere(current_user: UserResponse = Depends(get_current_user)):
+    """End every sign-in this account has, on every device, this one included."""
+    pool = getattr(app.state, "pg_pool", None)
+    if pool is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    async with pool.acquire() as conn:
+        await revoke_sessions(conn, current_user.id)
+    response = JSONResponse(content={"ok": True})
+    response.delete_cookie("access_token", path="/")
+    response.delete_cookie("token", path="/")
+    return response
+
+
 @app.post("/api/auth/login", tags=["auth"])
 async def login(request: AuthRequest, app_request: Request):
     # Use connection pool if available
@@ -3390,6 +3527,11 @@ async def _login_with_connection(request: AuthRequest, conn, headers=None):
         user = await conn.fetchrow(
             "SELECT id, password FROM users WHERE email = $1", request.email
         )
+        if not user:
+            try:
+                verify_password(request.password, _DUMMY_PASSWORD_HASH)
+            except Exception:
+                pass
         if not user or not verify_password(request.password, user["password"]):
             raise HTTPException(
                 status_code=401,
@@ -3527,9 +3669,18 @@ async def create_or_update_api_key(
     # from the other console. Verified-at-save is the same contract Codex and Claude Code
     # already use (owui_compat/engine_auth.py::_verify_credential).
     if provider in ("moonshot", "kimi") and received_key:
-        from moonshot_api import verify_moonshot_key
+        from moonshot_api import _is_official, is_guarded, verify_moonshot_key
+        from plugins.hermes_ui.providers import EndpointValidationError, refuse_private_url
 
-        ok, working_url, err = await verify_moonshot_key(received_key, api_url)
+        # A custom URL is stored and then used for every Kimi chat, so on a shared host a
+        # non-admin may only point it at a public address.
+        guarded = user_guarded(current_user.id)
+        if is_guarded(guarded) and (api_url or "").strip() and not _is_official(api_url):
+            try:
+                await refuse_private_url(api_url)
+            except EndpointValidationError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from None
+        ok, working_url, err = await verify_moonshot_key(received_key, api_url, guarded)
         if not ok:
             raise HTTPException(status_code=400, detail=err)
         api_url = working_url
@@ -3656,6 +3807,19 @@ async def get_api_key_by_provider(
 
 # ─── Harvis Claw LLM Config Endpoints ─────────────────────────────────────
 
+def _require_admin_if_shared(user) -> None:
+    """The model proxy serves one active config row to every user, so on a shared
+    host only an admin may write it. Deleting is left open: it only removes the caller's own row."""
+    from owui_compat.authz import is_admin
+    from plugins.exposure import shared
+
+    if shared() and not is_admin(user):
+        raise HTTPException(
+            status_code=403,
+            detail="Administrator privileges are required for this operation.",
+        )
+
+
 @app.get("/api/user/openclaw-config", response_model=OpenClawConfigResponse, tags=["openclaw"])
 async def get_openclaw_config(
     request: Request,
@@ -3706,6 +3870,7 @@ async def save_openclaw_config(
     current_user: UserResponse = Depends(get_current_user),
 ):
     """Save the user's Harvis Claw LLM configuration"""
+    _require_admin_if_shared(current_user)
     pool = getattr(request.app.state, "pg_pool", None)
     if not pool:
         raise HTTPException(status_code=500, detail="Database not available")
@@ -4445,17 +4610,10 @@ async def chat(
                     yield f"data: {json.dumps({'status': 'error', 'error': 'Moonshot API key not configured. Please add your API key in Profile settings.'})}\n\n"
                     return
 
-                # Debug: Log API key info (safely)
                 api_key = moonshot_config["api_key"]
                 if len(api_key) > 0:
-                    prefix = api_key[:4] if len(api_key) >= 4 else api_key[:2]
-                    suffix = api_key[-4:] if len(api_key) >= 4 else api_key[-2:]
-                    middle_len = max(0, len(api_key) - len(prefix) - len(suffix))
-                    middle = "*" * middle_len
-                    masked_key = f"{prefix}{middle}{suffix}"
-                    logger.info(
-                        f"🌙 Moonshot API key: {masked_key} (length={len(api_key)})"
-                    )
+                    from moonshot_api import _key_fingerprint
+                    logger.info(f"🌙 Moonshot API key: {_key_fingerprint(api_key)}")
                 else:
                     logger.error("🌙 Moonshot API key is EMPTY!")
 
@@ -4463,6 +4621,7 @@ async def chat(
                 moonshot_client = MoonshotClient(
                     api_key=api_key,
                     base_url=moonshot_config.get("api_url") or MOONSHOT_BASE_URL,
+                    guarded=user_guarded(current_user.id),
                 )
 
                 # Get the correct model ID
@@ -5146,7 +5305,7 @@ async def chat(
             else:
                 yield f"data: {json.dumps({'status': 'generating_audio', 'detail': 'Generating voice response...'})}\n\n"
 
-                audio_prompt_path = req.audio_prompt or HARVIS_VOICE_PATH
+                audio_prompt_path = voice_paths.resolve_voice_prompt(req.audio_prompt) or HARVIS_VOICE_PATH
                 if not os.path.isfile(audio_prompt_path):
                     logger.warning(
                         "Audio prompt %s not found, falling back to default voice.",
@@ -5190,10 +5349,12 @@ async def chat(
                         and wav.shape[0] > 0
                     ):
                         filename = f"response_{uuid.uuid4()}.wav"
-                        filepath = os.path.join(tempfile.gettempdir(), filename)
-                        sf.write(filepath, wav, sr)
-                        logger.info("Audio written to %s", filepath)
-                        audio_path = f"/api/audio/{filename}"
+                        import private_audio
+
+                        audio_path = private_audio.write_private_wav(
+                            current_user.id, filename, wav, sr
+                        )
+                        logger.info("Audio written to owner's private namespace: %s", audio_path)
                     else:
                         logger.warning(
                             "⚠️ TTS unavailable - returning response without audio"
@@ -5441,6 +5602,17 @@ async def vision_chat(
                             image_path = os.path.join(IMAGES_DIR, image_filename)
                             with open(image_path, "wb") as img_file:
                                 img_file.write(decoded)
+                            # The sidecar is what /api/images/{filename} checks the caller against.
+                            with open(os.path.splitext(image_path)[0] + ".meta.json", "w") as meta_file:
+                                json.dump(
+                                    {
+                                        "filename": image_filename,
+                                        "mime_type": "image/png",
+                                        "stored_path": image_path,
+                                        "user_id": current_user.id,
+                                    },
+                                    meta_file,
+                                )
                             saved_image_paths.append(f"/api/images/{image_filename}")
                             logger.info(f"🖼️ Image {idx + 1}: Saved to {image_path}")
                         except Exception as save_err:
@@ -5596,6 +5768,7 @@ async def vision_chat(
                     moonshot_client = MoonshotClient(
                         api_key=moonshot_config["api_key"],
                         base_url=moonshot_config.get("api_url") or MOONSHOT_BASE_URL,
+                        guarded=user_guarded(current_user.id),
                     )
 
                     # Format messages for Moonshot vision (OpenAI-compatible format)
@@ -5833,9 +6006,11 @@ async def vision_chat(
 
                         if wav is not None:
                             filename = f"vision_{uuid.uuid4()}.wav"
-                            filepath = os.path.join(tempfile.gettempdir(), filename)
-                            sf.write(filepath, wav, sr)
-                            audio_path = f"/api/audio/{filename}"
+                            import private_audio
+
+                            audio_path = private_audio.write_private_wav(
+                                current_user.id, filename, wav, sr
+                            )
                             logger.info(f"🔊 VISION: Generated TTS audio: {audio_path}")
                     except Exception as tts_error:
                         logger.error(
@@ -5876,25 +6051,40 @@ async def vision_chat(
     )
 
 
-_AUDIO_NAME_RX = re.compile(r"^[A-Za-z0-9_-]{8,128}\.(wav|mp3)$")
+def _private_audio_directory(user_id: int, *, create: bool = False) -> int:
+    """Open validated directory descriptors; callers must close the result.
+
+    The implementation lives in private_audio.py so the background TTS worker
+    (job_queue.py) writes into the same owner namespace this route reads from.
+    """
+    import private_audio
+
+    return private_audio.open_private_dir(user_id, create=create)
 
 
 @app.get("/api/audio/{filename}", tags=["audio"])
-async def serve_audio(filename: str):
-    """
-    FastAPI static audio fallback (use nginx /audio alias in production for speed).
+async def serve_audio(
+    filename: str, current_user: UserResponse = Depends(get_current_user)
+):
+    """Only audio produced in the caller's private namespace is accessible."""
+    import private_audio
+    import stat
 
-    Same rule as that alias: only a generated ``<name>.wav|mp3`` straight inside
-    the temp dir. The names carry a uuid4, so the URL is the capability; anything
-    else in /tmp (STT uploads, caches, other services' files) is not served.
-    """
-    if not _AUDIO_NAME_RX.match(filename):
+    if not private_audio.valid_name(filename):
         raise HTTPException(404, "Audio file not found")
-    full_path = os.path.join(tempfile.gettempdir(), filename)
-    if os.path.islink(full_path) or not os.path.isfile(full_path):
+    try:
+        directory = _private_audio_directory(current_user.id)
+        try:
+            fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        finally:
+            os.close(directory)
+        with os.fdopen(fd, "rb") as audio:
+            if not stat.S_ISREG(os.fstat(audio.fileno()).st_mode):
+                raise OSError("Not a regular audio file")
+            data = audio.read()
+    except (OSError, ValueError, TypeError):
         raise HTTPException(404, "Audio file not found")
-    media = "audio/mpeg" if filename.endswith(".mp3") else "audio/wav"
-    return FileResponse(full_path, media_type=media)
+    return Response(data, media_type="audio/wav", headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
 
 
 @app.get("/api/images/{filename}", tags=["images"])
@@ -5902,11 +6092,28 @@ async def serve_image(
     filename: str, current_user: UserResponse = Depends(get_current_user)
 ):
     """
-    Serve chat images from persistent storage. Requires authentication.
+    Serve chat images from persistent storage. Requires authentication, and the
+    file's own `{id}.meta.json` must name the caller; admins read everything.
+    A file with no sidecar, or one that records no owner, is served to admins only.
     """
+    not_found = HTTPException(404, f"Image file not found: {filename}")
+    if os.path.basename(filename) != filename or filename.endswith(".meta.json"):
+        raise not_found
     full_path = os.path.join(IMAGES_DIR, filename)
-    if not os.path.exists(full_path):
-        raise HTTPException(404, f"Image file not found: {filename}")
+    if not os.path.isfile(full_path):
+        raise not_found
+    from owui_compat.authz import is_admin
+
+    if not is_admin(current_user):
+        meta_path = os.path.join(IMAGES_DIR, f"{filename.split('.')[0]}.meta.json")
+        try:
+            with open(meta_path) as f_meta:
+                owner = json.load(f_meta).get("user_id")
+            owned = owner is not None and int(owner) == int(current_user.id)
+        except (OSError, ValueError, TypeError, AttributeError):
+            owned = False
+        if not owned:
+            raise not_found
     return FileResponse(full_path, media_type="image/png")
 
 
@@ -6765,7 +6972,7 @@ async def analyze_screen_with_tts(req: ScreenAnalysisWithTTSRequest, current_use
         reload_models_if_needed()
 
         # Generate TTS audio
-        audio_prompt_path = req.audio_prompt or HARVIS_VOICE_PATH
+        audio_prompt_path = voice_paths.resolve_voice_prompt(req.audio_prompt) or HARVIS_VOICE_PATH
         if not os.path.isfile(audio_prompt_path):
             logger.warning(
                 f"Audio prompt {audio_prompt_path} not found, using default voice"
@@ -6783,17 +6990,18 @@ async def analyze_screen_with_tts(req: ScreenAnalysisWithTTSRequest, current_use
             tts_engine=tts_engine,
         )
 
-        # Save audio file
+        # Save audio file into the caller's private namespace
         filename = f"screen_analysis_{uuid.uuid4()}.wav"
-        filepath = os.path.join(tempfile.gettempdir(), filename)
-        sf.write(filepath, wav, sr)
+        import private_audio
+
+        audio_path = private_audio.write_private_wav(current_user.id, filename, wav, sr)
 
         logger.info("✅ Complete screen analysis with TTS finished")
         return {
             "response": llm_response,
             "screen_analysis": vision_analysis,
             "model_used": req.model,
-            "audio_path": f"/api/audio/{filename}",
+            "audio_path": audio_path,
             "processing_stages": {
                 "vision_analysis": "✅ Completed",
                 "llm_response": "✅ Completed",
@@ -6979,6 +7187,7 @@ async def mic_chat(
                             api_key=moonshot_config["api_key"],
                             base_url=moonshot_config.get("api_url")
                             or MOONSHOT_BASE_URL,
+                            guarded=user_guarded(current_user.id),
                         )
 
                         sys_prompt_path = os.path.join(
@@ -7009,7 +7218,7 @@ async def mic_chat(
                     except Exception as e:
                         logger.error(f"🎤 MIC-CHAT: Moonshot request failed: {e}")
                         return JSONResponse(
-                            status_code=500,
+                            status_code=400 if isinstance(e, HTTPException) and e.status_code == 400 else 500,
                             content={
                                 "status": "error",
                                 "error": f"Moonshot error: {str(e)}",
@@ -7144,10 +7353,12 @@ async def mic_chat(
                     and wav.shape[0] > 0
                 ):
                     fname = f"response_{uuid.uuid4()}.wav"
-                    filepath = os.path.join(tempfile.gettempdir(), fname)
-                    sf.write(filepath, wav, sr)
-                    audio_path = f"/api/audio/{fname}"
-                    logger.info(f"🔊 MIC-CHAT: Audio written to {filepath}")
+                    import private_audio
+
+                    audio_path = private_audio.write_private_wav(
+                        current_user.id, fname, wav, sr
+                    )
+                    logger.info("🔊 MIC-CHAT: Audio written to owner's private namespace: %s", audio_path)
                 else:
                     logger.warning("⚠️ MIC-CHAT: TTS returned no audio")
             except Exception as e:
@@ -7313,6 +7524,7 @@ async def research_chat(
             moonshot_config.get("api_key") or "",
             # api_url holds the platform verified at save time (.ai vs .cn).
             moonshot_config.get("api_url") or "",
+            guarded=user_guarded(current_user.id),
         )
 
     if req.model == "nvidia-kimi":
@@ -7323,77 +7535,6 @@ async def research_chat(
             await get_user_api_key(pool, current_user.id, "nvidia") if pool else None
         ) or {}
         set_research_agent_nvidia_key(nvidia_config.get("api_key") or "")
-
-    # ── Live Web: dispatch through OpenClaw with unrestricted web access ──
-    live_web = getattr(req, "live_web", False)
-    if live_web:
-        from workspace.workspace_router import launch_workspace_internal
-
-        async def stream_live_research():
-            yield f"data: {json.dumps({'status': 'starting', 'message': req.message, 'live_web': True})}\n\n"
-            yield f"data: {json.dumps({'status': 'researching', 'detail': 'OpenClaw live web research active'})}\n\n"
-
-            result = await launch_workspace_internal(
-                request=request,
-                user_id=current_user.id,
-                task_brief=f"LIVE WEB RESEARCH: {req.message}",
-                chat_history=req.history,
-                agent_id="main",
-                session_id=getattr(req, "session_id", None),
-                live_web=True,
-            )
-            ws_id = result["workspace_id"]
-
-            # Stream workspace events as SSE research progress
-            from workspace.workspace_router import _workspace_broadcasters
-
-            broadcaster = _workspace_broadcasters.get(ws_id)
-            if not broadcaster:
-                yield f"data: {json.dumps({'status': 'error', 'error': 'Failed to start live research workspace'})}\n\n"
-                return
-
-            live_queue = broadcaster.subscribe()
-            try:
-                final_content = ""
-                while True:
-                    try:
-                        item = await asyncio.wait_for(live_queue.get(), timeout=300)
-                    except asyncio.TimeoutError:
-                        yield f"data: {json.dumps({'status': 'error', 'error': 'Live research timed out'})}\n\n"
-                        return
-
-                    if item is None:
-                        break
-                    seq, event = item
-                    if event.type == "token":
-                        token_text = event.data.get("token", "")
-                        final_content += token_text
-                        yield f"data: {json.dumps({'status': 'streaming', 'token': token_text})}\n\n"
-                    elif event.type == "tool_call":
-                        tool_name = event.data.get("name", "tool")
-                        yield f"data: {json.dumps({'status': 'researching', 'detail': f'Using {tool_name}...', 'type': 'tool_call'})}\n\n"
-                    elif event.type == "log":
-                        msg = event.data.get("message", "")
-                        yield f"data: {json.dumps({'status': 'researching', 'detail': msg})}\n\n"
-                    elif event.type in ("done", "error"):
-                        if event.type == "error":
-                            err_msg = event.data.get("message", "Unknown error")
-                            yield f"data: {json.dumps({'status': 'error', 'error': err_msg})}\n\n"
-                            return
-                        summary = event.data.get("summary", "") or final_content
-                        final_content = summary
-                        break
-
-                # Emit final response
-                yield f"data: {json.dumps({'status': 'complete', 'response': final_content, 'sources': [], 'live_web': True})}\n\n"
-            finally:
-                broadcaster.unsubscribe(live_queue)
-
-        return StreamingResponse(
-            stream_live_research(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
 
     async def stream_research():
         try:
@@ -7708,8 +7849,20 @@ logger.info("Models will be loaded on demand for optimal memory management")
 
 
 # ─── Dev entry-point -----------------------------------------------------------
+async def _optional_user(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    pool=Depends(get_db_pool),
+):
+    """The signed-in user, or None. For the few routes that stay open on a local install."""
+    try:
+        return await get_current_user_optimized(request, credentials, pool)
+    except HTTPException:
+        return None
+
+
 @app.get("/api/ollama-models", tags=["models"])
-async def get_ollama_models():
+async def get_ollama_models(user=Depends(_optional_user)):
     """
     Fetches the list of available models from the configured provider (native
     Ollama API), vLLM, llama-server, and (optionally) the external Ollama
@@ -7723,6 +7876,14 @@ async def get_ollama_models():
     than an error, while a CONFIGURED provider being down stays distinguishable
     via the reason + per-probe errors.
     """
+    from owui_compat.authz import is_admin
+    from plugins.exposure import shared
+
+    # On a shared host the model list and the probe ledger below name this server's
+    # internal providers, so only a signed-in user gets either, and only an admin the ledger.
+    on_shared_host = shared()
+    if on_shared_host and user is None:
+        raise HTTPException(status_code=401, detail="Sign in to list models.")
     ollama_model_names = []
     # Per-backend probe ledger, returned when everything came up empty so the
     # caller (and the operator reading the response) can see what was tried.
@@ -7901,6 +8062,13 @@ async def get_ollama_models():
                 "no model provider configured — start an Ollama/vLLM/llama-server "
                 "instance and set HARVIS_LLM_BASE_URL (or OLLAMA_URL) to its address"
             )
+        if on_shared_host and not is_admin(user):
+            return {
+                "models": [],
+                "provider_available": False,
+                "reason": "no model provider is available on this server",
+                "probed": [],
+            }
         return {
             "models": [],
             "provider_available": False,
@@ -7959,7 +8127,7 @@ class UnloadModelRequest(BaseModel):
     response_model=MemoryStatsResponse,
     tags=["model-management"],
 )
-async def get_memory_stats():
+async def get_memory_stats(current_user: UserResponse = Depends(get_current_user)):
     """Get detailed GPU memory statistics"""
     from model_manager import get_gpu_memory_stats
 
@@ -7972,7 +8140,7 @@ async def get_memory_stats():
     response_model=MemoryPressureResponse,
     tags=["model-management"],
 )
-async def get_memory_pressure():
+async def get_memory_pressure(current_user: UserResponse = Depends(get_current_user)):
     """Check memory pressure and get recommendations"""
     from model_manager import check_memory_pressure
 
@@ -8025,7 +8193,7 @@ async def get_model_status():
 
 
 @app.post("/api/models/unload", tags=["model-management"])
-async def unload_model(request: UnloadModelRequest):
+async def unload_model(request: UnloadModelRequest, _admin=Depends(require_admin)):
     """Unload specific models to free memory"""
     from model_manager import unload_tts_model, unload_whisper_model, unload_models
 
@@ -8147,14 +8315,16 @@ if __name__ == "__main__":
 # huh2.0
 
 
+@app.post("/api/private/synthesize-speech", tags=["tts"])
 @app.post("/api/synthesize-speech", tags=["tts"])
-async def synthesize_speech(req: SynthesizeSpeechRequest):
-    """
-    Synthesizes speech from text using the TTS model.
-    This endpoint is called by worker nodes.
-    """
+async def synthesize_speech(
+    req: SynthesizeSpeechRequest, current_user: UserResponse = Depends(get_current_user)
+):
+    """Synthesize speech into the authenticated user's private audio namespace."""
+    if req.audio_prompt:
+        raise HTTPException(400, "Custom server-side audio paths are not supported")
     try:
-        audio_prompt_path = req.audio_prompt or HARVIS_VOICE_PATH
+        audio_prompt_path = HARVIS_VOICE_PATH
         if not os.path.isfile(audio_prompt_path):
             logger.warning(
                 "Audio prompt %s not found, falling back to default voice.",
@@ -8174,16 +8344,26 @@ async def synthesize_speech(req: SynthesizeSpeechRequest):
         if sr is None or wav is None:
             raise HTTPException(500, f"TTS ({req.tts_engine}) generation failed")
 
-        filename = f"response_{uuid.uuid4()}.wav"
-        filepath = os.path.join(tempfile.gettempdir(), filename)
-        sf.write(filepath, wav, sr)
-        logger.info("Audio written to %s", filepath)
+        filename = f"response_{uuid.uuid4().hex}.wav"
+        directory = _private_audio_directory(current_user.id, create=True)
+        try:
+            fd = os.open(filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
+            try:
+                with os.fdopen(fd, "wb") as audio:
+                    sf.write(audio, wav, sr, format="WAV")
+            except Exception:
+                os.unlink(filename, dir_fd=directory)
+                raise
+        finally:
+            os.close(directory)
 
         return {"audio_path": f"/api/audio/{filename}", "tts_engine": req.tts_engine}
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("TTS synthesis endpoint crashed")
-        raise HTTPException(500, str(e)) from e
+        raise HTTPException(500, "TTS synthesis failed") from e
 
 
 @app.get("/api/tts-engines", tags=["tts"])
@@ -8262,6 +8442,8 @@ async def create_tts_job(
     Returns immediately with job_id. Use /api/jobs/{job_id} to check status.
     This avoids HTTP timeouts for long-running TTS generation.
     """
+    if current_user is None or current_user.id is None:
+        raise HTTPException(401, "Authentication required")
     try:
         from job_queue import enqueue_tts_job
 
@@ -8287,28 +8469,10 @@ async def create_tts_job(
 async def create_whisper_job(
     req: WhisperJobRequest, current_user: UserResponse = Depends(get_current_user)
 ):
-    """
-    Create an async Whisper transcription job.
-
-    Returns immediately with job_id. Use /api/jobs/{job_id} to check status.
-    This avoids HTTP timeouts for long-running transcription.
-    """
-    try:
-        from job_queue import enqueue_whisper_job
-
-        job_id = await enqueue_whisper_job(
-            audio_path=req.audio_path, user_id=current_user.id if current_user else None
-        )
-
-        return {
-            "job_id": job_id,
-            "status": "queued",
-            "message": "Whisper job queued successfully. Check /api/jobs/{job_id} for status.",
-        }
-
-    except Exception as e:
-        logger.exception("Failed to create Whisper job")
-        raise HTTPException(500, f"Failed to create Whisper job: {str(e)}") from e
+    """Disable server-path transcription until uploads have ownership metadata."""
+    if current_user is None or current_user.id is None:
+        raise HTTPException(401, "Authentication required")
+    raise HTTPException(410, "Server-path transcription jobs are disabled; use an audio upload endpoint")
 
 
 @app.get("/api/jobs/{job_id}", tags=["jobs"])
@@ -8330,6 +8494,11 @@ async def get_job_status(
         if not status:
             raise HTTPException(404, f"Job {job_id} not found")
 
+        owner = (status.get("data") or {}).get("user_id")
+        if owner is None or str(owner) != str(current_user.id):
+            # Do not reveal whether another user's job exists.
+            raise HTTPException(404, f"Job {job_id} not found")
+
         return status
 
     except HTTPException:
@@ -8348,7 +8517,7 @@ class ResearchStatsResponse(BaseModel):
 
 
 @app.get("/api/research/stats", response_model=ResearchStatsResponse, tags=["research"])
-async def research_stats():
+async def research_stats(current_user: UserResponse = Depends(get_current_user)):
     """
     Get research system statistics and performance metrics
     """
@@ -8385,7 +8554,7 @@ async def research_stats():
 
 
 @app.get("/api/research/health", tags=["research"])
-async def research_health_check():
+async def research_health_check(current_user: UserResponse = Depends(get_current_user)):
     """
     Health check for research system components
     """

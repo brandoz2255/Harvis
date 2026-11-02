@@ -30,6 +30,7 @@ resync drops sessions the runner has closed or timed out, so the pane shows
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -66,23 +67,79 @@ from .computer_registry import (  # noqa: F401 — re-exported for callers and t
 
 _REF_RE = re.compile(r"^ref_\d{1,4}$")
 
+# The browser is a real Firefox that does its own name lookups and follows its own
+# redirects, so the backend cannot vet where it ends up. On a shared host a
+# non-admin may only drive it when the operator says the runner's egress is walled
+# off from private ranges (scripts/browser-egress-lock.sh, or the Kubernetes
+# browser-runner-public-only NetworkPolicy). The backend cannot see the host's
+# firewall, so this is the operator's attestation, and without it the answer is no.
+EGRESS_LOCK_ENV = "HARVIS_BROWSER_EGRESS_LOCKED"
+_NO_EGRESS_LOCK = ("The shared browser is switched off for non-admin accounts until the operator "
+                   "locks its network egress.")
+
+
+def _guarded(user_id: int) -> bool:
+    from plugins.hermes_ui.providers import url_guarded
+
+    return url_guarded(int(user_id))
+
+
+def _egress_locked() -> bool:
+    return os.getenv(EGRESS_LOCK_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _barred(user_id: int) -> bool:
+    """A guarded user while the operator has not attested the egress lock."""
+    return _guarded(user_id) and not _egress_locked()
+
 SESSION_ENDED = "The browser session ended (closed or timed out). Open the browser again."
 
 router = APIRouter(prefix="/computer", tags=["agents-computer"])
 
 
-async def resync() -> bool:
+async def resync(*, quiet: bool = False) -> bool:
     """Ask the runner what is really open. False when it could not be asked, in
     which case the table is left as it was rather than emptied."""
     try:
         data = await _runner("GET", "/sessions", timeout=8.0)
     except HTTPException as exc:
-        logger.info("computer: resync skipped, runner said %s", exc.detail)
+        (logger.debug if quiet else logger.info)("computer: resync skipped, runner said %s", exc.detail)
         return False
-    n = adopt(list(data.get("items") or []))
+    # A session that outlived the lock (opened before this check, the lock switched off,
+    # or the owner demoted) is a free browser onto the private network: close it
+    # rather than hand it back.
+    allowed = []
+    for item in list(data.get("items") or []):
+        owner = owner_of_profile(item.get("profile"))
+        sid = str(item.get("sessionId") or "")
+        if owner is not None and sid and _barred(owner):
+            try:
+                await _runner("POST", "/close", json={"sessionId": sid}, timeout=15.0)
+            except HTTPException:
+                pass
+            continue
+        allowed.append(item)
+    n = adopt(allowed)
     if n:
         logger.info("computer: adopted %d live session(s) from the runner", n)
     return True
+
+
+LOCK_SWEEP_SECONDS = 60
+
+
+async def run_lock_sweeper(interval: float = LOCK_SWEEP_SECONDS) -> None:
+    """Background loop (started at boot on a shared host) that closes barred users'
+    browsers without waiting for a request. resync otherwise runs only when someone
+    calls this API, and the VNC screen never does, so a session that outlived the
+    lock (switched off at a restart, or its owner demoted) would stay watchable and
+    drivable. The first pass runs at boot."""
+    while True:
+        try:
+            await resync(quiet=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("computer: lock sweep failed: %s", type(exc).__name__)
+        await asyncio.sleep(interval)
 
 
 # ── runner client ────────────────────────────────────────────────────────────
@@ -108,6 +165,22 @@ async def _runner(method: str, path: str, *, json: Any = None, timeout: float = 
 
 
 # ── routes ───────────────────────────────────────────────────────────────────
+
+
+async def _owned_session(user_id: int, session_id: str) -> Dict[str, Any]:
+    """The caller's session, or 404; 403 (and the screen closed) for a guarded user
+    whose session the egress lock no longer covers."""
+    rec = owned(user_id, session_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="No such session")
+    if _barred(user_id):
+        try:
+            await _runner("POST", "/close", json={"sessionId": session_id}, timeout=15.0)
+        except HTTPException:
+            pass
+        _forget(session_id)
+        raise HTTPException(status_code=403, detail=_NO_EGRESS_LOCK)
+    return rec
 
 
 def _uid(current_user) -> int:
@@ -175,6 +248,8 @@ async def ensure_session(
     teammate that starts browsing shows up in the pane the user already has open.
     """
     uid = int(user_id)
+    if _barred(uid):
+        raise HTTPException(status_code=403, detail=_NO_EGRESS_LOCK)
     found = find_session(uid, agent_id)
     if found is None:
         # Not in our table does not mean not open: after a backend restart the
@@ -248,9 +323,7 @@ async def computer_start(form: StartForm, current_user=Depends(get_current_user_
 
 @router.get("/sessions/{session_id}")
 async def computer_get(session_id: str, current_user=Depends(get_current_user_optimized)):
-    rec = owned(_uid(current_user), session_id)
-    if rec is None:
-        raise HTTPException(status_code=404, detail="No such session")
+    rec = await _owned_session(_uid(current_user), session_id)
     try:
         info = await _runner("GET", f"/camofox/tabs/{session_id}", timeout=15.0)
     except HTTPException as exc:
@@ -267,7 +340,18 @@ async def _navigate(rec: Dict[str, Any], url: str) -> Dict[str, Any]:
     # Same URL policy as every other browser lane, live-web strength: the user
     # is steering their own teammate's browser, not an unsupervised agent, so
     # the research allowlist does not apply — https and no private hosts still do.
-    from tools.openclaw_proxy import _validate_browser_url
+    from tools.url_safety import _validate_browser_url
+
+    if _guarded(rec["user_id"]):
+        # First, and stricter than the check below: a name that does not resolve here is
+        # refused rather than left for the browser to resolve its own way, and the
+        # refusal does not say whether a name points inside.
+        from plugins.hermes_ui.providers import EndpointValidationError, refuse_private_url
+
+        try:
+            await refuse_private_url(url)
+        except EndpointValidationError:
+            raise HTTPException(status_code=400, detail="That address is not allowed on a shared server.") from None
     _validate_browser_url(url, live_web=True)
     return await _runner("POST", "/navigate", json={"sessionId": rec["session_id"], "url": url})
 
@@ -276,9 +360,7 @@ async def _navigate(rec: Dict[str, Any], url: str) -> Dict[str, Any]:
 async def computer_navigate(
     session_id: str, form: NavigateForm, current_user=Depends(get_current_user_optimized)
 ):
-    rec = owned(_uid(current_user), session_id)
-    if rec is None:
-        raise HTTPException(status_code=404, detail="No such session")
+    rec = await _owned_session(_uid(current_user), session_id)
     return await _navigate(rec, form.url.strip())
 
 
@@ -286,9 +368,7 @@ async def computer_navigate(
 async def computer_takeover(
     session_id: str, form: TakeoverForm, current_user=Depends(get_current_user_optimized)
 ):
-    rec = owned(_uid(current_user), session_id)
-    if rec is None:
-        raise HTTPException(status_code=404, detail="No such session")
+    rec = await _owned_session(_uid(current_user), session_id)
     out = await _runner("POST", f"/camofox/tabs/{session_id}/takeover", json={"taken": form.taken})
     rec["taken_over"] = bool(out.get("takenOver", form.taken))
     return public_view(rec)

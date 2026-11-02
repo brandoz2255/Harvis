@@ -30,3 +30,8 @@ export function shouldShowIntro(input: {
     input.messagesEmpty
   )
 }
+
+/** Island visibility follows the fresh-draft conditions, not the intro preference. */
+export function shouldShowIsland(input: Parameters<typeof shouldShowIntro>[0], enabled: boolean): boolean {
+  return enabled && shouldShowIntro({ ...input, enabled: true })
+}

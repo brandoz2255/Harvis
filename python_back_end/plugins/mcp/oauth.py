@@ -70,8 +70,14 @@ def _sweep() -> None:
 # -- the flow --------------------------------------------------------------
 
 
+def _strict(user_id: int) -> bool:
+    from .http_transport import strict_for
+
+    return strict_for(user_id)
+
+
 async def _client_for(storage: PgTokenStorage, meta: dict, redirect_uri: str,
-                      manual: Optional[dict]) -> dict:
+                      manual: Optional[dict], strict: bool = False) -> dict:
     """The OAuth client to use for this (user, server).
 
     A client id the user typed in wins and is remembered. Otherwise a registered
@@ -89,7 +95,8 @@ async def _client_for(storage: PgTokenStorage, meta: dict, redirect_uri: str,
         info.get("harvis_manual") or info.get("harvis_redirect_uri") == redirect_uri
     ):
         return info
-    info = await disc.register_client(meta, redirect_uri)
+    info = await (disc.register_client(meta, redirect_uri, strict=True) if strict
+                  else disc.register_client(meta, redirect_uri))
     await storage.set_client_info(info)
     return info
 
@@ -107,11 +114,13 @@ async def begin_authorization(
                 if p["user_id"] == cfg.user_id and p["server_name"] == cfg.server_name]:
         _pending.pop(old, None)
 
-    meta = await discover(cfg.url, www_authenticate=www_authenticate or None)
+    strict = _strict(cfg.user_id)
+    meta = await (discover(cfg.url, www_authenticate=www_authenticate or None, strict=True) if strict
+                  else discover(cfg.url, www_authenticate=www_authenticate or None))
     storage = PgTokenStorage(pool=pool, user_id=cfg.user_id, server_name=cfg.server_name)
     manual = {"client_id": client_id.strip(), **({"client_secret": client_secret.strip()}
                                                  if client_secret.strip() else {})} if client_id.strip() else None
-    client = await _client_for(storage, meta, redirect_uri, manual)
+    client = await _client_for(storage, meta, redirect_uri, manual, strict)
 
     verifier, challenge = _pkce()
     state = _b64url(secrets.token_bytes(24))
@@ -164,7 +173,7 @@ async def complete_authorization(state: str, code: str, pool) -> dict:
     if meta.get("resource"):
         form["resource"] = meta["resource"]
 
-    tokens = await _token_request(meta["token_endpoint"], form)
+    tokens = await _token_request(meta["token_endpoint"], form, strict=_strict(pending["user_id"]))
     storage = PgTokenStorage(pool=pool, user_id=pending["user_id"], server_name=pending["server_name"])
     tokens["harvis_token_endpoint"] = meta["token_endpoint"]
     tokens["harvis_resource"] = meta.get("resource") or ""
@@ -173,8 +182,8 @@ async def complete_authorization(state: str, code: str, pool) -> dict:
     return {"server_name": pending["server_name"], "user_id": pending["user_id"]}
 
 
-async def _token_request(endpoint: str, form: dict) -> dict:
-    async with disc._client() as client:
+async def _token_request(endpoint: str, form: dict, *, strict: bool = False) -> dict:
+    async with (disc._client(strict=True) if strict else disc._client()) as client:
         try:
             resp = await client.post(
                 endpoint, data=form,
@@ -238,7 +247,7 @@ async def _refresh(storage: PgTokenStorage, cfg: McpServerConfig, tokens: dict) 
     if tokens.get("harvis_resource"):
         form["resource"] = tokens["harvis_resource"]
     try:
-        renewed = await _token_request(endpoint, form)
+        renewed = await _token_request(endpoint, form, strict=_strict(cfg.user_id))
     except OAuthError as exc:
         logger.warning("mcp oauth: refresh failed for %s — %s", cfg.server_name, exc)
         return None

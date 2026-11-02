@@ -19,7 +19,6 @@
 #   HARVIS_PORT_POSTGRES      5432   pgsql
 #   HARVIS_PORT_MCP           8010   harvis-mcp        (loopback only)
 #   HARVIS_PORT_FRONTEND      3000   frontend          (profile: legacy)
-#   HARVIS_PORT_OPENCLAW     18789   openclaw gateway  (loopback; profile: engines)
 #   HARVIS_PORT_TTS           8001   tts-service       (profile: advanced-voice)
 #   HARVIS_PORT_NOTEBOOK_UI   8502   open-notebook UI  (profile: notebooks-upstream)
 #   HARVIS_PORT_NOTEBOOK_API  5055   open-notebook API (profile: notebooks-upstream)
@@ -172,7 +171,7 @@ services:
       # HARVIS_BIND_ADDR=0.0.0.0 in .env only if you need it from another machine.
       - "${HARVIS_BIND_ADDR:-127.0.0.1}:${HARVIS_PORT_BACKEND:-8000}:8000"
     environment:
-      DATABASE_URL: "postgresql://pguser:${POSTGRES_PASSWORD:-pgpassword}@pgsql:5432/database"
+      DATABASE_URL: "postgresql://pguser:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@pgsql:5432/database"
       JWT_SECRET: "${JWT_SECRET:?JWT_SECRET must be set in .env}"
       # Let PyTorch reuse fragmented/reserved VRAM instead of OOMing on the
       # TTS generation's ~774MB activation alloc. Critical on the 8GB laptop GPU
@@ -188,7 +187,7 @@ services:
       HARVIS_MODEL_POOLS: "${HARVIS_MODEL_POOLS:-}"
       # Which optional capability packs the operator turned on. A container cannot
       # see `docker compose --profile`, so without this the health endpoints have
-      # no way to tell "engines were never installed" from "openclaw crashed", and
+      # no way to tell "engines were never installed" from "an engine crashed", and
       # a correct default install reports itself degraded.
       HARVIS_ENABLED_PROFILES: "${COMPOSE_PROFILES:-}"
       # /api/capabilities/hosting reports "NVIDIA runtime wired" from this. The
@@ -241,7 +240,7 @@ services:
       # (main.resolve_default_model). Empty = HARVIS_DEFAULT_LOCAL_MODEL, then the first
       # chat model the provider reports.
       HARVIS_DEFAULT_MODEL: "${HARVIS_DEFAULT_MODEL:-}"
-      # Safety net for OpenClaw's `model=auto` when the saved pick can't be served.
+      # Safety net for the workspace `model=auto` when the saved pick can't be served.
       # Empty = the resolver names a real installed model instead of a fixed guess.
       HARVIS_AUTO_MODEL_FALLBACK: "${HARVIS_AUTO_MODEL_FALLBACK:-}"
       # Per-workspace ephemeral Docker terminal (Phase 2). Default ON — the
@@ -250,7 +249,8 @@ services:
       # HARVIS_TERMINAL_ENABLED=false to force-disable as a kill-switch.
       HARVIS_TERMINAL_ENABLED: "${HARVIS_TERMINAL_ENABLED:-true}"
       HARVIS_TERMINAL_IMAGE: "${HARVIS_TERMINAL_IMAGE:-ubuntu:24.04}"
-      HARVIS_TERMINAL_NETWORK: "${HARVIS_TERMINAL_NETWORK:-harvis_openclaw-internal}"
+      # ws-term-net holds the backend and the terminals, nothing else (see networks:).
+      HARVIS_TERMINAL_NETWORK: "${HARVIS_TERMINAL_NETWORK:-${HARVIS_STACK_NAME:-harvis}_ws-term-net}"
       HARVIS_TERMINAL_MEM: "${HARVIS_TERMINAL_MEM:-512m}"
       HARVIS_TERMINAL_CPUS: "${HARVIS_TERMINAL_CPUS:-1.0}"
       HARVIS_TERMINAL_DEFAULT_TIMEOUT_S: "${HARVIS_TERMINAL_DEFAULT_TIMEOUT_S:-30}"
@@ -362,28 +362,24 @@ services:
       # process. With this unset or the sandbox down, document generation fails
       # with an error instead of falling back to running the code here.
       CODE_EXECUTOR_URL: "http://sandbox:8080"
-      # OpenClaw integration
-      # OPENCLAW_URL / OPENCLAW_BUNDLED_URL default to the local container.
-      # Override in .env to route to a remote gateway (e.g. desktop GPU box).
-      # If primary fails, the client auto-retries against OPENCLAW_FALLBACK_URL.
-      OPENCLAW_URL: "${OPENCLAW_URL:-ws://openclaw:18789}"
-      OPENCLAW_GATEWAY_TOKEN: "${OPENCLAW_GATEWAY_TOKEN_BUNDLED:-${OPENCLAW_GATEWAY_TOKEN}}"
-      OPENCLAW_GATEWAY_TOKEN_BUNDLED: "${OPENCLAW_GATEWAY_TOKEN_BUNDLED:-${OPENCLAW_GATEWAY_TOKEN}}"
-      OPENCLAW_BUNDLED_URL: "${OPENCLAW_BUNDLED_URL:-ws://openclaw:18789}"
-      OPENCLAW_FALLBACK_URL: "${OPENCLAW_FALLBACK_URL:-ws://openclaw:18789}"
-      OPENCLAW_FALLBACK_TOKEN: "${OPENCLAW_FALLBACK_TOKEN:-${OPENCLAW_GATEWAY_TOKEN_BUNDLED:-${OPENCLAW_GATEWAY_TOKEN}}}"
-      # Host-installed OpenClaw gateway (Discord-facing, runs on host:18790)
-      OPENCLAW_HOST_URL: "${OPENCLAW_HOST_URL:-ws://host.docker.internal:18790}"
-      # Path inside the container to the host's native OpenClaw config
-      # (bind-mounted below). Used by /model Discord command to propagate
-      # model selection to the native BYO OpenClaw gateway.
-      HOST_OPENCLAW_CONFIG: "${HOST_OPENCLAW_CONFIG:-/host-openclaw/openclaw.json}"
+      # Shared internal bearer for the workspace/tool proxies and harvis-mcp.
+      # HARVIS_GATEWAY_TOKEN is the name the code reads first; an .env that still
+      # has only the OPENCLAW_* names resolves to the same value, and the legacy
+      # OPENCLAW_GATEWAY_TOKEN name is still passed so an older image keeps working.
+      # The bundled OpenClaw container is retired (2026-10-30): no OPENCLAW_URL
+      # here. OpenClaw is an optional per-user external link, stored in the DB.
+      HARVIS_GATEWAY_TOKEN: "${HARVIS_GATEWAY_TOKEN:-${OPENCLAW_GATEWAY_TOKEN_BUNDLED:-${OPENCLAW_GATEWAY_TOKEN:-}}}"
+      OPENCLAW_GATEWAY_TOKEN: "${HARVIS_GATEWAY_TOKEN:-${OPENCLAW_GATEWAY_TOKEN_BUNDLED:-${OPENCLAW_GATEWAY_TOKEN:-}}}"
       # Engine sync (Agent Studio → Skills → Engine sync). ONE published SKILL.md
       # tree, written here by the backend and mounted read-only into every engine
       # sidecar at /skills — a verified skill should reach whichever engine runs
-      # the task, not just OpenClaw. Gated by HARVIS_ENGINE_SYNC; nothing is ever
+      # the task, not just one. Gated by HARVIS_ENGINE_SYNC; nothing is ever
       # written without an explicit apply from the UI.
       HARVIS_ENGINE_SKILLS_DIR: "${HARVIS_ENGINE_SKILLS_DIR:-/app/engine_skills}"
+      # Engine identity/config tree (host ./engine-config), read by the workspace
+      # client and the MCP wizard. The env names keep their historical OPENCLAW spelling.
+      HARVIS_OPENCLAW_CONFIG_DIR: "${HARVIS_OPENCLAW_CONFIG_DIR:-/app/engine_config}"
+      HARVIS_OPENCLAW_IDENTITY_DIR: "${HARVIS_OPENCLAW_IDENTITY_DIR:-/app/engine_config}"
       HARVIS_ENGINE_SYNC: "${HARVIS_ENGINE_SYNC:-${HARVIS_OPENCLAW_SYNC:-0}}"
       # Cloud AI providers (loaded from .env — never hardcode here)
       MOONSHOT_API_KEY: "${MOONSHOT_API_KEY:-}"
@@ -411,20 +407,21 @@ services:
       HARVIS_CODE_CHANNEL_ID: "${HARVIS_CODE_CHANNEL_ID:-1526412856990502923}"
       HARVIS_CODE_GUILD_ID: "${HARVIS_CODE_GUILD_ID:-1491563310699516044}"
       HARVIS_CODE_APPROVER_ROLE_IDS: "${HARVIS_CODE_APPROVER_ROLE_IDS:-}"
-      # Workspace routing — send most messages through OpenClaw
+      # Workspace routing — send most messages through the workspace agent
       DISCORD_PREFER_WORKSPACE: "${DISCORD_PREFER_WORKSPACE:-true}"
       # History turns — 0 prevents prior chat history from bleeding into
       # tool-dependent workspace tasks (hash cracking, decode, etc.).
-      # OpenClaw maintains its own per-session context for continuity.
+      # The agent maintains its own per-session context for continuity.
       DISCORD_WORKSPACE_HISTORY_TURNS: "${DISCORD_WORKSPACE_HISTORY_TURNS:-0}"
       # Messaging gateway sidecar — service-to-service shared secret
       MESSAGING_GATEWAY_TOKEN: "${MESSAGING_GATEWAY_TOKEN:-}"
       HARVIS_PUBLIC_URL: "${HARVIS_PUBLIC_URL:-}"
-      # Shared projects volume path inside backend container
+      # Shared projects volume path inside backend container (name kept so
+      # existing repo clones stay on the same volume)
       OPENCLAW_PROJECTS_DIR: "/data/openclaw-projects"
       # Real local repos bind-mounted READ-ONLY for orchestrated clone-local "attached" runs
       # (comma-separated container paths). The agent only ever clones FROM these.
-      # Phase E1 — external code engines (OpenCode/Codex/Claude Code sidecars). Default ON so
+      # Phase E1 — external code engines (Codex/Claude Code sidecars). Default ON so
       # a verified Claude/OpenAI credential makes those Build engines runnable (the picker
       # already lists their models); still overridable via the env var.
       HARVIS_OWUI_EXTERNAL_ENGINES: "${HARVIS_OWUI_EXTERNAL_ENGINES:-true}"
@@ -456,6 +453,11 @@ services:
       # New accounts wait for the admin's approval (Settings ▸ People). Empty =
       # on for lan/tunnel, off for local; true/false overrides.
       HARVIS_SIGNUP_APPROVAL: "${HARVIS_SIGNUP_APPROVAL:-}"
+      # House rules people tick at sign-up. Empty = on for lan/tunnel, off for
+      # local. HARVIS_HOUSE_RULES replaces the default rules ("rule one | rule two");
+      # keep site wording in a git-ignored preset (plugins/people/terms.py).
+      HARVIS_SIGNUP_TERMS: "${HARVIS_SIGNUP_TERMS:-}"
+      HARVIS_HOUSE_RULES: "${HARVIS_HOUSE_RULES:-}"
       # "everyone" lets non-admins use Build Space on a shared server too.
       HARVIS_BUILD_SPACE_ACCESS: "${HARVIS_BUILD_SPACE_ACCESS:-}"
       # Server-enforced (main.py signup gate) AND read by the frontend config.
@@ -509,7 +511,7 @@ services:
       # yt_transcript / gh_view / rss_read) for chat and workspace runs. On by
       # default since 2026-10-01: every call runs from the backend through the
       # SSRF guard (public addresses only, no cookies); set false to turn it off.
-      # NEVER enable this inside the egress-denied OpenClaw pod.
+      # NEVER enable this inside an egress-denied container.
       HARVIS_AGENT_REACH_ENABLED: "${HARVIS_AGENT_REACH_ENABLED:-true}"
       # Screenshot-to-code self-check — renders the model's own HTML in the
       # locked-down preview container and feeds the PNG back for comparison.
@@ -524,9 +526,9 @@ services:
       # model-authored and untrusted, and preview-runner is the container that
       # forces safe mode and sits on an internal-only network.
       HARVIS_BROWSER_RUNNER_URL: "${HARVIS_BROWSER_RUNNER_URL:-http://preview-runner:8765}"
-      HARVIS_OPENCODE_CONTAINER: "${HARVIS_OPENCODE_CONTAINER:-harvis-opencode}"
-      HARVIS_OPENCODE_DEFAULT_MODEL: "${HARVIS_OPENCODE_DEFAULT_MODEL:-qwen3:4b}"
-      HARVIS_OPENCODE_TIMEOUT_S: "${HARVIS_OPENCODE_TIMEOUT_S:-900}"
+      # Seconds a Build engine may go silent before it is stopped. Still honours the
+      # old HARVIS_OPENCODE_TIMEOUT_S from an existing .env.
+      HARVIS_ENGINE_IDLE_TIMEOUT_S: "${HARVIS_ENGINE_IDLE_TIMEOUT_S:-${HARVIS_OPENCODE_TIMEOUT_S:-900}}"
       # Phase E4 — Hermes NATIVE engine (SubAgentRunner + SOUL persona, no sidecar). Own
       # flag (decoupled from the external-engines flag). Flag default OFF.
       HARVIS_OWUI_HERMES_ENGINE: "${HARVIS_OWUI_HERMES_ENGINE:-}"
@@ -632,11 +634,10 @@ services:
       - ./python_back_end/migrations:/app/migrations:ro
       - ./python_back_end/onb_compat:/app/onb_compat:ro
       - ./python_back_end/open_notebook:/app/open_notebook:ro
-      - ./openclaw/config:/app/openclaw_config
+      - ./engine-config:/app/engine_config
       # Shared engine skills tree — RW here (the backend publishes into it), :ro in
-      # every engine sidecar. Same host path OpenClaw already mounted at /skills, so
-      # existing published skills carry over untouched.
-      - ./openclaw/skills/${OPENCLAW_CONFIG_SET:-bundled}:/app/engine_skills:rw
+      # every engine sidecar.
+      - ./engine-skills/${OPENCLAW_CONFIG_SET:-bundled}:/app/engine_skills:rw
       - ./python_back_end/notebooks:/app/notebooks:ro
       - ./python_back_end/vibecoding:/app/vibecoding:ro
       # Agent Reach (lane-5 public research), screenshot-to-code, and the skillopt
@@ -693,36 +694,36 @@ services:
       # Browsed folders are clone-mode by default; flip HARVIS_INPLACE_ON_BROWSED only once the
       # permission ladder + an exec sandbox are verified.
       - ${HARVIS_FS_BROWSE_ROOT_RW_HOST:-./harvis-fs-browse}:/data/host-fs-rw:rw
-      # Write-through to a host-native OpenClaw config, so Discord /model
-      # propagates to a BYO gateway. Defaults to a repo-local directory: a
-      # fresh install has no native OpenClaw, and Docker CREATES a missing
-      # bind-mount source — an absolute default would plant a root-owned
-      # directory on every installer's machine. Point
-      # HOST_OPENCLAW_CONFIG_HOST_PATH at ~/.openclaw in .env if you run one.
-      # Requires the file to be writable by UID 1001 (appuser) — chmod 664
-      # and chgrp to a shared group if needed.
-      - "${HOST_OPENCLAW_CONFIG_HOST_PATH:-./harvis-openclaw-config}:/host-openclaw:rw"
       # The Shut down button (scripts/power-button.sh): the backend drops a "stop"
       # file here and a root watcher on the host stops Harvis. The installer sets
       # HARVIS_CONTROL_DIR when it sets the watcher up; without one (repo default)
       # the button stays hidden.
       - "${HARVIS_CONTROL_DIR:-./harvis-control}:/harvis-control:rw"
     networks:
-      - ollama-n8n-network
-      - openclaw-internal
-      - cad-internal
-      - repo-sandbox
+      # The backend sits on two networks that have a gateway: this one and
+      # repo-sandbox. Docker picks the default route by network NAME unless told
+      # otherwise, and "harvis_repo-sandbox" sorts before "ollama-n8n-network", so
+      # without gw_priority the backend's traffic to host Ollama and to LAN model
+      # servers leaves from the repo-sandbox subnet, which scripts/browser-egress-lock.sh
+      # and scripts/ollama-lan-lock.sh drop. The highest gw_priority wins.
+      ollama-n8n-network:
+        gw_priority: 1
+      # Workspace terminals run the agent's shell. They get their own internal
+      # network, shared with the backend alone, so a terminal never sits on a
+      # segment with pgsql or harvis-mcp.
+      ws-term-net: {}
+      cad-internal: {}
+      repo-sandbox: {}
       # Reaches preview-runner, which renders untrusted model-authored HTML.
       # preview-net is internal:true, so nothing on it can reach the internet.
-      - preview-net
+      preview-net: {}
       # Drives browser-runner (automation API on :8765). browser-ctl is
       # internal:true and holds only backend, nginx and browser-runner.
-      - browser-ctl
+      browser-ctl: {}
       # Sends document code to the sandbox. internal:true; only backend and
       # document-worker are on it.
-      - sandbox-net
+      sandbox-net: {}
     extra_hosts:
-      # Allow backend container to reach host-installed openclaw gateway on :18790
       - "host.docker.internal:host-gateway"
     depends_on:
       pgsql:
@@ -738,13 +739,13 @@ services:
       # every fresh install download the Whisper/Chatterbox/Qwen3-TTS voice
       # weights before the app could start (and a default service may never
       # depend on a profiled one, or Compose refuses to schedule it).
-      # NOTE: openclaw + browser-runner are deliberately NOT depends_on.
-      # The backend never contacts either at startup — both lifespan() and
-      # startup_event() touch Postgres only, and the openclaw/browser routers
-      # proxy lazily at request time (/api/services/health probes them per
-      # request). Keeping them here made two optional capabilities into hard
-      # boot blockers and prevented profile-gating them. Availability is
-      # reported by the health probe, not enforced by the boot order.
+      # NOTE: browser-runner is deliberately NOT depends_on.
+      # The backend never contacts it at startup — both lifespan() and
+      # startup_event() touch Postgres only, and the browser router proxies
+      # lazily at request time (/api/services/health probes it per request).
+      # Keeping it here made an optional capability a hard boot blocker and
+      # prevented profile-gating it. Availability is reported by the health
+      # probe, not enforced by the boot order.
 
   # Tier 3 Browser Runner (Firefox sandbox) - internet only, no LAN (see networks below)
   browser-runner:
@@ -765,14 +766,14 @@ services:
     # Two networks, each with one job:
     #   browser-ctl     internal:true. How backend (API) and nginx (the :6080
     #                   watch-the-browser stream) reach this container. Shares
-    #                   nothing with pgsql, ollama or openclaw.
+    #                   nothing with pgsql or ollama.
     #   browser-egress  The way out to the internet, on a pinned subnet so that
     #                   scripts/browser-egress-lock.sh can refuse LAN and private
     #                   destinations. Docker has no "internet but not the LAN"
     #                   network setting: without that script this container
     #                   can still reach the host's LAN.
-    # It was on openclaw-internal and ollama-n8n-network; nothing here needs
-    # either, and ollama-n8n-network put it next to every other service.
+    # It was once on ollama-n8n-network; nothing here needs it, and that network
+    # put it next to every other service.
     networks:
       - browser-ctl
       - browser-egress
@@ -803,7 +804,7 @@ services:
   #     JavaScript or network, whatever it sends in the request body;
   #   - preview-net is internal:true, so even a browser bug can't reach the
   #     internet, and the container is on no other network, so it can't reach
-  #     pgsql, ollama, or openclaw either;
+  #     pgsql or ollama either;
   #   - no ports: — not reachable from the host.
   # browser-runner stays as-is for the trusted browsing lane, which needs both.
   preview-runner:
@@ -948,10 +949,6 @@ services:
       # the one surface behind a login. Everything else is loopback-only.
       # This computer only unless ./install.sh --expose lan (or --k8s) opens it.
       - "${HARVIS_BIND_ADDR_PUBLIC:-127.0.0.1}:${HARVIS_PORT_NGINX:-9000}:80"
-      # Untrusted repo-preview origin (Adaptive Workspace Repo Runner live app
-      # preview). Bound to localhost only so preview dev servers are reachable
-      # from the local user's browser but never exposed on the LAN.
-      - "127.0.0.1:9002:9002"
       # The HTTPS front door. Nothing listens here until ./scripts/enable-https.sh
       # has run — until then nginx has no 443 server block and the port simply
       # refuses connections, which costs nothing. Publishing it up front is what
@@ -973,7 +970,6 @@ services:
       # matching zero files is not an error, so HTTPS stays off until
       # ./scripts/enable-https.sh puts both here.
       - ./nginx/tls:/etc/nginx/tls:ro
-      - /tmp:/tmp:ro
     depends_on:
       # long-form so nginx waits for the one-shot hermes-ui-builder to finish
       # populating the static bundle before it starts serving.
@@ -1066,7 +1062,7 @@ services:
     profiles: ["notebooks"]
     restart: unless-stopped
     environment:
-      DATABASE_URL: "postgresql://pguser:${POSTGRES_PASSWORD:-pgpassword}@pgsql:5432/database"
+      DATABASE_URL: "postgresql://pguser:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@pgsql:5432/database"
       OLLAMA_URL: "${HARVIS_LLM_BASE_URL:-${OLLAMA_URL:-http://host.docker.internal:11434}}"
       BACKEND_URL: "http://backend:8000"
       ENVIRONMENT: "production"
@@ -1113,7 +1109,7 @@ services:
       POSTGRES_USER: pguser
       # Generated by install.sh on a fresh database; falls back to the
       # historical default so existing volumes keep working.
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pgpassword}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
       POSTGRES_DB: database
       POSTGRES_INITDB_ARGS: "-E UTF8 --locale=C"
     volumes:
@@ -1142,201 +1138,12 @@ services:
           memory: 512M
     networks:
       - ollama-n8n-network
-      - openclaw-internal
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U pguser -d database"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-
-  # ═══════════════════════════════════════════════════════════════════════════
-  # OpenClaw Agent Gateway
-  # ═══════════════════════════════════════════════════════════════════════════
-
-  # DB schema init — runs once per stack start (idempotent CREATE IF NOT EXISTS)
-  openclaw-db-init:
-    image: postgres:15-alpine@sha256:fceb6f86328c36f2438fae3b851b0cc57c4a7e69a58c866d9ce24281f2cf0c9c
-    container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-openclaw-db-init
-    profiles: ["engines"]
-    restart: "no"
-    command: >
-      sh -c "
-        echo 'Waiting for PostgreSQL...' &&
-        until pg_isready -h pgsql -U pguser -d database; do
-          echo 'PostgreSQL not ready, retrying in 2s...'; sleep 2;
-        done &&
-        echo 'Creating OpenClaw tables...' &&
-        psql postgresql://pguser:${POSTGRES_PASSWORD:-pgpassword}@pgsql:5432/database <<'SQL'
-          CREATE TABLE IF NOT EXISTS openclaw_sessions (
-            id           SERIAL PRIMARY KEY,
-            session_key  TEXT UNIQUE NOT NULL,
-            agent_id     TEXT NOT NULL,
-            display_name TEXT,
-            model_id     TEXT,
-            created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            tokens_in    INTEGER DEFAULT 0,
-            tokens_out   INTEGER DEFAULT 0,
-            cost_usd     NUMERIC(12, 8) DEFAULT 0,
-            metadata     JSONB DEFAULT '{}'
-          );
-          CREATE TABLE IF NOT EXISTS openclaw_messages (
-            id           SERIAL PRIMARY KEY,
-            session_key  TEXT NOT NULL REFERENCES openclaw_sessions(session_key),
-            msg_id       TEXT NOT NULL,
-            role         TEXT NOT NULL,
-            content      JSONB NOT NULL,
-            metadata     JSONB DEFAULT '{}',
-            created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
-          );
-          CREATE INDEX IF NOT EXISTS idx_oc_sessions_agent
-            ON openclaw_sessions(agent_id);
-          CREATE INDEX IF NOT EXISTS idx_oc_sessions_updated
-            ON openclaw_sessions(updated_at);
-          CREATE INDEX IF NOT EXISTS idx_oc_messages_session
-            ON openclaw_messages(session_key, created_at);
-        SQL
-        echo 'OpenClaw schema ready!'
-      "
-    depends_on:
-      pgsql:
-        condition: service_healthy
-    networks:
-      - openclaw-internal
-
-  # OpenClaw agent gateway — isolated agent backend for Harvis Workspaces + Discord.
-  # NO ports exposed to host — only reachable from backend via openclaw-internal.
-  # Discord channel driver connects outbound to Discord gateway (port 443).
-  openclaw:
-    build:
-      context: .
-      dockerfile: openclaw-browser/Dockerfile
-    # Digest-only: this image publishes no version tag and no version label, so
-    # a digest is the only thing that identifies it. Re-pin deliberately when
-    # you want a newer OpenClaw browser build.
-    image: dulc3/openclaw-browser@sha256:584a24f8715223fc76d14cb6b8c8eab449c9fd48b9456d6bdfe39ab5b1a426c1
-    # Registry-style tag but we build it locally — force build so a bare
-    # `docker compose up -d` doesn't try to pull it.
-    pull_policy: build
-    container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-openclaw
-    profiles: ["engines"]
-    restart: unless-stopped
-    user: "1000:1000"
-    # Expose to localhost ONLY for Cursor extension — never 0.0.0.0
-    ports:
-      - "127.0.0.1:${HARVIS_PORT_OPENCLAW:-18789}:18789"
-    # Chromium needs shared memory — Docker default 64MB causes tab crashes
-    shm_size: '256m'
-    tmpfs:
-      - /tmp/.chromium:size=128m
-    environment:
-      HOME: /home/node
-      NODE_ENV: production
-      TERM: xterm-256color
-      OPENCLAW_STATE_DIR: /home/node/.openclaw
-      OPENCLAW_GATEWAY_TOKEN: "${OPENCLAW_GATEWAY_TOKEN_BUNDLED:-${OPENCLAW_GATEWAY_TOKEN}}"
-      OPENCLAW_MODE: "${OPENCLAW_MODE:-bundled}"
-      OLLAMA_API_KEY: "ollama-local"
-      DATABASE_URL: "postgresql://pguser:${POSTGRES_PASSWORD:-pgpassword}@pgsql:5432/database"
-      GH_TOKEN: "${HARVIS_GITHUB_TOKEN:-}"
-      GH_USER: "${HARVIS_GITHUB_USER:-}"
-      GH_EMAIL: "${HARVIS_GITHUB_EMAIL:-}"
-      # Chromium discovery for OpenClaw's native browser tool
-      CHROME_BIN: /usr/bin/chromium
-      PUPPETEER_EXECUTABLE_PATH: /usr/bin/chromium
-      PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
-    volumes:
-      - openclaw-data:/home/node/.openclaw
-      # Mode-specific config set (default: bundled)
-      # RW so `openclaw plugins install/enable` can update the config via
-      # atomic rename. The host file lives in the repo so writes are visible
-      # in git status and reversible. Was :ro pre-2026-05-24 — flipped when
-      # B7 (custom MCP tool plugins) needed OpenClaw to register installs.
-      - ./openclaw/config/${OPENCLAW_CONFIG_SET:-bundled}/openclaw.json:/home/node/.openclaw/openclaw.json:rw
-      # NOTE: exec-approvals.json bind mount removed 2026-05-24 (B7/v4 work).
-      # OpenClaw v2026.5.x rewrites this file on every exec via atomic
-      # temp-file-rename (write tmp, rename tmp → target). Linux refuses to
-      # rename over a single-file bind mount with EBUSY because the inode
-      # is pinned by the mount — every exec fails. Same root cause as the
-      # openclaw.json case above, but :rw doesn't help here because the
-      # failure is on the rename, not the open-for-write.
-      # The file now lives in the openclaw-data volume only. On a fresh
-      # volume, OpenClaw v4 creates the file with library defaults; if
-      # the defaults need tightening (ask: "off", askFallback: "allow"),
-      # seed via `docker exec harvis-openclaw bash -c 'cat > ... <<EOF'`
-      # after first boot. Tonight's volume already carries a populated
-      # copy from earlier sessions.
-      # Shared identity files
-      - ./openclaw/config/shared/IDENTITY.md:/home/node/.openclaw/IDENTITY.md:ro
-      - ./openclaw/config/shared/SOUL.md:/home/node/.openclaw/SOUL.md:ro
-      # Mode-specific identity overrides + skills
-      - ./openclaw/config/${OPENCLAW_CONFIG_SET:-bundled}/USER.md:/home/node/.openclaw/USER.md:ro
-      - ./openclaw/config/${OPENCLAW_CONFIG_SET:-bundled}/AGENT.md:/home/node/.openclaw/AGENT.md:ro
-      # Skills are writable so the agent can edit its own behavior. Identity
-      # files (IDENTITY.md / SOUL.md / USER.md / AGENT.md) are mounted
-      # separately as :ro elsewhere — those stay locked. The agent edits skills
-      # via the existing `exec` tool (e.g. `cat > /skills-shared/harvis-X/SKILL.md`).
-      - ./openclaw/skills/${OPENCLAW_CONFIG_SET:-bundled}:/skills:rw
-      - ./openclaw/skills/shared:/skills-shared:rw
-      # Mode-specific heartbeat workspace files
-      - ./openclaw/config/${OPENCLAW_CONFIG_SET:-bundled}/HEARTBEAT.md:/home/node/.openclaw/workspace/HEARTBEAT.md:ro
-      - ./openclaw/scripts/${OPENCLAW_CONFIG_SET:-bundled}:/home/node/.openclaw/workspace/scripts:ro
-      # Shared projects volume — backend writes repos, OpenClaw reads/writes code
-      - openclaw-projects:/home/node/projects
-      # Local OpenClaw tool plugins (built artifacts + manifest) — installed
-      # via `openclaw plugins install --link /openclaw-plugins/<id>`. Path is
-      # stable across rebuilds because it lives in the repo. RW so the
-      # container can `npm install` runtime deps (typebox) alongside dist/.
-      - ./openclaw/plugins:/openclaw-plugins:rw
-    # OpenClaw is npm-installed globally in the image (see
-    # openclaw-browser/Dockerfile). The `openclaw` binary is on PATH; the
-    # prior `node openclaw.mjs ...` form only worked when openclaw.mjs was
-    # in PWD, which required the dulc3/openclaw base image's filesystem
-    # layout. Now we invoke the CLI directly.
-    # Wrap the gateway with a background auto-approver. On a FRESH openclaw-data
-    # volume the backend's device lands "pending" — openclaw v2026.5.22 does not
-    # honor skipPairingForOperatorSharedAuth despite the backend sending the
-    # correct token + operator.admin scopes — so Workspace + Build hang on
-    # "pairing required: device is not approved yet". This drains pending pairing
-    # requests every 5s so the backend's handshake succeeds unattended; it is an
-    # idempotent no-op once the device is paired ("No pending requests", exit 0).
-    # Safe here: openclaw has NO external port (internal network + 127.0.0.1 only),
-    # so only Harvis's own services / local Cursor can ever create a pending
-    # request. `$$` = a literal `$` (expanded container-side, not by Compose).
-    command:
-      - sh
-      - -c
-      - |
-        ( while true; do
-            openclaw devices approve --latest --url ws://127.0.0.1:18789 \
-              --token "$$OPENCLAW_GATEWAY_TOKEN" >/dev/null 2>&1 || true
-            sleep 5
-          done ) &
-        exec openclaw gateway --bind lan --port 18789 --allow-unconfigured
-    depends_on:
-      pgsql:
-        condition: service_healthy
-      openclaw-db-init:
-        condition: service_completed_successfully
-      # The bundled ollama + ollama-model-check are gone: the model server is the
-      # operator's now (HARVIS_LLM_BASE_URL), so there is nothing local to wait on.
-      # OpenClaw resolves its model endpoint per request and reports a provider
-      # that isn't answering, rather than refusing to boot without one.
-    healthcheck:
-      test: ["CMD-SHELL", "node -e \"const n=require('net');const c=n.createConnection(18789,'127.0.0.1');c.on('connect',()=>{c.end();process.exit(0)});c.on('error',()=>process.exit(1))\""]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-    deploy:
-      resources:
-        limits:
-          memory: 4G
-          cpus: '2.0'
-    networks:
-      - openclaw-internal
-      - ollama-n8n-network
 
   # ═══════════════════════════════════════════════════════════════════════════
   # Open Notebook Services
@@ -1424,7 +1231,8 @@ services:
     entrypoint: ["uvicorn", "mcp.server.app:app", "--host", "0.0.0.0", "--port", "8010"]
     environment:
       BACKEND_INTERNAL_URL: "http://backend:8000"
-      OPENCLAW_GATEWAY_TOKEN: "${OPENCLAW_GATEWAY_TOKEN_BUNDLED:-${OPENCLAW_GATEWAY_TOKEN}}"
+      HARVIS_GATEWAY_TOKEN: "${HARVIS_GATEWAY_TOKEN:-${OPENCLAW_GATEWAY_TOKEN_BUNDLED:-${OPENCLAW_GATEWAY_TOKEN:-}}}"
+      OPENCLAW_GATEWAY_TOKEN: "${HARVIS_GATEWAY_TOKEN:-${OPENCLAW_GATEWAY_TOKEN_BUNDLED:-${OPENCLAW_GATEWAY_TOKEN:-}}}"
       # The bearer every /mcp/invoke call must carry (mcp/server/auth.py). No
       # default on purpose: unset, the server answers 503 to every request
       # rather than accepting a value that is published in the repo.
@@ -1438,7 +1246,6 @@ services:
         condition: service_started
     networks:
       - ollama-n8n-network
-      - openclaw-internal
     ports:
       - "127.0.0.1:${HARVIS_PORT_MCP:-8010}:8010"
 
@@ -1674,7 +1481,7 @@ services:
   # ───────────────────────────────────────────────────────────────────────────
   # Bridges third-party messaging platforms (Slack, Discord, Telegram, Email,
   # SMS) to the Harvis backend. Runs on ollama-n8n-network ONLY — needs
-  # outbound internet for platform APIs. NEVER joins openclaw-internal.
+  # outbound internet for platform APIs.
   #
   # Phase 1B ships only the stub adapter (HTTP inject endpoint at :18800,
   # bound to 127.0.0.1, gated by STUB_ENABLED=true). Real platform adapters
@@ -1740,35 +1547,6 @@ services:
     networks:
       - ollama-n8n-network
 
-  # ── Harvis OpenCode engine sidecar (Phase E1 — external code engine) ──
-  # An external coding CLI the VibeCode/Build runtime can drive: the backend
-  # `docker exec`s `opencode run` here against the session clone (shared via the
-  # artifact_data volume, same path) using a LOCAL Ollama model — zero cloud
-  # credentials. Idle by default (invoked per-turn); gated on the backend by
-  # HARVIS_OWUI_EXTERNAL_ENGINES. No host ports. uid 1001 = artifact_data owner.
-  opencode:
-    # Reaches an LLM server running on the HOST (the default is the operator's
-    # own Ollama/LM Studio/llama.cpp/vLLM on 127.0.0.1). Linux needs this
-    # mapping explicitly; without it host.docker.internal does not resolve.
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    build:
-      context: ./opencode
-      dockerfile: Dockerfile
-    image: harvis-opencode:local
-    pull_policy: build
-    container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-opencode
-    profiles: ["engines"]
-    restart: unless-stopped
-    user: "1001:1001"
-    environment:
-      OLLAMA_URL: "${HARVIS_LLM_BASE_URL:-${OLLAMA_URL:-http://host.docker.internal:11434}}"
-      HOME: /home/opencode
-    volumes:
-      - artifact_data:/data/artifacts
-    networks:
-      - ollama-n8n-network
-
   # ── Harvis Codex engine sidecar (Phase E2 — cloud, per-user OpenAI key) ──
   # Runs OpenAI's Codex CLI against the session clone. The user's OpenAI key is
   # injected per-exec at run time (docker exec -e OPENAI_API_KEY=…) — NOT baked here.
@@ -1788,7 +1566,7 @@ services:
     volumes:
       - artifact_data:/data/artifacts
       # Published skills (Engine sync) — read-only; the backend owns writes.
-      - ./openclaw/skills/${OPENCLAW_CONFIG_SET:-bundled}:/skills:ro
+      - ./engine-skills/${OPENCLAW_CONFIG_SET:-bundled}:/skills:ro
     networks:
       - ollama-n8n-network
 
@@ -1812,7 +1590,7 @@ services:
     volumes:
       - artifact_data:/data/artifacts
       # Published skills (Engine sync) — read-only; the backend owns writes.
-      - ./openclaw/skills/${OPENCLAW_CONFIG_SET:-bundled}:/skills:ro
+      - ./engine-skills/${OPENCLAW_CONFIG_SET:-bundled}:/skills:ro
     networks:
       - ollama-n8n-network
 
@@ -1852,7 +1630,7 @@ services:
       - hermes_gateway_home:/opt/data       # gateway (Chat) profile/config/memory
       - hermes_homes:/data/hermes-homes     # per-user Build profiles (HERMES_HOME per run)
       # Published skills (Engine sync) — read-only; the backend owns writes.
-      - ./openclaw/skills/${OPENCLAW_CONFIG_SET:-bundled}:/skills:ro
+      - ./engine-skills/${OPENCLAW_CONFIG_SET:-bundled}:/skills:ro
     networks:
       - ollama-n8n-network
 
@@ -1870,7 +1648,7 @@ services:
     restart: unless-stopped
     # Dedicated INTERNAL network shared only with the backend. The sidecar has no
     # auth and no host port; keeping it off the shared ollama-n8n-network means the
-    # internet-capable / prompt-injectable OpenClaw pod cannot reach it laterally.
+    # internet-capable / prompt-injectable agent container cannot reach it laterally.
     # Precisely: `internal: true` blocks EXTERNAL egress. Sibling containers on
     # cad-internal can still reach it, so the safety here rests on having no secret,
     # no docker socket and no bind mount — not on being unreachable.
@@ -1964,7 +1742,6 @@ services:
   # Agent Reach (optional) — Phase 1 tools run IN the Harvis backend
   # (agent_reach package) when HARVIS_AGENT_REACH_ENABLED=1.
   # This profile is a placeholder for a future exec sandbox with controlled egress.
-  # NEVER attach this to the OpenClaw pod / never widen OpenClaw NetworkPolicy.
   agent-reach-sandbox:
     image: curlimages/curl:8.5.0
     container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-agent-reach-sandbox
@@ -1978,7 +1755,6 @@ services:
 
   # SentrySearch (optional video MCP) — local video search over a user volume.
   # Profile-gated (~450–600 MB). Default OFF. Not security/CVE search.
-  # Do NOT use the upstream OpenClaw skill path (needs Gemini + egress).
   sentrysearch-mcp:
     build:
       context: ./mcp-servers/sentrysearch
@@ -2010,7 +1786,9 @@ networks:
     ipam:
       config:
         - subnet: ${HARVIS_TUNNEL_SUBNET:-10.213.82.0/29}
-  openclaw-internal:
+  # Workspace terminals (harvis-ws-term-*) and the backend, nothing else.
+  # internal:true: a terminal has no route to the internet or the LAN.
+  ws-term-net:
     driver: bridge
     internal: true
   cad-internal:
@@ -2023,10 +1801,18 @@ networks:
     internal: true
   # Repo Runner sandbox network — NOT internal:true (untrusted repo code needs the
   # internet for npm/uv installs). No Harvis service is attached, so the sandbox can't
-  # reach pgsql/ollama/openclaw; the backend is dual-homed only to run the readiness
+  # reach pgsql/ollama; the backend is dual-homed only to run the readiness
   # probe. The live preview is a docker-published 127.0.0.1 host port hit directly.
+  # The backend stays on it because rest_sandbox_apps proxies the runners by name.
+  # The subnet is pinned so scripts/browser-egress-lock.sh can keep the sandboxes
+  # off this host and the LAN; left to Docker it takes the next free /16 or /20.
+  # Change HARVIS_REPO_SANDBOX_SUBNET if 10.213.84.0/24 is in use, and give the
+  # script the same value.
   repo-sandbox:
     driver: bridge
+    ipam:
+      config:
+        - subnet: ${HARVIS_REPO_SANDBOX_SUBNET:-10.213.84.0/24}
   # Control path to browser-runner: backend, nginx and browser-runner, nothing
   # else. internal:true so the path itself carries no traffic off the host.
   browser-ctl:
@@ -2065,7 +1851,6 @@ volumes:
   tts_models:
   tts_rvc_models:
   tts_rvc_assets:
-  openclaw-data:
   openclaw-projects:
   ssh_state:             # Phase 4: per-user SSH known_hosts + ephemeral key temp files (0700)
   hermes_gateway_home:   # Phase E4B: Hermes Agent gateway (Chat) profile/config/memory
