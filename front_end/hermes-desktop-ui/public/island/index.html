@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Island — Harvis agent hub</title>
+<style>
+  /* Harvis colours (dark until the host sends its theme, see island:theme in src/island/main.js). */
+  :root { --bg: #0d1117; --panel: #161b22; --line: #30363d; --fg: #e6edf3; --muted: #7d8590; --accent: #4a84fe; --accent-fg: #161616; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.4 "Segoe UI", -apple-system, BlinkMacSystemFont, system-ui, sans-serif; display: flex; min-height: 100vh; }
+  #stage { flex: 1; display: grid; place-items: center; padding: 16px; overflow: auto; }
+  canvas { image-rendering: pixelated; border: 2px solid var(--line); border-radius: 6px; cursor: crosshair; max-width: 100%; }
+  aside { width: 300px; background: var(--panel); border-left: 1px solid var(--line); padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+  h1 { font-size: 14px; margin: 0; letter-spacing: .5px; }
+  .clock { font: 600 28px/1 ui-monospace, "JetBrains Mono", monospace; color: var(--fg); }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; }
+  button { background: color-mix(in srgb, var(--panel) 70%, var(--line)); color: var(--fg); border: 1px solid var(--line); border-radius: 5px; padding: 4px 8px; font: inherit; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.on { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+  .agents { display: flex; flex-direction: column; gap: 4px; }
+  .agent { display: grid; grid-template-columns: 10px 1fr auto; gap: 8px; align-items: center; padding: 5px 7px; border-radius: 5px; cursor: pointer; border: 1px solid transparent; }
+  .agent:hover { border-color: var(--line); }
+  .agent.sel { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .dot { width: 10px; height: 10px; border-radius: 2px; }
+  .st { color: var(--muted); font-size: 11px; }
+  .log { flex: 1; min-height: 100px; overflow: auto; font-size: 11px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 8px; }
+  .log b { color: var(--fg); font-weight: normal; }
+  .perf { font-size: 11px; color: var(--muted); }
+  .hint { font-size: 11px; color: var(--muted); }
+  /* The user's own game art draws on its own full-page canvas (#sc, added by island.js). */
+  #sc { display: none; position: fixed; inset: 0; width: 100%; height: 100%; touch-action: none; image-rendering: pixelated; }
+  body.byo #stage, body.byo aside { display: none; }
+  body.byo #sc { display: block; }
+  @media (max-width: 720px) { aside { display: none; } #stage { padding: 4px; } }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="c"></canvas></div>
+<aside>
+  <h1>ISLAND · agent hub</h1>
+  <div><span class="clock" id="clock">06:00</span> <span class="st" id="weather">sun</span></div>
+  <div class="row" id="speed">
+    <button data-speed="0">⏸</button><button data-speed="1" class="on">1×</button><button data-speed="4">4×</button><button data-speed="16">16×</button>
+  </div>
+  <div class="row">
+    <button data-time="07:00">morning</button><button data-time="12:00">noon</button>
+    <button data-time="18:00">dusk</button><button data-time="21:50">bedtime</button>
+    <button id="rain">rain</button>
+  </div>
+  <div class="agents" id="agents"></div>
+  <div class="row" id="emotes">
+    <button data-emote="!">!</button><button data-emote="?">?</button><button data-emote="heart">♥</button>
+    <button data-emote="music">♪</button><button id="say">say hi</button>
+  </div>
+  <div class="hint">Click a resident to select. Click a tile to send them there.</div>
+  <div class="log" id="log"></div>
+  <div class="perf" id="perf"></div>
+</aside>
+<script src="./island.js"></script>
+</body>
+</html>
