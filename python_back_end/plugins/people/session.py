@@ -17,7 +17,7 @@ from fastapi import APIRouter, Request, Response
 
 from .approval import PENDING_STATUS
 from .controls import is_blocked
-from .gate import _user_ids
+from .gate import live_user_ids
 
 router = APIRouter(tags=["people"])
 
@@ -46,8 +46,10 @@ async def _usable(pool, uid: int) -> bool:
 @router.get("/api/session/check", include_in_schema=False)
 async def session_check(request: Request) -> Response:
     pool = getattr(request.app.state, "pg_pool", None)
-    ids = _user_ids(request.scope)
-    if pool is None or not ids:
+    if pool is None:
+        return Response(status_code=401)
+    ids, ended = await live_user_ids(request.scope, pool)
+    if ended or not ids:
         return Response(status_code=401)
     for uid in ids:
         if not await _usable(pool, uid):

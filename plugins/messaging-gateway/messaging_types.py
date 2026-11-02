@@ -62,6 +62,9 @@ class InboundMessage:
     message_type: MessageType = MessageType.TEXT
     text: Optional[str] = None
     fallback_user_id: Optional[int] = None
+    # Owner of the bot that received the message; None for the house bot. The backend
+    # answers a user's own bot from that user's links alone.
+    bot_owner_user_id: Optional[int] = None
     received_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     raw: Optional[dict] = None
 
@@ -72,6 +75,7 @@ class InboundMessage:
             "message_type": self.message_type.value,
             "text": self.text,
             "fallback_user_id": self.fallback_user_id,
+            "bot_owner_user_id": self.bot_owner_user_id,
             "raw": self.raw,
         }
 

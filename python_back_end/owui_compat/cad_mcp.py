@@ -26,7 +26,6 @@ import base64
 import json
 import logging
 import os
-from datetime import timedelta
 from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -61,7 +60,7 @@ SIDECAR_MCP_URL = os.getenv("HARVIS_CAD_MCP_URL", "http://backend:8000/api/cad/m
 
 # Long enough for a build with repair attempts, short enough that a token left
 # behind in a process listing is dead before anyone could go looking for it.
-SIDECAR_TOKEN_MINUTES = 90
+from jwt_secret import MCP_TOKEN_MINUTES as SIDECAR_TOKEN_MINUTES  # noqa: E402
 
 # Server-injected context, carried beside the bearer token rather than inside the
 # tool arguments. See `sidecar_mcp_config`.
@@ -102,10 +101,9 @@ def sidecar_mcp_config(user_id: int | None, *, conversation_id: str | None = Non
     # Late import: `main` imports this package, so a module-level import would cycle.
     # One signer for every Harvis token, rather than a second copy of the secret's
     # env-var name and fallback living out here.
-    from main import create_access_token
+    from main import create_mcp_token
 
-    token = create_access_token({"sub": str(int(user_id))},
-                                timedelta(minutes=SIDECAR_TOKEN_MINUTES))
+    token = create_mcp_token(user_id)
     headers = {"Authorization": f"Bearer {token}"}
     ctx = {k: v for k, v in (
         ("conversation_id", str(conversation_id) if conversation_id else None),

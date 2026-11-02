@@ -16,7 +16,7 @@ Persistence model (HARVIS_TERMINAL_PERSISTENT=true, default ON):
   - Idle sweep STOPS but does NOT remove containers; the next exec restarts.
   - Explicit teardown is required to wipe a session's container + volume.
 
-Auth: all endpoints require the same `OPENCLAW_GATEWAY_TOKEN` the OpenClaw
+Auth: all endpoints require the same `HARVIS_GATEWAY_TOKEN` the OpenClaw
 agent uses for backend tool calls (see workspace/gateway_auth.py).
 """
 
@@ -27,6 +27,9 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from pydantic import BaseModel, Field
+
+from auth_utils import get_current_user
+from owui_compat.authz import is_admin
 
 from .terminal_container import (
     build_tool_call_payload,
@@ -49,7 +52,7 @@ router = APIRouter(
 # ── Auth dependency ────────────────────────────────────────────────────────
 
 def _check_gateway_token(authorization: Optional[str] = Header(default=None)) -> None:
-    """Verify Bearer <OPENCLAW_GATEWAY_TOKEN>. Same shape as gateway_auth.py."""
+    """Verify Bearer <HARVIS_GATEWAY_TOKEN>. Same shape as gateway_auth.py."""
     from . import gateway_auth  # local import to avoid module-load cycle
 
     expected = (
@@ -57,7 +60,7 @@ def _check_gateway_token(authorization: Optional[str] = Header(default=None)) ->
     )
     if not expected:
         # No token configured — DO NOT silently allow. Fail closed in prod.
-        raise HTTPException(503, "terminal not configured: OPENCLAW_GATEWAY_TOKEN unset")
+        raise HTTPException(503, "terminal not configured: HARVIS_GATEWAY_TOKEN unset")
 
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(401, "missing or malformed Authorization header")
@@ -85,9 +88,16 @@ class ExecResponse(BaseModel):
 # ── Routes ──────────────────────────────────────────────────────────────────
 
 @router.get("/status")
-async def status() -> dict:
-    """Probe Docker daemon + network + base image. Cheap; safe to poll."""
-    return await terminal_status(force_probe=False)
+async def status(user=Depends(get_current_user)) -> dict:
+    """Probe Docker daemon + network + base image. Cheap; safe to poll.
+
+    Needs a signed-in user. ``reason`` and ``probe`` carry the Docker daemon's own error
+    text and host details, so only an admin gets them; everyone else gets the booleans.
+    """
+    report = await terminal_status(force_probe=False)
+    if is_admin(user):
+        return report
+    return {k: report[k] for k in ("enabled", "ready", "available")}
 
 
 @router.post(

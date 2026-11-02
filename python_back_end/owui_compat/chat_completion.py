@@ -342,7 +342,7 @@ async def _inject_media(request, owui_body: dict, user_id: int | None = None) ->
             # about content it never received (i.e. hallucinate), which reads to
             # the user as success. An honest marker lets the model caveat instead.
             try:
-                from tools.openclaw_proxy import _validate_url
+                from tools.url_safety import _validate_url
 
                 try:
                     _validate_url(url)  # SSRF: reject private/localhost/non-http(s)
@@ -350,9 +350,14 @@ async def _inject_media(request, owui_body: dict, user_id: int | None = None) ->
                     logger.info("owui_compat: media ingest skipped blocked URL %s", url)
                     blocks.append(f"### Could not read {url}\n(blocked: address not permitted for fetching)")
                     continue
+                from research import safe_fetch
                 from research.extract.router import extract_url
 
-                doc = await asyncio.to_thread(extract_url, url)
+                def _extract_guarded(target: str):
+                    with safe_fetch.forced():  # vetted connect + re-vetted redirects in every mode
+                        return extract_url(target)
+
+                doc = await asyncio.to_thread(_extract_guarded, url)
                 text = (getattr(doc, "text", "") or "").strip()
                 if not (getattr(doc, "success", False) and text):
                     blocks.append(f"### Could not read {url}\n(the page could not be fetched or had no readable text)")
@@ -489,14 +494,14 @@ async def _inject_skills(request, owui_body: dict, user_id: int | None = None) -
     logger.info("owui_compat: injected %d active skill(s) into the prompt", len(blocks))
 
 
-async def _inject_project_instructions(request, owui_body: dict) -> None:
+async def _inject_project_instructions(request, owui_body: dict, user_id: int | None = None) -> None:
     """If the chat belongs to a Project (folder), prepend that project's custom
     instructions (folder.data.system_prompt) as a system message so they apply
     to the whole conversation — Claude-Projects style. ``chat_id`` rides in the
     OWUI body (stripped later by owui_body_to_proxy). Never raises.
     """
     chat_id = owui_body.get("chat_id")
-    if not chat_id:
+    if not chat_id or user_id is None:
         return
     messages = owui_body.get("messages")
     if not isinstance(messages, list):
@@ -507,7 +512,7 @@ async def _inject_project_instructions(request, owui_body: dict) -> None:
     try:
         from . import persistence
 
-        instructions = await persistence.get_chat_folder_system_prompt(pool, chat_id)
+        instructions = await persistence.get_chat_folder_system_prompt(pool, chat_id, user_id)
     except Exception:
         logger.warning("owui_compat: project-instruction lookup failed", exc_info=True)
         return
@@ -625,6 +630,28 @@ def _inject_render_prompts(owui_body: dict) -> None:
     if not hermes:
         _inject_block_vocabulary(owui_body)  # terminal / search / file / writing renderers
     _inject_turn_notes(owui_body)
+
+
+async def _inject_mod_context(request, owui_body: dict, user_id: int | None = None) -> None:
+    """The person's approved ``prepend-context`` mod rules (PreSend every turn,
+    SessionStart on the first), appended to the leading system message after the
+    render prompts so the house persona still lands. inject_core runs later and
+    stays on top. Fail-open like the rules loader: no text on any error."""
+    messages = owui_body.get("messages")
+    if user_id is None or not isinstance(messages, list) or not messages:
+        return
+    from plugins.mods import rules_for_user
+
+    rules = await rules_for_user(getattr(request.app.state, "pg_pool", None), user_id)
+    first_turn = sum(1 for m in messages if isinstance(m, dict) and m.get("role") == "user") <= 1
+    text = rules.context_text(first_turn) if rules else ""
+    if not text:
+        return
+    first = messages[0]
+    if isinstance(first, dict) and first.get("role") == "system" and isinstance(first.get("content"), str):
+        first["content"] = f"{first['content']}\n\n{text}"
+    else:
+        messages.insert(0, {"role": "system", "content": text})
 
 
 def _inject_turn_notes(owui_body: dict) -> None:
@@ -788,8 +815,9 @@ async def run_chat_completion(request, owui_body: dict, user_id: int | None = No
     # Skills now apply only when explicitly attached to a chat (kb_ids-style opt-in,
     # below) — never globally. See _inject_skills.
     await _inject_skills(request, owui_body, user_id=user_id)
-    await _inject_project_instructions(request, owui_body)
+    await _inject_project_instructions(request, owui_body, user_id=user_id)
     _inject_render_prompts(owui_body)
+    await _inject_mod_context(request, owui_body, user_id=user_id)
     from .chat_abilities import inject_abilities
     inject_abilities(owui_body)  # what this install can do, so a missed doc request is not "I can't"
     # LAST prompt mutation on purpose: the house ground rules must sit at the FRONT

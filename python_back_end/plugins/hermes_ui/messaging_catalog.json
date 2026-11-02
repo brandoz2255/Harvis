@@ -1806,8 +1806,8 @@
       },
       {
         "key": "WHATSAPP_APP_SECRET",
-        "required": false,
-        "description": "The app's App Secret (Settings > Basic); lets Harvis verify that webhook calls really come from Meta",
+        "required": true,
+        "description": "The app's App Secret (Settings > Basic); Harvis uses it to check that webhook calls really come from Meta and ignores unsigned ones",
         "prompt": "App secret",
         "help": "",
         "url": null,
@@ -1828,7 +1828,8 @@
     "required_env": [
       "WHATSAPP_ACCESS_TOKEN",
       "WHATSAPP_PHONE_NUMBER_ID",
-      "WHATSAPP_VERIFY_TOKEN"
+      "WHATSAPP_VERIFY_TOKEN",
+      "WHATSAPP_APP_SECRET"
     ]
   }
 ]

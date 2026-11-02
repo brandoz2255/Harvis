@@ -3,7 +3,7 @@ name: harvis-ai
 description: Harvis AI Project - A sophisticated AI voice assistant with Next.js frontend and Python backend services
 type: application
 version: 0.1.0
-appVersion: "1.0.0"
+appVersion: "0.2.0"
 keywords:
   - ai
   - voice-assistant

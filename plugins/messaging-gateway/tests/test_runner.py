@@ -84,6 +84,46 @@ async def test_allowlisted_sender_is_answered_as_the_owner():
 
 
 @pytest.mark.asyncio
+async def test_inbound_names_the_bot_owner_for_a_users_own_bot_only():
+    bridge = FakeBridge()
+    runner = GatewayRunner(_cfg(), bridge)
+    await runner.process_inbound(Recorder(AdapterSpec("telegram", 7, {"ALLOWED": "555"})), _msg("555"))
+    await runner.process_inbound(Recorder(AdapterSpec("telegram", None, {}, source="env")), _msg("555"))
+    # An env adapter that names a default user (legacy Discord) is still the house bot.
+    await runner.process_inbound(Recorder(AdapterSpec("telegram", 3, {}, source="env")), _msg("555"))
+    assert [m.bot_owner_user_id for m in bridge.posted] == [7, None, None]
+
+
+@pytest.mark.asyncio
+async def test_inbound_replaces_a_bot_owner_the_message_arrived_with():
+    bridge = FakeBridge()
+    runner = GatewayRunner(_cfg(), bridge)
+    msg = _msg("555")
+    msg.bot_owner_user_id = 99
+    await runner.process_inbound(Recorder(AdapterSpec("telegram", 7, {})), msg)
+    assert bridge.posted[0].bot_owner_user_id == 7
+
+
+@pytest.mark.asyncio
+async def test_bridge_post_inbound_carries_the_bot_owner_in_the_payload():
+    seen = []
+
+    def handler(request):
+        import json
+        seen.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True, "workspace_id": "ws1"})
+
+    bridge = HarvisBridge(_cfg())
+    async with bridge:
+        bridge._client = httpx.AsyncClient(base_url="http://backend:8000", transport=httpx.MockTransport(handler))
+        owned, house = _msg("555"), _msg("555")
+        owned.bot_owner_user_id = 7
+        assert (await bridge.post_inbound(owned)).workspace_id == "ws1"
+        await bridge.post_inbound(house)
+    assert [p["bot_owner_user_id"] for p in seen] == [7, None]
+
+
+@pytest.mark.asyncio
 async def test_unknown_sender_gets_a_pairing_code_once_and_nothing_is_relayed():
     bridge = FakeBridge(inbound_error=NO_USER_ERROR)
     runner = GatewayRunner(_cfg(), bridge)

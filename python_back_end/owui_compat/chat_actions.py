@@ -20,8 +20,9 @@ Each tool is offered only when its own cue matched, so the list stays short for 
 models, and ``start_agent_run`` is offered only when the user themselves asked for an agent:
 a model cannot escalate to a full-tool run on its own say-so.
 
-Three phrasings are answered without any model call, so models without tools get them too:
-"remind me every <day> at <time> to X", "forget that X" and "what do you remember about me".
+Some phrasings are answered without any model call, so models without tools get them too:
+"remind me every <day> at <time> to X", "forget that X" and "what do you remember about me", plus the
+notebook ones in ``chat_notebook_actions`` ("make a notebook about X", "make me a quiz on X").
 They are narrow on purpose, because they change saved data without asking the model: a reminder
 needs a real schedule word after "every" (so "remind me every time you write code" stays a normal
 chat instruction), "forget that" needs a specific clause (so "forget that part" never deletes
@@ -40,7 +41,7 @@ from typing import Optional
 from fastapi import Request
 from fastapi.responses import StreamingResponse
 
-from . import chat_abilities
+from . import chat_abilities, chat_notebook_actions as nb_actions
 from .chat_action_handlers import (
     HANDLERS, Ctx, create_job, forget_target_is_specific, is_schedule_when, _memory_forget, _memory_list,
 )
@@ -111,7 +112,7 @@ def fast_path(text: str) -> Optional[tuple[str, dict]]:
         return "forget", {"text": m.group("what")}
     if _LIST_MEMORY.match(text):
         return "list", {}
-    return None
+    return nb_actions.notebook_fast_path(text)
 
 
 def _one_off(text: str) -> Optional[dict]:
@@ -173,7 +174,7 @@ _QUESTION_LEAD = re.compile(r"^\W*(?:how|what|why|which|who|when|where|explain|i
 _CUES = {
     "make_document": _DOC_CUE, "deep_research": _RESEARCH_CUE, "start_agent_run": _AGENT_CUE,
     "generate_image": _IMAGE_CUE, "schedule_task": _SCHEDULE_CUE, "memory": _MEMORY_CUE,
-    "search_connectors": _CONNECTOR_CUE,
+    "search_connectors": _CONNECTOR_CUE, "make_notebook": nb_actions.NOTEBOOK_CUE, "make_study": nb_actions.STUDY_CUE,
 }
 
 
@@ -221,6 +222,7 @@ TOOL_SPECS = {
     "search_connectors": _tool(
         "search_connectors", "Search the catalog of connectors the user can install. Read-only.",
         {"query": _STR}, ["query"]),
+    **nb_actions.tool_specs(_tool),
 }
 
 _SYSTEM = (
@@ -308,6 +310,8 @@ async def _run_fast(ctx: Ctx, kind: str, args: dict) -> Optional[StreamingRespon
         return await create_job(ctx, when, args["what"], shown_as=args["when"]) if when else None
     if kind == "forget":
         return await _memory_forget(ctx, args["text"], fast=True)
+    if kind in nb_actions.HANDLERS:
+        return await nb_actions.HANDLERS[kind](ctx, args)
     return await _memory_list(ctx)
 
 
@@ -340,7 +344,7 @@ async def maybe_handle_action(request: Request, owui_body: dict, user) -> Option
         owui_body.pop(TURN_NOTES_KEY, None)
         name, args = picked
         logger.info("chat_actions: model chose %s", name)
-        return await HANDLERS[name](ctx, args)
+        return await {**HANDLERS, **nb_actions.HANDLERS}[name](ctx, args)
     except asyncio.TimeoutError:
         logger.info("chat_actions: tool choice timed out; normal chat")
     except Exception:

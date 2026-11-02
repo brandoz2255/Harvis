@@ -55,7 +55,7 @@ def load_discord_workspace_config() -> DiscordWorkspaceConfig:
     default_user_id = int(os.getenv("DISCORD_DEFAULT_USER_ID", "2"))
     mention_only = os.getenv("DISCORD_MENTION_ONLY", "true").lower() == "true"
     allowed_channel_ids = _parse_int_set(os.getenv("DISCORD_ALLOWED_CHANNEL_IDS", ""))
-    agent_id = os.getenv("DISCORD_WORKSPACE_AGENT_ID", "main").strip() or "main"
+    agent_id = os.getenv("DISCORD_WORKSPACE_AGENT_ID", "agent-native").strip() or "agent-native"
     model_name = os.getenv("DISCORD_WORKSPACE_MODEL_NAME", "").strip()
     # Default 600s (10 min). Prior default was 1200s but users routinely waited
     # the full 20 min on stuck runs because the timeout merely *reported* failure
@@ -119,7 +119,7 @@ async def _get_user_model_preference(pool, user_id: int) -> tuple[str, str]:
         if now - cached_at < 30.0:
             return agent_id, model_name
 
-    res_agent = "main"
+    res_agent = "agent-native"
     res_model = ""
     if pool:
         try:
@@ -141,7 +141,7 @@ async def _get_user_model_preference(pool, user_id: int) -> tuple[str, str]:
                     res_agent = "nvidia-kimi"
                     res_model = model
                 else:
-                    res_agent = "main"
+                    res_agent = "agent-native"
                     res_model = model
         except Exception as exc:
             logger.warning("Failed to fetch user model preference: %s", exc)
@@ -151,20 +151,20 @@ async def _get_user_model_preference(pool, user_id: int) -> tuple[str, str]:
 
 
 # ── Workspace ENGINE preference (separate from the MODEL) ──────────────────
-# Engine = who performs the work (Native/OpenClaw tool loop vs Claude Code direct).
+# Engine = who performs the work (Harvis's own tool loop vs Claude Code direct).
 # Model = the brain the engine uses. They are independent controls.
 _ENGINE_LABELS = {
-    "native": "Native (OpenClaw)",
+    "native": "Native (Harvis agent)",
     "claude-code": "Claude Code",
 }
 _ENGINE_HINTS = {
-    "native": "Complex tasks run through OpenClaw's tool loop on your selected model.",
+    "native": "Complex tasks run through Harvis's own agent on your selected model.",
     "claude-code": "Complex tasks run directly through Claude Code on your connected Claude credential.",
 }
 
 
 async def _get_user_engine_preference(pool, user_id: int) -> str:
-    """Return the user's saved workspace ENGINE — 'native' (OpenClaw tool loop)
+    """Return the user's saved workspace ENGINE — 'native' (Harvis's tool loop)
     or 'claude-code' (Claude Code direct engine). Fail-soft → 'native'."""
     if not pool:
         return "native"
@@ -317,9 +317,9 @@ _WORKSPACE_SIGNALS = re.compile(
 _VISUAL_TASK_SIGNALS = re.compile(
     # Visual intent ONLY — explicit screenshot / page-render words.
     # Previously this also matched bare URLs and TLDs, which silently forced
-    # `agent_id="main"` for ANY prompt mentioning a link (including our own
+    # the browser route for ANY prompt mentioning a link (including our own
     # skill example URLs), overriding the user's `/model` pick. Removed the
-    # URL/TLD matches; only kick into the OpenClaw browser path when the user
+    # URL/TLD matches; only switch to the native agent when the user
     # actually asks to see something.
     r"(screenshot|screen\s*shot|screencap|capture\s+screen|"
     r"show\s+me\s+the\s+page|take\s+(?:a\s+)?picture\s+of\s+the\s+page|"
@@ -2665,123 +2665,6 @@ def _register_harvis_code(
                 pass
 
 
-# ── Native BYO OpenClaw config write-through ────────────────────────────────
-#
-# When the user picks a model via Discord `/model`, we want the choice to
-# propagate to the native OpenClaw gateway's default agent model. OpenClaw
-# hot-reloads its config on file change, so a JSON rewrite is enough.
-#
-# Requires `HOST_OPENCLAW_CONFIG` to be set to a path that is writable from
-# inside the backend container (typically a bind mount of
-# `~/.openclaw/openclaw.json`). If the env var is unset or the path isn't
-# writable, we degrade gracefully — the model still applies to the fast path
-# and DB-backed workspace routing.
-
-_HOST_OPENCLAW_CONFIG = os.getenv("HOST_OPENCLAW_CONFIG", "").strip()
-_BUNDLED_OPENCLAW_CONFIG = os.getenv(
-    "BUNDLED_OPENCLAW_CONFIG",
-    "/app/openclaw_config/bundled/openclaw.json",
-).strip()
-_BUNDLED_OPENCLAW_CONTAINER = os.getenv(
-    "BUNDLED_OPENCLAW_CONTAINER", "harvis-openclaw"
-).strip()
-
-
-def _rewrite_openclaw_config_sync(path: str, model: str, provider: str) -> tuple[str, bool]:
-    """Set the primary model in an OpenClaw config. Returns (written_ref, changed)."""
-    target = f"{provider}/{model}"
-    with open(path, "r", encoding="utf-8") as f:
-        cfg = json.load(f)
-
-    before = json.dumps(cfg, sort_keys=True)
-
-    agents = cfg.setdefault("agents", {})
-    defaults = agents.setdefault("defaults", {})
-    default_model = defaults.setdefault("model", {})
-    default_model["primary"] = target
-
-    subagents = defaults.get("subagents")
-    if isinstance(subagents, dict) and isinstance(subagents.get("model"), str):
-        subagents["model"] = target
-
-    agent_list = agents.get("list")
-    if isinstance(agent_list, list):
-        for entry in agent_list:
-            if isinstance(entry, dict):
-                entry_model = entry.setdefault("model", {})
-                if isinstance(entry_model, dict):
-                    entry_model["primary"] = target
-
-    providers = cfg.setdefault("models", {}).setdefault("providers", {})
-    prov = providers.get(provider)
-    if isinstance(prov, dict):
-        # Additive merge — preserve the user's existing models list rather
-        # than replacing it with a single-element list. The previous
-        # `prov["models"] = [{...}]` form silently truncated BYO configs
-        # from "qwen3.5, llama3.1:8b, gpt-oss, gemma4:e4b, gemma4:e2b, ..."
-        # down to one entry on every /model call, which made subsequent
-        # `/model <other>` selections fail because the chosen model was no
-        # longer in the providers list.
-        existing = prov.get("models")
-        if isinstance(existing, list):
-            if not any(
-                isinstance(m, dict) and m.get("id") == model
-                for m in existing
-            ):
-                existing.append({"id": model, "name": model})
-        else:
-            prov["models"] = [{"id": model, "name": model}]
-
-    after = json.dumps(cfg, sort_keys=True)
-    if before == after:
-        return target, False
-
-    with open(path, "r+", encoding="utf-8") as f:
-        f.seek(0)
-        f.truncate()
-        json.dump(cfg, f, indent=2)
-        f.write("\n")
-        f.flush()
-        try:
-            os.fsync(f.fileno())
-        except OSError:
-            pass
-    return target, True
-
-
-def _restart_openclaw_container_sync(container: str) -> tuple[bool, str]:
-    import subprocess
-    try:
-        out = subprocess.run(
-            ["docker", "restart", container],
-            capture_output=True,
-            text=True,
-            timeout=20,
-        )
-        ok = out.returncode == 0
-        return ok, (out.stdout + out.stderr).strip()[:240]
-    except Exception as exc:
-        return False, str(exc)[:240]
-
-
-async def _wait_openclaw_ready(host: str = "openclaw", port: int = 18789, total_s: float = 12.0) -> bool:
-    """Poll the bundled OpenClaw gateway port until it accepts TCP, bounded."""
-    deadline = time.monotonic() + total_s
-    while time.monotonic() < deadline:
-        try:
-            fut = asyncio.open_connection(host, port)
-            reader, writer = await asyncio.wait_for(fut, timeout=1.5)
-            writer.close()
-            try:
-                await writer.wait_closed()
-            except Exception:
-                pass
-            return True
-        except Exception:
-            await asyncio.sleep(0.5)
-    return False
-
-
 def _looks_like_escalation_worthy_failure(
     status: str, summary: str | None, err: str | None
 ) -> tuple[bool, str]:
@@ -2800,60 +2683,14 @@ def _looks_like_escalation_worthy_failure(
     return False, ""
 
 
-async def _apply_model_to_native_openclaw(model: str) -> str:
-    """Rewrite every reachable OpenClaw config (host BYO + bundled) so the
-    native gateway picks up the current global/user model. Returns a short
-    human-readable note for the Discord reply.
-
-    The bundled config is authoritative for the in-cluster OpenClaw pod at
-    ws://openclaw:18789 and uses the `harvis-proxy` provider (backend-fronted
-    OpenAI-compat). The host BYO config uses `ollama`.
-    """
-    targets = [
-        ("host-byo", _HOST_OPENCLAW_CONFIG, "ollama", None),
-        ("bundled", _BUNDLED_OPENCLAW_CONFIG, "harvis-proxy", _BUNDLED_OPENCLAW_CONTAINER),
-    ]
-    notes: list[str] = []
-    for label, path, provider, container in targets:
-        if not path or not os.path.exists(path) or not os.access(path, os.W_OK):
-            continue
-        try:
-            written, changed = await asyncio.to_thread(
-                _rewrite_openclaw_config_sync, path, model, provider
-            )
-            logger.info(
-                "Rewrote %s OpenClaw default model → %s (%s, changed=%s)",
-                label, written, path, changed,
-            )
-            if changed and container:
-                ok, detail = await asyncio.to_thread(
-                    _restart_openclaw_container_sync, container
-                )
-                ready = False
-                if ok:
-                    ready = await _wait_openclaw_ready()
-                notes.append(
-                    f"{label}→`{written}` (restart {'ok' if ok else 'failed: ' + detail}"
-                    f"{', ready' if ready else (', not-ready' if ok else '')})"
-                )
-            else:
-                notes.append(f"{label}→`{written}`" + ("" if changed else " (unchanged)"))
-        except Exception as exc:
-            logger.warning("Failed to rewrite %s OpenClaw config at %s: %s", label, path, exc)
-            notes.append(f"{label} error: {str(exc)[:80]}")
-    if not notes:
-        return "_(no OpenClaw config files writable — applied to fast-path + workspace routing only)_"
-    return "_(propagated to native OpenClaw → " + ", ".join(notes) + ")_"
-
-
 async def _persist_model_selection(
     new_model: str,
     cfg: DiscordWorkspaceConfig,
     pool,
     ollama_url: str,
 ) -> str:
-    """Apply a model switch across all three stores (process global, DB, native
-    OpenClaw config) and return a user-visible confirmation message."""
+    """Apply a model switch to the process global and the DB, and return a
+    user-visible confirmation message."""
     global _model_override
     _model_override = new_model
     _model_pref_cache.clear()
@@ -2897,17 +2734,13 @@ async def _persist_model_selection(
 
     if _is_cloud:
         # Cloud chat models (e.g. Claude) run through the user's verified
-        # credential, NOT OpenClaw — skip the native-model sync entirely.
+        # credential.
         return (
             f"Switched to **`{new_model}`** (saved). Cloud chat model — "
             "replies run on your connected credential."
         )
 
-    byo_note = await _apply_model_to_native_openclaw(new_model)
-    msg = f"Switched to **`{new_model}`** (saved)."
-    if byo_note:
-        msg += f"\n{byo_note}"
-    return msg
+    return f"Switched to **`{new_model}`** (saved)."
 
 
 async def _persist_engine_selection(
@@ -3013,7 +2846,7 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
 
     Notes:
     - Uses DM + mention-only defaults to avoid responding in every channel.
-    - Launches Harvis Workspace runs (agent_id defaults to 'main' = OpenClaw).
+    - Launches Harvis Workspace runs (agent_id defaults to 'agent-native', Harvis's own agent).
     """
     cfg = load_discord_workspace_config()
     if not cfg.enabled:
@@ -3184,11 +3017,11 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
         description="Pick which engine runs your workspace tasks (Native or Claude Code).",
     )
     @app_commands.describe(
-        engine="Native = OpenClaw tool loop · Claude Code = Claude runs it directly"
+        engine="Native = Harvis's own agent · Claude Code = Claude runs it directly"
     )
     @app_commands.choices(
         engine=[
-            app_commands.Choice(name="Native (OpenClaw)", value="native"),
+            app_commands.Choice(name="Native (Harvis agent)", value="native"),
             app_commands.Choice(name="Claude Code", value="claude-code"),
         ]
     )
@@ -3348,7 +3181,7 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
                 )
                 await message.channel.send(
                     f"Context reset. Next message will start a fresh "
-                    f"OpenClaw session AND drop Discord chat history — "
+                    f"agent session AND drop Discord chat history — "
                     f"the model will see only your next message, nothing prior."
                 )
                 return
@@ -3491,38 +3324,32 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
             # (the DB row is fresh, but the local cache may be stale for ~30s).
             if _model_override:
                 pref_model_name = _model_override
-            # Phase 3 (model_proxy auto): prefer agent=main so the workspace
-            # runs through OpenClaw on the desktop, which gives full tool-calling
-            # + skill loading. The desktop's default model is `harvis-proxy/auto`,
-            # which the model_proxy resolves to the user's saved DB pick on every
-            # request — so the picked model actually runs WITH tools.
-            # Override DB's `agent=local` ONLY when the user has set a real
-            # workspace model preference; that local path is text-only.
+            # The local lane is text-only. With a real workspace model picked, run it
+            # on Harvis's own agent instead so the picked model runs WITH tools.
             if pref_model_name and pref_agent_id == "local":
-                pref_agent_id = "main"
+                pref_agent_id = "agent-native"
             # ── Engine preference (separate from the model): Native vs Claude Code ──
             pref_engine = await _get_user_engine_preference(pool, cfg.default_user_id)
             _use_claude_engine = pref_engine == "claude-code"
-            # Path A readiness: native engine + Claude model runs on OpenClaw via
-            # the Anthropic API key. When ready, don't swap the Claude model for a
-            # local one — let it flow through to OpenClaw → model_proxy → Anthropic.
+            # Path A readiness: native engine + Claude model on the Anthropic API key.
+            # When ready, don't swap the Claude model for a local one.
             _path_a_ready = await _user_has_anthropic_provider(pool, cfg.default_user_id)
             # Multi-agent opt-in (the /agents toggle).
             _orchestrate_enabled = await _get_user_orchestrate_pref(pool, cfg.default_user_id)
 
-            # Force browser-capable OpenClaw path for visual tasks.
+            # Visual tasks go to Harvis's own agent, which has real tools.
             # Local/Kimi workspace runners are text-only and can "simulate" screenshots.
             visual_task = _looks_like_visual_task(content)
-            if visual_task and pref_agent_id != "main":
+            if visual_task and pref_agent_id != "agent-native":
                 logger.info(
-                    "Discord visual task forcing agent route: %s -> main",
+                    "Discord visual task forcing agent route: %s -> agent-native",
                     pref_agent_id,
                 )
-                pref_agent_id = "main"
+                pref_agent_id = "agent-native"
 
             # ── Claude Code engine (Path B): run the task DIRECTLY through Claude ──
             # Only for non-visual tasks — Claude Code can't take browser
-            # screenshots, so visual tasks stay on OpenClaw. The `claude` lane
+            # screenshots, so visual tasks stay on the native agent. The `claude` lane
             # runs `claude -p` in the sidecar on the user's verified credential.
             if _use_claude_engine and not visual_task and pref_agent_id != "claude":
                 logger.info(
@@ -3533,7 +3360,7 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
                 pref_agent_id = "claude"
 
             # ── Multi-agent (/agents ON): fan a complex task out to several parallel
-            # sub-agents. Native/OpenClaw only — Claude Code + visual tasks stay
+            # sub-agents. Native only — Claude Code + visual tasks stay
             # single. Trivial tasks fast-path before the workspace lane, so this
             # only takes effect for real (multi-part) workspace tasks.
             if (
@@ -3733,18 +3560,12 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
                         )
                         prior_history = []
 
-                # Keep OpenClaw main-agent model aligned with the current global/user model.
-                # Without this, OpenClaw may retain a stale default (e.g. gemma4:4b) and fail
-                # with "model not found" even when Discord is configured to another model.
                 effective_model_name = (_model_override or pref_model_name or "").strip()
-                # ── Cloud model can't drive the OpenClaw workspace tool loop ──
-                # (Path A — OpenClaw→Claude via Anthropic API key — isn't wired
-                # yet.) Fall back to a local model AND say so plainly, so a
-                # local-model run is never mistaken for "OpenClaw used Claude".
-                # The `claude` lane (Claude Code engine) DOES run the cloud model
-                # directly, so skip the fallback there. And when Path A is ready
-                # (Anthropic API key as the OpenClaw provider), OpenClaw itself
-                # routes the Claude model to Anthropic — so don't fall back either.
+                # ── A cloud chat model can't drive the workspace tool loop ──
+                # Fall back to a local model AND say so plainly, so a local-model
+                # run is never mistaken for "the agent used Claude". The `claude`
+                # lane (Claude Code engine) runs the cloud model directly, and with
+                # Path A ready the Anthropic key does, so neither falls back.
                 if _model_is_cloud and pref_agent_id != "claude" and not _path_a_ready:
                     _cloud_pick = effective_model_name
                     # Prefer the user's LAST LOCAL model (their actual pick before
@@ -3757,23 +3578,16 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
                         or ""
                     )
                     logger.info(
-                        "Discord workspace: cloud model %s can't run the OpenClaw loop — "
+                        "Discord workspace: cloud model %s can't run the workspace loop — "
                         "falling back to last-used local model %r",
                         _cloud_pick, effective_model_name,
                     )
                     _fb_label = f"`{effective_model_name}`" if effective_model_name else "a local model"
                     await message.channel.send(
-                        f"ℹ️ `{_cloud_pick}` is a cloud model and can't drive the OpenClaw "
+                        f"ℹ️ `{_cloud_pick}` is a cloud model and can't drive the "
                         f"workspace yet — running this task with {_fb_label} instead."
                     )
                 effective_model_name = _on_list(effective_model_name)
-                if pref_agent_id == "main" and effective_model_name:
-                    sync_note = await _apply_model_to_native_openclaw(effective_model_name)
-                    logger.info(
-                        "Discord workspace synced main-agent model to %s %s",
-                        effective_model_name,
-                        sync_note or "",
-                    )
 
                 progress_msg = await message.channel.send(
                     f"**Workspace launching\u2026**\n\u23f3 Starting workspace\u2026"
@@ -3855,21 +3669,6 @@ def start_discord_workspace_bot(app_request: Request) -> discord.Client | None:
                             )
                         except discord.HTTPException:
                             pass
-
-                        # Heavyweight swap: for the OpenClaw 'main' route this
-                        # restarts the openclaw container so the alternate
-                        # becomes the active default. For 'local' / 'kimi' /
-                        # 'nvidia-kimi' / 'cloud-ollama', the model_name arg
-                        # below drives selection directly.
-                        if pref_agent_id == "main":
-                            try:
-                                await _apply_model_to_native_openclaw(alternate_model)
-                            except Exception as exc:
-                                logger.warning(
-                                    "Escalation: failed to apply alternate %s "
-                                    "to openclaw config: %s",
-                                    alternate_model, exc,
-                                )
 
                         # Reset-context semantics: fresh session_id + empty
                         # history. Alternate sees the task cold so the failed

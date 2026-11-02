@@ -715,6 +715,13 @@ async def maybe_inject_reach(request, owui_body: dict, user_id: int | None = Non
             _remember_turn(request, message, previous, model_name, user_id)
             return
 
+        stop = await _mod_stop(pool, user_id)
+        if stop:
+            logger.info("chat_reach: a mod rule stopped the lookup")
+            if forced:
+                _note_mod_stopped(messages, idx, stop)
+            return
+
         if not query:
             query = reach_gate.fallback_query(message, previous)
         logger.info(
@@ -773,6 +780,18 @@ _SEARCH_FAILED_NOTE = (
 )
 
 
+def _note_mod_stopped(messages: list, idx: int, reason: str) -> None:
+    """Tell the model the web search the user asked for was stopped by their own mod."""
+    note = (f"\n\n<web_results>\nThe user asked for a live web search, but it was not run: "
+            f"{reason}. Say so in your first sentence, then answer from what you know and say "
+            "it may be out of date. Do not write tool calls.\n</web_results>")
+    content = messages[idx].get("content")
+    if isinstance(content, list):
+        content.append({"type": "text", "text": note})
+    else:
+        messages[idx]["content"] = f"{content or ''}{note}"
+
+
 def _note_search_failed(messages: list, idx: int) -> None:
     """Tell the model a search the user explicitly asked for came back empty, so the
     reply says so instead of passing off an ungrounded answer (or a fake tool call)."""
@@ -797,6 +816,30 @@ async def _reach_toolset_on(pool, user_id: int | None) -> bool:
     except Exception:
         logger.warning("chat_reach: could not read toolset choices; treating reach as on", exc_info=True)
         return True
+
+
+# What a chat lookup does, in the runner's tool names, so one mod rule covers both.
+_REACH_TOOL_NAMES = ("agent_reach_web_search", "agent_reach_web_read")
+
+
+async def _mod_stop(pool, user_id: int | None) -> str:
+    """Why the user's mod rules stop a chat web lookup, or "".
+
+    Chat cannot stop to ask, so an ask-first rule stops the lookup the same as a block.
+    """
+    if user_id is None:
+        return ""
+    from plugins.mods import rules_for_user
+
+    rules = await rules_for_user(pool, int(user_id))
+    for name in _REACH_TOOL_NAMES:
+        rule = rules.tool_rule(name) if rules else None
+        if rule:
+            return rule[1]
+    if rules:
+        for name in _REACH_TOOL_NAMES:
+            rules.log_tool("PreToolUse", name)
+    return ""
 
 
 def _forced_search(owui_body: dict) -> bool:
@@ -906,6 +949,8 @@ async def _hedge_continuation(turn: dict, retry, answer: str, pool=None,
     it rather than replacing it.
     """
     if not reach_gate.detect_hedge(answer):
+        return ""
+    if await _mod_stop(pool, user_id):
         return ""
     message = turn.get("message") or ""
     previous = turn.get("previous") or ""

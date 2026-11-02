@@ -2,6 +2,7 @@ import { useStore } from '@nanostores/react'
 import { useQuery } from '@tanstack/react-query'
 import { useMemo } from 'react'
 
+import { Button } from '@/components/ui/button'
 import { $session } from '@/lib/harvis-session'
 import { Box, Cpu, Download, MessageQuestion, Monitor } from '@/lib/icons'
 import { notify } from '@/store/notifications'
@@ -17,7 +18,15 @@ export function modelDetails(m: InstalledModel): string {
   return [m.details?.family, m.details?.parameter_size, m.details?.quantization_level].filter(Boolean).join(' · ')
 }
 
-function InstalledList({ error, loading, models }: { error?: string; loading: boolean; models: InstalledModel[] }) {
+export function InstalledList({
+  error,
+  loading,
+  models
+}: {
+  error?: string
+  loading: boolean
+  models: InstalledModel[]
+}) {
   if (loading) {
     return (
       <div className="grid gap-1">
@@ -62,7 +71,7 @@ function InstalledList({ error, loading, models }: { error?: string; loading: bo
  * Settings → Models. Everyone sees what is installed. Admins can download more and
  * answer requests; everyone else asks. The other-computers list is admin only.
  */
-export function ModelsSettings() {
+export function ModelsSettings({ onOpenCookbook }: { onOpenCookbook?: () => void } = {}) {
   const session = useStore($session)
   const isAdmin = session.status === 'signed-in' && session.user.role === 'admin'
   const node = useQuery({
@@ -111,6 +120,13 @@ export function ModelsSettings() {
   return (
     <SettingsContent>
       <SettingsSection
+        aside={
+          onOpenCookbook && (
+            <Button onClick={onOpenCookbook} size="sm" variant="text">
+              Open Cookbook
+            </Button>
+          )
+        }
         icon={Box}
         meta={installed.data ? String(models.length) : undefined}
         title="Installed on this server"

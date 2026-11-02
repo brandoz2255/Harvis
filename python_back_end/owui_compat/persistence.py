@@ -746,8 +746,10 @@ async def list_chats_by_folder(pool, user_id: int, folder_id: str) -> list[dict]
     ]
 
 
-async def get_chat_folder_system_prompt(pool, chat_id: str) -> Optional[str]:
-    """The project's custom instructions for the project a chat belongs to (or None)."""
+async def get_chat_folder_system_prompt(pool, chat_id: str, user_id: int) -> Optional[str]:
+    """The project's custom instructions for the project a chat belongs to (or None).
+
+    Both the chat and its folder must be ``user_id``'s own."""
     cid = _as_uuid(chat_id)
     if cid is None:
         return None
@@ -756,10 +758,11 @@ async def get_chat_folder_system_prompt(pool, chat_id: str) -> Optional[str]:
             """
             SELECT f.data AS data
             FROM owui_chats c
-            JOIN owui_folders f ON f.id::text = c.folder_id
-            WHERE c.id = $1 AND c.folder_id IS NOT NULL
+            JOIN owui_folders f ON f.id::text = c.folder_id AND f.user_id = c.user_id
+            WHERE c.id = $1 AND c.user_id = $2 AND c.folder_id IS NOT NULL
             """,
             cid,
+            user_id,
         )
     if not row:
         return None

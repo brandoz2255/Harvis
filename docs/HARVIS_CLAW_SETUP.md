@@ -1,3 +1,5 @@
+> **Retired 2026-10-30:** the bundled OpenClaw service is gone and Hermes is the recommended agent. OpenClaw remains only as an optional external link to a gateway you run yourself (see `docs/byo-openclaw-setup.md`).
+
 # Harvis Claw LLM Configuration Guide
 
 ## Overview

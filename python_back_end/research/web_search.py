@@ -18,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 
 # Import YouTube transcript extraction
+from research import safe_fetch
 from research.extract.youtube import extract_youtube
 
 logger = logging.getLogger(__name__)
@@ -220,7 +221,11 @@ class WebSearchAgent:
         """
         try:
             # Quick URL validation first
-            response = requests.head(url, timeout=5, allow_redirects=True)
+            guarded = safe_fetch.enabled()
+            if guarded:
+                response = safe_fetch.fetch(url, method="HEAD", timeout=5)
+            else:
+                response = requests.head(url, timeout=5, allow_redirects=True)
             if response.status_code >= 400:
                 logger.warning(f"URL returned {response.status_code}: {url}")
                 return {
@@ -233,8 +238,15 @@ class WebSearchAgent:
                     "error": f"HTTP {response.status_code}",
                 }
 
-            article = Article(url)
-            article.download()
+            # the result carries no images, and fetching them dials every <img src> unguarded
+            article = Article(url, fetch_images=False)
+            if guarded:
+                # newspaper's own downloader would dial the URL unguarded
+                page = safe_fetch.fetch(url, timeout=15)
+                page.raise_for_status()
+                article.download(input_html=page.text)
+            else:
+                article.download()
             article.parse()
 
             return {

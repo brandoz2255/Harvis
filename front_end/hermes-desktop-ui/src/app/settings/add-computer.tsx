@@ -56,7 +56,7 @@ function NodeRow({ node }: { node: InferenceNode }) {
           </Button>
         ) : undefined
       }
-      description={`${node.base_url} · ${modelCount((node.models ?? []).length)}`}
+      description={[node.base_url, modelCount((node.models ?? []).length)].filter(Boolean).join(' · ')}
       key={node.name}
       title={
         <span className="flex flex-wrap items-center gap-2">

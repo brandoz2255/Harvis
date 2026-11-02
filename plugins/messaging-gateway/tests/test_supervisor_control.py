@@ -45,9 +45,12 @@ class WebhookAdapter(FakeAdapter):
     def verify_webhook(self, query):
         return query.get("hub.challenge") if query.get("hub.verify_token") == "vt" else None
 
+    def addressed_by_webhook(self, raw):
+        return self.is_connected and json.loads(raw).get("ours", False)
+
     async def handle_webhook(self, raw, headers, query):
         self.sent.append(("webhook", raw, headers.get("x-sig")))
-        return json.loads(raw).get("ours", False)
+        return True
 
 
 async def _noop(adapter, msg):

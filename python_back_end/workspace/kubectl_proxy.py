@@ -5,7 +5,7 @@ OpenClaw agents call this endpoint to run kubectl commands against the cluster
 without needing kubectl binary in the OpenClaw pod.
 
 Security model:
-- Verifies OPENCLAW_GATEWAY_TOKEN on every request. FAILS CLOSED if token unset.
+- Verifies HARVIS_GATEWAY_TOKEN on every request. FAILS CLOSED if token unset.
 - Read-only operations execute immediately (get, list, describe, logs, top).
 - Write operations (rollout restart, scale) are QUEUED for human approval.
   OpenClaw's tool loop blocks until the user approves or rejects in the UI.
@@ -14,7 +14,7 @@ Security model:
 - Output sanitized — secrets/tokens/PEM/JWTs redacted before returning.
 - Execution timeout — commands killed after 30s (configurable 1-120s).
 
-Endpoints (OpenClaw → backend, needs OPENCLAW_GATEWAY_TOKEN):
+Endpoints (OpenClaw → backend, needs HARVIS_GATEWAY_TOKEN):
   POST /kubectl/exec           — execute a kubectl command
   GET  /kubectl/health         — check kubectl availability
 
@@ -26,7 +26,6 @@ Approval endpoints (user-facing, needs JWT auth):
 
 import asyncio
 import logging
-import os
 import re
 import subprocess
 import shlex
@@ -44,7 +43,6 @@ from workspace.gateway_auth import resolve_gateway_caller
 
 logger = logging.getLogger(__name__)
 
-OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 APPROVAL_TIMEOUT_SECONDS = 300  # 5 minutes
 
 # ─── In-memory approval registry ──────────────────────────────────────────────

@@ -153,12 +153,15 @@ def _adapter_view(adapter: dict) -> tuple[str, str | None, str | None]:
 
 
 def platform_payload(entry: dict[str, Any], saved: dict, app: Any = None, gw: dict | None = None,
-                     owner: int = 0) -> dict[str, Any]:
+                     owner: int = 0, host_tail: bool = True) -> dict[str, Any]:
+    """``host_tail`` False hides the last four characters of the host's own env
+    keys (a non-admin's view); a user's own saved values always keep theirs."""
     pid = entry["id"]
     env_vars, set_keys = [], set()
     for var in entry["env_vars"]:
         value = os.getenv(var["key"], "") if pid in SUPPORTED_PLATFORMS else ""
-        is_set, redacted = (True, redact(value)) if value else _stored_var(saved, var["key"])
+        is_set, redacted = ((True, redact(value) if host_tail else None) if value
+                            else _stored_var(saved, var["key"]))
         if is_set:
             set_keys.add(var["key"])
         env_vars.append({**var, "is_set": is_set, "redacted_value": redacted})
@@ -212,6 +215,8 @@ async def _saved(pool, uid: int) -> dict[str, dict]:
 
 @router.get("/messaging/platforms")
 async def messaging_platforms(request: Request, user=Depends(get_current_user_optimized)):
+    from owui_compat.authz import is_admin
+
     pool, uid = _pool(request), _uid(user)
     saved = await _saved(pool, uid)
     gw = await messaging_gateway.status()
@@ -222,7 +227,8 @@ async def messaging_platforms(request: Request, user=Depends(get_current_user_op
         "gateway_error": None if gw is not None else _gateway_stopped_message(),
         "gateway_last_sync_ok": bool((gw or {}).get("last_sync_ok")),
         "public_url": messaging_gateway.public_url() or None,
-        "platforms": [platform_payload(e, saved.get(e["id"]) or {}, request.app, gw, uid) for e in catalog()],
+        "platforms": [platform_payload(e, saved.get(e["id"]) or {}, request.app, gw, uid, host_tail=is_admin(user))
+                      for e in catalog()],
     }
 
 

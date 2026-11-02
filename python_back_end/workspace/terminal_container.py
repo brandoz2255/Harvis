@@ -46,7 +46,21 @@ logger = logging.getLogger(__name__)
 
 
 _BASE_IMAGE = os.getenv("HARVIS_TERMINAL_IMAGE", "ubuntu:24.04")
-_NETWORK = os.getenv("HARVIS_TERMINAL_NETWORK", "harvis_openclaw-internal")
+# ws-term-net is internal and holds only the backend, so a terminal never shares a segment
+# with pgsql, harvis-mcp or openclaw. Compose names it "<stack>_ws-term-net" (the top-level
+# `name:` is HARVIS_STACK_NAME, default "harvis") and passes the full name in
+# HARVIS_TERMINAL_NETWORK; the default here builds the same name. If the network does not
+# exist the terminal runs with network "none", never on a shared Harvis network.
+_NETWORK = (os.getenv("HARVIS_TERMINAL_NETWORK", "").strip()
+            or f"{os.getenv('HARVIS_STACK_NAME', '').strip() or 'harvis'}_ws-term-net")
+# Workspace terminals run the agent's shell: no root, no capabilities, no escalation, a
+# process cap. HARVIS_TERMINAL_USER="" restores the old root container (not recommended).
+_TERMINAL_USER = os.getenv("HARVIS_TERMINAL_USER", "1001:1001").strip()
+_TERMINAL_PIDS = int(os.getenv("HARVIS_TERMINAL_PIDS", "256"))
+# "nocopy": without it Docker copies /workspace's image-side owner (root) into a new, still
+# empty volume as the container starts, undoing _own_volume's chown, and the terminal user
+# gets "Permission denied" on a fresh workspace.
+_WORKSPACE_VOLUME_MODE = "rw,nocopy"
 _MEM_LIMIT = os.getenv("HARVIS_TERMINAL_MEM", "512m")
 _CPU_QUOTA = float(os.getenv("HARVIS_TERMINAL_CPUS", "1.0"))
 _DEFAULT_TIMEOUT_S = float(os.getenv("HARVIS_TERMINAL_DEFAULT_TIMEOUT_S", "30"))
@@ -241,8 +255,9 @@ class WorkspaceTerminalManager:
                     network_present = True
                 except NotFound:
                     reasons.append(
-                        f"network {_NETWORK!r} not found — set HARVIS_TERMINAL_NETWORK "
-                        "to an existing internal docker network"
+                        f"network {_NETWORK!r} not found, so terminals run with no network "
+                        "until it exists (start the compose stack, or set "
+                        "HARVIS_TERMINAL_NETWORK to an existing internal docker network)"
                     )
                 except Exception as exc:  # noqa: BLE001
                     reasons.append(f"network probe failed: {exc}")
@@ -256,9 +271,10 @@ class WorkspaceTerminalManager:
                         f"base image {_BASE_IMAGE!r} not present locally (will pull on first use)"
                     )
 
-        # Ready means the daemon is up and the network exists. Missing image is
-        # tolerated because container.run() will pull it on first use.
-        ready = docker_ok and network_present
+        # Ready means the daemon is up. A missing network is tolerated (terminals fall back
+        # to network "none", see _spawn_network) and a missing image because
+        # container.run() will pull it on first use.
+        ready = docker_ok
         if ready and not reasons:
             reason = "ok"
         elif ready:
@@ -299,6 +315,47 @@ class WorkspaceTerminalManager:
         safe = "".join(c if c.isalnum() or c in "_.-" else "-" for c in workspace_id)
         return f"harvis-ws-vol-{safe[:48]}"
 
+    @staticmethod
+    def _is_hardened(container) -> bool:
+        """Whether a surviving terminal container already has the hardening profile."""
+        attrs = container.attrs or {}
+        host = attrs.get("HostConfig") or {}
+        return ((attrs.get("Config") or {}).get("User") == _TERMINAL_USER
+                and "ALL" in (host.get("CapDrop") or [])
+                and "no-new-privileges:true" in (host.get("SecurityOpt") or [])
+                and bool(host.get("PidsLimit")))
+
+    async def _spawn_network(self, workspace_id: str) -> str:
+        """The configured terminal network, or "none" (with a warning) if it does not exist."""
+        try:
+            await asyncio.to_thread(self._client.networks.get, _NETWORK)
+        except NotFound:
+            logger.warning(
+                "[terminal:%s] network %r not found, spawning with network 'none'; "
+                "start the compose stack or set HARVIS_TERMINAL_NETWORK",
+                workspace_id, _NETWORK,
+            )
+            return "none"
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[terminal:%s] network probe for %r failed (%s); trying it anyway",
+                           workspace_id, _NETWORK, exc)
+        return _NETWORK
+
+    async def _own_volume(self, vol_name: str) -> None:
+        """A fresh named volume is root-owned; hand it to the terminal user from a
+        throwaway container (root with only CAP_CHOWN, no network) so the long-lived
+        terminal never holds a capability."""
+        uid = _TERMINAL_USER.split(":")[0]
+        gid = (_TERMINAL_USER.split(":") + [uid])[1]
+        try:
+            await asyncio.to_thread(
+                self._client.containers.run, _BASE_IMAGE, ["chown", "-R", f"{uid}:{gid}", "/workspace"],
+                user="0", network_mode="none", remove=True, cap_drop=["ALL"], cap_add=["CHOWN"],
+                security_opt=["no-new-privileges:true"],
+                volumes={vol_name: {"bind": "/workspace", "mode": _WORKSPACE_VOLUME_MODE}})
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[terminal] could not chown volume %s to %s: %s", vol_name, _TERMINAL_USER, exc)
+
     async def _spawn(self, workspace_id: str) -> _TerminalState:
         """Create + start the container. Idempotent."""
         if self._client is None:
@@ -306,9 +363,14 @@ class WorkspaceTerminalManager:
 
         name = self._container_name(workspace_id)
 
-        # If an existing container with this name is around, reuse it.
+        # If an existing container with this name is around, reuse it, unless it
+        # predates the hardening profile: that one is replaced (its volume is kept).
         try:
             existing = await asyncio.to_thread(self._client.containers.get, name)
+            if _TERMINAL_USER and not self._is_hardened(existing):
+                logger.info("[terminal:%s] replacing unhardened container %s", workspace_id, name)
+                await asyncio.to_thread(existing.remove, force=True)
+                raise NotFound("replaced")
             if existing.status != "running":
                 await asyncio.to_thread(existing.start)
             state = _TerminalState(
@@ -333,12 +395,25 @@ class WorkspaceTerminalManager:
         #     sessions reusing the same session_key get the same container
         #     across messages, no spamming.
         vol_name = self._volume_name(workspace_id)
+        tmpfs: dict[str, str] = {}
         if _PERSISTENT:
-            volumes = {vol_name: {"bind": "/workspace", "mode": "rw"}}
+            volumes = {vol_name: {"bind": "/workspace", "mode": _WORKSPACE_VOLUME_MODE}}
             auto_remove = False
+            if _TERMINAL_USER:
+                await self._own_volume(vol_name)
         else:
             volumes = {}
             auto_remove = True
+            if _TERMINAL_USER:
+                # No volume to chown: give the unprivileged user a writable /workspace.
+                uid, _, gid = _TERMINAL_USER.partition(":")
+                tmpfs = {"/workspace": f"uid={uid},gid={gid},mode=0755,size={_MEM_LIMIT}"}
+        network = await self._spawn_network(workspace_id)
+        hardening: dict[str, Any] = {}
+        if _TERMINAL_USER:
+            hardening = {"user": _TERMINAL_USER, "cap_drop": ["ALL"], "security_opt": ["no-new-privileges:true"],
+                         "pids_limit": _TERMINAL_PIDS, "environment": {"HOME": "/workspace"},
+                         **({"tmpfs": tmpfs} if tmpfs else {})}
         try:
             container = await asyncio.to_thread(
                 self._client.containers.run,
@@ -348,7 +423,7 @@ class WorkspaceTerminalManager:
                 detach=True,
                 tty=False,
                 stdin_open=True,
-                network=_NETWORK,
+                network=network,
                 mem_limit=_MEM_LIMIT,
                 nano_cpus=int(_CPU_QUOTA * 1_000_000_000),
                 labels={
@@ -361,6 +436,7 @@ class WorkspaceTerminalManager:
                 restart_policy={"Name": "unless-stopped"} if _PERSISTENT else None,
                 working_dir="/workspace",
                 volumes=volumes,
+                **hardening,
             )
             # Best-effort: ensure /workspace exists writable
             try:
@@ -644,9 +720,14 @@ class WorkspaceTerminalManager:
             raise RuntimeError(f"session workspace {workspace_path!r} does not exist")
         host_src = await self.host_path_of(workspace_path)
         name = f"harvis-vc-run-{self._safe_id(session_id)[:40]}"
-        # A Hermes chat sandbox can opt into the GPU (plugins/hermes_ui/sandbox.set_gpu
-        # leaves a `.harvis/gpu` marker in its folder). Everything else stays CPU-only.
-        want_gpu = os.path.exists(os.path.join(workspace_path, ".harvis", "gpu"))
+        # A Hermes chat sandbox can be granted the GPU by an admin (sandbox.set_gpu). The grant
+        # lives in the backend-only meta folder, because anything inside the bind-mounted
+        # workspace is writable by the code running in it. Everything else stays CPU-only.
+        try:
+            from plugins.hermes_ui import sandbox as _sandbox
+            want_gpu = _sandbox.gpu_granted(workspace_path)
+        except Exception:  # noqa: BLE001
+            want_gpu = False
 
         # Reuse a surviving container (backend restart) — but ONLY if its
         # /workspace bind still points at the same host path and its GPU access
@@ -710,7 +791,7 @@ class WorkspaceTerminalManager:
             # host trees, no artifact volume.
             volumes={host_src: {"bind": "/workspace", "mode": "rw"}},
             auto_remove=False,
-            **({"device_requests": [docker.types.DeviceRequest(count=-1, capabilities=[["gpu"]])]}
+            **({"device_requests": [docker.types.DeviceRequest(count=1, capabilities=[["gpu"]])]}
                if want_gpu else {}),
         )
         state = _TerminalState(workspace_id=key, container_name=name, created_at=time.time())
@@ -1761,7 +1842,7 @@ async def _broadcast_live(workspace_id: str, event_type: str, payload: dict, seq
     """Push the event onto the running workspace's live broadcaster, if any."""
     try:
         from workspace.workspace_router import _workspace_broadcasters  # noqa: WPS433
-        from workspace.openclaw_client import OpenClawEvent  # noqa: WPS433
+        from workspace.events import OpenClawEvent  # noqa: WPS433
     except Exception:
         return
     broadcaster = _workspace_broadcasters.get(workspace_id)

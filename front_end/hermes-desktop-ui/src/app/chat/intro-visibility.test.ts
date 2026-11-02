@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { shouldShowIntro } from './intro-visibility'
+import { shouldShowIntro, shouldShowIsland } from './intro-visibility'
 
 const showing = {
   activeSessionId: null,
@@ -44,5 +44,13 @@ describe('shouldShowIntro', () => {
     expect(shouldShowIntro({ ...showing, selectedSessionId: 'session-1' })).toBe(false)
     expect(shouldShowIntro({ ...showing, activeSessionId: 'session-1' })).toBe(false)
     expect(shouldShowIntro({ ...showing, messagesEmpty: false })).toBe(false)
+  })
+})
+
+describe('shouldShowIsland', () => {
+  it('shows on an enabled island even when the intro is disabled, but not in a session', () => {
+    expect(shouldShowIsland({ ...showing, enabled: false }, true)).toBe(true)
+    expect(shouldShowIsland(showing, false)).toBe(false)
+    expect(shouldShowIsland({ ...showing, activeSessionId: 'session-1' }, true)).toBe(false)
   })
 })

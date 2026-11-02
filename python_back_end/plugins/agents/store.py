@@ -21,7 +21,7 @@ import asyncpg
 # ─── vocabulary ──────────────────────────────────────────────────────────────
 
 # Which runner executes a step. "auto" lets the coordinator choose per step.
-ENGINES = ("auto", "native", "hermes", "claude", "codex", "opencode")
+ENGINES = ("auto", "native", "hermes", "claude", "codex")
 
 # The four actions that always stop and ask, no matter how much autonomy the
 # agent has been given, unless the user cleared that specific one. Named in the
@@ -70,6 +70,8 @@ def clean_text(raw: Optional[str], *, limit: int, field: str) -> Optional[str]:
 
 def clean_engine(raw: Optional[str]) -> str:
     e = (raw or "auto").strip().lower()
+    if e == "opencode":  # retired engine; saved agents fall back to letting the coordinator pick
+        e = "auto"
     if e not in ENGINES:
         raise ValidationError(f"engine must be one of: {', '.join(ENGINES)}")
     return e

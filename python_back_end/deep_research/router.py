@@ -49,6 +49,14 @@ _handler = ResearchHandler()
 
 _SESSION_ID_RE = re.compile(r"^[a-zA-Z0-9-]{1,128}$")
 
+# The report is served on the app's own origin and carries model- and web-derived text.
+# Its inline script only calls this origin's /api/research; nothing else may load or send.
+_REPORT_CSP = (
+    "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+    "img-src https: data:; font-src data:; connect-src 'self'; object-src 'none'; "
+    "base-uri 'none'; form-action 'none'; frame-ancestors 'self'"
+)
+
 # Default Ollama model for research synthesis. Override per-request (body.model)
 # or globally via DEEP_RESEARCH_MODEL. No keyword-based auto-routing.
 # `or` (not a getenv default) so compose forwarding the var as an EMPTY string
@@ -265,7 +273,11 @@ async def research_report(session_id: str, current_user: Dict = Depends(get_curr
         raise HTTPException(500, f"Report generation failed: {e}")
     if html is None:
         raise HTTPException(404, "No visual report available for this session")
-    return HTMLResponse(content=html)
+    return HTMLResponse(content=html, headers={
+        "Content-Security-Policy": _REPORT_CSP,
+        "X-Content-Type-Options": "nosniff",
+        "Referrer-Policy": "no-referrer",
+    })
 
 
 @router.get("/library")

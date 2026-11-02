@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Harvis</title>
+  <meta name="description" content="Harvis is a free, open-source, self-hosted workspace for chatting with your own AI models. An alternative to Open WebUI and Claude Desktop.">
+  <meta name="color-scheme" content="light dark">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect x='124' y='58' width='264' height='220' rx='50' fill='%234a7be6'/%3E%3Crect x='153' y='88' width='205' height='160' rx='26' fill='%2314203f'/%3E%3Cpath d='M185 158Q211 128 237 158M273 158Q299 128 325 158M210 205Q256 232 302 205' fill='none' stroke='%236b9bff' stroke-width='14' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- The Harvis mark, redrawn from hermes-desktop-ui/public/harvis-logo.png. -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+    <defs>
+      <linearGradient id="hv-head" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#5b8def"/>
+        <stop offset="1" stop-color="#2f5fd6"/>
+      </linearGradient>
+      <linearGradient id="hv-screen" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#1a2a58"/>
+        <stop offset="1" stop-color="#111a35"/>
+      </linearGradient>
+      <linearGradient id="hv-bar" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#6f9ef5"/>
+        <stop offset="1" stop-color="#3a69da"/>
+      </linearGradient>
+      <symbol id="harvis-mark" viewBox="0 0 512 512">
+        <g stroke="#6b9bff" stroke-width="12" stroke-linecap="round">
+          <path d="M165 35 188 62M345 35 322 62"/>
+        </g>
+        <circle cx="153" cy="15" r="22" fill="#6b9bff"/>
+        <circle cx="357" cy="15" r="22" fill="#6b9bff"/>
+        <rect x="124" y="58" width="264" height="220" rx="50" fill="url(#hv-head)"/>
+        <rect x="153" y="88" width="205" height="160" rx="26" fill="url(#hv-screen)"/>
+        <path d="M185 158Q211 128 237 158M273 158Q299 128 325 158M210 205Q256 232 302 205" fill="none" stroke="#6b9bff" stroke-width="14" stroke-linecap="round"/>
+        <rect x="138" y="278" width="74" height="205" rx="22" fill="url(#hv-head)"/>
+        <rect x="300" y="278" width="74" height="205" rx="22" fill="url(#hv-head)"/>
+        <rect x="138" y="350" width="235" height="58" rx="14" fill="url(#hv-bar)"/>
+        <rect x="66" y="307" width="44" height="103" rx="22" fill="#6b9bff"/>
+        <rect x="402" y="307" width="44" height="103" rx="22" fill="#6b9bff"/>
+      </symbol>
+    </defs>
+  </svg>
+
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="wrap top">
+    <a class="brand" href="index.html" aria-label="Harvis home">
+      <svg viewBox="0 0 512 512" aria-hidden="true"><use href="#harvis-mark"/></svg>
+      Harvis
+    </a>
+    <nav aria-label="Main">
+      <a href="#get">What you get</a>
+      <a href="#install">Install</a>
+      <a href="#island">Island</a>
+      <a href="https://github.com/brandoz2255/Harvis">GitHub</a>
+      <a href="terms.html">Terms</a>
+    </nav>
+  </header>
+
+  <main id="main">
+    <div class="wrap hero">
+      <div class="mark harvis-glitch-in">
+        <svg viewBox="0 0 512 512" role="img" aria-label="The Harvis robot mark"><use href="#harvis-mark"/></svg>
+      </div>
+      <div>
+        <h1 class="wordmark">Harvis</h1>
+        <p class="lede">A free, open-source workspace you run yourself, for chatting with your own AI models: an alternative to Open WebUI and Claude Desktop.</p>
+        <div class="actions">
+          <a class="btn primary" href="#install">Install it</a>
+          <a class="btn" href="https://github.com/brandoz2255/Harvis">Source on GitHub</a>
+        </div>
+        <ul class="facts">
+          <li>MIT license</li>
+          <li>Ubuntu and Windows</li>
+          <li>Bring your own model server</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="wrap">
+      <figure class="shot-app">
+        <img src="assets/harvis-app.png" width="1440" height="900" alt="The Harvis app on its new-chat screen.">
+        <figcaption>The new-chat screen in the Hermes desktop UI.</figcaption>
+      </figure>
+    </div>
+
+    <div class="wrap">
+      <section class="sec" id="get" aria-labelledby="get-h">
+        <h2 id="get-h">What you get</h2>
+        <dl class="defs">
+          <div>
+            <dt>Chat with your own models</dt>
+            <dd>Talk to whatever your model server runs. For reasoning models, the thinking is kept apart from the final answer.</dd>
+          </div>
+          <div>
+            <dt>Agents and tools</dt>
+            <dd>Set up agents with their own model and personality, give them skills, schedule them, and reach them from messaging apps such as Discord and Slack.</dd>
+          </div>
+          <div>
+            <dt>Notebooks and your own sources</dt>
+            <dd>Keep notebooks of the sources you add and ask questions against them. Embeddings are stored in Postgres with pgvector, on your machine.</dd>
+          </div>
+          <div>
+            <dt>Voice</dt>
+            <dd>Speak to it and hear it answer. Speech runs in a voice service on your machine (ONNX), with no GPU needed for Harvis itself.</dd>
+          </div>
+          <div>
+            <dt>Mods and the island</dt>
+            <dd>Each person can change how their Harvis looks and behaves with mods: theme values, small sandboxed widgets and simple rules. A new mod is shown to you for approval before it turns on. The Mods page also has the island, a built-in extra you switch on there.</dd>
+          </div>
+          <div>
+            <dt>Share it on your network</dt>
+            <dd>Open it to the people on your network with <code>--expose lan</code>. The first account is the admin, and sign-up then stays closed until you open it. People who join read and tick the house rules first, and you can set daily limits and pause or remove accounts.</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section class="sec" id="how" aria-labelledby="how-h">
+        <h2 id="how-h">How it runs</h2>
+        <div>
+          <p>Harvis runs on your computer. The backend is FastAPI with Postgres and pgvector, and the interface is the Hermes desktop UI, served at <code>http://localhost:9000/harvis/</code>.</p>
+          <p>It ships the workspace and leaves the model to you. The installer looks on your machine for Ollama, LM Studio, llama.cpp or vLLM and uses the first it finds, or you point it at any OpenAI-compatible server. With none running, Harvis still starts and tells you that no model provider is connected, and you can attach one from Settings later.</p>
+          <p>Your chats, files, settings and saved keys live in the database and folders of the computer running Harvis. Harvis has no analytics, no tracking and no usage reporting, and it does not send your data to the Harvis project. Only what you or the operator set up leaves the machine, such as a chat with a cloud model whose key you added. The full list is in the <a href="terms.html#what-does-leave-the-machine">terms</a>.</p>
+        </div>
+      </section>
+
+      <section class="sec" id="install" aria-labelledby="install-h">
+        <h2 id="install-h">Install</h2>
+        <div>
+        <div class="install">
+          <section aria-labelledby="ubuntu-h">
+            <h3 id="ubuntu-h">Ubuntu 22.04 or 24.04</h3>
+            <p>Install Docker Engine and Docker Compose first, then:</p>
+            <div class="cmd"><pre data-copy>git clone https://github.com/brandoz2255/Harvis.git
+cd Harvis
+./install.sh</pre></div>
+            <p class="fine">Add <code>--yes</code> to skip the questions, or <code>--llm-url</code> with your server&#39;s address, such as <code>http://host.docker.internal:11434</code>. Use <code>host.docker.internal</code> or a LAN address, because <code>localhost</code> inside a container means the container.</p>
+          </section>
+
+          <section aria-labelledby="windows-h">
+            <h3 id="windows-h">Windows 11</h3>
+            <p>Install Docker Desktop with WSL 2 integration, and Ollama or another OpenAI-compatible server. From PowerShell in the cloned repository:</p>
+            <div class="cmd"><pre data-copy>.\install.ps1 -CheckOnly
+.\install.ps1 -Yes</pre></div>
+            <p class="fine">On a machine with an NVIDIA GPU, run <code>.\install.ps1 -VerifyGpu</code> first. If the installer finds a model server on this PC, it points Harvis at it through <code>host.docker.internal</code>. If you pass <code>-LlmUrl</code> yourself, use <code>host.docker.internal</code>, not <code>localhost</code>.</p>
+          </section>
+
+          <section aria-labelledby="k3s-h">
+            <h3 id="k3s-h">k3s, to host models across your own network</h3>
+            <p>Linux only, and it needs sudo. This installs k3s on the machine and runs Harvis in it, at the same address and with the same data.</p>
+            <div class="cmd"><pre data-copy>./install.sh --k8s</pre></div>
+            <p>To add another machine as a worker, print the join command on the first one, then run what it shows on the second, from its own Harvis checkout:</p>
+            <div class="cmd"><pre data-copy>./install.sh --k8s-join-command</pre></div>
+            <p class="fine"><code>./install.sh --k8s-off</code> goes back to plain Docker and deletes nothing. <code>./install.sh --k8s-status</code> shows nodes, pods and addresses.</p>
+          </section>
+        </div>
+        <p class="fine">When it finishes, open <code>http://localhost:9000/harvis/</code>. The first account you make on a fresh install is the admin.</p>
+        </div>
+      </section>
+
+      <section class="sec" id="island" aria-labelledby="island-h">
+        <h2 id="island-h">The island</h2>
+        <div>
+          <p>The island is a small pixel-art town that floats over the app. Your assistant and its helpers walk around it. It slows down while a run is busy and stops drawing when you cannot see it. It is off until you turn it on in Settings.</p>
+          <figure class="shot-island">
+            <img src="assets/island.png" width="1028" height="644" alt="The island, a small pixel-art town block with a cafe, a shop and a fountain plaza where agent characters walk around.">
+            <figcaption>Agents in the town square.</figcaption>
+          </figure>
+          <p>If you own a game whose art you would like on it, you can load that art from your own computer. It stays in your browser, Harvis never uploads or serves it, and Harvis includes none of it.</p>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <footer class="wrap foot">
+    <ul>
+      <li><a href="https://github.com/brandoz2255/Harvis">GitHub</a></li>
+      <li><a href="https://github.com/brandoz2255/Harvis/blob/HEAD/LICENSE">MIT license</a></li>
+      <li><a href="terms.html">Terms of Use and Acceptable Use</a></li>
+    </ul>
+    <p>Harvis is open-source software and comes with no warranty.</p>
+  </footer>
+
+  <script src="landing.js"></script>
+</body>
+</html>

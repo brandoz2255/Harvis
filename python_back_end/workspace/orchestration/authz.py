@@ -36,7 +36,7 @@ from owui_compat.workspace_method import (
     tool_can_execute,
 )
 
-from .risk import gate_decision_ex, is_session_approved
+from .risk import classify_action_risk_with_reason, gate_decision_ex, is_session_approved
 
 # Reach fetch tools whose URL argument is chosen by the MODEL. web_search takes a
 # query, not a URL, so it is deliberately absent.
@@ -138,6 +138,19 @@ async def _emit_decision(emit, payload: dict) -> None:
         logger.warning("authz decision emit failed: %s", exc)
 
 
+async def _mod_ask(emit, tool_name: str, args: dict, lane: int, tier: str | None,
+                   mod_rule: tuple[str, str] | None) -> AuthzResult | None:
+    """A mod's require-approval rule turns an allow into a gate."""
+    if not mod_rule or mod_rule[0] != "require-approval":
+        return None
+    tier = tier or classify_action_risk_with_reason(tool_name, args if isinstance(args, dict) else {})[0]
+    await _emit_decision(emit, {
+        "tool": tool_name, "lane": lane, "tier": tier,
+        "policy": "gate", "reason": mod_rule[1], "source": "mod_rule",
+    })
+    return AuthzResult(allowed=True, reason=mod_rule[1], tier=tier, needs_approval=True)
+
+
 def _reach_target(tool_name: str, args: dict) -> str:
     """The URL a reach fetch tool would go to, or "" when it is not one."""
     base = (tool_name or "").lower()
@@ -164,13 +177,18 @@ async def authorize_action(
     session_id: str | None = None,
     pool=None,
     hard_limit: str | None = None,
+    mod_rule: tuple[str, str] | None = None,
 ) -> AuthzResult:
     """The choke point: lane gate first, then the friction gate. Emits exactly
     one 'decision' payload {tool, lane, tier, policy, reason, source} per call.
 
     ``hard_limit`` names the teammate limit (sign_in / pay / send / delete) the
     caller has already decided this action crosses; it forces the ``hard`` tier,
-    which asks under every rung and is never pre-approved for a session."""
+    which asks under every rung and is never pre-approved for a session.
+
+    ``mod_rule`` is the strictest rule the person's own approved mods set for
+    this tool (plugins.mods.rules): ("block" | "require-approval", reason). It
+    only tightens: a block denies, an ask turns an allow into a gate."""
 
     # ── a. LANE GATE (structural) ─────────────────────────────────────────
     tool = {
@@ -211,6 +229,14 @@ async def authorize_action(
             })
             return AuthzResult(allowed=False, reason=why, tier=None, needs_approval=False)
 
+    # ── a3. MOD RULES (tighten only) ──────────────────────────────────────
+    if mod_rule and mod_rule[0] == "block":
+        await _emit_decision(emit, {
+            "tool": tool_name, "lane": lane, "tier": None,
+            "policy": "deny", "reason": mod_rule[1], "source": "mod_rule",
+        })
+        return AuthzResult(allowed=False, reason=mod_rule[1], tier=None, needs_approval=False)
+
     # ── b. FRICTION GATE (permission ladder) ──────────────────────────────
     # Only when permission_mode is set — clone-mode + the orchestrator pass
     # None and have never been risk-gated; that behavior is preserved.
@@ -226,6 +252,10 @@ async def authorize_action(
             })
             return AuthzResult(allowed=False, reason=reason, tier=tier, needs_approval=False)
         if decision == "gate":
+            # A mod that asks every time outranks approve-for-session.
+            asked = await _mod_ask(emit, tool_name, args, lane, tier, mod_rule)
+            if asked:
+                return asked
             # Approve-for-session FIRST: an action the user already approved for the
             # whole session auto-allows without re-prompting (Build Space Phase 2).
             if (
@@ -245,6 +275,9 @@ async def authorize_action(
                 "policy": "gate", "reason": risk_reason, "source": "risk_gate",
             })
             return AuthzResult(allowed=True, reason=risk_reason, tier=tier, needs_approval=True)
+        asked = await _mod_ask(emit, tool_name, args, lane, tier, mod_rule)
+        if asked:
+            return asked
         await _emit_decision(emit, {
             "tool": tool_name, "lane": lane, "tier": tier,
             "policy": "allow", "reason": "", "source": "risk_gate",
@@ -253,6 +286,9 @@ async def authorize_action(
 
     # No permission_mode → friction gate skipped (pre-existing semantics);
     # the lane gate alone decided.
+    asked = await _mod_ask(emit, tool_name, args, lane, None, mod_rule)
+    if asked:
+        return asked
     await _emit_decision(emit, {
         "tool": tool_name, "lane": lane, "tier": None,
         "policy": "allow", "reason": "", "source": "lane_gate",

@@ -410,7 +410,15 @@ function Initialize-HarvisEnvironment {
     if (-not (Get-DotEnvValue 'JWT_SECRET')) { Set-DotEnvValue 'JWT_SECRET' (New-RandomHex 32) }
     if (-not (Get-DotEnvValue 'FERNET_KEY')) { Set-DotEnvValue 'FERNET_KEY' (New-FernetKey) }
     if (-not (Get-DotEnvValue 'POSTGRES_PASSWORD')) { Set-DotEnvValue 'POSTGRES_PASSWORD' (New-RandomHex 24) }
-    if (-not (Get-DotEnvValue 'OPENCLAW_GATEWAY_TOKEN')) { Set-DotEnvValue 'OPENCLAW_GATEWAY_TOKEN' (New-RandomHex 24) }
+    # An install from before the rename holds the shared token as OPENCLAW_GATEWAY_TOKEN.
+    # Carry that value over so backend and harvis-mcp keep agreeing; only a new install generates one.
+    if (-not (Get-DotEnvValue 'HARVIS_GATEWAY_TOKEN')) {
+        # The old stack ran on _BUNDLED when set, else the plain name.
+        $legacyGatewayToken = Get-DotEnvValue 'OPENCLAW_GATEWAY_TOKEN_BUNDLED'
+        if (-not $legacyGatewayToken) { $legacyGatewayToken = Get-DotEnvValue 'OPENCLAW_GATEWAY_TOKEN' }
+        if ($legacyGatewayToken) { Set-DotEnvValue 'HARVIS_GATEWAY_TOKEN' $legacyGatewayToken }
+        else { Set-DotEnvValue 'HARVIS_GATEWAY_TOKEN' (New-RandomHex 24) }
+    }
     if (-not (Get-DotEnvValue 'MESSAGING_GATEWAY_TOKEN')) { Set-DotEnvValue 'MESSAGING_GATEWAY_TOKEN' (New-RandomHex 24) }
     if ($ResolvedLlmUrl) { Set-DotEnvValue 'HARVIS_LLM_BASE_URL' $ResolvedLlmUrl }
 

@@ -1,0 +1,564 @@
+/* Harvis landing page. Tokens follow the app: brand blue from the robot mark, the night-blue
+   ground of the voice orb, Inter Bold for the wordmark, the app's own system stack for text. */
+
+@font-face {
+  font-family: 'Harvis Inter';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('./fonts/Inter-Bold.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./fonts/JetBrainsMono-Regular.woff2') format('woff2');
+}
+
+:root {
+  color-scheme: light dark;
+  --bg: #f5f7fc;
+  --surface: #ffffff;
+  --ink: #0d152a;
+  --muted: #4a5578;
+  --line: #d5dcee;
+  --brand: #2f5fd6;
+  --brand-soft: #5b8def;
+  --code-bg: #0d152a;
+  --code-ink: #dfe8ff;
+  --code-line: #26335a;
+  --code-muted: #8b9bc4;
+  --glitch-pink: #ff3d7f;
+  --glitch-cyan: #2ee6ff;
+
+  --font-sans: 'Segoe WPC', 'Segoe UI', -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif;
+  --font-wordmark: 'Harvis Inter', 'Inter', var(--font-sans);
+  --font-mono: 'JetBrains Mono', Menlo, Monaco, 'SF Mono', 'Courier Prime', monospace;
+
+  --gutter: 16px;
+  --measure: 66rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0b1020;
+    --surface: #121a30;
+    --ink: #e8edfb;
+    --muted: #9aa7c7;
+    --line: #232d4a;
+    --brand: #7ba3ff;
+    --code-bg: #080d1a;
+    --code-line: #1d2848;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--bg);
+  scroll-behavior: smooth;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 1rem;
+  line-height: 1.6;
+  overflow-wrap: break-word;
+}
+
+img,
+svg {
+  display: block;
+  max-width: 100%;
+}
+
+a {
+  color: var(--brand);
+  text-underline-offset: 0.18em;
+}
+
+a:hover {
+  text-decoration-thickness: 2px;
+}
+
+:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+.skip {
+  position: absolute;
+  left: var(--gutter);
+  top: -4rem;
+  z-index: 10;
+  padding: 0.5rem 0.75rem;
+  background: var(--surface);
+  border: 1px solid var(--line);
+}
+
+.skip:focus {
+  top: var(--gutter);
+}
+
+.wrap {
+  max-width: var(--measure);
+  margin-inline: auto;
+  padding-inline: var(--gutter);
+}
+
+/* Header */
+
+.top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 1.25rem;
+  padding-block: 1rem;
+}
+
+.top .brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  color: var(--ink);
+  text-decoration: none;
+  font-family: var(--font-wordmark);
+  font-weight: 700;
+  letter-spacing: 0.26em;
+  text-transform: uppercase;
+  font-size: 0.9rem;
+}
+
+.top .brand svg {
+  width: 1.75rem;
+  height: 1.75rem;
+}
+
+.top nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1.1rem;
+  font-size: 0.9rem;
+}
+
+.top nav a {
+  color: var(--muted);
+  text-decoration: none;
+  padding-block: 0.25rem;
+}
+
+.top nav a:hover,
+.top nav a[aria-current='page'] {
+  color: var(--ink);
+  text-decoration: underline;
+}
+
+/* Hero */
+
+.hero {
+  display: grid;
+  gap: 1.75rem;
+  padding-block: 2.5rem 3rem;
+  align-items: center;
+}
+
+.mark {
+  width: 8rem;
+  /* The glitch keyframes size their colour fringe in em, so the wrapper owns the font size. */
+  font-size: 8rem;
+}
+
+.mark svg {
+  width: 1em;
+  height: 1em;
+  overflow: visible;
+}
+
+.wordmark {
+  margin: 0;
+  font-family: var(--font-wordmark);
+  font-weight: 700;
+  font-size: clamp(2.5rem, 11vw, 4.75rem);
+  line-height: 1;
+  letter-spacing: 0.26em;
+  text-transform: uppercase;
+  /* The tracking adds space after the last letter; pull it back so the word sits flush. */
+  margin-right: -0.26em;
+}
+
+.lede {
+  margin: 1.1rem 0 0;
+  max-width: 34rem;
+  font-size: 1.2rem;
+  line-height: 1.5;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 1.5rem;
+}
+
+.btn {
+  display: inline-block;
+  padding: 0.6rem 1.1rem;
+  border: 1px solid var(--ink);
+  border-radius: 0.5rem;
+  color: var(--ink);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.btn.primary {
+  background: var(--ink);
+  color: var(--bg);
+}
+
+.btn:hover {
+  border-color: var(--brand);
+}
+
+.btn.primary:hover {
+  background: var(--brand);
+  color: var(--bg);
+}
+
+.facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1.25rem;
+  margin: 1.25rem 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+/* The RGB-split glitch from the app (harvis-glitch-in in hermes-desktop-ui/src/styles.css),
+   played once on the mark. */
+.harvis-glitch-in {
+  animation: harvis-glitch-in 620ms linear both;
+}
+
+@keyframes harvis-glitch-in {
+  0% {
+    opacity: 0;
+    clip-path: inset(42% 0 44% 0);
+    transform: translateX(-0.08em);
+    filter: drop-shadow(-0.06em 0 var(--glitch-pink)) drop-shadow(0.06em 0 var(--glitch-cyan));
+  }
+  12% {
+    opacity: 1;
+    clip-path: inset(8% 0 72% 0);
+    transform: translateX(0.07em);
+  }
+  24% {
+    clip-path: inset(62% 0 6% 0);
+    transform: translateX(-0.05em) skewX(-10deg);
+  }
+  36% {
+    clip-path: inset(0 0 0 0);
+    transform: translateX(0.04em);
+  }
+  48% {
+    clip-path: inset(28% 0 34% 0);
+    transform: translateX(-0.03em) skewX(6deg);
+  }
+  62% {
+    clip-path: inset(0 0 0 0);
+    transform: translateX(0.015em);
+    filter: drop-shadow(-0.04em 0 var(--glitch-pink)) drop-shadow(0.04em 0 var(--glitch-cyan));
+  }
+  100% {
+    opacity: 1;
+    clip-path: inset(-20% 0 -20% 0);
+    transform: none;
+    filter: drop-shadow(0 0 0 transparent) drop-shadow(0 0 0 transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .harvis-glitch-in {
+    animation: none;
+  }
+  html {
+    scroll-behavior: auto;
+  }
+}
+
+/* Sections: a narrow label column and a reading column, divided by one hairline. */
+
+.sec {
+  display: grid;
+  gap: 1rem;
+  padding-block: 2.5rem;
+  border-top: 1px solid var(--line);
+}
+
+.sec > h2 {
+  margin: 0;
+  font-family: var(--font-wordmark);
+  font-weight: 700;
+  font-size: 0.8rem;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--muted);
+  line-height: 1.8;
+}
+
+.sec h3 {
+  margin: 0 0 0.35rem;
+  font-size: 1.05rem;
+  line-height: 1.35;
+}
+
+.sec p {
+  margin: 0 0 1rem;
+  max-width: 40rem;
+}
+
+.sec p:last-child {
+  margin-bottom: 0;
+}
+
+.sec p.fine,
+.fine {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.defs {
+  display: grid;
+  gap: 1.5rem 2.5rem;
+  margin: 0;
+}
+
+.defs dt {
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.defs dd {
+  margin: 0.2rem 0 0;
+  color: var(--muted);
+  max-width: 28rem;
+}
+
+code {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+}
+
+p code,
+dd code,
+li code {
+  padding: 0.05em 0.35em;
+  background: color-mix(in srgb, var(--brand) 12%, transparent);
+  border-radius: 0.25rem;
+}
+
+p code,
+dd code,
+li code {
+  white-space: nowrap;
+}
+
+/* Install blocks */
+
+.install {
+  display: grid;
+  gap: 2rem;
+  min-width: 0;
+}
+
+.install section {
+  min-width: 0;
+}
+
+.cmd {
+  position: relative;
+  margin: 0.6rem 0 0.9rem;
+  background: var(--code-bg);
+  color: var(--code-ink);
+  border: 1px solid var(--code-line);
+  border-radius: 0.5rem;
+}
+
+.cmd pre {
+  margin: 0;
+  padding: 0.85rem 1rem;
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.cmd.has-copy pre {
+  padding-right: 4.75rem;
+}
+
+.copy {
+  position: absolute;
+  top: 0.45rem;
+  right: 0.45rem;
+  padding: 0.25rem 0.6rem;
+  border: 1px solid var(--code-line);
+  border-radius: 0.35rem;
+  background: transparent;
+  color: var(--code-ink);
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.copy:hover {
+  border-color: var(--brand-soft);
+}
+
+.copy:focus-visible {
+  outline-color: var(--brand-soft);
+}
+
+/* Screenshots */
+
+figure {
+  margin: 0;
+}
+
+figure img {
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--line);
+  border-radius: 0.6rem;
+  background: var(--surface);
+}
+
+figure figcaption {
+  margin-top: 0.5rem;
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+/* Reserve the shape of each screenshot so the page holds together if the file is missing. */
+.shot-app img {
+  aspect-ratio: 1440 / 900;
+}
+
+.shot-island img {
+  aspect-ratio: 960 / 587;
+  image-rendering: pixelated;
+}
+
+.shot-app {
+  padding-bottom: 3rem;
+}
+
+/* Terms page */
+
+.doc {
+  padding-block: 1.5rem 3rem;
+  max-width: 44rem;
+}
+
+.doc h1 {
+  margin: 0 0 0.5rem;
+  font-family: var(--font-wordmark);
+  font-weight: 700;
+  font-size: clamp(1.6rem, 6vw, 2.4rem);
+  line-height: 1.15;
+}
+
+.doc .version {
+  margin: 0 0 1.5rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.doc h2 {
+  margin: 2.5rem 0 0.25rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--line);
+  font-family: var(--font-wordmark);
+  font-weight: 700;
+  font-size: 0.85rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.doc h3 {
+  margin: 1.5rem 0 0.25rem;
+  font-size: 1.05rem;
+  line-height: 1.35;
+}
+
+.doc p {
+  margin: 0 0 0.9rem;
+}
+
+/* Footer */
+
+.foot {
+  padding-block: 2rem 3rem;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.foot ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1.25rem;
+  margin: 0 0 0.75rem;
+  padding: 0;
+  list-style: none;
+}
+
+.foot p {
+  margin: 0;
+}
+
+/* Wider screens */
+
+@media (min-width: 52rem) {
+  :root {
+    --gutter: 32px;
+  }
+
+  .hero {
+    grid-template-columns: auto 1fr;
+    gap: 3.5rem;
+    padding-block: 4rem 4.5rem;
+  }
+
+  .mark {
+    width: 11rem;
+    font-size: 11rem;
+  }
+
+  .sec {
+    grid-template-columns: 11rem 1fr;
+    gap: 2rem;
+    padding-block: 3.25rem;
+  }
+
+  .defs {
+    grid-template-columns: 1fr 1fr;
+  }
+
+}
+
+.sec figure {
+  margin-block: 1.25rem;
+}

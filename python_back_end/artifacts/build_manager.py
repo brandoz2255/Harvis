@@ -448,8 +448,8 @@ class ArtifactBuildManager:
             logger.info(f"Cleaned up {deleted} expired build jobs")
             return deleted
 
-    async def get_active_builds(self) -> List[Dict[str, Any]]:
-        """Get all active (queued, building, running) build jobs"""
+    async def get_active_builds(self, user_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Get active (queued, building, running) build jobs; only ``user_id``'s when given."""
         async with self.db_pool.acquire() as conn:
             rows = await conn.fetch(
                 """
@@ -461,8 +461,10 @@ class ArtifactBuildManager:
                 FROM artifact_build_jobs j
                 JOIN artifacts a ON j.artifact_id = a.id
                 WHERE j.status IN ('queued', 'building', 'running')
+                  AND ($1::bigint IS NULL OR a.user_id = $1)
                 ORDER BY j.queued_at
-                """
+                """,
+                user_id,
             )
             return [dict(row) for row in rows]
 

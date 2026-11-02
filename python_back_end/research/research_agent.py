@@ -206,10 +206,11 @@ class ResearchAgent:
                 # .ai and .cn have separate key namespaces, so defaulting to .ai
                 # makes a valid .cn key look revoked.
                 _base = getattr(self, "moonshot_base_url", "") or ""
+                _guarded = getattr(self, "moonshot_guarded", None)
                 client = (
-                    MoonshotClient(self.moonshot_api_key, _base)
+                    MoonshotClient(self.moonshot_api_key, _base, _guarded)
                     if _base
-                    else MoonshotClient(self.moonshot_api_key)
+                    else MoonshotClient(self.moonshot_api_key, guarded=_guarded)
                 )
                 moonshot_model = get_moonshot_model_id(model)
 
@@ -281,10 +282,11 @@ class ResearchAgent:
                 # .ai and .cn have separate key namespaces, so defaulting to .ai
                 # makes a valid .cn key look revoked.
                 _base = getattr(self, "moonshot_base_url", "") or ""
+                _guarded = getattr(self, "moonshot_guarded", None)
                 client = (
-                    MoonshotClient(self.moonshot_api_key, _base)
+                    MoonshotClient(self.moonshot_api_key, _base, _guarded)
                     if _base
-                    else MoonshotClient(self.moonshot_api_key)
+                    else MoonshotClient(self.moonshot_api_key, guarded=_guarded)
                 )
                 moonshot_model = get_moonshot_model_id(model)
 

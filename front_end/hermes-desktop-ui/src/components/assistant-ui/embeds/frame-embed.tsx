@@ -18,6 +18,9 @@ export default function FrameEmbedRenderer({ descriptor }: { descriptor: FrameEm
   // theme instead of flashing white at the corners / during load.
   const colorScheme = isDark ? 'dark' : 'light'
 
+  // The tweet iframe themes itself from the URL; widgets.js is not in play.
+  const src = descriptor.provider === 'twitter' ? `${descriptor.embedUrl}&theme=${colorScheme}` : descriptor.embedUrl
+
   const style: CSSProperties = descriptor.aspectRatio
     ? { aspectRatio: descriptor.aspectRatio, colorScheme }
     : { colorScheme, height: descriptor.height }
@@ -30,7 +33,7 @@ export default function FrameEmbedRenderer({ descriptor }: { descriptor: FrameEm
           className="absolute inset-0 size-full border-0 bg-transparent"
           loading="lazy"
           referrerPolicy="strict-origin-when-cross-origin"
-          src={descriptor.embedUrl}
+          src={src}
           style={{ colorScheme }}
           title={`${descriptor.label} embed`}
         />
@@ -47,7 +50,7 @@ export default function FrameEmbedRenderer({ descriptor }: { descriptor: FrameEm
       loading="lazy"
       referrerPolicy="strict-origin-when-cross-origin"
       scrolling="no"
-      src={descriptor.embedUrl}
+      src={src}
       style={style}
       title={`${descriptor.label} embed`}
     />

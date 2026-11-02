@@ -68,15 +68,12 @@ class TestClaudeCredentialInjection(unittest.TestCase):
 
 
 class TestOtherBuildersIgnoreClaudeEnv(unittest.TestCase):
-    def test_opencode_and_hermes_have_no_claude_creds(self):
-        from workspace.orchestration.engine_adapter import (
-            _build_opencode_command, _build_hermes_command,
-        )
-        for builder in (_build_opencode_command, _build_hermes_command):
-            cmd, _ = builder("c", "/work", "do x", "", "SECRET", user_id=1, auth_mode="oauth_token")
-            env = _exec_env(cmd)
-            self.assertNotIn("ANTHROPIC_API_KEY", env)
-            self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", env)
+    def test_hermes_has_no_claude_creds(self):
+        from workspace.orchestration.engine_adapter import _build_hermes_command
+        cmd, _ = _build_hermes_command("c", "/work", "do x", "", "SECRET", user_id=1, auth_mode="oauth_token")
+        env = _exec_env(cmd)
+        self.assertNotIn("ANTHROPIC_API_KEY", env)
+        self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", env)
 
 
 class TestAuthModeConstants(unittest.TestCase):

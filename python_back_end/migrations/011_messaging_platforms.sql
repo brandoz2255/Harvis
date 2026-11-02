@@ -13,9 +13,9 @@ CREATE TABLE IF NOT EXISTS messaging_platforms (
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- (platform, identifier) is the natural key the dispatcher resolves on.
-CREATE UNIQUE INDEX IF NOT EXISTS uq_messaging_platforms_platform_identifier
-    ON messaging_platforms(platform, identifier);
+-- Uniqueness is added by 026 (per user, and per identity among house links). This file
+-- is re-applied on every boot, so it must not re-create the global (platform,
+-- identifier) index that 026 drops: it would fail once two users link one identity.
 
 CREATE INDEX IF NOT EXISTS idx_messaging_platforms_user
     ON messaging_platforms(user_id);

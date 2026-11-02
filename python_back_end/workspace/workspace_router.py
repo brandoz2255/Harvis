@@ -43,9 +43,9 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from auth_optimized import get_current_user_optimized
+from .events import OpenClawEvent
 from .openclaw_client import (
     OpenClawClient,
-    OpenClawEvent,
     PROTOCOL_VERSION,
     _CLIENT_ID,
     _CLIENT_MODE,
@@ -94,11 +94,11 @@ def _hermes_agent_engine_enabled() -> bool:
     both the external-engines flag and the E4 native-hermes flag."""
     return (os.getenv("HARVIS_OWUI_HERMES_AGENT_ENGINE") or "").strip().lower() in {"1", "true", "yes", "on"}
 
-# Engine ids stored in vibecode_sessions.engine. opencode = local (no auth); codex +
-# claude-code = CLOUD (per-user API key); hermes-agent = the full Hermes Agent app
+# Engine ids stored in vibecode_sessions.engine. codex + claude-code = CLOUD
+# (per-user API key); hermes-agent = the full Hermes Agent app
 # (local Ollama, no key) run via the engine-adapter sidecar (Phase E4B). All of these
 # route to the engine-adapter. The auth-row engine id == the engine id here.
-EXTERNAL_ENGINE_IDS = {"opencode", "codex", "claude-code", "hermes-agent"}
+EXTERNAL_ENGINE_IDS = {"codex", "claude-code", "hermes-agent"}
 CLOUD_ENGINE_IDS = {"codex", "claude-code"}
 # Phase E4 (renamed): the experimental NATIVE Hermes engine (vibecode-turn SubAgentRunner
 # + SOUL persona, NOT a sidecar). Kept as an opt-in fallback alongside the real app engine.
@@ -161,7 +161,7 @@ def _engine_runnable(engine: str) -> bool:
 
 def _engine_enabled(engine: str) -> bool:
     """Per-engine enablement: hermes-agent has its OWN flag; the other external engines
-    (opencode/codex/claude-code) share the external-engines flag. (hermes-native is NATIVE,
+    (codex/claude-code) share the external-engines flag. (hermes-native is NATIVE,
     gated by _hermes_engine_enabled separately.)"""
     if engine == "hermes-agent":
         return _hermes_agent_engine_enabled()
@@ -477,7 +477,7 @@ class LaunchRequest(BaseModel):
     task_brief: str
     chat_history: list[dict]
     session_id: Optional[str] = None
-    agent_id: str = "main"
+    agent_id: str = "agent-native"
     model_name: str = ""
     enable_interactive: bool = True
     live_web: bool = True  # When True, OpenClaw gets X-Live-Web (broad web + browser navigate)
@@ -1152,29 +1152,16 @@ async def _db_enable_interactive(
 
 # ─── Background task ────────────────────────────────────────────────────────────
 
-# Lanes that run a model Harvis picks; any other id is sent to OpenClaw.
+# Lanes that run a model Harvis picks. OpenClaw is retired: "main" (its old default for
+# routines, Discord and the API) and any id no lane claims run on Harvis's own agent.
 _MODEL_LANES = ("local", "kimi", "claude", "kimi-code", "nvidia-kimi", "cloud-ollama", "gpt-oss",
                 "orchestrated", "agent-native", "vibecode-turn", "vibecode-review", "engine-adapter")
 
 
-def _goes_to_openclaw(agent_id: str) -> bool:
-    return agent_id not in _MODEL_LANES and not agent_id.startswith("agent:")
-
-
-async def _openclaw_reachable(url: str) -> bool:
-    """True when something accepts a connection at the OpenClaw gateway address."""
-    from urllib.parse import urlparse
-    parsed = urlparse(url or "")
-    if not parsed.hostname:
-        return False
-    try:
-        _reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(parsed.hostname, parsed.port or (443 if parsed.scheme in ("wss", "https") else 80)),
-            timeout=3.0)
-    except Exception:
-        return False
-    writer.close()
-    return True
+def _native_lane_for(agent_id: str) -> str:
+    if agent_id in _MODEL_LANES or agent_id.startswith("agent:"):
+        return agent_id
+    return "agent-native"
 
 
 async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> None:
@@ -1194,10 +1181,9 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
         logger.warning("[workspace:%s] _run_workspace_bg: workspace not found", workspace_id)
         return
 
-    client: OpenClawClient = ws["client"]
     task_brief: str = ws["task_brief"]
     chat_history: list[dict] = ws["chat_history"]
-    agent_id: str = ws.get("agent_id", "main")
+    agent_id: str = ws.get("agent_id", "agent-native")
     model_name: str = ws.get("model_name", "")
     broadcaster: WorkspaceLiveBroadcaster = _workspace_broadcasters[workspace_id]
 
@@ -1276,15 +1262,27 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
 
     # The admin's model list (Settings ▸ People). Checked here, not only at launch,
     # because runs also start from traces, reviews, teammates, Discord and messaging.
-    # OpenClaw ("main", and any id no lane claims) runs the server-wide model and NVIDIA NIM
-    # the server's key, so a limited person runs on the local lane instead; the orchestrator
-    # filters its own pools.
+    # NVIDIA NIM runs on the server's key, so a limited person runs on the local lane
+    # instead; the orchestrator filters its own pools.
     from plugins.people.controls import allowed_for, only_allowed
     _allowed = await allowed_for(pool, int(ws["user_id"])) if ws.get("user_id") is not None else None
+
+    if _native_lane_for(agent_id) != agent_id:
+        agent_id = "agent-native"
+        # A limited person's empty model becomes the first one on their list below;
+        # the server default may not be on it.
+        if not model_name and _allowed is None:
+            try:
+                from plugins.models.resolver import resolve_default_local_model
+                model_name = await resolve_default_local_model(pool=pool, user_id=ws.get("user_id")) or ""
+            except Exception:
+                logger.debug("[workspace:%s] no default local model for the native agent", workspace_id,
+                             exc_info=True)
+
     _people_refusal = ""
     if _allowed is not None:
         model_name = model_name or (_allowed[0] if _allowed else "")
-        if _goes_to_openclaw(agent_id) or agent_id == "nvidia-kimi":
+        if agent_id == "nvidia-kimi":
             agent_id = "local"
             _people_note = OpenClawEvent("log", {
                 "message": f"Running on {model_name}: the Harvis admin limits which models your account uses.",
@@ -1300,40 +1298,6 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
         if (ws.get("vibecode_persona_engine") == "hermes-native" and "hermes" not in model_name.lower()
                 and _hermes_default not in _allowed):
             ws["vibecode_persona_engine"] = ""
-
-    # OpenClaw is an optional service: the Kubernetes install has none, and a Docker
-    # install may leave it off. Scheduled routines, Discord and the API default to it
-    # ("main"), so with no OpenClaw those runs used to fail with "Name or service not
-    # known"; they run on the local lane instead.
-    if _goes_to_openclaw(agent_id) and not await _openclaw_reachable(client.gateway_url):
-        from workspace.openclaw_client import OPENCLAW_FALLBACK_URL, OPENCLAW_FALLBACK_TOKEN
-        if OPENCLAW_FALLBACK_URL and OPENCLAW_FALLBACK_URL != client.gateway_url \
-                and await _openclaw_reachable(OPENCLAW_FALLBACK_URL):
-            # Same switch the client makes on a failed connect, without its wait.
-            client.gateway_url = OPENCLAW_FALLBACK_URL
-            client.gateway_token = OPENCLAW_FALLBACK_TOKEN or client.gateway_token
-    if _goes_to_openclaw(agent_id) and not await _openclaw_reachable(client.gateway_url):
-        agent_id = "local"
-        try:
-            from owui_compat.cloud_chat import is_cloud_chat_model
-            if model_name and is_cloud_chat_model(model_name):
-                model_name = ""  # the local lane runs Ollama models only
-        except Exception:
-            pass
-        if not model_name:
-            try:
-                from plugins.models.resolver import resolve_default_local_model
-                model_name = await resolve_default_local_model(pool=pool, user_id=ws.get("user_id")) or ""
-            except Exception:
-                logger.debug("[workspace:%s] no default local model for the OpenClaw fallback", workspace_id,
-                             exc_info=True)
-        _oc_note = OpenClawEvent("log", {
-            "message": f"OpenClaw is not running on this server, so this run uses {model_name or 'the local model'} instead.",
-        })
-        seq = await allocate_event_seq(pool, workspace_id)
-        await _db_save_event(pool, workspace_id, seq, _oc_note)
-        await broadcaster.put((seq, _oc_note))
-        event_count += 1
 
     # ── Select the event stream based on agent_id ────────────────────────────
     event_stream = None
@@ -1551,9 +1515,7 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
         # Harvis agent through the native runner. This is the only lane that offers
         # WIRE_TOOL_SCHEMA — Agent Reach (web_read / gh_view / rss_read / yt_transcript)
         # included — so routing here is what makes "Agent" mean the same thing on an
-        # Ollama tag as it does on a CLI engine. The previous default was OpenClaw,
-        # which has no reach tools and deliberately never will (no outbound internet).
-        # Escape hatch: HARVIS_OWUI_WORKSPACE_AGENT=main puts it back on OpenClaw.
+        # Ollama tag as it does on a CLI engine. "main" and unclaimed ids land here too.
         from .orchestration.orchestrator import run_orchestrated
         _repo_path = ws.get("repo_path")
         event_stream = run_orchestrated(
@@ -1621,7 +1583,7 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
         )
 
     elif agent_id == "engine-adapter":
-        # External code engine (Phase E1, e.g. OpenCode): run an external CLI against the
+        # External code engine (Phase E1, e.g. Hermes Agent): run an external CLI against the
         # session's clone via the sidecar; same OpenClawEvent stream → unchanged persist/
         # broadcast/RunView. CLONE (session) isolation only — enforced at turn dispatch.
         from .orchestration.engine_adapter import run_external_engine_adapter
@@ -1634,8 +1596,8 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
             workspace_path=ws.get("workspace_path") or "",
             base_sha=ws.get("base_sha") or "",
             repo_path=ws.get("repo_path") or "",
-            engine=ws.get("engine") or "opencode",
-            api_key=ws.get("engine_key"),  # decrypted per-user credential for cloud engines; None for opencode
+            engine=ws.get("engine") or "hermes-agent",
+            api_key=ws.get("engine_key"),  # decrypted per-user credential for cloud engines; None for hermes-agent
             auth_mode=ws.get("engine_auth_mode") or "api_key",  # E4B: api_key vs subscription oauth_token
             # Staged into the clone before the CLI launches — an external engine reads
             # files, so this is the only way an attached screenshot reaches it.
@@ -1643,13 +1605,11 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
         )
 
     else:
-        # Default: route through OpenClaw WebSocket
-        event_stream = client.stream(
-            task_brief,
-            chat_history,
-            interactive_context=ws.get("interactive_context"),
-            live_web=ws.get("live_web", True),
-        )
+        # _native_lane_for already mapped every unclaimed id; reaching here is a lane added
+        # to _MODEL_LANES without a branch above.
+        async def _no_lane():
+            yield OpenClawEvent("error", {"message": f"No lane runs agent '{agent_id}'."})
+        event_stream = _no_lane()
 
     try:
         async for event in event_stream:
@@ -1953,7 +1913,7 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
         # invalidate a prior 'agreed' review — the reviewers approved the OLD diff, so shipping
         # now would pass changes nobody reviewed. Flip 'agreed' → 'stale' so Create-PR re-blocks
         # until a fresh review runs. The WHERE makes it a no-op unless the review was agreed.
-        # 'engine-adapter' = an external-engine (opencode/codex/claude-code/hermes) coding turn on
+        # 'engine-adapter' = an external-engine (codex/claude-code/hermes) coding turn on
         # the SAME session tree, so it invalidates a prior agreement exactly like a native turn.
         # 'orchestrated' is excluded (sub-agents work on isolated clones); 'vibecode-review' too.
         if agent_id in ("vibecode-turn", "engine-adapter") and terminal_status == "done" and _vib_sid and pool is not None:
@@ -2755,22 +2715,24 @@ async def _start_workspace(
     Register a workspace in memory, create its queue, and start the background task.
     Returns the OpenClawClient for the /cancel endpoint.
     """
-    # Resolve which OpenClaw instance this user routes to
-    config = await resolve_openclaw_config(pool, user_id)
-
-    logger.info(
-        "workspace launch: user=%s mode=%s url=%s prefix=%r",
-        user_id, config.mode, config.url, config.workspace_prefix,
-    )
-
-    client = OpenClawClient(
-        workspace_id=workspace_id,
-        session_id=session_id,
-        agent_id=agent_id,
-        gateway_url=config.url,
-        gateway_token=config.token,
-        workspace_prefix=config.workspace_prefix,
-    )
+    # All current Build lanes run natively; the retired gateway is optional.
+    # Do not resolve credentials or construct a gateway client when disabled.
+    from openclaw_availability import openclaw_disabled
+    config = None if openclaw_disabled() else await resolve_openclaw_config(pool, user_id)
+    client = None
+    if config is not None:
+        logger.info(
+            "workspace launch: user=%s mode=%s url=%s prefix=%r",
+            user_id, config.mode, config.url, config.workspace_prefix,
+        )
+        client = OpenClawClient(
+            workspace_id=workspace_id,
+            session_id=session_id,
+            agent_id=agent_id,
+            gateway_url=config.url,
+            gateway_token=config.token,
+            workspace_prefix=config.workspace_prefix,
+        )
 
     _workspaces[workspace_id] = {
         "client": client,
@@ -2796,10 +2758,10 @@ async def _start_workspace(
         "base_sha": base_sha,
         "vibecode_isolation_mode": vibecode_isolation_mode,
         "vibecode_permission_mode": vibecode_permission_mode,
-        # Phase E1: external code engine (e.g. "opencode") for this run; None = native runner.
+        # Phase E1: external code engine (e.g. "hermes-agent") for this run; None = native runner.
         "engine": engine,
         # Phase E2: decrypted per-user CREDENTIAL for cloud engines (codex/claude-code), held
-        # in-memory for this run only — NEVER logged/persisted. None for opencode/native.
+        # in-memory for this run only — NEVER logged/persisted. None for hermes-agent/native.
         "engine_key": engine_key,
         # Phase E4B: which credential the cloud engine injects — 'api_key' (ANTHROPIC_API_KEY)
         # or 'oauth_token' (CLAUDE_CODE_OAUTH_TOKEN, Claude subscription). Never both.
@@ -2824,8 +2786,8 @@ async def _start_workspace(
         # can be sent to the model as real multimodal parts rather than a filename.
         "attachments": attachments or [],
         # Two-mode tracking
-        "mode": config.mode,
-        "allowed_capabilities": config.allowed_capabilities,
+        "mode": config.mode if config is not None else "native",
+        "allowed_capabilities": config.allowed_capabilities if config is not None else set(),
     }
 
     broadcaster = WorkspaceLiveBroadcaster()
@@ -2869,7 +2831,7 @@ async def launch_workspace_internal(
     user_id: int,
     task_brief: str,
     chat_history: list[dict] | None = None,
-    agent_id: str = "main",
+    agent_id: str = "agent-native",
     model_name: str = "",
     session_id: str | None = None,
     enable_interactive: bool = True,
@@ -3341,7 +3303,8 @@ async def cancel_workspace_internal(
 
     client_cancel_err: Optional[str] = None
     try:
-        ws["client"].cancel()
+        if ws.get("client") is not None:
+            ws["client"].cancel()
     except Exception as exc:
         client_cancel_err = str(exc)
         logger.warning("cancel_workspace_internal: client.cancel failed: %s", exc)
@@ -3650,6 +3613,29 @@ def _artifact_bytes(path, content: str, content_bytes=None) -> tuple:
     return content.encode("utf-8", "replace"), (meta["mime"] if meta["category"] != "unknown" else "text/plain; charset=utf-8")
 
 
+# Types a browser will execute as a document at our origin. XML in particular renders as
+# XHTML (and runs its <script>) when served with an xml content-type.
+_ACTIVE_ARTIFACT_MIMES = frozenset({
+    "text/html", "image/svg+xml", "application/xml", "text/xml", "application/xhtml+xml",
+})
+
+
+def _artifact_raw_response_policy(mime: str) -> tuple:
+    """(content-type, extra headers) for serving an artifact inline from /raw.
+
+    Active document types are demoted to octet-stream. Everything that is not a plain
+    image/video/audio/PDF additionally gets Content-Disposition: attachment and a
+    sandbox CSP, so a type we did not think of still cannot run script on this origin."""
+    headers = {"X-Content-Type-Options": "nosniff"}
+    base = (mime or "").split(";", 1)[0].strip().lower()
+    if base in _ACTIVE_ARTIFACT_MIMES or base.endswith("+xml"):
+        mime = base = "application/octet-stream"
+    if not (base.startswith(("image/", "video/", "audio/")) or base == "application/pdf"):
+        headers["Content-Disposition"] = "attachment"
+        headers["Content-Security-Policy"] = "sandbox"
+    return mime, headers
+
+
 @workspace_router.get("/artifact/{artifact_id}/raw")
 async def get_artifact_raw(
     artifact_id: str,
@@ -3657,18 +3643,16 @@ async def get_artifact_raw(
     current_user: dict = Depends(get_current_user_optimized),
 ):
     """Serve an artifact's bytes inline with the right Content-Type (for <img>/<iframe>/<embed>
-    preview). Ownership-checked; secret-named files refused; HTML served as octet-stream so the
-    browser NEVER renders untrusted model HTML at our origin (preview uses the sandboxed iframe)."""
+    preview). Ownership-checked; secret-named files refused; HTML/SVG/XML served as octet-stream so the
+    browser NEVER renders untrusted model markup at our origin (preview uses the sandboxed iframe)."""
     from fastapi.responses import Response
     pool = getattr(request.app.state, "pg_pool", None)
     if pool is None:
         raise HTTPException(status_code=503, detail="Database not available")
     path, content, content_bytes = await _fetch_owned_artifact(pool, artifact_id, current_user.get("id"))
     data, mime = _artifact_bytes(path, content, content_bytes)
-    # Never serve raw HTML/SVG with an active content-type at our origin (XSS) — force download type.
-    if mime in ("text/html", "image/svg+xml"):
-        mime = "application/octet-stream"
-    return Response(content=data, media_type=mime, headers={"X-Content-Type-Options": "nosniff"})
+    mime, headers = _artifact_raw_response_policy(mime)
+    return Response(content=data, media_type=mime, headers=headers)
 
 
 @workspace_router.get("/artifact/{artifact_id}/download")
@@ -3937,7 +3921,7 @@ class VibecodeSessionCreate(BaseModel):
     title: Optional[str] = None
     isolation_mode: str = "session"   # 'session' (clone, default+safe) | 'inplace' (opt-in)
     permission_mode: str = "ask"      # in-place only: plan|ask|auto-accept|full-auto
-    engine: str = "native"            # Phase E1: 'native' (OpenClaw runner) | 'opencode' (external CLI; clone-only, flag-gated)
+    engine: str = "native"            # Phase E1: 'native' (Harvis agent) | 'codex' / 'claude-code' / 'hermes-agent' (external CLI; clone-only, flag-gated)
     # Local-folder mode (browser File System Access API): the picked directory's display
     # label. Set ⇒ repo_path is ignored, the workspace is created empty + seeded by the
     # browser (POST /seed), and changed files are written back to the real folder per turn.
@@ -4356,6 +4340,9 @@ async def create_vibecode_session(
     # Hermes model is installed. External engines run as sidecars (engine-adapter);
     # Hermes runs the NATIVE SubAgentRunner with a SOUL persona.
     _req_engine = (req.engine or "native")
+    if _req_engine == "opencode":
+        # OpenCode was retired; a stale picker or saved preset still sending it builds natively.
+        _req_engine = "native"
     if _req_engine != "native" and _req_engine not in (
         EXTERNAL_ENGINE_IDS | NATIVE_ENGINE_IDS | KIMI_ENGINE_IDS | KIMI_CODE_ENGINE_IDS
     ):
@@ -4391,7 +4378,7 @@ async def create_vibecode_session(
                     status_code=400,
                     detail=f"{_req_engine} requires a connected, verified API key — connect it in Integrations first",
                 )
-        engine_val = _req_engine   # opencode / codex / claude-code / hermes-agent → engine-adapter
+        engine_val = _req_engine   # codex / claude-code / hermes-agent → engine-adapter
     elif _req_engine == "hermes-native" and _hermes_engine_enabled() and isolation_mode == "session":
         # Phase E4 (experimental fallback): reject only when the model probe SUCCEEDS and
         # finds no Hermes model (fail-OPEN on a transient probe error — runtime fails soft).
@@ -4568,7 +4555,7 @@ async def get_vibecode_session(
             "status": s.get("status"),
             "isolation_mode": s.get("isolation_mode") or "session",
             "permission_mode": s.get("permission_mode") or "ask",
-            # Which Build engine this session runs (native | opencode | codex | claude-code |
+            # Which Build engine this session runs (native | codex | claude-code |
             # hermes-*). Stored at create; surfaced so the thread can label "Built with X".
             "engine": s.get("engine") or "native",
             "local_folder_name": local_folder_name,
@@ -4840,7 +4827,7 @@ async def start_vibecode_turn(
         # `engine` is read from the authoritative session ROW, so reload/resume is consistent.
         _engine = s.get("engine") or "native"
         _is_session = (s.get("isolation_mode") or "session") == "session"
-        # opencode / codex / claude-code / hermes-agent → engine-adapter sidecar. Each is
+        # codex / claude-code / hermes-agent → engine-adapter sidecar. Each is
         # gated by its own flag (hermes-agent has HARVIS_OWUI_HERMES_AGENT_ENGINE; the rest
         # share the external-engines flag) via _engine_enabled().
         _use_engine = (
@@ -6054,7 +6041,7 @@ async def rerun_workspace(
     pool = getattr(request.app.state, "pg_pool", None)
 
     task_brief: Optional[str] = None
-    agent_id = "main"
+    agent_id = "agent-native"
 
     if pool:
         try:
@@ -6072,7 +6059,7 @@ async def rerun_workspace(
         ws = _workspaces.get(source_id)
         if ws and ws.get("user_id") == current_user["id"]:
             task_brief = ws["task_brief"]
-            agent_id = ws.get("agent_id", "main")
+            agent_id = ws.get("agent_id", "agent-native")
 
     if not task_brief:
         raise HTTPException(status_code=404, detail="Workspace run not found")
@@ -6654,6 +6641,10 @@ async def verify_byo_config(
     Returns ok=true on success, ok=false with error/hint on failure.
     On success, stores verified timestamp (and token if provided).
     """
+    from openclaw_availability import openclaw_disabled
+    if openclaw_disabled():
+        return {"ok": False, "error": "OpenClaw gateway is disabled by deployment configuration"}
+
     import websockets as _ws
 
     if not req.url.startswith(("ws://", "wss://")):

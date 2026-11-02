@@ -22,9 +22,10 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 
-from auth_optimized import decode_token_fast, get_current_user_optimized
+from auth_optimized import auth_optimizer, decode_token_fast, get_current_user_optimized, revoked, session_cutoff
 
 from . import learn, sandbox
+from .origin import origin_allowed
 
 log = logging.getLogger("hermes_ui.sandbox")
 
@@ -250,6 +251,14 @@ async def sandbox_info(request: Request, session: str, user=Depends(get_current_
 
 @router.post(f"{API}/sandbox/gpu")
 async def sandbox_gpu(request: Request, user=Depends(get_current_user_optimized)):
+    # A GPU grant takes the card from Ollama, so it is the owner's call: on a shared
+    # host only an admin may flip it, whatever HARVIS_BUILD_SPACE_ACCESS says.
+    from owui_compat.authz import is_admin
+    from plugins.exposure import require_build_space, shared
+
+    require_build_space(user)
+    if shared() and not is_admin(user):
+        raise HTTPException(403, "Only an admin can change a sandbox's GPU access.")
     body = await request.json()
     uid, session, on = _uid(user), str(body.get("session") or ""), bool(body.get("on"))
     if on and not await gpu_available():
@@ -312,12 +321,19 @@ async def _open_shell(user_id: int, cwd: str, cols: int, rows: int):
 
 @router.websocket(f"{API}/terminal/ws")
 async def terminal_ws(ws: WebSocket):
+    if not origin_allowed(ws):
+        log.warning("sandbox terminal: refused origin %s (host %s)", ws.headers.get("origin"), ws.headers.get("host"))
+        await ws.close(code=4403, reason="cross-origin socket refused")
+        return
     token = _token_from(ws)
     payload = decode_token_fast(token) if token else None
     try:
         user_id = int(payload.get("sub")) if payload else None
     except (TypeError, ValueError):
         user_id = None
+    if user_id is not None and revoked(
+            payload, await session_cutoff(getattr(ws.app.state, "pg_pool", None) or auth_optimizer.db_pool, user_id)):
+        user_id = None  # signed out server-side: password changed, signed out everywhere, blocked
     if user_id is None:
         await ws.close(code=4401, reason="sign in to Harvis first")
         return

@@ -164,11 +164,11 @@ def register_connection_routes(router: APIRouter, get_current_user: Callable) ->
         if transport != "stdio":
             # Refuse an unreachable or internal URL at save time rather than
             # letting it fail later as a mystery inside the agent loop.
-            from plugins.mcp.http_transport import guard_url_async
+            from plugins.mcp.http_transport import guard_url_async, strict_for
             from plugins.mcp.protocol import McpError as _McpError
 
             try:
-                await guard_url_async(form.url or "")
+                await guard_url_async(form.url or "", strict_for(int(user.id)))
             except _McpError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
         pool = _pool(request)

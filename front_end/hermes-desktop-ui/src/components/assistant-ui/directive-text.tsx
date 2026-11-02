@@ -5,6 +5,7 @@ import type { TextMessagePartComponent, TextMessagePartProps } from '@assistant-
 import type { FC } from 'react'
 import { Fragment, useEffect, useMemo, useState } from 'react'
 
+import { RemoteImageGate } from '@/components/chat/remote-image-gate'
 import { ZoomableImage } from '@/components/chat/zoomable-image'
 import type { I18nContextValue } from '@/i18n'
 import { extractEmbeddedImages } from '@/lib/embedded-images'
@@ -439,13 +440,15 @@ const DirectiveImage: FC<{ id: string; label: string }> = ({ id, label }) => {
   }
 
   return (
-    <ZoomableImage
-      alt={label}
-      className="max-h-48 max-w-full rounded-lg border border-(--ui-stroke-tertiary) object-contain"
-      draggable={false}
-      slot="aui_directive-image"
-      src={src}
-    />
+    <RemoteImageGate src={src}>
+      <ZoomableImage
+        alt={label}
+        className="max-h-48 max-w-full rounded-lg border border-(--ui-stroke-tertiary) object-contain"
+        draggable={false}
+        slot="aui_directive-image"
+        src={src}
+      />
+    </RemoteImageGate>
   )
 }
 

@@ -23,6 +23,10 @@ from workspace.orchestration import runner, tools as orch_tools  # noqa: E402
 
 UID = 7
 BODY = "# Compose debug\n\n1. Run docker compose logs.\n2. Check the ports.\n3. Restart the service.\n"
+# The columns plugins/mods/store.active_rules reads. Without a table there, every tool call asks first.
+USER_MODS_SQL = (
+    "CREATE TABLE user_mods (user_id INTEGER, name TEXT, hash TEXT, approved_hash TEXT, status TEXT, "
+    "tiers TEXT[], manifest JSONB)")
 NEW_BODY = "# Compose debug\n\n1. Run docker compose logs.\n2. Check the ports and the volumes.\n3. Restart it.\n"
 
 
@@ -61,6 +65,7 @@ def with_db(scenario):
             await conn.execute(f"CREATE SCHEMA {schema}")
             await conn.execute(f"SET search_path TO {schema}")
             await conn.execute(CREATE_OWUI_SKILLS_SQL)
+            await conn.execute(USER_MODS_SQL)
             return await scenario(OnePool(conn), conn)
         finally:
             await conn.execute("RESET search_path")

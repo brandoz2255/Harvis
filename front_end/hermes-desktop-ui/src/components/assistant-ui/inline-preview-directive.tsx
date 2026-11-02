@@ -34,12 +34,13 @@ import { localPreviewTarget } from '@/lib/local-preview'
  * app. The page's own styles override all of it, so a full page keeps its
  * own design.
  *
- * WIDGETS TALK BACK OFF-SCREEN. `window.hermes.send(prompt)` (or declarative
+ * WIDGETS TALK BACK, VISIBLY. `window.hermes.send(prompt)` (or declarative
  * `data-hermes-send` on any clickable element) routes the prompt through the
- * composer's send path as a user turn typed `display_kind=hidden`: the agent
- * wakes and the durable row exists (context, resume, audit via the DB), but
- * no bubble renders — the widget updating is the visible response. Token-
- * gated, length-capped, throttled to human speed.
+ * composer's send path as a user turn in the widget's OWN chat, labelled
+ * "[Sent by widget]" so the bubble shows what was sent and by whom. The
+ * frame is agent-authored, so a send is accepted only inside a fresh user
+ * gesture (a click in the frame), never while the page or pane is hidden,
+ * and only a few times per mount. Token-gated, length-capped, throttled.
  *
  * SMART WIDGETS. `window.harvis.askModel(prompt)`, `saveData(key, value)` and
  * `loadData(key)` (lib/artifact-bridge) let the page ask Harvis a plain
@@ -79,11 +80,34 @@ const INTENT_MESSAGE_TYPE = 'hermes-inline-preview-intent'
 const MAX_INTENT_LENGTH = 500
 /** One intent per frame per second; clicks are human-speed. */
 const INTENT_THROTTLE_MS = 1000
+/** Total intents one mounted widget may send, however many clicks it gets. */
+const MAX_INTENTS_PER_MOUNT = 5
+/** What the user sees (and the agent reads) at the head of a widget's turn. */
+export const WIDGET_INTENT_LABEL = '[Sent by widget] '
+
+export interface WidgetIntentGateInput {
+  /** Intents this mount already sent. */
+  count: number
+  /** `Date.now()` of the last accepted intent, 0 when none. */
+  lastAt: number
+  now: number
+  /** The app page is hidden, or the widget sits in a hidden pane. */
+  hidden: boolean
+  /** `navigator.userActivation.isActive` on the app page: a click or key in
+   *  the frame activates its ancestors too, a script on its own does not. */
+  userActive: boolean
+}
+
+/** Whether a widget intent may become a user turn right now. The widget is
+ *  agent-authored, so "the user clicked something" is the only authority. */
+export function widgetIntentAllowed({ count, hidden, lastAt, now, userActive }: WidgetIntentGateInput): boolean {
+  return userActive && !hidden && count < MAX_INTENTS_PER_MOUNT && now - lastAt >= INTENT_THROTTLE_MS
+}
 
 /** The script that gives the widget its ONE voice: `hermes.send(prompt)`.
  *  Posts the prompt up tagged with the mount token; the parent validates,
- *  throttles, and routes it through the composer as a normal user message —
- *  the widget speaks WITH the user's voice, visibly, never silently. Also
+ *  gates, and routes it through the composer as a labelled user message —
+ *  the widget speaks with the user's voice, visibly, never silently. Also
  *  wires `data-hermes-send` so declarative HTML works with zero script:
  *  `<button data-hermes-send="get-price eth">ETH</button>`. */
 export function intentScript(token: string): string {
@@ -332,23 +356,42 @@ function InlineHtmlFrame({
   }, [path, streaming])
 
   useEffect(() => {
-    // Human-speed gate on widget intents. A closure local, not state: it's
-    // a rate limiter read inside the handler, never rendered.
+    // Gate state is a closure local, not React state: it's read inside the
+    // handler and never rendered.
+    let sent = 0
     let lastIntentAt = 0
 
     const onMessage = (event: MessageEvent) => {
+      const frame = frameRef.current
+
+      if (!frame || event.source !== frame.contentWindow) {
+        return
+      }
+
       const intent = intentFromMessage(event.data, token)
 
       if (intent !== null) {
+        // Compare the frame's own surface, not the page-wide active chat: an
+        // inactive tab keeps its widgets mounted, and a widget left in chat A
+        // must never type into the chat the user is working in.
+        const surface = frame.closest<HTMLElement>('[data-composer-target]')
+        const target = surface?.dataset.composerTarget
+        const surfaceId = surface?.dataset.composerSurfaceId
         const now = Date.now()
 
-        if (now - lastIntentAt >= INTENT_THROTTLE_MS) {
+        const allowed =
+          Boolean(target && surfaceId) &&
+          widgetIntentAllowed({
+            count: sent,
+            hidden: document.hidden || Boolean(frame.closest('[data-pane-hidden]')),
+            lastAt: lastIntentAt,
+            now,
+            userActive: typeof navigator !== 'undefined' && navigator.userActivation?.isActive === true
+          })
+
+        if (allowed && requestComposerSubmit(WIDGET_INTENT_LABEL + intent, { surfaceId, target })) {
+          sent += 1
           lastIntentAt = now
-          // Off-screen: the prompt reaches the agent as a normal user turn
-          // through the composer's own send path (steer/queue rules apply),
-          // but the row is typed hidden — no bubble, no UI space. The widget
-          // updating IS the visible response.
-          requestComposerSubmit(intent, { target: 'active', displayKind: 'hidden' })
         }
 
         return

@@ -35,26 +35,45 @@ class DispatchResult:
     error: Optional[str] = None
 
 
-async def resolve_user_id(pool, source: SessionSource) -> Optional[int]:
-    """Look up the Harvis user_id linked to (platform, sender_id).
+async def resolve_user_id(
+    pool,
+    source: SessionSource,
+    bot_owner_user_id: Optional[int] = None,
+) -> Optional[int]:
+    """Look up the Harvis user_id a sender is linked to on the bot that received the message.
 
-    Returns None if no mapping exists.
+    A user's own bot (``bot_owner_user_id`` set) answers only that user's links:
+    the owner when they hold an enabled row for the sender, else None. Other
+    users' rows are never read. The house bot (no owner) resolves house links
+    only, of which there is at most one per identity.
     """
     if pool is None:
         return None
     try:
         async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                SELECT user_id
-                FROM messaging_platforms
-                WHERE platform = $1 AND identifier = $2 AND enabled = TRUE
-                ORDER BY updated_at DESC
-                LIMIT 1
-                """,
-                source.platform.value,
-                source.sender_id,
-            )
+            if bot_owner_user_id is not None:
+                row = await conn.fetchrow(
+                    """
+                    SELECT user_id
+                    FROM messaging_platforms
+                    WHERE user_id = $3 AND platform = $1 AND identifier = $2 AND enabled = TRUE
+                    LIMIT 1
+                    """,
+                    source.platform.value,
+                    source.sender_id,
+                    int(bot_owner_user_id),
+                )
+            else:
+                row = await conn.fetchrow(
+                    """
+                    SELECT user_id
+                    FROM messaging_platforms
+                    WHERE platform = $1 AND identifier = $2 AND house AND enabled = TRUE
+                    LIMIT 1
+                    """,
+                    source.platform.value,
+                    source.sender_id,
+                )
         return int(row["user_id"]) if row else None
     except Exception:
         logger.exception("messaging.resolve_user_id failed for %s", source.session_key())
@@ -102,17 +121,31 @@ async def dispatch_inbound(
     event: MessageEvent,
     *,
     fallback_user_id: Optional[int] = None,
+    bot_owner_user_id: Optional[int] = None,
 ) -> DispatchResult:
     """Route an inbound message to the agent runtime and return run metadata.
+
+    ``bot_owner_user_id`` is the owner of the bot that received the message; it
+    is absent for the house bot and for sidecars that predate it. On an owned
+    bot the message runs as that owner or not at all, and a fallback naming
+    anyone else is ignored.
 
     Workspace launch is async — caller polls /api/messaging/runs/{workspace_id}/status
     (or workspace_events) to surface the response back to the platform.
     """
     pool = getattr(request.app.state, "pg_pool", None)
 
-    user_id = await resolve_user_id(pool, event.source)
+    user_id = await resolve_user_id(pool, event.source, bot_owner_user_id)
     if user_id is None:
-        user_id = fallback_user_id
+        if bot_owner_user_id is None:
+            user_id = fallback_user_id
+        elif fallback_user_id == bot_owner_user_id:
+            user_id = bot_owner_user_id
+        elif fallback_user_id is not None:
+            logger.warning(
+                "messaging dispatch: ignoring fallback user %s on a bot owned by %s (%s)",
+                fallback_user_id, bot_owner_user_id, event.source.session_key(),
+            )
 
     if user_id is None:
         await audit(pool, event, user_id=None, direction=Direction.INBOUND, status="rejected_no_user")

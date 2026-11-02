@@ -16,12 +16,14 @@ export const twitter: EmbedMatcher = url => {
   }
 
   return {
+    // The iframe endpoint, not widgets.js: that script would run inside this origin.
+    embedUrl: `https://platform.twitter.com/embed/Tweet.html?dnt=true&id=${id}`,
+    height: 520,
     id: `twitter:${id}`,
     label: 'X',
     maxWidth: 480,
     provider: 'twitter',
-    renderer: 'tweet',
-    sourceUrl: url.toString(),
-    tweetId: id
+    renderer: 'frame',
+    sourceUrl: url.toString()
   }
 }

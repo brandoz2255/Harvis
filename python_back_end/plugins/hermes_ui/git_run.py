@@ -166,7 +166,7 @@ async def _check_dotgit(root: str) -> Optional[str]:
     if cst is None or cst.st_size > MAX_CONFIG_BYTES:
         return "missing or oversized .git/config"
     proc = await asyncio.create_subprocess_exec(
-        GIT, "config", "--file", cfg, "--list", "--name-only", "-z",
+        GIT, "config", "--file", cfg, "--list", "--name-only", "-z", cwd=root,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
         env={"PATH": "/usr/bin:/bin", "HOME": "/nonexistent", "GIT_CONFIG_NOSYSTEM": "1"})
     try:

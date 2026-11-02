@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Docker-mode twin of the Kubernetes `browser-runner-public-only` NetworkPolicy
 # (scripts/k8s/k8s_harden.py, browser_egress): browser-runner may reach the
-# public internet and nothing on this host's LAN or any private range.
+# public internet and nothing on this host's LAN or any private range. The same
+# goes for the repo-sandbox network, where untrusted repo code runs (it needs the
+# internet for npm and uv installs, so it cannot be `internal`).
 #
 #   scripts/browser-egress-lock.sh apply    install the rules (idempotent)
 #   scripts/browser-egress-lock.sh remove   take every rule and chain away
@@ -10,20 +12,28 @@
 #   --dry-run on apply/remove is the same as print.
 #
 # Docker cannot say "internet but not the LAN", so this keys on the pinned
-# subnet of the `browser-egress` network in docker-compose.yaml. Two chains, both
-# ours, so `remove` leaves nothing behind:
+# subnets of the `browser-egress` and `repo-sandbox` networks in
+# docker-compose.yaml. Four chains, all ours, so `remove` leaves nothing behind:
 #   HARVIS-BROWSER-FWD   hooked from DOCKER-USER (traffic leaving the host)
 #   HARVIS-BROWSER-IN    hooked from INPUT (traffic aimed at the host itself:
 #                        host services such as Ollama on the docker0 address,
 #                        and the host's own LAN address, never touch FORWARD)
+#   HARVIS-SANDBOX-FWD / HARVIS-SANDBOX-IN
+#                        the same two jobs for repo-sandbox. Kept apart so the
+#                        browser's allowed ranges do not widen the sandboxes.
+#                        Traffic inside the sandbox subnet itself is allowed:
+#                        the backend is on that network to reach the runners.
 #
 # Environment:
 #   HARVIS_BROWSER_SUBNET       the network's subnet; must equal what compose
 #                               uses (default 10.213.83.0/28). Comma list if
 #                               several stacks share this host.
+#   HARVIS_REPO_SANDBOX_SUBNET  the repo-sandbox network's subnet; must equal what
+#                               compose uses (default 10.213.84.0/24). Comma list
+#                               if several stacks share this host.
 #   HARVIS_BROWSER_ALLOW_CIDRS  comma list of private IPv4 ranges the browser may
 #                               reach anyway, e.g. 192.168.50.0/24. Same name and
-#                               meaning as the Kubernetes setting.
+#                               meaning as the Kubernetes setting. Browser only.
 #   HARVIS_BROWSER_DNS          extra resolver IPs to let through on port 53.
 #                               The host's own non-loopback resolvers are found
 #                               automatically: without them a LAN router that
@@ -32,12 +42,23 @@
 # Needs root. Without iptables, without root or passwordless sudo, or without
 # Docker's DOCKER-USER chain it says so and exits 0: the install carries on, the
 # browser just is not walled off from the LAN, and the warning says that.
+# It refuses (exit 3, nothing installed) when a repo-sandbox or browser-egress
+# network exists on a subnet the rules do not cover, or when the running backend's
+# default route goes through repo-sandbox (scripts/lock-preflight.sh says why and
+# prints the fix). HARVIS_LOCK_SKIP_PREFLIGHT=1 applies anyway.
 # IPv4 only; the compose network has no IPv6.
 set -uo pipefail
 
 PRIVATE_RANGES="10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 169.254.0.0/16 127.0.0.0/8 0.0.0.0/8 224.0.0.0/4 240.0.0.0/4"
 FWD_CHAIN="HARVIS-BROWSER-FWD"
 IN_CHAIN="HARVIS-BROWSER-IN"
+SBX_FWD_CHAIN="HARVIS-SANDBOX-FWD"
+SBX_IN_CHAIN="HARVIS-SANDBOX-IN"
+
+LP_NAME="browser-egress-lock"
+# shellcheck source=scripts/lock-preflight.sh
+_lp_dir="${BASH_SOURCE[0]}"; case "$_lp_dir" in */*) _lp_dir="${_lp_dir%/*}" ;; *) _lp_dir=. ;; esac
+. "$_lp_dir/lock-preflight.sh"
 
 MODE="${1:-apply}"
 DRY=0
@@ -59,6 +80,8 @@ env_file_get() {
 SUBNETS="${HARVIS_BROWSER_SUBNET:-$(env_file_get HARVIS_BROWSER_SUBNET)}"
 SUBNETS="${SUBNETS:-10.213.83.0/28}"
 ALLOW="${HARVIS_BROWSER_ALLOW_CIDRS:-$(env_file_get HARVIS_BROWSER_ALLOW_CIDRS)}"
+SBX_SUBNETS="${HARVIS_REPO_SANDBOX_SUBNET:-$(env_file_get HARVIS_REPO_SANDBOX_SUBNET)}"
+SBX_SUBNETS="${SBX_SUBNETS:-10.213.84.0/24}"
 
 valid_cidr() { # IPv4 a.b.c.d or a.b.c.d/n, octets <=255, n <=32
   local c="$1" ip n o
@@ -75,6 +98,10 @@ validate_all() {
     valid_cidr "$c" && [[ "$c" == */* ]] || { warn "HARVIS_BROWSER_SUBNET: '$c' is not an IPv4 range like 10.213.83.0/28"; return 1; }
   done
   [ -n "$(split_list "$SUBNETS")" ] || { warn "HARVIS_BROWSER_SUBNET is empty"; return 1; }
+  for c in $(split_list "$SBX_SUBNETS"); do
+    valid_cidr "$c" && [[ "$c" == */* ]] || { warn "HARVIS_REPO_SANDBOX_SUBNET: '$c' is not an IPv4 range like 10.213.84.0/24"; return 1; }
+  done
+  [ -n "$(split_list "$SBX_SUBNETS")" ] || { warn "HARVIS_REPO_SANDBOX_SUBNET is empty"; return 1; }
   for c in $(split_list "$ALLOW"); do
     valid_cidr "$c" || { warn "HARVIS_BROWSER_ALLOW_CIDRS: '$c' is not an IPv4 range like 192.168.1.0/24"; return 1; }
   done
@@ -122,12 +149,45 @@ rules() {
     echo "HOOK DOCKER-USER -s $sn -j $FWD_CHAIN"
     echo "HOOK INPUT -s $sn -j $IN_CHAIN"
   done
+  sandbox_rules
+}
+
+# repo-sandbox: the same wall, plus what a published preview port and the
+# backend's own presence on the network need.
+sandbox_rules() {
+  local sn c ns
+  echo "ENSURE_CHAIN $SBX_FWD_CHAIN"; echo "ENSURE_CHAIN $SBX_IN_CHAIN"
+  echo "FLUSH $SBX_FWD_CHAIN"; echo "FLUSH $SBX_IN_CHAIN"
+  # Replies to connections the host or the backend opened (the live preview is a
+  # published 127.0.0.1 port; the readiness probe comes from the backend) are not
+  # new traffic from the sandbox.
+  echo "APPEND $SBX_FWD_CHAIN -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"
+  echo "APPEND $SBX_IN_CHAIN -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"
+  for sn in $(split_list "$SBX_SUBNETS"); do
+    echo "APPEND $SBX_FWD_CHAIN -s $sn -d $sn -j ACCEPT"
+  done
+  for ns in $(resolvers); do
+    echo "APPEND $SBX_FWD_CHAIN -d $ns -p udp --dport 53 -j ACCEPT"
+    echo "APPEND $SBX_FWD_CHAIN -d $ns -p tcp --dport 53 -j ACCEPT"
+    echo "APPEND $SBX_IN_CHAIN -d $ns -p udp --dport 53 -j ACCEPT"
+    echo "APPEND $SBX_IN_CHAIN -d $ns -p tcp --dport 53 -j ACCEPT"
+  done
+  for c in $PRIVATE_RANGES; do echo "APPEND $SBX_FWD_CHAIN -d $c -j DROP"; done
+  echo "APPEND $SBX_IN_CHAIN -j DROP"
+  echo "APPEND $SBX_FWD_CHAIN -j RETURN"
+  for sn in $(split_list "$SBX_SUBNETS"); do
+    echo "HOOK DOCKER-USER -s $sn -j $SBX_FWD_CHAIN"
+    echo "HOOK INPUT -s $sn -j $SBX_IN_CHAIN"
+  done
 }
 
 unhook_lines() { # remove every jump to our chains, whatever subnet it was for
   echo "UNHOOK DOCKER-USER $FWD_CHAIN"; echo "UNHOOK INPUT $IN_CHAIN"
+  echo "UNHOOK DOCKER-USER $SBX_FWD_CHAIN"; echo "UNHOOK INPUT $SBX_IN_CHAIN"
   echo "FLUSH $FWD_CHAIN"; echo "FLUSH $IN_CHAIN"
+  echo "FLUSH $SBX_FWD_CHAIN"; echo "FLUSH $SBX_IN_CHAIN"
   echo "DELETE_CHAIN $FWD_CHAIN"; echo "DELETE_CHAIN $IN_CHAIN"
+  echo "DELETE_CHAIN $SBX_FWD_CHAIN"; echo "DELETE_CHAIN $SBX_IN_CHAIN"
 }
 
 IPT=(iptables -w 5)
@@ -174,10 +234,14 @@ case "$MODE" in
   apply)
     validate_all || exit 0
     [ "$DRY" = 1 ] || can_run || exit 0
+    # Refuse rules that would miss the sandbox (network on another subnet) or cut the
+    # backend off (its default route through repo-sandbox). Exit 3, not 0: unlike a
+    # missing iptables this needs fixing, and install.sh carries on regardless.
+    [ "$DRY" = 1 ] || lock_preflight "$SBX_SUBNETS" "$SUBNETS" || exit 3
     # Re-apply from scratch: unhook first so a changed HARVIS_BROWSER_SUBNET
     # does not leave a stale jump behind, then build and hook.
     { unhook_lines | grep -v DELETE_CHAIN; rules; } | execute
-    [ "$DRY" = 1 ] || say "browser-runner egress locked to the public internet on $SUBNETS (allowed private ranges: ${ALLOW:-none})"
+    [ "$DRY" = 1 ] || say "browser-runner egress locked to the public internet on $SUBNETS (allowed private ranges: ${ALLOW:-none}); repo sandboxes on $SBX_SUBNETS"
     ;;
   remove)
     if [ "$DRY" != 1 ]; then can_run || exit 0; fi
@@ -186,8 +250,8 @@ case "$MODE" in
     ;;
   status)
     can_run || exit 0
-    for ch in "DOCKER-USER" "INPUT" "$FWD_CHAIN" "$IN_CHAIN"; do
-      echo "== $ch"; $SUDO "${IPT[@]}" -S "$ch" 2>&1 | grep -E "HARVIS-BROWSER|^-N $ch|-A $ch" || true
+    for ch in "DOCKER-USER" "INPUT" "$FWD_CHAIN" "$IN_CHAIN" "$SBX_FWD_CHAIN" "$SBX_IN_CHAIN"; do
+      echo "== $ch"; $SUDO "${IPT[@]}" -S "$ch" 2>&1 | grep -E "HARVIS-(BROWSER|SANDBOX)|^-N $ch|-A $ch" || true
     done
     ;;
   *) echo "usage: $0 apply|remove|status|print [--dry-run]" >&2; exit 2 ;;

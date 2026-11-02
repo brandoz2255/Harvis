@@ -1,0 +1,149 @@
+<!doctype html>
+<!-- Mod sandbox PROXY page (outer iframe). The host mounts it with sandbox="allow-scripts"
+     only, so it runs in an opaque origin and cannot touch the host page, cookies or storage.
+     It receives the approved mod HTML plus the CSP the host built from the approved manifest,
+     mounts both in an inner sandboxed iframe, and relays ui/* messages between host and mod.
+     Messages are matched by window identity (e.source), never by origin. -->
+<meta charset="utf-8" />
+<script>
+  let view = null
+
+  // Runs inside the mod frame before its own code: reports errors to the host and gives the
+  // mod a small `window.mod` helper over the ui/* JSON-RPC bridge.
+  const BOOT = `<script>
+// CSP does not govern WebRTC, so ICE/STUN would be a way out with data in the candidate; drop it
+// from this window before the mod's own code runs.
+for (const n of ['RTCPeerConnection', 'webkitRTCPeerConnection', 'RTCDataChannel', 'RTCSessionDescription'])
+  try { Object.defineProperty(window, n, { value: undefined, configurable: false, writable: false }); } catch (_) {}
+window.addEventListener('error', (e) => parent.postMessage({ jsonrpc: '2.0', method: 'ui/error',
+  params: { message: String(e.error?.message ?? e.message ?? 'unknown') } }, '*'));
+window.addEventListener('unhandledrejection', (e) => parent.postMessage({ jsonrpc: '2.0', method: 'ui/error',
+  params: { message: 'unhandled rejection: ' + String(e.reason?.message ?? e.reason) } }, '*'));
+let _mid = 0; const _pending = new Map();
+window.mod = {
+  send: (method, params) => parent.postMessage({ jsonrpc: '2.0', method, params }, '*'),
+  request: (method, params) => new Promise((res, rej) => {
+    const id = ++_mid; _pending.set(id, { res, rej });
+    parent.postMessage({ jsonrpc: '2.0', id, method, params }, '*');
+    setTimeout(() => { if (_pending.delete(id)) rej(new Error('host timeout')); }, 4000);
+  }),
+  _handlers: [],
+  onMessage: (fn) => window.mod._handlers.push(fn),
+};
+window.addEventListener('message', (e) => {
+  if (e.source !== parent) return;
+  const d = e.data;
+  if (d && d.id !== undefined && _pending.has(d.id)) {
+    const p = _pending.get(d.id); _pending.delete(d.id);
+    d.error ? p.rej(new Error(d.error.message)) : p.res(d.result);
+  } else { for (const fn of window.mod._handlers) fn(d); }
+});
+<\/script>`
+
+  function dropView() {
+    if (view) view.remove()
+    view = null
+  }
+
+  // The host's CSP names the only origins the mod may embed. The same frame-src is also set on THIS
+  // page, because a frame's own navigation (location = 'https://x/?d=' + data) is checked against
+  // its embedder's policy, not its own, and a self-navigation has no other directive (no
+  // navigate-to). A srcdoc frame inherits this policy, so a mod with no frameDomains cannot
+  // navigate or embed at all; one with frameDomains can reach only those. A CSP can only be
+  // tightened, never relaxed, so a proxy mounts one frame-src and refuses a different later one.
+  let appliedFrameSrc = null
+
+  function frameSrcOf(csp) {
+    const found = csp.split(';').map(part => part.trim()).find(part => /^frame-src(\s|$)/.test(part))
+    const value = found ? found.slice('frame-src'.length).trim() : ''
+
+    return /^[\w.:*'\-/ ]+$/.test(value) ? value : "'none'"
+  }
+
+  function lockFrameSrc(csp) {
+    const frameSrc = frameSrcOf(csp)
+
+    if (appliedFrameSrc !== null) {
+      return appliedFrameSrc === frameSrc
+    }
+
+    const meta = document.createElement('meta')
+    meta.httpEquiv = 'Content-Security-Policy'
+    meta.content = 'frame-src ' + frameSrc
+    document.head.appendChild(meta)
+    appliedFrameSrc = frameSrc
+
+    return true
+  }
+
+  function mountView(html, csp) {
+    dropView()
+
+    if (!lockFrameSrc(csp)) {
+      parent.postMessage({ jsonrpc: '2.0', method: 'ui/error', params: { message: 'mod frame policy changed' } }, '*')
+
+      return
+    }
+
+    // The CSP meta goes first so it governs everything after it, including the mod's own markup.
+    const meta = '<meta http-equiv="Content-Security-Policy" content="' + csp.replace(/"/g, '&quot;') + '" />'
+
+    view = document.createElement('iframe')
+    view.setAttribute('sandbox', 'allow-scripts')
+    view.style.cssText = 'border:0;width:100%;height:100%;background:transparent'
+    view.srcdoc = meta + BOOT + html
+
+    // The CSP cannot restrict where a frame navigates itself (there is no navigate-to), so
+    // `location = 'https://x/?d=' + data` would leave with whatever the mod holds. The srcdoc
+    // loads once; any later load is a navigation, so the frame is torn down and the host told.
+    const frame = view
+    let loads = 0
+
+    frame.addEventListener('load', () => {
+      loads += 1
+
+      if (loads > 1 && view === frame) {
+        dropView()
+        parent.postMessage({ jsonrpc: '2.0', method: 'ui/error', params: { message: 'mod frame navigated away' } }, '*')
+      }
+    })
+
+    document.body.appendChild(view)
+  }
+
+  window.addEventListener('message', e => {
+    const d = e.data
+
+    if (e.source === parent) {
+      if (d && d.method === 'ui/notifications/sandbox-resource-ready') {
+        if (d.params && typeof d.params.html === 'string' && typeof d.params.csp === 'string') {
+          mountView(d.params.html, d.params.csp)
+        }
+
+        return
+      }
+
+      if (d && d.method === 'ui/resource-teardown' && view) {
+        dropView()
+
+        return
+      }
+
+      if (view && d && d.jsonrpc) {
+        view.contentWindow.postMessage(d, '*')
+      }
+    } else if (view && e.source === view.contentWindow) {
+      parent.postMessage(d, '*')
+    }
+  })
+
+  parent.postMessage({ jsonrpc: '2.0', method: 'ui/notifications/sandbox-proxy-ready' }, '*')
+</script>
+<style>
+  html,
+  body {
+    height: 100%;
+    margin: 0;
+    background: transparent;
+  }
+</style>

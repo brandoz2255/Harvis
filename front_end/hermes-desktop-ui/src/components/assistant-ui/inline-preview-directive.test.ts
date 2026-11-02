@@ -5,6 +5,7 @@ import {
   frameSizeFromMessage,
   intentFromMessage,
   themePrelude,
+  widgetIntentAllowed,
   withInlineChrome
 } from './inline-preview-directive'
 
@@ -133,5 +134,27 @@ describe('withInlineChrome intent wiring', () => {
     expect(framed).toContain('window.hermes={send:send}')
     expect(framed).toContain('data-hermes-send')
     expect(framed).toContain('hermes-inline-preview-intent')
+  })
+})
+
+describe('widgetIntentAllowed', () => {
+  const ok = { count: 0, hidden: false, lastAt: 0, now: 10_000, userActive: true }
+
+  it('accepts a fresh gesture on a visible widget', () => {
+    expect(widgetIntentAllowed(ok)).toBe(true)
+  })
+
+  it('refuses a send with no user activation (a script talking on its own)', () => {
+    expect(widgetIntentAllowed({ ...ok, userActive: false })).toBe(false)
+  })
+
+  it('refuses while the page or pane is hidden', () => {
+    expect(widgetIntentAllowed({ ...ok, hidden: true })).toBe(false)
+  })
+
+  it('caps the total per mount and keeps the human-speed throttle', () => {
+    expect(widgetIntentAllowed({ ...ok, count: 5 })).toBe(false)
+    expect(widgetIntentAllowed({ ...ok, lastAt: 9_500 })).toBe(false)
+    expect(widgetIntentAllowed({ ...ok, lastAt: 8_900 })).toBe(true)
   })
 })

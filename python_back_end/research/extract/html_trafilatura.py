@@ -5,6 +5,8 @@ import logging
 
 import  requests
 
+from research import safe_fetch
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -25,6 +27,10 @@ class HtmlExtractionResult:
     meta: Dict[str, Any]
 
 def fetch_html(url: str, user_agent: str, timeout_s: int) -> str :
+    if safe_fetch.enabled():
+        r = safe_fetch.fetch(url, headers={"User-Agent": user_agent}, timeout=timeout_s)
+        r.raise_for_status()
+        return r.text
     r = requests.get(url, timeout=timeout_s, headers={"User-Agent": user_agent})
     r.raise_for_status()
     return r.text  

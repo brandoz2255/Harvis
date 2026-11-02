@@ -90,6 +90,8 @@ class GatewayRunner:
     async def process_inbound(self, adapter: BasePlatformAdapter, msg: InboundMessage) -> None:
         logger.info("[%s] inbound %s text=%r", adapter.key, msg.message_id, (msg.text or "")[:120])
 
+        # An env-configured adapter is the house bot even when it names a default user.
+        msg.bot_owner_user_id = adapter.owner_user_id if adapter.spec.source != "env" else None
         if msg.fallback_user_id is None:
             msg.fallback_user_id = adapter.fallback_user_for(msg.source.sender_id)
 

@@ -28,6 +28,7 @@ function route(session: () => Response, config = { onboarding: false, features: 
 
 describe('SessionGate', () => {
   beforeEach(() => {
+    window.localStorage.clear()
     $session.set({ status: 'checking' })
     vi.stubGlobal(
       'matchMedia',
@@ -175,6 +176,28 @@ describe('SessionGate', () => {
 
     expect(reload).toHaveBeenCalled()
     expect(screen.getByText('the app').closest('[inert]')).not.toBeNull()
+  })
+
+  it('wipes another account cache and restarts instead of mounting on a fresh load', async () => {
+    const reload = vi.fn()
+    vi.stubGlobal('location', { ...window.location, reload })
+    window.localStorage.setItem('harvis.storageOwner', 'someone-else')
+    window.localStorage.setItem('hermes.desktop.lastRoute', '/chat/theirs')
+    vi.stubGlobal(
+      'fetch',
+      route(() => json(200, USER))
+    )
+
+    render(
+      <SessionGate>
+        <p>the app</p>
+      </SessionGate>
+    )
+
+    await vi.waitFor(() => expect(reload).toHaveBeenCalled())
+    expect(screen.queryByText('the app')).toBeNull()
+    expect(window.localStorage.getItem('hermes.desktop.lastRoute')).toBeNull()
+    expect(window.localStorage.getItem('harvis.storageOwner')).toBe(USER.id)
   })
 
   it('says what is missing when sign-up is sent with a blank name', async () => {

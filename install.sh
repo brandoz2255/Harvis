@@ -67,6 +67,9 @@ KNOWN_PROVIDERS=(
 )
 
 HEALTH_URL="http://localhost:9000/api/health/services"
+# The same report read from inside the backend, where it is always the full one
+# (see fetch_health).
+HEALTH_INNER_URL="http://127.0.0.1:8000/api/health/services"
 SETUP_URL="http://localhost:9000/api/setup/status"
 # The health report lists the model provider under this key. That server is the
 # user's own (plug-and-play via HARVIS_LLM_BASE_URL), not a container of this
@@ -262,17 +265,82 @@ print_check_table() {
 }
 
 # ── Prerequisites ───────────────────────────────────────────────────────────
+is_macos() { [ "$(uname -s 2>/dev/null || echo unknown)" = "Darwin" ]; }
+
+# Docker Desktop installs its CLI into ~/.docker/bin and puts that on PATH only
+# by editing the shell profile. A terminal opened before Docker was installed —
+# or any non-login shell — therefore sees no `docker` at all while Docker
+# Desktop is running in the menu bar. Recover it from the known install
+# locations before concluding it is missing.
+find_docker_cli() {
+  command -v docker >/dev/null 2>&1 && return 0
+  local d
+  for d in "${HOME:-/nonexistent}/.docker/bin" /usr/local/bin /opt/homebrew/bin \
+           "/Applications/Docker.app/Contents/Resources/bin"; do
+    if [ -x "$d/docker" ]; then
+      PATH="$d:$PATH"
+      export PATH
+      add_hint "  The Docker CLI is at $d/docker but was not on your PATH.
+  Using it for this run. To make that permanent, open a NEW terminal (Docker
+  Desktop adds it to your shell profile when it installs), or add:
+
+      export PATH=\"$d:\$PATH\""
+      return 0
+    fi
+  done
+  return 1
+}
+
 check_prereqs() {
-  if command -v docker >/dev/null 2>&1; then
+  if find_docker_cli; then
     add_row PASS docker "$(docker --version 2>/dev/null || echo present)"
   else
     add_row FAIL docker "not found — install Docker first"
+    if is_macos; then
+      add_hint "  Install Docker Desktop for Mac:
+      https://docs.docker.com/desktop/install/mac-install/
+
+  If it IS already installed, its CLI lives in ~/.docker/bin — open a NEW
+  terminal window so your shell profile is re-read, then run this again."
+    else
+      add_hint "  Install Docker Engine and the compose v2 plugin:
+      https://docs.docker.com/engine/install/"
+    fi
     return 1
   fi
+
   if docker compose version >/dev/null 2>&1; then
     add_row PASS "docker compose" "$(docker compose version --short 2>/dev/null || echo present)"
   else
     add_row FAIL "docker compose" "v2 plugin ('docker compose') not found"
+    return 1
+  fi
+
+  # `docker` and `docker compose` are CLIENT binaries — both answer fine while
+  # the engine is stopped. Without this check the preflight table passes and
+  # the FIRST real command dies on "Cannot connect to the Docker daemon",
+  # which reads like a Harvis bug rather than "Docker Desktop isn't running".
+  local server
+  server="$(docker version --format '{{.Server.Version}}' 2>/dev/null || true)"
+  if [ -n "$server" ]; then
+    add_row PASS "docker daemon" "engine $server"
+  else
+    add_row FAIL "docker daemon" "CLI is installed but the engine is not reachable"
+    if is_macos; then
+      add_hint "  Start Docker Desktop and wait for the whale icon to stop animating:
+
+      open -a Docker
+
+  Then run this script again."
+    else
+      add_hint "  Start the Docker engine:
+
+      sudo systemctl start docker
+
+  If it is already running, your user may not be in the 'docker' group:
+
+      sudo usermod -aG docker \"\$USER\"    # then log out and back in"
+    fi
     return 1
   fi
 }
@@ -331,7 +399,19 @@ detect_gpu_runtime() {
 
 # ── Model-server detection ──────────────────────────────────────────────────
 port_listening() { # /dev/tcp probe: succeeds iff something accepts on $1:$2
-  ( exec 3<>"/dev/tcp/$1/$2" ) 2>/dev/null
+  # Capped on purpose. A bare /dev/tcp connect has no timeout, so a host that
+  # silently drops packets — host.docker.internal resolving to something
+  # unroutable, or a firewalled default gateway — blocks for the kernel's full
+  # SYN-retry window, about 130 s. detect_provider runs this once per host/port
+  # pair with no output in between, so the installer just sat there after the
+  # banner for minutes. curl's -m 4 never helped: this gate runs before it.
+  # macOS ships no `timeout`; there the probe stays uncapped rather than
+  # reporting every port as closed.
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 2 bash -c 'exec 3<>"/dev/tcp/$0/$1"' "$1" "$2" 2>/dev/null
+  else
+    ( exec 3<>"/dev/tcp/$1/$2" ) 2>/dev/null
+  fi
 }
 
 # Which compose project, if any, publishes host port $1. Empty when the holder
@@ -387,16 +467,25 @@ containers_reach_port() { # port — succeeds when a container could connect
 add_unreachable_hint() { # port name
   local fix
   if [ "$2" = "Ollama" ]; then
-    fix="  Ollama on Linux listens on 127.0.0.1 only. Let it listen for containers too,
-  then re-run the installer:
+    fix="  Ollama on Linux listens on 127.0.0.1 only. Containers reach it through the
+  Docker bridge address, so it has to listen there. Do not just set
+  OLLAMA_HOST=0.0.0.0: on a machine other people can reach, that puts an
+  unauthenticated model server (pull, delete, run) on your network.
+  Either bind it to the bridge address (the ollama command on this machine then
+  needs OLLAMA_HOST=${LLM_BRIDGE_GW:-172.17.0.1}:11434 too):
       sudo systemctl edit ollama        # add these two lines and save:
           [Service]
-          Environment=\"OLLAMA_HOST=0.0.0.0\"
+          Environment=\"OLLAMA_HOST=${LLM_BRIDGE_GW:-172.17.0.1}:11434\"
+  or, to listen on every address, firewall the port first and only then set
+  OLLAMA_HOST=0.0.0.0 the same way:
+      sudo scripts/ollama-lan-lock.sh apply
+  Then:
       sudo systemctl restart ollama
       ./install.sh --yes"
   else
-    fix="  Restart ${2} so it listens on 0.0.0.0 instead of 127.0.0.1 (LM Studio: turn on
-  \"Serve on Local Network\"; llama.cpp and vLLM: --host 0.0.0.0), then re-run
+    fix="  Restart ${2} so containers can reach it: listen on this machine's Docker bridge
+  address (${LLM_BRIDGE_GW:-172.17.0.1}) rather than 0.0.0.0 (LM Studio: bind to that address
+  in its server settings; llama.cpp and vLLM: --host ${LLM_BRIDGE_GW:-172.17.0.1}), then re-run
   ./install.sh --yes"
   fi
   # Kept for the closing summary too: the build prints thousands of lines
@@ -405,7 +494,8 @@ add_unreachable_hint() { # port name
   add_hint "⚠ ${2} answers on this machine but not from inside Docker (${LLM_BRIDGE_GW}:${1} refused).
   Harvis will start, but chat will have no model until this is fixed.
 ${fix}
-  0.0.0.0 also opens port ${1} to your network; firewall it if that matters.
+  Listening on 0.0.0.0 opens port ${1} to your whole network with no sign-in; never
+  do that without a firewall (scripts/ollama-lan-lock.sh is one).
   Or point Harvis at an address containers can reach:
       ./install.sh --yes --llm-url http://<this machine's LAN IP>:${1}"
 }
@@ -530,6 +620,10 @@ check_compose_merge() {
   local -a envprefix=(env "HARVIS_GPU_RUNTIME=${GPU_RUNTIME:-runc}")
   if [ -z "${JWT_SECRET:-}" ] && ! grep -q '^JWT_SECRET=' .env 2>/dev/null; then
     envprefix+=(JWT_SECRET=preflight-only-dummy)
+  fi
+  # Same for POSTGRES_PASSWORD, which compose also refuses to default.
+  if [ -z "${POSTGRES_PASSWORD:-}" ] && ! grep -q '^POSTGRES_PASSWORD=' .env 2>/dev/null; then
+    envprefix+=(POSTGRES_PASSWORD=preflight-only-dummy)
   fi
   if ! "${envprefix[@]}" docker compose "${COMPOSE_ARGS[@]}" config --format json \
       >"$MERGED_JSON" 2>"$errs"; then
@@ -685,7 +779,7 @@ check_resources() {
   if [ -n "${disk_kb:-}" ]; then
     local disk_gib=$((disk_kb / 1024 / 1024))
     if [ "$disk_gib" -lt 10 ]; then
-      add_row WARN disk "${disk_gib} GiB free — the images alone need roughly 7 GiB"
+      add_row WARN disk "${disk_gib} GiB free — the images alone need roughly 8 GiB"
     else
       add_row PASS disk "${disk_gib} GiB free"
     fi
@@ -809,9 +903,21 @@ write_env() {
   # .env on every launch, which is what lets a fresh .env sit beside old data.
   ensure_env_secret POSTGRES_PASSWORD "$(rand_hex 24)" "a POSTGRES_PASSWORD"
 
-  # OPENCLAW_GATEWAY_TOKEN — SHARED across backend/openclaw/harvis-mcp; a running
-  # stack authenticated with the old value breaks if this ever regenerates.
-  ensure_env_secret OPENCLAW_GATEWAY_TOKEN "$(rand_hex 32)" "an OPENCLAW_GATEWAY_TOKEN"
+  # HARVIS_GATEWAY_TOKEN — SHARED across backend/openclaw/harvis-mcp; a running
+  # stack authenticated with the old value breaks if this ever regenerates. An
+  # install from before the rename holds it as OPENCLAW_GATEWAY_TOKEN: that value
+  # is carried over, never replaced, so backend and harvis-mcp keep agreeing.
+  # The old key is left in .env, where compose still reads it as a fallback. The
+  # old stack ran on _BUNDLED when set, else the plain name, so that is the value kept.
+  if ! grep -q "^HARVIS_GATEWAY_TOKEN=" .env; then
+    legacy_gateway_token="$(env_value OPENCLAW_GATEWAY_TOKEN_BUNDLED)"
+    [ -n "$legacy_gateway_token" ] || legacy_gateway_token="$(env_value OPENCLAW_GATEWAY_TOKEN)"
+    if [ -n "$legacy_gateway_token" ]; then
+      ensure_env_secret HARVIS_GATEWAY_TOKEN "$legacy_gateway_token" "a HARVIS_GATEWAY_TOKEN (reused from OPENCLAW_GATEWAY_TOKEN)"
+    fi
+    unset legacy_gateway_token
+  fi
+  ensure_env_secret HARVIS_GATEWAY_TOKEN "$(rand_hex 32)" "a HARVIS_GATEWAY_TOKEN"
   # MESSAGING_GATEWAY_TOKEN — shared by the backend and the messaging
   # gateway (on by default). Without it the gateway cannot reach the backend.
   ensure_env_secret MESSAGING_GATEWAY_TOKEN "$(rand_hex 32)" "a MESSAGING_GATEWAY_TOKEN"
@@ -829,6 +935,38 @@ write_env() {
 ensure_network() {
   docker network inspect ollama-n8n-network >/dev/null 2>&1 || docker network create ollama-n8n-network >/dev/null
   echo "✓ docker network 'ollama-n8n-network' ready"
+}
+
+# ── repo-sandbox subnet ─────────────────────────────────────────────────────
+# docker-compose.yaml pins the repo-sandbox subnet so scripts/browser-egress-lock.sh
+# can name it, but compose never changes the subnet of a network that already
+# exists: an install made before the pin keeps the range Docker handed out, and
+# the firewall rules would then name a range nobody is on. With no container
+# (running or stopped) attached the network is removed here so `up` creates it on
+# the pinned subnet; with containers attached it is left alone and the one-line
+# fix is printed, because removing it would break the running stack.
+REPO_SANDBOX_STALE=0
+reconcile_repo_sandbox_subnet() {
+  REPO_SANDBOX_STALE=0
+  local stack pin name subnets
+  stack="${HARVIS_STACK_NAME:-$(env_value HARVIS_STACK_NAME)}"
+  pin="${HARVIS_REPO_SANDBOX_SUBNET:-$(env_value HARVIS_REPO_SANDBOX_SUBNET)}"
+  pin="${pin:-10.213.84.0/24}"
+  name="${stack:-harvis}_repo-sandbox"
+  subnets="$(docker network inspect "$name" --format '{{range .IPAM.Config}}{{.Subnet}} {{end}}' 2>/dev/null || true)"
+  [ -n "${subnets// /}" ] || return 0
+  case " $subnets " in *" $pin "*) return 0 ;; esac
+  if [ -z "$(docker ps -aq --filter "network=$name" 2>/dev/null || true)" ]; then
+    if docker network rm "$name" >/dev/null 2>&1; then
+      echo "✓ Removed the old '$name' network (it was on ${subnets% }); it is recreated on $pin"
+      return 0
+    fi
+  fi
+  REPO_SANDBOX_STALE=1
+  echo "⚠ Docker network '$name' is on ${subnets% }, not the pinned $pin, so the sandbox firewall"
+  echo "  rules cannot cover it. Compose does not change an existing network's subnet. To fix:"
+  echo "      docker compose down && docker network rm $name && ./install.sh"
+  echo "  (or set HARVIS_REPO_SANDBOX_SUBNET=${subnets%% *} in .env to keep the old range)"
 }
 
 # ── Startup poll — report what was OBSERVED, not what was hoped ─────────────
@@ -957,14 +1095,14 @@ report_models() {
   # So: point at the machine that owns it, and say what to run there.
   #
   # Deliberately names no model. This script knows nothing about your hardware,
-  # and a hardcoded suggestion is a guess dressed as advice; the setup wizard
+  # and a hardcoded suggestion is a guess dressed as advice; the Cookbook
   # asks llmfit (running in the default set) to rank real candidates for THIS
   # machine, which is a better answer than any constant could be.
   echo ""
   if [ -z "$LLM_ENDPOINT" ]; then
     echo "  No model server was found on this machine, so chat has nothing to talk to yet."
-    echo "  Two ways forward, both offered in the setup wizard on first login:"
-    echo "    • connect a cloud provider with an API key, or"
+    echo "  Two ways forward:"
+    echo "    • sign in, then connect a provider with an API key when Harvis asks, or"
     echo "    • start a local server (ollama serve, LM Studio, llama.cpp, vLLM) and re-run this."
     return 0
   fi
@@ -972,11 +1110,11 @@ report_models() {
   # $1 is the backend's view of that server. Anything but "up" was already
   # explained above; advice about loading models would contradict it.
   if [ -n "${1:-}" ] && [ "$1" != "up" ]; then
-    echo "  Fix the connection above first, then pick a model in the setup wizard."
+    echo "  Fix the connection above first, then pick a model in Harvis."
     return 0
   fi
   case "$LLM_PROVIDER" in
-    Ollama) echo "  The setup wizard ranks the models this machine can run and pulls the one you pick." ;;
+    Ollama) echo "  The Cookbook ranks the models this machine can run and downloads the one you pick." ;;
     *)      echo "  Load a model there, then pick it in Harvis." ;;
   esac
 }
@@ -1031,25 +1169,63 @@ check_stack_containers() {
   done
 }
 
+# One read of the health report into HEALTH_BODY; HEALTH_DETAIL=1 when it lists the
+# services. On a shared install nginx answers anyone from outside with just
+# {"status":..}, which names no failing service, so health_blockers would find
+# nothing and the installer would call a half-down stack a success. The backend
+# gives the full report to a caller on its own loopback, so ask it from inside
+# (docker compose exec, or kubectl exec in Kubernetes mode) and only fall back to
+# the nginx URL when that fails, e.g. while the backend container is still starting.
+HEALTH_BODY=""
+HEALTH_DETAIL=0
+fetch_health() {
+  local sudo=""
+  HEALTH_BODY=""; HEALTH_DETAIL=0
+  if [ "$K8S_ACTION" = "up" ] || [ -f "$K8S_MODE_FILE" ]; then
+    [ "$(id -u)" -eq 0 ] || sudo="sudo"
+    HEALTH_BODY="$($sudo k3s kubectl -n harvis exec deploy/backend -- curl -s -m 8 "$HEALTH_INNER_URL" 2>/dev/null || true)"
+  else
+    HEALTH_BODY="$(docker compose exec -T backend curl -s -m 8 "$HEALTH_INNER_URL" 2>/dev/null || true)"
+  fi
+  if printf '%s' "$HEALTH_BODY" | grep -q '^{"status":"[a-z]*".*":{"status":"'; then
+    HEALTH_DETAIL=1
+    return 0
+  fi
+  HEALTH_BODY="$(curl -s -m 8 "$HEALTH_URL" 2>/dev/null || true)"
+  printf '%s' "$HEALTH_BODY" | grep -q '":{"status":"' && HEALTH_DETAIL=1
+  return 0
+}
+
 poll_health() {
   echo ""
-  echo "Waiting for the stack to come up (polling ${HEALTH_URL}) ..."
+  echo "Waiting for the stack to come up (asking the backend for ${HEALTH_INNER_URL}) ..."
   local deadline=$((SECONDS + 180)) body="" overall=""
   while [ $SECONDS -lt $deadline ]; do
-    body="$(curl -s -m 8 "$HEALTH_URL" 2>/dev/null || true)"
+    fetch_health
+    body="$HEALTH_BODY"
     overall="$(printf '%s' "$body" | sed -n 's/^{"status":"\([a-z]*\)".*/\1/p')"
     [ "$overall" = "healthy" ] && break
     # "degraded" with nothing wrong but the model provider IS the healthy state
-    # of a no-provider install — waiting the full 180s won't change it.
-    if [ -n "$body" ] && [ -z "$(health_blockers "$body")" ]; then break; fi
-    sleep 5
+    # of a no-provider install — waiting the full 180s won't change it. Only a
+    # report that lists the services can say that; a bare {"status":..} says nothing.
+    if [ "$HEALTH_DETAIL" = 1 ] && [ -n "$body" ] && [ -z "$(health_blockers "$body")" ]; then break; fi
+    sleep "${HARVIS_HEALTH_POLL_INTERVAL:-5}"
   done
   echo ""
   check_stack_containers
   if [ -z "$body" ]; then
     echo ""
-    echo "✗ No response from ${HEALTH_URL} after 180s — nginx (or the backend behind it) never came up."
+    echo "✗ No response from the backend (${HEALTH_INNER_URL}) or from ${HEALTH_URL} after 180s — nginx (or the backend behind it) never came up."
     echo "  Inspect with:  docker compose ps"
+    echo "                 docker compose logs --tail=100 backend nginx pgsql"
+    return 1
+  fi
+  if [ "$HEALTH_DETAIL" != 1 ] && [ "$overall" != "healthy" ]; then
+    echo ""
+    echo "✗ The stack reports '${overall:-no status}' but the per-service detail could not be read"
+    echo "  (the backend did not answer inside its container, and nginx only gives a summary)."
+    echo "  Inspect with:  docker compose ps"
+    echo "                 docker compose exec -T backend curl -s ${HEALTH_INNER_URL}"
     echo "                 docker compose logs --tail=100 backend nginx pgsql"
     return 1
   fi
@@ -1130,12 +1306,10 @@ poll_health() {
       echo "  Browsers hand out the microphone only over https (or on this machine at"
       echo "  localhost), so voice will not work from other devices until you do. The"
       echo "  script makes its own certificate, so the first visit shows a warning you"
-      echo "  click past once. Plain http on :9000 keeps working either way."
-      echo ""
-      echo "  Auth cookie: HARVIS_COOKIE_SECURE defaults to false, which is what lets"
-      echo "  the http lane log in. Set it to true in .env only if you have switched to"
-      echo "  https for everyone — a Secure cookie is not sent over http at all, so"
-      echo "  turning it on while anyone still uses :9000 locks them out." ;;
+      echo "  click past once. The script also makes plain http on :9000 redirect to"
+      echo "  https (so passwords and the session cookie stay off the network in the"
+      echo "  clear) and sets HARVIS_COOKIE_SECURE=true. Until you run it, :9000 serves"
+      echo "  the app over plain http and the cookie stays non-Secure so sign-in works." ;;
     lan+tunnel)
       echo ""
       # --public-access harvis turns on HARVIS_OWUI_ENABLE_SIGNUP, which is not per-port.
@@ -1150,8 +1324,9 @@ poll_health() {
       echo ""
       echo "      ./scripts/enable-https.sh"
       echo ""
-      echo "  Leave HARVIS_COOKIE_SECURE unset: the tunnel port marks the cookie Secure"
-      echo "  itself, and the http lane on :9000 needs it plain." ;;
+      echo "  Until then leave HARVIS_COOKIE_SECURE unset: the tunnel port marks the"
+      echo "  cookie Secure itself, and the http lane on :9000 needs it plain. The"
+      echo "  script turns it on and makes :9000 redirect to https." ;;
     k8s)
       local https_port="${HARVIS_HTTPS_PORT:-$(env_value HARVIS_HTTPS_PORT)}"
       echo ""
@@ -1163,7 +1338,9 @@ poll_health() {
       echo "  localhost), so voice will not work from other devices until you do. The"
       echo "  script makes its own certificate and restarts the nginx pod, then HTTPS"
       echo "  answers on port ${https_port:-9443}. The first visit shows a warning you click past"
-      echo "  once. Plain http on :9000 keeps working either way." ;;
+      echo "  once. It also makes plain http on :9000 redirect to https and turns on the"
+      echo "  Secure sign-in cookie (restarting the backend pod), so passwords and the"
+      echo "  session cookie stay off the network in the clear." ;;
   esac
   # Provider status is informational, never pass/fail: with none configured,
   # report_models below says what to do. Configured-but-unreachable gets its own
@@ -1375,9 +1552,19 @@ main() {
   if [ "$K8S_ACTION" = "up" ]; then launch_k8s; else
     # Docker mode: the agent browser reaches the internet, not this machine or the LAN.
     # Kubernetes does the same with a NetworkPolicy (scripts/k8s/k8s_harden.py).
-    bash scripts/browser-egress-lock.sh apply || true
+    reconcile_repo_sandbox_subnet
+    lock_deferred=0
+    bash scripts/browser-egress-lock.sh apply || lock_deferred=1
     setup_power_button
-    launch; report_exposure
+    launch
+    # The lock refuses while the backend's default route still runs through
+    # repo-sandbox, which is how a stack started before gw_priority was added looks.
+    # launch just recreated the backend, so try once more. Not for a stale subnet:
+    # nothing launch does changes that, and the warning above already says how.
+    if [ "$lock_deferred" = 1 ] && [ "$REPO_SANDBOX_STALE" = 0 ] && [ "${HARVIS_LAUNCHED:-0}" = 1 ]; then
+      bash scripts/browser-egress-lock.sh apply || true
+    fi
+    report_exposure
   fi
 }
 

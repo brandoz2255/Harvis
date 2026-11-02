@@ -1,5 +1,9 @@
 import { atom } from 'nanostores'
 
+import { idbArtStore } from '@/mods/island-art'
+
+import { clearUserScopedStorage } from './user-scoped-storage'
+
 /**
  * Who is signed in to this Harvis, as the backend sees it.
  *
@@ -30,6 +34,8 @@ export interface AuthConfig {
   setupCodeRequired: boolean
   /** New accounts wait for the admin's approval; the sign-up form asks for a note to the host. */
   signupApproval: boolean
+  /** House rules a new account must accept; `required` is false on a laptop and for the host's own first account. */
+  terms: { required: boolean; version: string | null; points: string[] }
 }
 
 export const $session = atom<SessionState>({ status: 'checking' })
@@ -50,7 +56,7 @@ export class AuthError extends Error {
   constructor(
     message: string,
     readonly status: number,
-    readonly field?: 'email' | 'password' | 'name' | 'setupCode' | 'newPassword'
+    readonly field?: 'email' | 'password' | 'name' | 'setupCode' | 'newPassword' | 'terms'
   ) {
     super(message)
   }
@@ -173,14 +179,27 @@ export async function fetchAuthConfig(): Promise<AuthConfig> {
 
   const body = (await res.json()) as {
     onboarding?: boolean
-    features?: { enable_signup?: boolean; setup_code_required?: boolean; signup_approval?: boolean }
+    features?: {
+      enable_signup?: boolean
+      setup_code_required?: boolean
+      signup_approval?: boolean
+      terms?: { required?: boolean; version?: string | null; points?: unknown }
+    }
   }
+
+  const terms = body.features?.terms
+  const points = Array.isArray(terms?.points) ? terms.points.filter((p): p is string => typeof p === 'string') : []
 
   return {
     onboarding: Boolean(body.onboarding),
     signupEnabled: body.features?.enable_signup !== false,
     setupCodeRequired: Boolean(body.features?.setup_code_required),
-    signupApproval: Boolean(body.features?.signup_approval)
+    signupApproval: Boolean(body.features?.signup_approval),
+    terms: {
+      required: Boolean(terms?.required),
+      version: typeof terms?.version === 'string' ? terms.version : null,
+      points
+    }
   }
 }
 
@@ -211,6 +230,9 @@ export async function signUp(input: {
   password: string
   setupCode?: string
   noteToHost?: string
+  /** Undefined when the form showed no house rules. */
+  acceptTerms?: boolean
+  termsVersion?: string | null
 }): Promise<HarvisUser> {
   // The form turns off browser validation to show its own messages, and the
   // server accepts empty strings, so blank fields have to stop here.
@@ -226,6 +248,10 @@ export async function signUp(input: {
     throw new AuthError(`Use at least ${MIN_PASSWORD} characters.`, 0, 'password')
   }
 
+  if (input.acceptTerms === false) {
+    throw new AuthError('Read the house rules and tick the box to agree.', 0, 'terms')
+  }
+
   const code = input.setupCode?.trim()
   const note = input.noteToHost?.trim().slice(0, NOTE_MAX)
 
@@ -235,13 +261,18 @@ export async function signUp(input: {
       name: input.name.trim(),
       email: input.email.trim(),
       password: input.password,
-      ...(note ? { note_to_host: note } : {})
+      ...(note ? { note_to_host: note } : {}),
+      ...(input.acceptTerms ? { accept_terms: true, terms_version: input.termsVersion } : {})
     },
     code ? { 'X-Setup-Code': code } : undefined
   )
 
   if (!res.ok) {
     const detail = await readDetail(res)
+
+    if (/house rules/i.test(detail)) {
+      throw new AuthError(detail, res.status, 'terms')
+    }
 
     // The server answers 409 for a taken email OR a taken name (the name is the
     // unique username) and does not say which.
@@ -311,6 +342,11 @@ export async function signOut(): Promise<void> {
   } catch {
     // storage blocked: nothing to clear
   }
+
+  clearUserScopedStorage()
+  // The island's game art is in IndexedDB on the shared origin, so the next account would get it
+  // back. A blocked database never answers, so sign-out stops waiting after a moment.
+  await Promise.race([idbArtStore.clear(), new Promise(resolve => setTimeout(resolve, 500))])
 
   // The shell's own address (/harvis/), dropping the #route of the old session.
   window.location.replace(import.meta.env.BASE_URL)

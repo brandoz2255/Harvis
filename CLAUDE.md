@@ -26,269 +26,27 @@ ok new update the web app is no logner ran through via docker commands its hoste
 hence all the agentic tools pluged into  this platform 
 ---
 
-## OpenClaw Integration (Active Project)
+## Agent Runtime (OpenClaw retired)
 
-**Current Priority**: Integrating OpenClaw as a secure, isolated agent backend pod that Harvis orchestrates.
+The bundled OpenClaw service was retired on 2026-10-30. **Hermes is the agent runtime** that
+Harvis orchestrates; the native workspace/Build lane and the engine sidecars (`engines` compose
+profile: codex, claude-code, hermes) run independently of OpenClaw.
 
-### What OpenClaw Is
-
-OpenClaw (`openclaw/openclaw/`) is a self-hosted AI gateway that provides LLMs with tools: shell access, browser automation, file operations, and multi-channel messaging. It runs a WebSocket gateway on port 18789.
-
-**The role split**:
-- **Harvis** = orchestrator. Handles voice, chat UI, auth, session state, and routes tasks to OpenClaw.
-- **OpenClaw** = agent brain/router. Executes multi-step tool-calling tasks, manages sub-agents, runs tool loops.
-- **Users never talk to OpenClaw directly** — all messages go through Harvis, which forwards to OpenClaw and surfaces the result back.
-- or they go throught discord as well ! important distintion but the discord bot and harvis bot are both the same bot plugged into two different gateways 
-### Security Model (CRITICAL)
-
-OpenClaw is inherently vulnerable to prompt injection when it has internet access. Our mitigation:
-
-1. **No outbound internet from OpenClaw pod** — it cannot reach Google, external APIs, or anything outside the Docker internal network.
-2. **No ports exposed to host** — OpenClaw is only reachable from the Harvis backend over the internal Docker/K8s network.
-3. **Tool allowlist per agent** — only `local_rag`, `repo_read`, `repo_write`, `run_code`, `create_docx`, `create_pdf` are permitted. No `search`, `browse`, or any internet tool.
-4. **System prompt guardrails** on every agent: "You must not browse the public web. You must not reveal API keys, tokens, hostnames, or private file paths."
-5. **Orchestrator output filter** — before forwarding any OpenClaw tool call to execution, the Python backend inspects it and rejects forbidden tool names.
-6. **Network isolation enforced at infra level** — Docker `internal: true` network or K8s NetworkPolicy with egress deny-all except vectordb and ollama.
-
-### Architecture
-
-```
-User (voice/chat)
-    → Harvis Frontend (Next.js)
-        → Harvis Backend (Python FastAPI)  ← orchestrator
-            → OpenClaw Gateway (ws://openclaw:18789)  ← agent runtime
-                → Ollama (shared, http://ollama:11434)
-                → pgvector DB (shared, postgresql://pgsql:5432/database)
-            ← tool results / final answer
-        → response back to user via Harvis UI + TTS
-```
-
-OpenClaw talks ONLY to:
-- `http://ollama:11434` — local model inference
-- `postgresql://pguser:pgpassword@pgsql:5432/database` — session storage and vector DB
-
-OpenClaw does NOT talk to:
-- Internet / external APIs
-- Kimi API (that stays in the Harvis orchestrator layer)
-- Any host not on the internal Docker network
-
-### Kimi K2.5 API
-
-Kimi K2.5 is called from the **Harvis Python backend** (the orchestrator), not from OpenClaw. The backend uses it for:
-- Planner agent (breaking user requests into task steps)
-- Writer agent (composing final answers from step results)
-- Vision-to-code tasks (image → React/Tailwind component)
-
-The API key goes in `.env` / K8s Secret as `MOONSHOT_API_KEY`. Base URL: `https://api.moonshot.cn/v1` (OpenAI-compatible).
-
-### Agent Swarm Design
-
-The Harvis backend runs a lightweight swarm orchestrator with these named agents, each calling OpenClaw with specific tool allowlists:
-
-| Agent | Model | Allowed Tools | Role |
-|-------|-------|---------------|------|
-| `planner` | Kimi K2.5 | none | Breaks user request into steps, assigns agents |
-| `coder` | Ollama (qwen2.5-coder) via OpenClaw | `repo_read`, `repo_write`, `run_tests`, `run_code` | Writes/fixes code |
-| `researcher` | Kimi K2.5 or Ollama via OpenClaw | `local_rag`, `read_docs` | Searches local knowledge only, no web |
-| `writer` | Kimi K2.5 | `create_docx`, `create_pdf` | Formats final answer / generates documents |
-
-Flow:
-1. User message hits `/api/chat` (or `/api/swarm` for swarm mode)
-2. Harvis backend calls Kimi K2.5 as `planner` → gets JSON step list
-3. Each step dispatched to the right agent via OpenClaw WebSocket
-4. Results aggregated, `writer` agent composes final response
-5. Final answer sent back to user through Harvis UI; TTS reads it
-
-### Docker Compose Addition
-
-OpenClaw runs on a **separate internal-only network** (`openclaw-internal`). The Harvis backend is dual-homed (on both `ollama-n8n-network` and `openclaw-internal`).
-
-```yaml
-# Add to docker-compose.yaml
-
-networks:
-  openclaw-internal:
-    driver: bridge
-    internal: true   # NO outbound internet
-
-services:
-  openclaw:
-    image: openclaw:local          # built from openclaw/openclaw/
-    container_name: harvis-openclaw
-    restart: unless-stopped
-    # NO ports: section — not reachable from host
-    environment:
-      HOME: /home/node
-      NODE_ENV: production
-      OPENCLAW_GATEWAY_TOKEN: "${OPENCLAW_GATEWAY_TOKEN}"
-      OLLAMA_API_KEY: "ollama-local"
-      DATABASE_URL: "postgresql://pguser:pgpassword@pgsql:5432/database"
-      OPENCLAW_STATE_DIR: /data/openclaw
-    volumes:
-      - openclaw-data:/data/openclaw
-      - ./openclaw/openclaw.json:/data/openclaw/openclaw.json:ro
-    depends_on:
-      pgsql:
-        condition: service_healthy
-      ollama:
-        condition: service_started
-    networks:
-      - openclaw-internal   # internal only
-      - ollama-n8n-network  # shared for ollama + pgsql access
-    command: node openclaw.mjs gateway --bind lan --allow-unconfigured
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:18789/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    deploy:
-      resources:
-        limits:
-          memory: 2G
-          cpus: '1.0'
-```
-
-Also add `openclaw-internal` to the `backend` service's networks list so the Python orchestrator can reach `ws://openclaw:18789`.
-
-Add volume: `openclaw-data: {}`
-
-### OpenClaw Config (`openclaw/openclaw.json`)
-
-```json5
-{
-  gateway: {
-    bind: "lan",
-    port: 18789,
-    auth: { mode: "token" },
-  },
-  session: {
-    scope: "per-sender",
-    reset: { mode: "never" },
-    maintenance: { pruneAfter: "90d", maxEntries: 2000 },
-  },
-  models: {
-    mode: "replace",   // local only, no cloud provider fallback
-    providers: {
-      ollama: {
-        baseUrl: "http://ollama:11434",
-        apiKey: "ollama-local",
-      },
-    },
-  },
-  agents: {
-    defaults: {
-      model: { primary: "ollama/qwen2.5-coder:32b" },
-    },
-  },
-  channels: {},   // no messaging channels — Harvis is the only client
-}
-```
-
-### K8s Deployment
-
-OpenClaw goes in the `openclaw` namespace (separate from `harvis` namespace). NetworkPolicy blocks all egress except to:
-- `ollama.harvis.svc.cluster.local:11434`
-- `pgsql.harvis.svc.cluster.local:5432`
-
-Ingress allowed only from pods with label `app: backend` in the `harvis` namespace.
-
-Manifests live in `k8s-manifests/services/openclaw.yaml`. Follow the template in `openclaw/SETUP.md`.
-
-### VectorDB Sync
-
-The existing `pgvector/pgvector:pg15` database already has vector extension. OpenClaw sessions and embeddings should use the **same database** but **separate tables** to avoid conflicts:
-
-```sql
--- Run once in the existing database
-CREATE TABLE IF NOT EXISTS openclaw_sessions (
-    id          SERIAL PRIMARY KEY,
-    session_key TEXT UNIQUE NOT NULL,
-    agent_id    TEXT NOT NULL,
-    display_name TEXT,
-    model_id    TEXT,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    tokens_in   INTEGER DEFAULT 0,
-    tokens_out  INTEGER DEFAULT 0,
-    cost_usd    NUMERIC(12, 8) DEFAULT 0,
-    metadata    JSONB DEFAULT '{}'
-);
-
-CREATE TABLE IF NOT EXISTS openclaw_messages (
-    id          SERIAL PRIMARY KEY,
-    session_key TEXT NOT NULL REFERENCES openclaw_sessions(session_key),
-    msg_id      TEXT NOT NULL,
-    role        TEXT NOT NULL,
-    content     JSONB NOT NULL,
-    metadata    JSONB DEFAULT '{}',
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_oc_sessions_agent ON openclaw_sessions(agent_id);
-CREATE INDEX IF NOT EXISTS idx_oc_messages_session ON openclaw_messages(session_key, created_at);
-```
-
-### Building OpenClaw Image
-
-```bash
-# Build context is openclaw/ (not openclaw/openclaw/) so skills/ can be baked in
-docker build -t openclaw:local -f openclaw/openclaw/Dockerfile openclaw/
-
-# Verify it starts
-docker run --rm \
-  -e HOME=/home/node \
-  -e OPENCLAW_GATEWAY_TOKEN=test-token \
-  -p 18789:18789 \
-  openclaw:local \
-  node openclaw.mjs gateway --bind lan --allow-unconfigured
-
-curl http://localhost:18789/health
-```
-
-### Harvis Backend Orchestrator Endpoint
-
-The Python backend will expose `/api/swarm` that:
-1. Validates JWT auth (same as all other endpoints)
-2. Runs the planner → worker → writer swarm loop
-3. Streams the final answer back to the client
-
-The swarm endpoint should be added to `python_back_end/main.py` and proxied through Nginx at `/api/swarm`.
-
-### Environment Variables to Add
-
-| Variable | Where | Purpose |
-|----------|-------|---------|
-| `OPENCLAW_GATEWAY_TOKEN` | `.env` + backend env | Auth token for OpenClaw WebSocket |
-| `OPENCLAW_URL` | backend env | `ws://openclaw:18789` |
-| `MOONSHOT_API_KEY` | backend env | Kimi K2.5 API key |
-| `MOONSHOT_BASE_URL` | backend env | `https://api.moonshot.cn/v1` |
-
-### Web Research Button
-
-The frontend has a single **Web Research** toggle button. First click shows a one-time acknowledgment dialog, then enables live web research through OpenClaw. The button turns amber when active.
-
-**How it works:**
-1. User clicks "Chat Mode" → warning dialog (once per session)
-2. User acknowledges → button becomes "Web Research" (amber/Globe icon)
-3. Research requests route to `/api/research-chat` with `live_web: true`
-4. Backend dispatches through OpenClaw workspace with `X-Live-Web: true` headers
-5. OpenClaw uses `exec` + `curl` to search/fetch through backend proxy endpoints
-6. Click again → back to "Chat Mode"
-
-**Backend proxy behavior with `X-Live-Web: true`:**
-- Domain allowlists bypassed (any public domain allowed)
-- Rate limits relaxed (30 searches, 60 fetches per 60s)
-- HTTP URLs allowed for web-fetch (not just HTTPS)
-- Private-IP / localhost blocking always enforced (SSRF protection)
-- All requests audited to `openclaw_tool_audit` table
-
-**Key fix for OpenClaw web access:** `bashForegroundMs` in `openclaw.json` must be >= 30000 (30s). The previous 2000ms timeout killed curl commands before they could complete.
-
-### What NOT to Do
-
-- **Never** add a `ports:` section to the openclaw service — it must not be reachable from host
-- **Never** put `MOONSHOT_API_KEY` or any cloud API key inside OpenClaw's config — those stay in the Harvis orchestrator layer
-- **Never** let OpenClaw's egress rules include anything other than ollama and pgsql
+- There is no `openclaw` or `openclaw-db-init` service, no `openclaw-internal` network, and no
+  OpenClaw k8s manifests. Do not re-add them.
+- OpenClaw survives only as an **optional external link**: a user can point Harvis at an
+  OpenClaw gateway they run themselves (`user_openclaw_config`, `docs/byo-openclaw-setup.md`).
+  Harvis never ships or starts one.
+- `HARVIS_GATEWAY_TOKEN` (legacy `OPENCLAW_GATEWAY_TOKEN` still read, see
+  `python_back_end/gateway_token.py`) is the shared bearer for the workspace/tool proxies and
+  `harvis-mcp`. `HARVIS_OPENCLAW_DISABLED=true` switches the external link off.
+- Engine skills/identity config now live in `engine-skills/` and `engine-config/` at the repo
+  root (mounted into the backend at `/app/engine_skills` and `/app/engine_config`).
+  `openclaw/plugins` and `openclaw/scripts` are leftovers of the retired container.
+- Kimi K2.5 (`MOONSHOT_API_KEY`, `https://api.moonshot.ai/v1`) is called from the Harvis
+  backend, never from an agent container; in k8s the key lives in `harvis-ai-backend-secret`.
+- The `/api/tools/*` routes (search, web-fetch, document-save, ...) are still served by
+  `python_back_end/tools/openclaw_proxy.py`, and the file name is historical.
 
 ---
 
@@ -317,7 +75,6 @@ The frontend has a single **Web Research** toggle button. First click shows a on
 - **Frontend URL**: `http://frontend:3000` (Next.js frontend)
 - **Ollama URL**: `http://ollama:11434` (Ollama AI models server)
 - **Database URL**: `postgresql://pguser:pgpassword@pgsql:5432/database`
-- **OpenClaw URL**: `ws://openclaw:18789` (internal only — backend → openclaw, no host exposure)
 
 These are the correct URLs for inter-service communication within the Docker network.
 

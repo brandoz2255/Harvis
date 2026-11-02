@@ -301,34 +301,43 @@ def test_workspace_runs_refuse_an_unlisted_model():
     run(go())
 
 
-def test_unknown_lanes_run_locally_on_an_allowed_model():
-    """An id no lane claims used to fall through to OpenClaw, which runs the server's
-    own model; for a limited person it now runs on the local lane."""
+def test_unknown_lanes_run_natively_on_an_allowed_model(monkeypatch):
+    """An id no lane claims runs on the native agent. For a limited person an empty
+    model becomes the first one on their list, not the server default, so the run is
+    never refused for a model they did not pick."""
     import asyncio
     import importlib
 
+    from plugins.models import resolver
+
+    async def server_default(**_):
+        return "big:70b"
+
+    monkeypatch.setattr(resolver, "resolve_default_local_model", server_default)
     wr = importlib.import_module("workspace.workspace_router")
 
     async def go():
         pool, ids = await _setup(1)
         request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(pg_pool=pool)))
-        run_id = None
+        run_ids = []
         try:
             await _set(pool, ids[0], models=["small:1b"])
-            launched = await wr.launch_workspace_internal(
-                request=request, user_id=ids[0], task_brief="say hi", agent_id="made-up", model_name="small:1b")
-            run_id = launched.get("workspace_id") or launched.get("id")
-            note = None
-            for _ in range(50):
-                note = await pool.fetchval(
-                    "SELECT payload::text FROM workspace_events WHERE workspace_id = $1 "
-                    "AND payload::text LIKE '%admin limits which models%'", run_id)
-                if note:
-                    break
-                await asyncio.sleep(0.2)
-            assert note and "small:1b" in note
+            for agent_id, model in (("made-up", "small:1b"), ("main", "")):
+                launched = await wr.launch_workspace_internal(
+                    request=request, user_id=ids[0], task_brief="say hi", agent_id=agent_id, model_name=model)
+                run_ids.append(launched.get("workspace_id") or launched.get("id"))
+            for run_id in run_ids:
+                events = []
+                for _ in range(50):
+                    events = [r["p"] for r in await pool.fetch(
+                        "SELECT payload::text AS p FROM workspace_events WHERE workspace_id = $1", run_id)]
+                    if any('"model": "small:1b"' in e for e in events):
+                        break
+                    await asyncio.sleep(0.2)
+                assert any('"model": "small:1b"' in e for e in events), events
+                assert not any("not on the models the Harvis admin allows you" in e for e in events), events
         finally:
-            if run_id:
+            for run_id in run_ids:
                 for _ in range(50):
                     st = await pool.fetchval("SELECT status FROM workspace_runs WHERE id = $1", run_id)
                     if st != "running":

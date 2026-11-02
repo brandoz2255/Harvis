@@ -197,9 +197,9 @@ log_info "Updating Kustomization for ArgoCD..."
 KUSTOMIZE_FILE="k8s-manifests/overlays/prod/kustomization.yaml"
 
 if [ -f "$KUSTOMIZE_FILE" ]; then
-  log_info "Updating image tags in kustomization (harvis images only — openclaw tag is managed by ci_openclaw_pipeline.sh)..."
+  log_info "Updating image tags in kustomization (harvis images only; no bundled openclaw image is built any more)..."
 
-  # Use targeted per-image replacements so the openclaw newTag is never touched.
+  # Use targeted per-image replacements so any image entry this pipeline does not build is never touched.
   # The old broad  sed "s/newTag: .*/..."  was clobbering the openclaw entry every run.
   python3 - <<PYEOF
 import re, sys

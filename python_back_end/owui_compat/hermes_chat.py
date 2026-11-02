@@ -27,12 +27,17 @@ import os
 import httpx
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from plugins.hermes_ui.providers import EndpointValidationError, guarded_client
+
 logger = logging.getLogger(__name__)
 
 # The single model id the facade exposes for Hermes-Agent chat. Distinct from the Build
 # engine id (also "hermes-agent") — different surface (chat vs the engine-adapter), but the
 # same underlying app, so sharing the name is intentional and user-legible.
 HERMES_CHAT_MODEL_ID = "hermes-agent"
+# The user's OPTIONAL linked OpenClaw (owui_compat/openclaw_connect.py). Only offered while
+# that link is verified; it shares this module's passthrough and is never anyone's default.
+OPENCLAW_CHAT_MODEL_ID = "openclaw-external"
 
 
 def _flag_on() -> bool:
@@ -52,7 +57,9 @@ def _api_key() -> str:
 
 
 def is_hermes_chat_model(model_id: str | None) -> bool:
-    return (model_id or "").strip() == HERMES_CHAT_MODEL_ID
+    """True for the agent-passthrough models: Hermes, and the user's linked OpenClaw. Both skip
+    the native router and the tool-gathering rounds; `proxy_hermes_chat` picks the target."""
+    return (model_id or "").strip() in (HERMES_CHAT_MODEL_ID, OPENCLAW_CHAT_MODEL_ID)
 
 
 # ── Hermes Agent model resolution (the LLM the agent runtime runs on) ──────────────────────
@@ -157,6 +164,44 @@ async def hermes_chat_model_entry(pool=None, user_id=None) -> dict | None:
     }
 
 
+async def openclaw_chat_model_entry(pool=None, user_id=None) -> dict | None:
+    """OWUI model dict for this user's linked OpenClaw, or None. Appears only while the link is
+    VERIFIED, so a user who never linked one never sees it and it can never be a default."""
+    try:
+        from .openclaw_connect import is_openclaw_linked
+
+        if pool is None or user_id is None or not await is_openclaw_linked(pool, user_id):
+            return None
+    except Exception:
+        return None
+    return {
+        "id": OPENCLAW_CHAT_MODEL_ID,
+        "name": "OpenClaw (your gateway)",
+        "object": "model",
+        "owned_by": "openclaw",
+        "info": {
+            "meta": {
+                "description": (
+                    "The OpenClaw gateway you linked in Settings, via its OpenAI-compatible API. "
+                    "Optional and legacy; Hermes Agent is the recommended agent."
+                ),
+                "capabilities": {},
+            }
+        },
+    }
+
+
+def _failure(message: str, stream: bool, status: int):
+    if not stream:
+        return JSONResponse(status_code=status, content={"error": {"message": message}})
+
+    async def _one():
+        yield f"data: {json.dumps({'error': {'message': message}})}\n\n".encode()
+        yield b"data: [DONE]\n\n"
+
+    return StreamingResponse(_one(), media_type="text/event-stream")
+
+
 async def proxy_hermes_chat(owui_body: dict, pool=None, user_id=None):
     """Forward an OpenAI-shaped chat body to the Hermes API server (stream or non-stream).
 
@@ -166,7 +211,12 @@ async def proxy_hermes_chat(owui_body: dict, pool=None, user_id=None):
     normal chat model never drives the Hermes runtime.
 
     Connection mode (Bring your Hermes into Harvis): a VERIFIED external Hermes Agent → route
-    there with the user's token; otherwise the LOCAL sidecar (managed or imported profile)."""
+    there with the user's token; otherwise the LOCAL sidecar (managed or imported profile).
+
+    The `openclaw-external` model goes to the user's linked OpenClaw instead (see
+    `_proxy_openclaw_chat`); it never falls back to Hermes or anything local."""
+    if (owui_body.get("model") or "").strip() == OPENCLAW_CHAT_MODEL_ID:
+        return await _proxy_openclaw_chat(owui_body, pool, user_id)
     resolved = await resolve_hermes_model(pool, user_id)
     body = {
         "model": resolved,  # external servers may override with their own configured model
@@ -177,47 +227,86 @@ async def proxy_hermes_chat(owui_body: dict, pool=None, user_id=None):
         body["temperature"] = owui_body["temperature"]
     stream = bool(body.get("stream"))
     # Resolve the target: external Hermes (user-owned) wins over the local sidecar.
-    base_url, api_key = _base_url(), _api_key()
+    base_url, api_key, guarded = _base_url(), _api_key(), False
     try:
         from .hermes_connect import resolve_external_target
         ext = await resolve_external_target(pool, user_id)
         if ext:
-            base_url, api_key = ext["base_url"], (ext.get("token") or "")
+            base_url, api_key, guarded = ext["base_url"], (ext.get("token") or ""), bool(ext.get("guarded"))
+    except EndpointValidationError as exc:
+        return _failure(str(exc), stream, 400)
     except Exception:
         pass
+    return await _forward(base_url, api_key, guarded, body, "Hermes Agent")
+
+
+async def _proxy_openclaw_chat(owui_body: dict, pool, user_id):
+    """Chat through the user's linked OpenClaw gateway (OpenAI-compatible /v1/chat/completions)."""
+    stream = bool(owui_body.get("stream"))
+    try:
+        from .openclaw_connect import resolve_openclaw_target
+
+        target = await resolve_openclaw_target(pool, user_id)
+    except EndpointValidationError as exc:
+        return _failure(str(exc), stream, 400)
+    except Exception:
+        target = None
+    if not target:
+        return _failure("No OpenClaw is linked. Link and verify yours in Settings, or use Hermes.", stream, 400)
+    body = {"model": "openclaw", "messages": owui_body.get("messages") or [], "stream": stream}
+    if owui_body.get("temperature") is not None:
+        body["temperature"] = owui_body["temperature"]
+    return await _forward(target["base_url"], target.get("token") or "", bool(target.get("guarded")), body, "OpenClaw")
+
+
+async def _forward(base_url: str, api_key: str, guarded: bool, body: dict, label: str):
+    """POST `body` to `{base_url}/v1/chat/completions` and relay it (SSE passthrough when streaming).
+    `guarded` dials through the connect-time SSRF guard. `label` names the agent in user-facing errors."""
+    stream = bool(body.get("stream"))
     url = f"{base_url}/v1/chat/completions"
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
+    def _client(timeout):
+        if guarded:
+            return guarded_client(timeout=timeout)
+        return httpx.AsyncClient(timeout=timeout)
+
     if not stream:
         try:
-            async with httpx.AsyncClient(timeout=180.0) as client:
+            async with _client(180.0) as client:
                 r = await client.post(url, headers=headers, json=body)
             return JSONResponse(status_code=r.status_code, content=r.json())
+        except EndpointValidationError as exc:
+            return _failure(str(exc), stream, 400)
         except Exception as exc:
-            logger.warning("hermes_chat: non-stream proxy failed: %s", exc)
+            logger.warning("hermes_chat: non-stream proxy to %s failed: %s", label, exc)
             return JSONResponse(
                 status_code=502,
-                content={"error": {"message": "Hermes Agent chat is unavailable right now."}},
+                content={"error": {"message": f"{label} chat is unavailable right now."}},
             )
 
     async def _gen():
         try:
-            async with httpx.AsyncClient(timeout=None) as client:
+            async with _client(None) as client:
                 async with client.stream("POST", url, headers=headers, json=body) as r:
                     if r.status_code >= 400:
                         detail = (await r.aread()).decode("utf-8", "replace")[:300]
-                        err = {"error": {"message": f"Hermes Agent chat error: {detail}"}}
+                        err = {"error": {"message": f"{label} chat error: {detail}"}}
                         yield f"data: {json.dumps(err)}\n\n".encode()
                         yield b"data: [DONE]\n\n"
                         return
                     async for chunk in r.aiter_raw():
                         if chunk:
                             yield chunk
+        except EndpointValidationError as exc:
+            err = {"error": {"message": str(exc)}}
+            yield f"data: {json.dumps(err)}\n\n".encode()
+            yield b"data: [DONE]\n\n"
         except Exception as exc:
-            logger.warning("hermes_chat: stream proxy failed: %s", exc)
-            err = {"error": {"message": "Hermes Agent chat stream dropped."}}
+            logger.warning("hermes_chat: stream proxy to %s failed: %s", label, exc)
+            err = {"error": {"message": f"{label} chat stream dropped."}}
             yield f"data: {json.dumps(err)}\n\n".encode()
             yield b"data: [DONE]\n\n"
 

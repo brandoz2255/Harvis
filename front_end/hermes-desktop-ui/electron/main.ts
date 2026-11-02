@@ -175,6 +175,7 @@ import {
   terminalScriptExtension,
   tuiResumeArgs
 } from './external-terminal'
+import { classifyExternalUrl } from './external-url'
 import { type FaviconIo, resolveFavicon } from './favicon'
 import { findGitBash as _findGitBash } from './find-git-bash'
 import {
@@ -1663,60 +1664,18 @@ function loadWindowUrl(win, url, label) {
   win.loadURL(url).catch(error => rememberLog(`${label} failed to load: ${describeCrashReason(error)}`))
 }
 
+// Only web and mail links go to the OS handler. `file:` URLs never reach
+// `shell.openPath` (it would launch a script or app bundle a model-written link
+// pointed at); the renderer's explicit open-in-folder click is handled by
+// revealFileUrl below.
 function openExternalUrl(rawUrl) {
-  const raw = String(rawUrl || '').trim()
+  const target = classifyExternalUrl(rawUrl)
 
-  if (!raw) {
+  if (target?.kind !== 'external') {
     return false
   }
 
-  let parsed
-
-  try {
-    parsed = new URL(raw)
-  } catch {
-    return false
-  }
-
-  // `file://` URLs come from the artifacts panel (the renderer can't open
-  // them itself because Chromium blocks file:// navigation from the app
-  // origin). Hand them to `shell.openPath`, which dispatches to the OS
-  // file association. If the OS can't open it (`error` is a non-empty
-  // string), fall back to revealing the file in the system file manager.
-  if (parsed.protocol === 'file:') {
-    let localPath
-
-    try {
-      localPath = resolveRequestedPathForIpc(parsed.toString(), { purpose: 'Open external file' })
-    } catch {
-      return false
-    }
-
-    void shell
-      .openPath(localPath)
-      .then(error => {
-        if (!error) {
-          return
-        }
-
-        rememberLog(`[file] openPath failed: ${error}; revealing in folder instead`)
-
-        try {
-          shell.showItemInFolder(localPath)
-        } catch (revealError) {
-          rememberLog(`[file] showItemInFolder failed: ${revealError.message}`)
-        }
-      })
-      .catch(error => rememberLog(`[file] openPath rejected: ${error.message}`))
-
-    return true
-  }
-
-  if (!['http:', 'https:', 'mailto:'].includes(parsed.protocol)) {
-    return false
-  }
-
-  const url = parsed.toString()
+  const url = target.url
 
   if (IS_WSL) {
     rememberLog(`[link] opening via WSL→Windows: ${url}`)
@@ -1737,6 +1696,27 @@ function openExternalUrl(rawUrl) {
   }
 
   shell.openExternal(url).catch(error => rememberLog(`[link] openExternal failed: ${error.message}`))
+
+  return true
+}
+
+// Shows a `file:` URL in the system file manager. Reveals, never opens.
+function revealFileUrl(fileUrl) {
+  let localPath
+
+  try {
+    localPath = resolveRequestedPathForIpc(fileUrl, { purpose: 'Show file in folder' })
+  } catch {
+    return false
+  }
+
+  try {
+    shell.showItemInFolder(localPath)
+  } catch (error) {
+    rememberLog(`[file] showItemInFolder failed: ${error.message}`)
+
+    return false
+  }
 
   return true
 }
@@ -16686,7 +16666,9 @@ ipcMain.on('hermes:devtools:disable-f12', (_event, on) => {
 })
 
 ipcMain.handle('hermes:openExternal', (_event, url) => {
-  if (!openExternalUrl(url)) {
+  const target = classifyExternalUrl(url)
+
+  if (!(target?.kind === 'file' ? revealFileUrl(target.url) : openExternalUrl(url))) {
     throw new Error('Invalid external URL')
   }
 })

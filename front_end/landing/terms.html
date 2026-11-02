@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Harvis Terms</title>
+  <meta name="description" content="The Terms of Use and Acceptable Use for Harvis, version 2026-10-30.">
+  <meta name="color-scheme" content="light dark">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect x='124' y='58' width='264' height='220' rx='50' fill='%234a7be6'/%3E%3Crect x='153' y='88' width='205' height='160' rx='26' fill='%2314203f'/%3E%3Cpath d='M185 158Q211 128 237 158M273 158Q299 128 325 158M210 205Q256 232 302 205' fill='none' stroke='%236b9bff' stroke-width='14' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- The Harvis mark, redrawn from hermes-desktop-ui/public/harvis-logo.png. -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+    <defs>
+      <linearGradient id="hv-head" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#5b8def"/>
+        <stop offset="1" stop-color="#2f5fd6"/>
+      </linearGradient>
+      <linearGradient id="hv-screen" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#1a2a58"/>
+        <stop offset="1" stop-color="#111a35"/>
+      </linearGradient>
+      <linearGradient id="hv-bar" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#6f9ef5"/>
+        <stop offset="1" stop-color="#3a69da"/>
+      </linearGradient>
+      <symbol id="harvis-mark" viewBox="0 0 512 512">
+        <g stroke="#6b9bff" stroke-width="12" stroke-linecap="round">
+          <path d="M165 35 188 62M345 35 322 62"/>
+        </g>
+        <circle cx="153" cy="15" r="22" fill="#6b9bff"/>
+        <circle cx="357" cy="15" r="22" fill="#6b9bff"/>
+        <rect x="124" y="58" width="264" height="220" rx="50" fill="url(#hv-head)"/>
+        <rect x="153" y="88" width="205" height="160" rx="26" fill="url(#hv-screen)"/>
+        <path d="M185 158Q211 128 237 158M273 158Q299 128 325 158M210 205Q256 232 302 205" fill="none" stroke="#6b9bff" stroke-width="14" stroke-linecap="round"/>
+        <rect x="138" y="278" width="74" height="205" rx="22" fill="url(#hv-head)"/>
+        <rect x="300" y="278" width="74" height="205" rx="22" fill="url(#hv-head)"/>
+        <rect x="138" y="350" width="235" height="58" rx="14" fill="url(#hv-bar)"/>
+        <rect x="66" y="307" width="44" height="103" rx="22" fill="#6b9bff"/>
+        <rect x="402" y="307" width="44" height="103" rx="22" fill="#6b9bff"/>
+      </symbol>
+    </defs>
+  </svg>
+
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="wrap top">
+    <a class="brand" href="index.html" aria-label="Harvis home">
+      <svg viewBox="0 0 512 512" aria-hidden="true"><use href="#harvis-mark"/></svg>
+      Harvis
+    </a>
+    <nav aria-label="Main">
+      <a href="index.html#get">What you get</a>
+      <a href="index.html#install">Install</a>
+      <a href="https://github.com/brandoz2255/Harvis">GitHub</a>
+      <a href="terms.html" aria-current="page">Terms</a>
+    </nav>
+  </header>
+
+  <main id="main" class="wrap">
+    <article class="doc">
+      <h1>Terms of Use and Acceptable Use</h1>
+      <p class="version">Version <span id="legal-version">2026-10-30</span></p>
+      <p>This is the text for the software itself. The house rules a person accepts when they sign up to someone else&#39;s Harvis are separate.</p>
+
+      <h2 id="terms">Terms of Use</h2>
+      <h3 id="using-harvis">Using Harvis</h3>
+      <p>Harvis is free, open-source software under the MIT license. You may use, copy, change and share it under that license; the full text is the LICENSE file in the source. Some parts come from other open-source projects and keep their own licenses; see the NOTICE file and the license files beside those parts. It comes with no warranty. It can go down, lose data or give wrong answers, so keep your own copy of anything important.</p>
+      <h3 id="whoever-runs-it-is-the-operator">Whoever runs it is the operator</h3>
+      <p>Harvis is self-hosted. The person who installs and runs a copy is its operator. The operator is responsible for that copy, for who they let in, and for what is done with it. The Harvis project does not run your copy, cannot see it, and cannot reset a password or recover data for you.</p>
+      <h3 id="your-data-stays-on-the-machine">Your data stays on the machine</h3>
+      <p>Your chats, files, settings and saved keys live in the database and folders of the computer running Harvis. Harvis has no analytics, no tracking and no usage reporting, and it does not send your data to the Harvis project. On a shared Harvis, the operator can see what people send through it.</p>
+      <h3 id="what-does-leave-the-machine">What does leave the machine</h3>
+      <p>Only what is listed here. Chatting with a cloud model sends that chat to the provider whose key is in use. Downloading a model fetches it from where it is hosted, such as the Ollama registry or Hugging Face. The voice service is on by default. When it starts, it downloads its speech models from GitHub and Hugging Face, and it checks Hugging Face for its browser voice files each time it starts. The operator can stop the start-up downloads and the check by setting VOICE_PREFETCH=0 and VOICE_BROWSER_ASSETS=0; the speech models are then fetched the first time they are used. The optional advanced voice can contact OpenAI's public file host, to download its speech-to-text model the first time and to check the connection. Web search goes to the search engine. Asking Harvis to read a web page sends that address to a reader service, r.jina.ai. GitHub and Google Maps are contacted only if you use those features. The default theme loads its font from Google Fonts each time the interface opens, including on the sign-in screen, and some other themes do too. An image, sound or video from another website in a chat, including one a model puts in its reply, loads from that website only after you click to load it. Video, music, social and map links in chat load from their own site only after you allow it. The Hermes bots page loads the skills hub from its host only after you open the hub browser. A page an agent writes for you runs in a sandbox, but it can still load files from other websites. Apart from the font and the voice service start-up, nothing here runs unless you or the operator use it.</p>
+      <h3 id="models">Models</h3>
+      <p>The models Harvis runs are made by other people, and each has its own license and use limits. The operator and anyone using a model are responsible for following that license. Harvis does not change a model's terms.</p>
+      <h3 id="cloud-providers-and-your-keys">Cloud providers and your keys</h3>
+      <p>If you connect a cloud provider with your own API key, that provider's terms and privacy policy apply to what you send it, and it bills you, not the Harvis project. Keys you save in the interface are stored encrypted on the machine running Harvis. Keys the operator puts in the server's settings file are not encrypted. A key you save for a provider is used for your own chats. A key saved for the agent model proxy is used for everyone's requests through that proxy, and on a shared Harvis only an admin can set it.</p>
+      <h3 id="game-art-in-the-island">Game art in the island</h3>
+      <p>The island can optionally use art from a game you own. You bring your own copy from your own computer. It stays in your browser, is never uploaded or served by Harvis, and Harvis does not include any of it. Do not share those files or post them anywhere.</p>
+      <h3 id="changes-to-these-terms">Changes to these terms</h3>
+      <p>When these terms change in substance, the version date changes with them. The current version is always shown at the top of this page.</p>
+      <h2 id="acceptable-use">Acceptable Use</h2>
+      <h3 id="use-it-lawfully">Use it lawfully</h3>
+      <p>Do not use Harvis for anything that is illegal where you or the people affected live.</p>
+      <h3 id="no-harm-to-other-systems-or-people">No harm to other systems or people</h3>
+      <p>Do not use it to spread malware or cause damage, to attack or probe systems you do not have permission to test, or to harass, threaten or stalk anyone.</p>
+      <h3 id="security-testing-and-research">Security testing and research</h3>
+      <p>Harvis can support professional security work, including penetration testing, red, blue and purple team exercises, vulnerability research, malware analysis, detection engineering, incident response, training and capture-the-flag events. Test only systems you own or have written permission to test, stay within the agreed scope and rules of engagement, and stop when you reach something outside them. Run phishing or other social engineering exercises only as part of an authorised programme, and never collect real credentials or personal data from people who have not agreed to take part. Keep live malware and exploit code inside an isolated test environment.</p>
+      <h3 id="other-ai-providers-and-online-services">Other AI providers and online services</h3>
+      <p>Cloud model providers, search engines and other online services have their own usage policies. Security questions sent to them, such as requests about exploits or attack techniques, may be refused or flagged, and may lead to action on your account with that provider. Harvis does not change those policies and does not help anyone get around them. You are responsible for following the policy of each service you use through Harvis. For sensitive security work, prefer a model that runs on your own machine. Do not use Harvis to test another company's AI system or service, including with prompt injection or jailbreak attempts, unless that company allows it, for example through a published bug bounty or a written agreement.</p>
+      <h3 id="handle-findings-responsibly">Handle findings responsibly</h3>
+      <p>Treat what you find as confidential: vulnerabilities, captured credentials, logs and client data. Keep it within the engagement, share it only with the people entitled to it, and delete it when the engagement ends or as your agreement requires. Report a vulnerability to the affected owner privately and give them reasonable time to fix it before you disclose it. Traffic from web search, browsing and terminals in Harvis leaves from the network Harvis runs on, so follow that network's own rules as well. To report a security problem in Harvis itself, use the private reporting described in the SECURITY.md file in the source, not a public issue.</p>
+      <h3 id="never-involving-minors">Never involving minors</h3>
+      <p>Do not create, request or share sexual content involving minors.</p>
+      <h3 id="no-impersonation-or-fraud">No impersonation or fraud</h3>
+      <p>Do not use it to pretend to be someone else, to deceive people for gain, or to run scams.</p>
+      <h3 id="respect-someone-else-s-harvis">Respect someone else's Harvis</h3>
+      <p>On a Harvis that someone else runs, follow their house rules and limits. Do not work around daily limits, a turned-off account or a waiting room, and do not scrape, resell or share access to their Harvis.</p>
+    </article>
+  </main>
+
+  <footer class="wrap foot">
+    <ul>
+      <li><a href="index.html">Home</a></li>
+      <li><a href="https://github.com/brandoz2255/Harvis">GitHub</a></li>
+      <li><a href="https://github.com/brandoz2255/Harvis/blob/HEAD/LICENSE">MIT license</a></li>
+    </ul>
+    <p>Harvis is open-source software and comes with no warranty.</p>
+  </footer>
+</body>
+</html>

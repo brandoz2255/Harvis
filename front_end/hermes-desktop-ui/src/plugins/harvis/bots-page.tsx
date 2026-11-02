@@ -116,10 +116,7 @@ export function BotsPage() {
             ) : selected && !bots.isLoading ? (
               <EmptyState description="It may have been deleted." title="That bot is not here" />
             ) : (
-              <EmptyState
-                description="Pick a bot on the left to edit it, or make a new one. Click a bot in the sidebar to chat with it."
-                title="Bots"
-              />
+              <EmptyState description="Select a bot or create one." title="Bots" />
             )}
           </div>
         </DetailColumn>

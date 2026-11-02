@@ -25,12 +25,20 @@ change what they sign in with.
 from __future__ import annotations
 
 import logging
+import os
+import time
 from datetime import date as _date
+from datetime import timedelta
 from typing import Callable
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
 from passlib.context import CryptContext
 from pydantic import BaseModel
+
+# Neither imports main, so this package still never does.
+from auth_optimized import _read_cutoff, mint_token, note_cutoff
+from jwt_secret import access_token_minutes, min_password_length
 
 from .translate import harvis_user_to_owui
 
@@ -39,7 +47,6 @@ logger = logging.getLogger(__name__)
 # Same scheme + defaults as main.py:161. Keep in sync.
 _pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-MIN_PASSWORD_LENGTH = 6  # same as sign-up (main.MIN_PASSWORD_LENGTH)
 
 
 class OwuiPasswordUpdateBody(BaseModel):
@@ -78,11 +85,13 @@ def register_account_routes(
         if pool is None:
             raise HTTPException(status_code=500, detail="Database unavailable")
 
+        # The same minimum as sign-up: 6 on a laptop, 12 on a shared server.
         new_password = payload.new_password or ""
-        if len(new_password) < MIN_PASSWORD_LENGTH:
+        min_length = min_password_length()
+        if len(new_password) < min_length:
             raise HTTPException(
                 status_code=400,
-                detail=f"New password must be at least {MIN_PASSWORD_LENGTH} characters.",
+                detail=f"New password must be at least {min_length} characters.",
             )
 
         async with pool.acquire() as conn:
@@ -98,11 +107,27 @@ def register_account_routes(
                 _pwd_context.hash(new_password),
                 user.id,
             )
+            # A trigger (migration 027) just set users.tokens_valid_after: every sign-in
+            # minted before now, on any device, has ended. Read it back so this
+            # process applies it at once and the cookie below is minted after it.
+            cutoff = await _read_cutoff(conn, user.id)
+        note_cutoff(user.id, cutoff)
 
-        # Existing tokens stay valid — they carry only `sub` and `exp`, and
-        # revoking them would need a token store this deployment doesn't have.
-        logger.info("owui: password changed for user id=%s", user.id)
-        return True
+        # The person who changed it stays signed in: a fresh token, issued after the
+        # cutoff, replaces their cookie. Every other session is gone.
+        token = mint_token(
+            {"sub": str(user.id)},
+            timedelta(minutes=access_token_minutes()),
+            iat=max(time.time(), cutoff or 0.0),
+        )
+        response = JSONResponse(content=True)
+        # Same cookie flags as the sign-in routes (HARVIS_COOKIE_SECURE, or HTTPS at the proxy).
+        secure = os.getenv("HARVIS_COOKIE_SECURE", "").strip().lower() in {"1", "true", "yes", "on"} or (
+            (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower() == "https"
+        )
+        response.set_cookie("access_token", token, httponly=True, samesite="lax", secure=secure)
+        logger.info("owui: password changed for user id=%s; other sessions ended", user.id)
+        return response
 
     @router.post("/api/v1/auths/update/profile")
     async def owui_update_profile(

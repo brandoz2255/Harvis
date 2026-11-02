@@ -17,6 +17,7 @@ type IntroCopyRecord = IntroCopy & {
 export type IntroProps = {
   personality?: string
   seed?: number
+  pixelWordmark?: boolean
 }
 
 const NEUTRAL_PERSONALITIES = new Set(['', 'default', 'none', 'neutral'])
@@ -156,7 +157,7 @@ function resolveCopy(personality?: string, seed?: number): IntroCopy {
   return pickCopy(copies, seed)
 }
 
-export function Intro({ personality, seed }: IntroProps) {
+export function Intro({ personality, seed, pixelWordmark = false }: IntroProps) {
   const [mountSeed] = useState(() => Math.floor(Math.random() * 100000))
   const copy = resolveCopy(personality, mountSeed + (seed ?? 0))
 
@@ -166,7 +167,13 @@ export function Intro({ personality, seed }: IntroProps) {
       data-slot="aui_intro"
     >
       <div className="w-full min-w-0">
-        <HarvisWordmark className="mx-auto mb-5 w-[min(100%,44rem)]" />
+        {pixelWordmark ? (
+          <p aria-label="Harvis" className="harvis-cycle mx-auto mb-5 w-[min(100%,44rem)]" data-slot="bots-island-wordmark" role="img">
+            <span aria-hidden="true" className="harvis-face" style={{ fontFamily: "'Mondwest', serif", fontWeight: 400, letterSpacing: '0.04em' }}>
+              <span className="harvis-letter">HARVIS</span>
+            </span>
+          </p>
+        ) : <HarvisWordmark className="mx-auto mb-5 w-[min(100%,44rem)]" />}
 
         <p className="m-0 text-center leading-normal tracking-tight">{copy.body}</p>
       </div>

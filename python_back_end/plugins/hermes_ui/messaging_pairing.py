@@ -3,9 +3,11 @@
 Pairing is what lets a stranger talk to the bot. The gateway files a pending
 request for the adapter owner (``messaging_gateway.add_pending``); approving
 it here links ``(platform, sender)`` to the owner in ``messaging_platforms``,
-the table the dispatcher resolves senders on, so the next message is answered
-as that user. Revoking deletes the link. The per-user settings copy is what
-the page lists.
+the table the dispatcher resolves senders on, so the next message to the
+owner's bot is answered as that user. The link is the owner's alone: the same
+sender may be paired to other users' bots, and nobody else's bot sees this row.
+Revoking deletes the owner's own link. The per-user settings copy is what the
+page lists.
 """
 from __future__ import annotations
 
@@ -51,14 +53,19 @@ def _pairing_row(row: dict) -> dict:
 
 
 async def link_sender(pool, owner: int, platform: str, identifier: str, name: Any) -> None:
-    """Point the dispatcher's (platform, identifier) lookup at the owner."""
+    """Link ``(platform, identifier)`` to the owner's own bot.
+
+    Only the owner's row is written, so another user holding the same identity
+    is neither affected nor revealed. A row the owner already holds as the house
+    bot's keeps that scope.
+    """
     if pool is None:
         return
     async with pool.acquire() as conn:
         await conn.execute(
-            "INSERT INTO messaging_platforms (user_id, platform, identifier, sender_display_name, enabled) "
-            "VALUES ($1, $2, $3, $4, TRUE) "
-            "ON CONFLICT (platform, identifier) DO UPDATE SET user_id = EXCLUDED.user_id, "
+            "INSERT INTO messaging_platforms (user_id, platform, identifier, sender_display_name, enabled, house) "
+            "VALUES ($1, $2, $3, $4, TRUE, FALSE) "
+            "ON CONFLICT (user_id, platform, identifier) DO UPDATE SET "
             "sender_display_name = EXCLUDED.sender_display_name, enabled = TRUE, updated_at = NOW()",
             owner, platform, identifier, str(name) if name else None)
 

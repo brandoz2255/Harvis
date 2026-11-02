@@ -21,6 +21,7 @@ import {
 } from './harvis-api'
 import { EndpointEditor } from './endpoint-editor'
 import { ModelSourcesSection, modelSourcesKey } from './harvis-model-sources'
+import { LinkedAgentsSection } from './linked-agents-section'
 import { ListRow, ListRowSkeleton, Pill, SettingsContent, SettingsSection } from './primitives'
 
 const freeKey = ['harvis', 'settings', 'free-providers'] as const
@@ -206,16 +207,19 @@ export function HarvisProvidersSettings() {
                   description={
                     <span className="flex flex-wrap items-center gap-x-2">
                       <span>{p.note}</span>
-                      <a
-                        className="inline-flex items-center gap-0.5 text-primary hover:underline"
-                        href={p.console_url}
-                        rel="noreferrer"
-                        target="_blank"
-                      >
-                        Open its dashboard <ExternalLink className="size-3" />
-                      </a>
+                      {p.console_url && (
+                        <a
+                          className="inline-flex items-center gap-0.5 text-primary hover:underline"
+                          href={p.console_url}
+                          rel="noreferrer"
+                          target="_blank"
+                        >
+                          Open its dashboard <ExternalLink className="size-3" />
+                        </a>
+                      )}
                       <span className="text-(--ui-text-tertiary)">
-                        Enter the address Harvis can reach it at (suggested: {p.base_url}), then Test connection.
+                        Enter the address Harvis can reach it at
+                        {p.base_url ? ` (suggested: ${p.base_url})` : ''}, then Test connection.
                       </span>
                     </span>
                   }
@@ -235,7 +239,7 @@ export function HarvisProvidersSettings() {
                       <span>{p.note}</span>
                       <a
                         className="inline-flex items-center gap-0.5 text-primary hover:underline"
-                        href={p.console_url}
+                        href={p.console_url ?? undefined}
                         rel="noreferrer"
                         target="_blank"
                       >
@@ -345,6 +349,7 @@ export function CodingEnginesSettings() {
           </div>
         )}
       </SettingsSection>
+      <LinkedAgentsSection />
       <p className="flex items-center gap-1.5 text-xs text-(--ui-text-tertiary)">
         <KeyRound className="size-3.5" /> Keys are stored encrypted on the Harvis server and are never shown again.
       </p>

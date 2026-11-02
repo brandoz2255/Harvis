@@ -3,7 +3,6 @@ VibeCode session clone and stream its work back as the standard ``OpenClawEvent`
 + a git diff, alongside the native ``vibecode-turn`` runner.
 
 Engines (``engine=…``):
-- ``opencode``    — local Ollama, no auth (E1).
 - ``codex``       — OpenAI's Codex CLI, CLOUD GPT models, per-user OpenAI key (E2).
 - ``claude-code`` — Anthropic's Claude Code CLI, CLOUD Claude models, per-user key (E2).
 - ``kimi-code``   — the SAME Claude Code CLI + sidecar with ANTHROPIC_BASE_URL repointed at
@@ -31,7 +30,7 @@ import time
 from pathlib import Path
 from typing import AsyncGenerator, Optional
 
-from ..openclaw_client import OpenClawEvent
+from ..events import OpenClawEvent
 from .isolation import SESSION_WORKSPACE_ROOT, WorkspaceIsolationManager
 from .syntax_gate import (
     PROJECT_LAYOUT_CONTRACT,
@@ -43,7 +42,6 @@ from .syntax_gate import (
 logger = logging.getLogger(__name__)
 
 _CONTAINERS = {
-    "opencode": os.getenv("HARVIS_OPENCODE_CONTAINER", "harvis-opencode"),
     "codex": os.getenv("HARVIS_CODEX_CONTAINER", "harvis-codex"),
     "claude-code": os.getenv("HARVIS_CLAUDE_CODE_CONTAINER", "harvis-claude-code"),
     # Kimi Code MEMBERSHIP runs the SAME sidecar and the SAME `claude` CLI as claude-code —
@@ -60,7 +58,6 @@ _CLOUD_ENGINES = {"codex", "claude-code", "kimi-code"}
 # service that does not exist. All of these live behind the `engines` profile, which a
 # default install deliberately leaves out.
 _ENGINE_SERVICE = {
-    "opencode": "opencode",
     "codex": "codex",
     "claude-code": "claude-code",
     "kimi-code": "claude-code",
@@ -95,7 +92,7 @@ def _missing_sidecar(stderr_lines: list[str], container: str) -> bool:
 # Engines whose stdout is PLAIN TEXT (not JSON) — the loop maps each line to a `log`
 # event and uses the output tail as the final summary; the git diff is the authority.
 _TEXT_ENGINES = {"hermes-agent"}
-_ENGINE_LABEL = {"opencode": "OpenCode", "codex": "Codex", "claude-code": "Claude Code",
+_ENGINE_LABEL = {"codex": "Codex", "claude-code": "Claude Code",
                  "hermes-agent": "Hermes Agent", "kimi-code": "Kimi Code"}
 # Cloud engines default to the CLI's own default model when these are empty.
 _CODEX_DEFAULT_MODEL = os.getenv("HARVIS_CODEX_DEFAULT_MODEL", "")
@@ -119,8 +116,8 @@ _HERMES_DEFAULT_MODEL = os.getenv("HARVIS_HERMES_AGENT_DEFAULT_MODEL", "qwen3:4b
 # identifies a wedged engine is producing no output at all, so the clock below resets on
 # every line the engine emits.
 #
-# HARVIS_OPENCODE_TIMEOUT_S is still read so existing deployments keep a knob that means
-# "how long before we give up on a quiet engine" — its original intent.
+# HARVIS_OPENCODE_TIMEOUT_S (from the retired OpenCode engine) is still read so existing
+# deployments keep a knob that means "how long before we give up on a quiet engine".
 _IDLE_TIMEOUT_S = int(
     os.getenv("HARVIS_ENGINE_IDLE_TIMEOUT_S", "")
     or os.getenv("HARVIS_OPENCODE_TIMEOUT_S", "")
@@ -381,17 +378,6 @@ def _bare_model(model_name: str) -> str:
     return m
 
 
-def _build_opencode_command(container, workspace_path, task_brief, model_name, api_key, user_id=0, auth_mode="api_key"):
-    model = (model_name or os.getenv("HARVIS_OPENCODE_DEFAULT_MODEL", "qwen3:4b")).strip() or "qwen3:4b"
-    model_id = model if model.startswith("ollama/") else f"ollama/{model}"
-    return [
-        "docker", "exec", "-u", "1001", "-w", workspace_path, container,
-        "opencode", "run", task_brief,
-        "--model", model_id, "--format", "json", "--dangerously-skip-permissions",
-        "--dir", workspace_path,
-    ], model_id
-
-
 def _build_codex_command(container, workspace_path, task_brief, model_name, api_key, user_id=0, auth_mode="api_key"):
     cmd = ["docker", "exec", "-e", f"OPENAI_API_KEY={api_key or ''}",
            "-u", "1001", "-w", workspace_path, container,
@@ -513,7 +499,6 @@ def _build_hermes_command(container, workspace_path, task_brief, model_name, api
 
 
 _BUILDERS = {
-    "opencode": _build_opencode_command,
     "codex": _build_codex_command,
     "claude-code": _build_claude_command,
     "kimi-code": _build_kimi_code_command,
@@ -525,26 +510,6 @@ _BUILDERS = {
 # Each takes a parsed JSON object + the root_ev factory and yields OpenClawEvents.
 # Unrecognized shapes → a `log` event (never crash, never drop). The shared loop
 # accumulates tool_calls (from tool_call events) + final text (from token events).
-
-def _map_opencode_line(obj, root_ev):
-    etype = obj.get("type")
-    part = obj.get("part") or {}
-    if etype == "text":
-        txt = part.get("text")
-        if txt:
-            yield root_ev("token", {"content": str(txt)})
-    elif etype == "tool_use":
-        tool = part.get("tool") or "tool"
-        state = part.get("state") or {}
-        yield root_ev("tool_call", {"tool": tool, "args": state.get("input") or {}})
-        status = state.get("status")
-        if status in ("completed", "error"):
-            yield root_ev("tool_result", {
-                "output": str(state.get("output") or "")[:2000],
-                "success": status == "completed",
-            })
-    # step_start / step_finish / other → drop
-
 
 def _map_codex_line(obj, root_ev):
     # Codex `--json`: thread.started / turn.started / item.started / item.completed{item:{type:…}} / turn.completed
@@ -614,7 +579,6 @@ def _map_hermes_line(obj, root_ev):
 
 
 _MAPPERS = {
-    "opencode": _map_opencode_line,
     "codex": _map_codex_line,
     "claude-code": _map_claude_line,
     # Same CLI, same `--output-format stream-json` shape → the same mapper.
@@ -679,7 +643,7 @@ def _usage_from_line(engine: str, obj: dict):
             if any(out.values()) or cost:
                 return {"kind": "final", "cost_usd": cost, **out}
             return None
-        u = obj.get("usage")  # generic fallback (codex/opencode if they emit it)
+        u = obj.get("usage")  # generic fallback (codex if it emits it)
         if isinstance(u, dict):
             out = _split_usage(u)
             if any(out.values()):
@@ -691,7 +655,7 @@ def _usage_from_line(engine: str, obj: dict):
 
 def _kill_run(container: str, workspace_path: str) -> None:
     """Best-effort, synchronous per-run kill INSIDE the sidecar (robust during cancel):
-    match by argv (opencode --dir / claude --add-dir carry the path) AND by cwd (codex
+    match by argv (claude --add-dir carries the path) AND by cwd (codex
     runs with cwd=clone). The unique clone path keys it to THIS run → cross-user safe."""
     script = (
         f'pkill -TERM -f "{workspace_path}" 2>/dev/null; '
@@ -767,7 +731,7 @@ async def run_external_engine_adapter(
     workspace_path: str = "",
     base_sha: str = "",
     repo_path: str = "",
-    engine: str = "opencode",
+    engine: str = "hermes-agent",
     api_key: Optional[str] = None,  # decrypted per-user credential for cloud engines (NEVER logged)
     auth_mode: str = "api_key",     # E4B: 'api_key' → ANTHROPIC_API_KEY; 'oauth_token' → CLAUDE_CODE_OAUTH_TOKEN
     attachments: Optional[list[dict]] = None,  # staged into the clone so the CLI can READ them

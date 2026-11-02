@@ -3,6 +3,7 @@
 import { type FC, useEffect, useState } from 'react'
 
 import { DiffusionCanvas } from '@/components/chat/image-generation-placeholder'
+import { RemoteImageGate } from '@/components/chat/remote-image-gate'
 import { ImageActionButton, ImageLightbox } from '@/components/chat/zoomable-image'
 import { useImageDownload } from '@/hooks/use-image-download'
 import { useI18n } from '@/i18n'
@@ -109,72 +110,80 @@ export const GeneratedImage: FC<{ aspectRatio?: string; result?: unknown }> = ({
   }
 
   return (
-    <>
-      <span
-        aria-label={pending ? t.assistant.tool.renderingImage : undefined}
-        aria-live={pending ? 'polite' : undefined}
-        className="group/image relative block max-w-full overflow-hidden rounded-2xl transition-[width,height] duration-300 ease-out"
-        data-slot="aui_generated-image"
-        role={pending ? 'status' : undefined}
-        style={{
-          aspectRatio: ratio,
-          // Width is capped so the derived height (width / ratio) never exceeds
-          // --image-preview-height; the box then matches the image exactly with
-          // no letterboxing.
-          width: `min(calc(var(--image-preview-height) * ${ratio}), var(--image-preview-max-width), 100%)`
-        }}
-      >
-        {!canvasGone && (
-          <div
-            className={cn('absolute inset-0 transition-opacity duration-500 ease-out', loaded && 'opacity-0')}
-            onTransitionEnd={() => loaded && setCanvasGone(true)}
-          >
-            <DiffusionCanvas />
-          </div>
-        )}
-        {src && (
-          <button
-            className="absolute inset-0 block size-full cursor-zoom-in"
-            onClick={() => setLightboxOpen(true)}
-            title={copy.openImage}
-            type="button"
-          >
-            <img
-              alt="Generated image"
-              className={cn(
-                'absolute inset-0 size-full object-contain opacity-0 transition-opacity duration-500 ease-out',
-                loaded && 'opacity-100'
-              )}
-              draggable={false}
-              onError={() => setFailed(true)}
-              onLoad={event => {
-                const { naturalHeight, naturalWidth } = event.currentTarget
+    // A tool result can name any https URL; it waits for a click like chat images.
+    <RemoteImageGate src={src}>
+      <>
+        <span
+          aria-label={pending ? t.assistant.tool.renderingImage : undefined}
+          aria-live={pending ? 'polite' : undefined}
+          className="group/image relative block max-w-full overflow-hidden rounded-2xl transition-[width,height] duration-300 ease-out"
+          data-slot="aui_generated-image"
+          role={pending ? 'status' : undefined}
+          style={{
+            aspectRatio: ratio,
+            // Width is capped so the derived height (width / ratio) never exceeds
+            // --image-preview-height; the box then matches the image exactly with
+            // no letterboxing.
+            width: `min(calc(var(--image-preview-height) * ${ratio}), var(--image-preview-max-width), 100%)`
+          }}
+        >
+          {!canvasGone && (
+            <div
+              className={cn('absolute inset-0 transition-opacity duration-500 ease-out', loaded && 'opacity-0')}
+              onTransitionEnd={() => loaded && setCanvasGone(true)}
+            >
+              <DiffusionCanvas />
+            </div>
+          )}
+          {src && (
+            <button
+              className="absolute inset-0 block size-full cursor-zoom-in"
+              onClick={() => setLightboxOpen(true)}
+              title={copy.openImage}
+              type="button"
+            >
+              <img
+                alt="Generated image"
+                className={cn(
+                  'absolute inset-0 size-full object-contain opacity-0 transition-opacity duration-500 ease-out',
+                  loaded && 'opacity-100'
+                )}
+                draggable={false}
+                onError={() => setFailed(true)}
+                onLoad={event => {
+                  const { naturalHeight, naturalWidth } = event.currentTarget
 
-                if (naturalWidth && naturalHeight) {
-                  setRatio(naturalWidth / naturalHeight)
-                }
+                  if (naturalWidth && naturalHeight) {
+                    setRatio(naturalWidth / naturalHeight)
+                  }
 
-                setLoaded(true)
-              }}
-              src={src}
+                  setLoaded(true)
+                }}
+                src={src}
+              />
+            </button>
+          )}
+          {loaded && src && (
+            <ImageActionButton
+              className="group-hover/image:opacity-100"
+              copy={copy}
+              onClick={download}
+              saving={saving}
             />
-          </button>
+          )}
+        </span>
+        {src && (
+          <ImageLightbox
+            alt="Generated image"
+            copy={copy}
+            onClick={download}
+            onOpenChange={setLightboxOpen}
+            open={lightboxOpen}
+            saving={saving}
+            src={src}
+          />
         )}
-        {loaded && src && (
-          <ImageActionButton className="group-hover/image:opacity-100" copy={copy} onClick={download} saving={saving} />
-        )}
-      </span>
-      {src && (
-        <ImageLightbox
-          alt="Generated image"
-          copy={copy}
-          onClick={download}
-          onOpenChange={setLightboxOpen}
-          open={lightboxOpen}
-          saving={saving}
-          src={src}
-        />
-      )}
-    </>
+      </>
+    </RemoteImageGate>
   )
 }

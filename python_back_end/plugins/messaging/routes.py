@@ -11,14 +11,18 @@ Two trust boundaries:
 
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 from typing import Optional
 
+import asyncpg
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from auth_optimized import get_current_user_optimized
+from owui_compat.authz import is_admin
+from plugins.exposure import mode as exposure_mode
 
 from .dispatcher import audit, dispatch_inbound, get_run_events, get_run_status, notify_terminal
 from .types import Direction, MessageEvent, MessageType, Platform, SessionSource
@@ -41,7 +45,7 @@ def require_gateway_token(x_gateway_token: str = Header(default="")) -> None:
     expected = _gateway_token()
     if not expected:
         raise HTTPException(status_code=503, detail="messaging gateway disabled (no token configured)")
-    if x_gateway_token != expected:
+    if not hmac.compare_digest(x_gateway_token.encode(), expected.encode()):
         raise HTTPException(status_code=401, detail="invalid gateway token")
 
 
@@ -66,6 +70,7 @@ class InboundMessagePayload(BaseModel):
     message_type: MessageType = MessageType.TEXT
     text: Optional[str] = None
     fallback_user_id: Optional[int] = None
+    bot_owner_user_id: Optional[int] = None
     raw: Optional[dict] = None
 
 
@@ -118,7 +123,12 @@ async def inbound(
         text=payload.text,
         raw=payload.raw,
     )
-    result = await dispatch_inbound(request, event, fallback_user_id=payload.fallback_user_id)
+    result = await dispatch_inbound(
+        request,
+        event,
+        fallback_user_id=payload.fallback_user_id,
+        bot_owner_user_id=payload.bot_owner_user_id,
+    )
     return InboundResponse(
         ok=result.ok,
         workspace_id=result.workspace_id,
@@ -219,7 +229,7 @@ async def list_platforms(
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT platform, identifier, sender_display_name, enabled, updated_at
+            SELECT platform, identifier, sender_display_name, enabled, house, updated_at
             FROM messaging_platforms
             WHERE user_id = $1
             ORDER BY platform, identifier
@@ -233,6 +243,7 @@ async def list_platforms(
                 "identifier": r["identifier"],
                 "sender_display_name": r["sender_display_name"],
                 "enabled": r["enabled"],
+                "house": r["house"],
                 "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
             }
             for r in rows
@@ -246,28 +257,39 @@ async def link_platform(
     request: Request,
     current_user: dict = Depends(get_current_user_optimized),
 ) -> dict:
+    if exposure_mode.shared() and not is_admin(current_user):
+        raise HTTPException(status_code=403, detail="Link messaging accounts through pairing.")
     pool = getattr(request.app.state, "pg_pool", None)
     if pool is None:
         raise HTTPException(status_code=503, detail="db unavailable")
     user_id = current_user["id"]
-    async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO messaging_platforms
-                (user_id, platform, identifier, sender_display_name, enabled, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
-            ON CONFLICT (platform, identifier) DO UPDATE
-                SET user_id = EXCLUDED.user_id,
-                    sender_display_name = EXCLUDED.sender_display_name,
-                    enabled = EXCLUDED.enabled,
-                    updated_at = NOW()
-            """,
-            user_id,
-            body.platform.value,
-            body.identifier,
-            body.sender_display_name,
-            body.enabled,
-        )
+    admin = is_admin(current_user)
+    # An admin's typed link is the house bot's: the host's own bot answers it, and it
+    # may never take a house identity from another user (the partial unique index
+    # raises). Anyone else's row only affects their own bot, where the sender can
+    # reach nobody else's agents. A row that is already the house's stays the house's.
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO messaging_platforms
+                    (user_id, platform, identifier, sender_display_name, enabled, house, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+                ON CONFLICT (user_id, platform, identifier) DO UPDATE
+                    SET house = messaging_platforms.house OR EXCLUDED.house,
+                        sender_display_name = EXCLUDED.sender_display_name,
+                        enabled = EXCLUDED.enabled,
+                        updated_at = NOW()
+                """,
+                user_id,
+                body.platform.value,
+                body.identifier,
+                body.sender_display_name,
+                body.enabled,
+                admin,
+            )
+    except asyncpg.UniqueViolationError:
+        raise HTTPException(status_code=409, detail="That account is already linked to another user.")
     return {"ok": True}
 
 

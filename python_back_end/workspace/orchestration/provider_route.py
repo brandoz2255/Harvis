@@ -50,6 +50,8 @@ class ToolRoute:
     upstream_model: str   # the id the VENDOR expects (facade prefix stripped)
     provider: str         # "groq" | "openai" | "moonshot" | …  — for logs only
     label: str            # human name, for honest error text
+    base_url: str = ""    # moonshot only: the user-settable base, for the SSRF guard
+    guarded: Optional[bool] = None  # moonshot only: moonshot_api.is_guarded's input
 
 
 def has_own_tools(model_id: Optional[str]) -> bool:
@@ -159,6 +161,8 @@ async def resolve_tool_route(
             upstream_model=_cc._api_model(mid),
             provider="moonshot",
             label="Kimi",
+            base_url=base or _cc._MOONSHOT_BASE_URL,
+            guarded=_cc._moonshot_user_guarded(user_id),
         )
 
     return None

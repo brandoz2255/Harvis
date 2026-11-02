@@ -19,7 +19,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import timedelta
 from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, Request
@@ -41,7 +40,7 @@ INTERNAL_ERROR = -32603
 MAX_BODY_BYTES = 2 * docs_tools.MAX_SOURCE_BYTES + 100_000   # JSON escaping can double a source at the limit
 
 SIDECAR_MCP_URL = os.getenv("HARVIS_DOCS_MCP_URL", "http://backend:8000/api/docs/mcp")
-SIDECAR_TOKEN_MINUTES = 90
+from jwt_secret import MCP_TOKEN_MINUTES as SIDECAR_TOKEN_MINUTES  # noqa: E402
 
 # Appended to a sidecar's system prompt when this server is offered. ``{server}`` is the
 # MCP server name, which the CLI uses to prefix every tool (``mcp__harvis-docs__docs_guide``).
@@ -57,9 +56,9 @@ def sidecar_mcp_config(user_id: int | None) -> dict | None:
     for an anonymous caller. Same signer and lifetime as the CAD door."""
     if not user_id:
         return None
-    from main import create_access_token   # late: main imports this package
+    from main import create_mcp_token   # late: main imports this package
 
-    token = create_access_token({"sub": str(int(user_id))}, timedelta(minutes=SIDECAR_TOKEN_MINUTES))
+    token = create_mcp_token(user_id)
     return {"mcpServers": {SERVER_INFO["name"]: {
         "type": "http", "url": SIDECAR_MCP_URL, "headers": {"Authorization": f"Bearer {token}"}}}}
 

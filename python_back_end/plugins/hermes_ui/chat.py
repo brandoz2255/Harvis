@@ -18,7 +18,7 @@ import httpx
 from plugins.agents.browse import is_explicit_browser_request
 from plugins.people.controls import ADMITTED_HEADER, admitted_mark
 
-from . import errors
+from . import errors, providers
 from .research_follow import follow_research
 
 log = logging.getLogger("hermes_ui.chat")
@@ -180,7 +180,7 @@ def _is_doc_request(text: str) -> bool:
 
 
 async def stream_turn(token: str, messages: list[dict], model: str = "",
-                      endpoint: dict[str, str] | None = None,
+                      endpoint: dict[str, Any] | None = None,
                       mode: str = "", effort: str = "", origin: str = "",
                       extra: dict | None = None) -> AsyncIterator[tuple[str, Any]]:
     """Yield ("text", delta) / ("reasoning", delta) / ("run", marker attrs) for the conversation.
@@ -196,17 +196,20 @@ async def stream_turn(token: str, messages: list[dict], model: str = "",
     `reasoning_content`); the visible answer arrives in `delta.content`.
     """
     research_id = None
-    async for kind, value in _stream_completion(token, messages, model, endpoint, mode, effort, extra):
-        if kind == "research":
-            research_id = value
-            continue
-        yield kind, value
+    try:
+        async for kind, value in _stream_completion(token, messages, model, endpoint, mode, effort, extra):
+            if kind == "research":
+                research_id = value
+                continue
+            yield kind, value
+    except providers.EndpointValidationError as exc:  # the connect-time guard refused the address
+        raise ChatError(str(exc)) from exc
     if research_id:
         async for item in follow_research(token, research_id, origin):
             yield item
 
 
-async def _stream_completion(token: str, messages: list[dict], model: str, endpoint: dict[str, str] | None,
+async def _stream_completion(token: str, messages: list[dict], model: str, endpoint: dict[str, Any] | None,
                              mode: str, effort: str,
                              extra: dict | None = None) -> AsyncIterator[tuple[str, Any]]:
     body = {
@@ -219,6 +222,11 @@ async def _stream_completion(token: str, messages: list[dict], model: str, endpo
         # Custom endpoints are OpenAI-compatible, not Harvis-compatible: do
         # not leak the Harvis bearer token or Harvis-only mode flags to them.
         base_url = endpoint["base_url"].rstrip("/")
+        if endpoint.get("guarded"):
+            try:
+                await providers.refuse_private_url(base_url)
+            except providers.EndpointValidationError as exc:
+                raise ChatError(str(exc)) from exc
         target_url = (f"{base_url}/chat/completions" if base_url.endswith("/v1")
                       else f"{base_url}/v1/chat/completions")
         headers = {"Authorization": f"Bearer {endpoint['api_key']}"} if endpoint.get("api_key") else {}
@@ -237,7 +245,9 @@ async def _stream_completion(token: str, messages: list[dict], model: str, endpo
         headers = {"Authorization": f"Bearer {token}", "Cookie": f"access_token={token}",
                    ADMITTED_HEADER: admitted_mark(token)}
     timeout = httpx.Timeout(connect=10.0, read=600.0, write=30.0, pool=10.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    guarded = bool(endpoint and endpoint.get("guarded"))
+    client = providers.guarded_client(timeout=timeout) if guarded else httpx.AsyncClient(timeout=timeout)
+    async with client:
         async with client.stream("POST", target_url, json=body, headers=headers) as resp:
             if resp.status_code != 200:
                 detail = (await resp.aread())[:400].decode("utf-8", "replace")

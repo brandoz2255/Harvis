@@ -3,6 +3,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
 
 import { TitlebarIcon } from '@/app/shell/titlebar-icon'
+import { RemoteImageGate } from '@/components/chat/remote-image-gate'
 import { ZoomableImage } from '@/components/chat/zoomable-image'
 import { PageLoader } from '@/components/page-loader'
 import { Button } from '@/components/ui/button'
@@ -503,16 +504,18 @@ function ArtifactImageCard({ artifact, failedImage, onImageError, onOpenChat }: 
         )}
       >
         {!failedImage && src && (
-          <ZoomableImage
-            alt={artifact.label}
-            className="max-h-40 max-w-full cursor-zoom-in rounded-md object-contain"
-            containerClassName="max-h-full"
-            decoding="async"
-            loading="lazy"
-            onError={() => onImageError(artifact.id)}
-            slot="artifact-media"
-            src={src}
-          />
+          <RemoteImageGate src={src}>
+            <ZoomableImage
+              alt={artifact.label}
+              className="max-h-40 max-w-full cursor-zoom-in rounded-md object-contain"
+              containerClassName="max-h-full"
+              decoding="async"
+              loading="lazy"
+              onError={() => onImageError(artifact.id)}
+              slot="artifact-media"
+              src={src}
+            />
+          </RemoteImageGate>
         )}
       </div>
 

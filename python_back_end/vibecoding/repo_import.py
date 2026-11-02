@@ -62,18 +62,13 @@ async def import_repository(
     Requires authentication via JWT cookie.
     """
     # Extract user ID from JWT token
-    from jose import jwt
-    SECRET_KEY = os.getenv("JWT_SECRET", "key")
-    ALGORITHM = "HS256"
-
     token = request.cookies.get("access_token")
     if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id = int(payload.get("sub"))
-    except Exception:
+    from auth_optimized import verified_user_id
+    user_id = await verified_user_id(token, getattr(request.app.state, 'pg_pool', None), request.url.path)
+    if user_id is None:
         raise HTTPException(status_code=401, detail="Invalid authentication")
 
     # Get GitHub token
@@ -283,18 +278,13 @@ async def list_repositories(
     Requires authentication via JWT cookie.
     """
     # Extract user ID from JWT token
-    from jose import jwt
-    SECRET_KEY = os.getenv("JWT_SECRET", "key")
-    ALGORITHM = "HS256"
-
     token = request.cookies.get("access_token")
     if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id = int(payload.get("sub"))
-    except Exception:
+    from auth_optimized import verified_user_id
+    user_id = await verified_user_id(token, getattr(request.app.state, 'pg_pool', None), request.url.path)
+    if user_id is None:
         raise HTTPException(status_code=401, detail="Invalid authentication")
 
     # Get GitHub token

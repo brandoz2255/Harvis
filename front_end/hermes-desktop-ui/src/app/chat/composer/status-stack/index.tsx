@@ -14,6 +14,7 @@ import { Tip, TipKeybindLabel } from '@/components/ui/tooltip'
 import { type Translations, useI18n } from '@/i18n'
 import { useSessionSlice } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
+import { ModSlot, useModsInSlot } from '@/mods/mod-slot'
 import { $billingBlock } from '@/store/billing-block'
 import {
   $statusItemsBySession,
@@ -101,6 +102,7 @@ export function ComposerStatusStack({ queue, sessionId }: ComposerStatusStackPro
   const billing = useStore($billingBlock)
 
   const groups = useMemo(() => groupStatusItems(items), [items])
+  const hasChatWidget = useModsInSlot('chat-widget').length > 0
 
   // Seed from the registry on session open; event-driven refreshes (terminal /
   // process tool completions) live in use-message-stream.
@@ -219,6 +221,10 @@ export function ComposerStatusStack({ queue, sessionId }: ComposerStatusStackPro
   // still render them as their own always-visible block.
   if (previewRows.length > 0 && !hasBackgroundGroup) {
     sections.push({ key: 'preview', node: previewBlock })
+  }
+
+  if (hasChatWidget) {
+    sections.push({ key: 'chat-widget', node: <ModSlot slot="chat-widget" /> })
   }
 
   if (queue) {

@@ -228,6 +228,9 @@ _EFFORT_OPENAI = {
 # routing gate on ``_moonshot_key`` rather than ``get_verified_engine_auth``. ctx/price are public
 # estimates for the Build usage meter. Kimi only supports temperature=1.0 → no reasoning-effort.
 from moonshot_api import MOONSHOT_BASE_URL as _MOONSHOT_BASE_URL
+from moonshot_api import moonshot_http_client as _moonshot_http_client
+from plugins.hermes_ui.providers import EndpointValidationError
+from moonshot_api import user_guarded as _moonshot_user_guarded
 
 _MOONSHOT_MODELS = [
     # kimi-k3 = the 2.8T-MoE flagship (~1M ctx, released 2026-07-16) → the default Kimi Build engine.
@@ -556,7 +559,8 @@ async def proxy_cloud_chat(owui_body: dict, pool, user_id: Optional[int]):
                 "Add a Moonshot API key in Settings (or set MOONSHOT_API_KEY) to use Kimi.",
             )
         try:
-            return await _proxy_moonshot_api(owui_body, model_id, key, key_base_url)
+            return await _proxy_moonshot_api(
+                owui_body, model_id, key, key_base_url, _moonshot_user_guarded(user_id))
         except Exception as exc:
             logger.warning("cloud_chat: moonshot proxy failed (%s): %s", model_id, type(exc).__name__)
             return _err_response(owui_body, 502, "Kimi is unavailable right now. Please try again.")
@@ -1020,15 +1024,20 @@ def _safe_openai_error(resp, label: str = "GPT") -> str:
 
 
 # ── Moonshot / Kimi path (OpenAI-compatible api_key) ────────────────────────────────────
-async def _proxy_moonshot_api(owui_body: dict, model_id: str, api_key: str, base_url: str = ""):
+async def _proxy_moonshot_api(owui_body: dict, model_id: str, api_key: str, base_url: str = "",
+                              guarded: Optional[bool] = None):
     """Moonshot's API is OpenAI-compatible → near-passthrough (mirrors _proxy_openai_api). Two Kimi
     quirks: it requires temperature=1.0 and does NOT expose reasoning_effort, so we force the former
     and never send the latter. The catalog id (``moonshot/kimi-k2.5``) → real id (``kimi-k2.5``).
 
     ``base_url`` is the platform stored with the user's key. Falling back to the module-level
     default is only correct for an env-provided key; a per-user key from the other Moonshot
-    console would 401 against it."""
-    url = f"{(base_url or _MOONSHOT_BASE_URL).rstrip('/')}/chat/completions"
+    console would 401 against it.
+
+    ``guarded`` is moonshot_api.is_guarded's input: a user-set base URL is only dialled at a
+    public address for a non-admin on a shared host."""
+    base = (base_url or _MOONSHOT_BASE_URL).rstrip("/")
+    url = f"{base}/chat/completions"
     messages = [
         {"role": m.get("role"), "content": m.get("content")}
         for m in (owui_body.get("messages") or [])
@@ -1045,15 +1054,18 @@ async def _proxy_moonshot_api(owui_body: dict, model_id: str, api_key: str, base
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
     if not body["stream"]:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0)) as client:
-            r = await client.post(url, headers=headers, json=body)
+        try:
+            async with _moonshot_http_client(base, guarded, timeout=httpx.Timeout(600.0, connect=10.0)) as client:
+                r = await client.post(url, headers=headers, json=body)
+        except EndpointValidationError as exc:
+            return _err_response(owui_body, 400, str(exc))
         if r.status_code >= 400:
             return _err_response(owui_body, 502, _safe_moonshot_error(r))
         return JSONResponse(status_code=200, content=r.json())
 
     async def _gen():
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(None, connect=10.0)) as client:
+            async with _moonshot_http_client(base, guarded, timeout=httpx.Timeout(None, connect=10.0)) as client:
                 async with client.stream("POST", url, headers=headers, json=body) as r:
                     if r.status_code >= 400:
                         detail = (await r.aread()).decode("utf-8", "replace")

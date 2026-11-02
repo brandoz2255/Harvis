@@ -16,7 +16,9 @@ import logging
 logger = logging.getLogger(__name__)
 
 # Auth configuration
-SECRET_KEY = os.getenv("JWT_SECRET", "key")
+from jwt_secret import MCP_TOKEN_MINUTES, get_jwt_secret, is_shared  # noqa: F401
+
+SECRET_KEY = get_jwt_secret()
 ALGORITHM = "HS256"
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://pguser:pgpassword@pgsql-db:5432/database")
 
@@ -100,40 +102,180 @@ class AuthOptimizer:
 # Global auth optimizer instance
 auth_optimizer = AuthOptimizer()
 
-def decode_token_fast(token: str) -> Optional[Dict]:
-    """Fast token decoding with caching"""
+def mint_token(data: dict, expires_delta, iat: Optional[float] = None) -> str:
+    """Sign a session token. ``iat`` is what server-side revocation compares (see
+    ``revoked``); it is fractional so a sign-in right after a password change is
+    never mistaken for one from before it. main.create_access_token calls this."""
+    from datetime import datetime, timedelta
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=15))
+    return jwt.encode({**data, "exp": expire, "iat": time.time() if iat is None else iat},
+                      SECRET_KEY, algorithm=ALGORITHM)
+
+
+# ─── Scoped sidecar tokens ──────────────────────────────────────────────────────
+# A sidecar's --mcp-config carries a token an agent can read back out of its own
+# process list, so it is minted with scope "mcp" and audience "harvis-mcp" and is
+# good only at the four MCP endpoints. python-jose refuses any token carrying `aud`
+# unless the caller names it, so a decoder that knows nothing of this rejects it too.
+MCP_SCOPE = "mcp"
+MCP_AUDIENCE = "harvis-mcp"
+MCP_PATHS = frozenset({
+    "/api/docs/mcp",
+    "/api/cad/mcp",
+    "/api/connectors/mcp",
+    "/api/workspace/artifact-mcp",
+})
+
+
+def is_mcp_path(path: Optional[str]) -> bool:
+    return bool(path) and path.rstrip("/") in MCP_PATHS
+
+
+def decode_claims(token: str, path: Optional[str] = None) -> Dict:
+    """Signature- and expiry-checked claims; raises JWTError for anything unusable here.
+
+    A scoped (MCP) token is accepted only when ``path`` is an MCP endpoint. On a
+    shared server a token with no ``iat`` predates revocation and is refused.
+    """
+    on_mcp = is_mcp_path(path)
+    payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM],
+                         audience=MCP_AUDIENCE if on_mcp else None)
+    if "scope" in payload or "aud" in payload:
+        if not on_mcp or payload.get("scope") != MCP_SCOPE:
+            raise JWTError("scoped token used outside its endpoint")
+    elif is_shared() and "iat" not in payload:
+        raise JWTError("token has no issue time")
+    return payload
+
+
+def predates_revocation(token: str) -> bool:
+    """Is this a sign-in this server signed (and has not expired) that carries no issue
+    time? Only possible for a token minted before revocation existed, and a shared
+    server refuses those outright (decode_claims). Separate from decode_claims so the
+    request gate can tell "ended" from "garbage" and clear the browser's cookie."""
+    if not token or not is_shared():
+        return False
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM],
+                             options={"verify_aud": False})
+    except JWTError:
+        return False
+    return "iat" not in payload and "scope" not in payload and "aud" not in payload
+
+
+def decode_token_fast(token: str, path: Optional[str] = None) -> Optional[Dict]:
+    """Fast token decoding with caching. ``path`` is the request path: without it
+    a scoped (MCP) token is refused."""
     current_time = time.time()
-    
+    on_mcp = is_mcp_path(path)
+
     # Check token cache first
     if token in TOKEN_CACHE:
         cached_data = TOKEN_CACHE[token]
-        if current_time - cached_data['timestamp'] < CACHE_EXPIRY:
-            # logger.info("🚀 Token cache hit")
-            return cached_data['payload']
-        else:
-            # Remove expired token from cache
-            del TOKEN_CACHE[token]
-    
+        payload = cached_data['payload']
+        # A cached payload is never trusted past its own expiry, whatever the cache window says.
+        expiry = payload.get('exp')
+        if (current_time - cached_data['timestamp'] < CACHE_EXPIRY
+                and (expiry is None or float(expiry) > current_time)):
+            if ('scope' in payload or 'aud' in payload) and not on_mcp:
+                return None
+            return payload
+        # Remove expired token from cache
+        TOKEN_CACHE.pop(token, None)
+
     # Decode token
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        
+        payload = decode_claims(token, path)
+
         # Cache the decoded payload
         TOKEN_CACHE[token] = {
             'payload': payload,
             'timestamp': current_time
         }
-        
+
         # Cleanup old tokens (keep cache size manageable)
         if len(TOKEN_CACHE) > 1000:
             cleanup_expired_tokens()
-        
-        # logger.info("✅ Token decoded and cached")
+
         return payload
-        
+
     except JWTError as e:
         logger.error(f"❌ JWT decode error: {e}")
         return None
+
+
+# ─── Server-side revocation ─────────────────────────────────────────────────────
+# users.tokens_valid_after (migration 027) is the moment before which no sign-in
+# counts. Password changes set it (a trigger), and so do blocking an account and
+# "sign out everywhere". Every token carries the time it was minted (`iat`), so
+# the check needs nothing from whoever minted it. Read at most every _CUTOFF_TTL
+# seconds per user; a change made by this process applies at once.
+_CUTOFF_TTL = 10.0
+_cutoffs: Dict[int, tuple] = {}
+
+
+async def _read_cutoff(conn, user_id: int) -> Optional[float]:
+    """Epoch seconds of the cutoff, or None when there is none (or the column is not there yet)."""
+    try:
+        return await conn.fetchval(
+            "SELECT EXTRACT(EPOCH FROM tokens_valid_after)::float8 FROM users WHERE id = $1", int(user_id))
+    except asyncpg.UndefinedColumnError:
+        return None
+
+
+async def session_cutoff(pool, user_id: int) -> Optional[float]:
+    if pool is None:
+        return None
+    hit = _cutoffs.get(int(user_id))
+    now = time.monotonic()
+    if hit and now - hit[1] < _CUTOFF_TTL:
+        return hit[0]
+    async with pool.acquire() as conn:
+        cutoff = await _read_cutoff(conn, user_id)
+    if len(_cutoffs) > 5000:
+        _cutoffs.clear()
+    _cutoffs[int(user_id)] = (cutoff, now)
+    return cutoff
+
+
+def revoked(payload: Dict, cutoff: Optional[float]) -> bool:
+    """Was this token minted before the account's cutoff? A token with no issue time
+    predates revocation, so any cutoff at all ends it."""
+    if cutoff is None:
+        return False
+    try:
+        return float(payload["iat"]) < cutoff
+    except (KeyError, TypeError, ValueError):
+        return True
+
+
+def note_cutoff(user_id: int, cutoff: Optional[float]) -> None:
+    """Make a cutoff this process just caused apply at once, not after the cache window."""
+    _cutoffs[int(user_id)] = (cutoff, time.monotonic())
+
+
+async def revoke_sessions(conn, user_id: int) -> None:
+    """Sign this account out everywhere: every token minted so far stops working."""
+    cutoff = await conn.fetchval(
+        "UPDATE users SET tokens_valid_after = clock_timestamp() WHERE id = $1 "
+        "RETURNING EXTRACT(EPOCH FROM tokens_valid_after)::float8", int(user_id))
+    note_cutoff(user_id, cutoff)
+
+
+async def verified_user_id(token: str, pool, path: Optional[str] = None) -> Optional[int]:
+    """The account a sign-in stands for, or None: bad signature, expired, a scoped
+    token off its endpoint, no issue time on a shared server, or ended server-side
+    (password changed, signed out everywhere, blocked). For the routes that read
+    the JWT themselves instead of using a shared auth dependency."""
+    try:
+        payload = decode_claims(token, path)
+        user_id = int(payload["sub"])
+    except (JWTError, KeyError, TypeError, ValueError):
+        return None
+    if revoked(payload, await session_cutoff(pool or auth_optimizer.db_pool, user_id)):
+        return None
+    return user_id
+
 
 def cleanup_expired_tokens():
     """Remove expired tokens from cache"""
@@ -182,7 +324,7 @@ async def get_current_user_optimized(
         )
     
     # Fast token decoding with cache
-    payload = decode_token_fast(token)
+    payload = decode_token_fast(token, request.url.path)
     if not payload:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -207,6 +349,13 @@ async def get_current_user_optimized(
             headers={"WWW-Authenticate": "Bearer"},
         )
     
+    if revoked(payload, await session_cutoff(pool or auth_optimizer.db_pool, user_id)):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session ended: sign in again",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     # Get user with optimized caching
     user_data = await auth_optimizer.get_user_from_cache_or_db(user_id)
     

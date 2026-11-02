@@ -55,6 +55,18 @@ set_env_value() { # $1 = key, $2 = value
 
 lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; } # macOS ships bash 3.2: no ${v,,}
 
+# HARVIS_BIND_ADDR=0.0.0.0 publishes the backend (8000), notebook and TTS ports on
+# the network with no sign-in in front of them. lan mode no longer keeps it just
+# because it is in .env: it stays only when this is set to true, in the shell or
+# in .env, by someone who wants those ports reachable and has firewalled them.
+# scripts/enable-https.sh drops this file; with it present nginx's plain lane only
+# redirects to https, so the Secure cookie is the right setting in every mode.
+https_redirect_active() { [ -f nginx/tls/harvis-https.redirect ]; }
+
+side_ports_opted_in() {
+  [ "$(lower "${HARVIS_ALLOW_PUBLIC_SIDE_PORTS:-$(env_value HARVIS_ALLOW_PUBLIC_SIDE_PORTS)}")" = true ]
+}
+
 current_exposure() {
   local m="${EXPOSE_MODE:-$(lower "$(env_value HARVIS_EXPOSURE)")}"
   printf '%s' "${m:-local}"
@@ -123,6 +135,9 @@ choose_default_exposure() {
   elif [ "$cur" = lan ] && [ "$(env_value HARVIS_BIND_ADDR_PUBLIC)" != "0.0.0.0" ]; then
     # lan recorded but port 9000 would now come up on 127.0.0.1 (the compose
     # default changed): re-apply lan rather than silently going dark.
+    EXPOSE_MODE=lan
+  elif [ "$cur" = lan ] && [ "$(env_value HARVIS_BIND_ADDR)" = "0.0.0.0" ] && ! side_ports_opted_in; then
+    # lan recorded with the side ports open and no opt-in: re-apply lan, which closes them.
     EXPOSE_MODE=lan
   elif [ -n "$cur" ] || [ -n "$(env_value HARVIS_BIND_ADDR_PUBLIC)" ]; then
     return 0
@@ -246,14 +261,14 @@ check_exposure() {
   bind="$(env_value HARVIS_BIND_ADDR_PUBLIC)"
   [ "$mode" = local ] || check_shared_secret "$mode"
   if [ "$(env_value HARVIS_BIND_ADDR)" = "0.0.0.0" ]; then
-    if [ "$mode" = lan ]; then
-      add_row WARN exposure "HARVIS_BIND_ADDR=0.0.0.0 opens the backend (8000), notebook and TTS ports with no sign-in"
-      add_hint "Remove HARVIS_BIND_ADDR from .env (it defaults to 127.0.0.1) so only port 9000 leaves this machine."
+    if side_ports_opted_in; then
+      add_row WARN exposure "HARVIS_BIND_ADDR=0.0.0.0 opens the backend (8000), notebook and TTS ports with no sign-in (kept: HARVIS_ALLOW_PUBLIC_SIDE_PORTS=true)"
+      add_hint "Firewall those ports from the network, or remove HARVIS_BIND_ADDR and HARVIS_ALLOW_PUBLIC_SIDE_PORTS from .env."
     elif [ -n "$EXPOSE_MODE" ]; then
       add_row WARN exposure "HARVIS_BIND_ADDR=0.0.0.0 opens the backend (8000), notebook and TTS ports; it will be removed"
     else
       add_row WARN exposure "HARVIS_BIND_ADDR=0.0.0.0 opens the backend (8000), notebook and TTS ports with no sign-in"
-      add_hint "Remove HARVIS_BIND_ADDR from .env, or run ./install.sh --expose local to do it for you."
+      add_hint "Remove HARVIS_BIND_ADDR from .env, or run ./install.sh --expose $mode to do it for you."
     fi
   fi
   if [ "$K8S_ACTION" = "up" ] && [ "$mode" = tunnel ]; then
@@ -350,8 +365,9 @@ write_exposure_env() {
       lan)   echo "✓ Kubernetes puts Harvis on your network, so it uses the lan rules: the first sign-up becomes admin, then sign-up closes" ;;
     esac
   fi
-  # Opening the side ports is never part of local or tunnel; lan keeps the warning.
-  if [ "$EXPOSE_MODE" != lan ] && [ "$(env_value HARVIS_BIND_ADDR)" = "0.0.0.0" ]; then
+  # Opening the side ports is never part of any mode on its own; lan keeps them
+  # only for an explicit HARVIS_ALLOW_PUBLIC_SIDE_PORTS=true.
+  if { [ "$EXPOSE_MODE" != lan ] || ! side_ports_opted_in; } && [ "$(env_value HARVIS_BIND_ADDR)" = "0.0.0.0" ]; then
     drop_env_key HARVIS_BIND_ADDR
     echo "✓ Removed HARVIS_BIND_ADDR=0.0.0.0 (backend, notebook and TTS ports back on 127.0.0.1)"
   fi
@@ -382,7 +398,8 @@ write_exposure_env() {
       set_env_value HARVIS_BIND_ADDR_PUBLIC 0.0.0.0
       close_signup
       # Plain http on the LAN; nginx marks the cookie Secure on the tunnel entrance.
-      drop_env_key HARVIS_COOKIE_SECURE
+      # Once enable-https.sh has run, :9000 only redirects, so Secure stays on.
+      https_redirect_active || drop_env_key HARVIS_COOKIE_SECURE
       set_env_value HARVIS_TUNNEL_TOKEN "$EXPOSE_TOKEN"
       write_public_access_env
       lock_tunnel_profile ;;
@@ -390,7 +407,7 @@ write_exposure_env() {
   # Leaving tunnel mode: the secure-only cookie would break sign-in over plain
   # http://<lan-ip>:9000, and the tunnel should close now, not at the next start.
   if is_tunnel_mode "$was" && ! is_tunnel_mode "$EXPOSE_MODE"; then
-    drop_env_key HARVIS_COOKIE_SECURE
+    https_redirect_active || drop_env_key HARVIS_COOKIE_SECURE
     drop_env_key HARVIS_TUNNEL_AUTH
     [ "$EXPOSE_MODE" = local ] || forget_public_access_signup
     if [ "$EXPOSE_MODE" = local ] && [ -n "$(env_value HARVIS_SIGNUP_OPENED_FOR_APPROVAL)" ]; then

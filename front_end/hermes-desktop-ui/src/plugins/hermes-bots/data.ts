@@ -631,12 +631,14 @@ interface UnionRoster {
   sources?: GatewaySource[]
 }
 
-export function useRoster() {
+export function useRoster(accountId?: string, isCurrent: () => boolean = () => true) {
   const activeConnectionId = useValue(host.state.connectionId)
 
   return useQuery({
-    queryKey: [...ROSTER_KEY, activeConnectionId],
+    queryKey: accountId ? ['island-roster', accountId, activeConnectionId] : [...ROSTER_KEY, activeConnectionId],
     queryFn: async () => {
+      const assertCurrent = () => { if (!isCurrent()) throw new Error("Account changed") }
+      assertCurrent()
       // Stamp the ISSUE time on the snapshot: mergeServerMeta compares it
       // against each bot's last local meta write, and a fetch issued before
       // a write can only carry pre-write ui_meta. (Issue time is the
@@ -669,6 +671,7 @@ export function useRoster() {
       }
 
       const local = await requestForBot<RosterSnapshot>(activeBot, 'profiles.list', {})
+      assertCurrent()
       // Newer backends inject the teammate-messaging protocol into every
       // session's system prompt (agent.bot_mode_protocol) — SOUL.md must not
       // carry a second copy. Older gateways lack the flag: keep appending.
@@ -682,7 +685,8 @@ export function useRoster() {
       if (typeof host.agents === 'function') {
         try {
           const union = await host.agents()
-          const previous: RosterRow[] = $lastRoster.get().filter(row => !row?.ghost)
+          assertCurrent()
+          const previous: RosterRow[] = accountId ? [] : $lastRoster.get().filter(row => !row?.ghost)
           const merged = mergeMultiSourceRoster(local, union, activeConnectionId, previous)
           const sources = Array.isArray(union?.sources) ? union.sources : []
 
@@ -693,10 +697,12 @@ export function useRoster() {
             fetchedAt: issuedAt
           }
         } catch {
+          assertCurrent()
           /* older build or roster failure — single-source list stands */
         }
       }
 
+      assertCurrent()
       return {
         ...(local && typeof local === 'object' ? local : {}),
         fetchedAt: issuedAt

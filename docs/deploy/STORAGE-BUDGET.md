@@ -1,8 +1,10 @@
 # Harvis storage budget
 
 **Living document.** Update the measured table whenever an image changes size, and move items
-between "banked" and "available" as they land. Last measured: **2026-07-26** on the dev box
-(`docker system df -v`, branch `deploy-optimize-test`).
+between "banked" and "available" as they land. Last estimated: **2026-10-28** on the dev box
+(`scripts/install-size.py`, branch `integration/october`). The sections from "What a bare-bones
+install cost" down date from **2026-07-26** (`docker system df -v`, branch `deploy-optimize-test`) and predate the
+Python 3.12 slim backend; they are history, not the current install.
 
 ## How to measure (do this, don't estimate)
 
@@ -15,7 +17,136 @@ backend/harvis-mcp/model-downloader family shares one multi-gigabyte layer stack
 exactly once. For a *fresh install* footprint, count each distinct base once and add each image's
 unique layers.
 
-## What a bare-bones install costs today
+## Current estimate: 2026-10-28 (dev box, not a new device)
+
+**Every number in this section is an estimate from the images already on the dev box.** It says
+what those images cost, not what a fresh clone produces: the local images can predate the
+Dockerfiles (the script flags each one), and images missing from the local store are left out and
+named, so the totals are lower bounds. The real figure is a measurement on a new device; see
+"Recording a new-device measurement" below.
+
+```bash
+python3 scripts/install-size.py                 # default profile set
+python3 scripts/install-size.py --each-profile  # + what each opt-in profile adds alone
+python3 scripts/install-size.py --json          # same, machine-readable
+python3 scripts/install-size.py --self-check    # prove the method against docker system df
+```
+
+It reads the compose files, lists the images a fresh `./install.sh` pulls or builds plus the base
+images each build pulls and leaves on disk, and counts every layer once by diff-ID. It only reads
+(`compose config`, `image inspect`, `history`); no build, pull, prune or container start. Needs
+the images to be in the local store; run it before the install, on a box that has built them.
+
+Default profile set: 13 services, 12 distinct images, plus the base images their builds pull. Sizes are decimal GB.
+"Alone" is the image's own size; "adds" is what it costs after the images above it have been
+counted, which is what the install actually pays.
+
+| Image | Alone | Adds | Note |
+|---|---:|---:|---|
+| `harvis-backend` | 2.38 | **2.21** | `python:3.12-slim` base, so no 12 GB PyTorch base any more |
+| `harvis-harvis-mcp` | 2.38 | 0.00 | same Dockerfile as `backend`; every layer shared |
+| `node:20-bookworm` | 1.58 | **1.58** | base of `repo-sandbox-image` |
+| `harvis-repo-sandbox` | 1.74 | 0.16 | almost all of it is the `node:20-bookworm` base |
+| `harvis-sandbox` | 1.26 | 1.08 | |
+| `harvis-browser-runner` | 1.19 | 1.00 | `preview-runner` is the same image |
+| `harvis-voice-onnx` | 1.04 | 0.86 | |
+| `pgvector/pgvector:pg15` | 0.61 | 0.61 | |
+| `python:3.11-slim` / `python:3.12-slim` | 0.19 / 0.18 | 0.19 / 0.18 | build bases, kept in the image store |
+| `ghcr.io/alexsjones/llmfit` | 0.18 | 0.18 | |
+| `harvis-messaging-gateway` | 0.30 | 0.12 | |
+| `nginx:1.29.6-alpine` | 0.09 | 0.09 | |
+| `harvis-hermes-ui-builder` | 0.06 | 0.05 | busybox + the built UI; the Node build stage is not an image |
+| `busybox:1.37.0` | 0.01 | 0.01 | `artifact-init` and the UI builder's final stage |
+| `node:22-bookworm-slim`, `ghcr.io/astral-sh/uv:latest` | not in local store | | build bases, **not counted** |
+
+**Images, shared layers once: 8.31 GB** (6.25 GB unpacked layers + 2.06 GB compressed blobs).
+The same images added up naively are 13.18 GB; sharing saves 4.87 GB. Plus the tracked repo
+files, 0.11 GB: **≈ 8.42 GB estimated, against the 7.0 GB budget, with two build bases still
+uncounted.** Volumes and the BuildKit cache are not estimated; a device that builds its own images
+also holds the build cache (the dev box holds 104 GB of it).
+
+Opt-in profiles, each added alone on top of the default set:
+
+| Profile | Adds (GB) | Not in local store, not counted |
+|---|---:|---|
+| `advanced-voice` | 37.61 | `nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04` |
+| `engines` | 9.79 | |
+| `notebooks-upstream` | 2.56 | |
+| `cad` | 1.73 | |
+| `laya` | 1.55 | |
+| `notebooks` | 1.50 | |
+| `legacy` | 1.24 | |
+| `sentrysearch` | 0.00 | |
+| `agent-reach` | 0.00 | `curlimages/curl:8.5.0` |
+| `tunnel` | 0.00 | `cloudflare/cloudflared:2026.9.3` |
+| `voice-fallback` | 0.00 | `ghcr.io/speaches-ai/speaches:latest-cpu` |
+
+All profiles on: **64.09 GB** of images with six images uncounted (shared layers save 35.9 GB of
+the 100.0 GB naive sum).
+
+**What the four merged October branches change in a fresh install.** Nothing in the default set.
+The only Docker-relevant files in the merge are `opencode/Dockerfile` (deleted) and
+`docker-compose.yaml` (the `opencode` service removed, `HARVIS_OPENCODE_*` settings replaced by
+`HARVIS_ENGINE_IDLE_TIMEOUT_S`), so `harvis-opencode` leaves the opt-in `engines` profile; that
+image is not in the local store, so its size is not measured here. `docker-compose.prebuilt.yml`
+changed environment variables only. No `requirements*.txt`, `package.json` or lockfile changed.
+The in-app island adds `front_end/hermes-desktop-ui/public/island/` (`index.html` and `island.js`,
+119,695 bytes on 2026-10-28, still changing) to the UI build output, which is negligible next to
+the 0.05 GB UI builder image.
+
+**How close the estimate is.** `--self-check` runs the same method over all 63 images on the box
+(419 distinct layers, all aligned) and compares with Docker: the whole-store total comes to
+103.23 GB against `docker system df` at 103.30 GB (-0.07%). Against `docker system df -v` UNIQUE
+SIZE, images over 100 MB are off by a median 0.11%; the worst is `harvis-model-downloader`
+(5.12 GB estimated, 4.76 GB reported, 7.7%), where the compressed-blob share is the soft part.
+
+**Method, and why not the obvious numbers.** On Docker 29 with the containerd image store,
+`docker image ls` DISK USAGE is the unpacked layers plus the compressed blobs kept beside them, and
+`docker image inspect` `.Size` is the same total for one image, with no sharing information.
+Per-layer unpacked sizes come from `docker history --human=false`, taken from the non-empty history
+rows and matched to `RootFS.Layers` in order. The compressed part is `.Size` minus the unpacked
+sum, spread over the image's layers in proportion to their unpacked size. On the classic overlay2
+store there are no blobs and that part is zero. The script refuses to guess: an image whose layer
+count does not match its history is counted whole and flagged.
+
+## Recording a new-device measurement
+
+The estimate is made on a dev box. The number that counts comes from a device that has never run
+Harvis (no Harvis images, no warm build cache, no model server), after the one command under test:
+
+```bash
+git clone <repo> harvis && cd harvis
+./install.sh
+INSTALL_SIZE_DEVICE=pi5-8gb INSTALL_SIZE_NOTE="first boot, wifi" ./scripts/verify-fresh-install.sh
+```
+
+Every run of `verify-fresh-install.sh` appends one JSON line to
+`~/.local/share/harvis/install-size-history.jsonl`, outside the repo: date, git commit and branch,
+OS, kernel and architecture, Docker and Compose versions, image, volume, repo and total GB, the
+budget, whether it was within budget, the BuildKit cache and container sizes (recorded, not in
+the total), and every image's `SIZE` and `UNIQUE SIZE`. It never changes the script's exit status.
+`INSTALL_SIZE_HISTORY` points it at another file (set it empty to record nothing). Compare runs:
+
+```bash
+python3 -c "
+import json, os
+for l in open(os.path.expanduser('~/.local/share/harvis/install-size-history.jsonl')):
+    r = json.loads(l)
+    print(r['date'][:10], r.get('device'), r['git']['commit'], r['kind'], r.get('total_gb', ''), r.get('build_cache_gb', ''))"
+```
+
+`python3 scripts/install-size.py --record` appends the dev-box estimate to the same file as
+`kind: estimate`, so estimate and measurement sit side by side.
+
+| Date | Where | Commit | Kind | Images GB | Total GB | Note |
+|---|---|---|---|---:|---:|---|
+| 2026-10-28 | dev box | `ae5fd20d` (uncommitted merge) | estimate | 8.31 | 8.42 | two build bases uncounted |
+| | *no new-device measurement yet* | | | | | |
+
+## What a bare-bones install cost on 2026-07-26 (superseded)
+
+Kept for the reduction history below. `ollama` and `owui-builder` are no longer in the default set,
+and the backend is no longer on the PyTorch base; use the current estimate above.
 
 The default profile set is 11 services (see `docker-compose.yaml`; everything else sits behind
 `engines` / `notebooks` / `voice` / `cad` / `legacy`).

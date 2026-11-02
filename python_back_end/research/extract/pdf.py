@@ -6,6 +6,8 @@ import io
 import logging
 import requests
 
+from research import safe_fetch
+
 logger = logging.getLogger(__name__)
 
 # We prefer pypdf (formerly PyPDF2)
@@ -21,6 +23,10 @@ class PageSpan:
     end: int
 
 def _download_pdf_bytes(url: str, user_agent: str, timeout_s: int) -> bytes:
+    if safe_fetch.enabled():
+        r = safe_fetch.fetch(url, headers={"User-Agent": user_agent}, timeout=timeout_s)
+        r.raise_for_status()
+        return r.content
     r = requests.get(url, timeout=timeout_s, headers={"User-Agent": user_agent})
     r.raise_for_status()
     return r.content

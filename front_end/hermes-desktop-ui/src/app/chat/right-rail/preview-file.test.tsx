@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { MarkdownPreview } from './preview-file'
@@ -34,12 +34,24 @@ describe('MarkdownPreview', () => {
     expect(table?.querySelector('tbody td')?.textContent).toBe('a')
   })
 
-  it('renders images with alt text', () => {
-    const { container } = render(<MarkdownPreview text={'![a chart](https://example.com/chart.png)'} />)
+  it('renders same-origin images with alt text straight away', () => {
+    const { container } = render(<MarkdownPreview text={'![a chart](/chart.png)'} />)
 
     const img = container.querySelector('img')
     expect(img?.getAttribute('alt')).toBe('a chart')
-    expect(img?.getAttribute('src')).toBe('https://example.com/chart.png')
+    expect(img?.getAttribute('src')).toBe('/chart.png')
+  })
+
+  it('holds a remote image back until clicked, so a document cannot beacon on open', () => {
+    const { container } = render(<MarkdownPreview text={'![a chart](https://example.com/chart.png?d=secret)'} />)
+
+    expect(container.querySelector('img')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: /example\.com/ }))
+
+    const img = container.querySelector('img')
+    expect(img?.getAttribute('alt')).toBe('a chart')
+    expect(img?.getAttribute('src')).toBe('https://example.com/chart.png?d=secret')
   })
 
   it('renders external links to open in a new tab safely', () => {

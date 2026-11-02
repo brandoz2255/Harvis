@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -187,6 +187,105 @@ export function targetFor(model: CookbookModel): DownloadTarget {
   return model.ollama_tag ? { tag: model.ollama_tag } : { quant: model.best_quant, repo: model.name }
 }
 
+/** Waits for typing to settle; under two characters is no search at all. */
+export function useSettledSearch(text: string) {
+  const [search, setSearch] = useState('')
+
+  useEffect(() => {
+    const id = window.setTimeout(() => setSearch(text.trim().length >= 2 ? text.trim() : ''), 350)
+
+    return () => window.clearTimeout(id)
+  }, [text])
+
+  return search
+}
+
+export interface FitRowState {
+  blocked: boolean
+  /** Already on the machine. */
+  have: boolean
+  /** The name Ollama pulls it by. */
+  tag: string
+}
+
+/** What fits a machine, best first, or what matches `search`. The caller decides what each row's button does. */
+export function FitList({
+  emptySearchText = 'Nothing matches that.',
+  errorHint,
+  installed,
+  node,
+  renderAction,
+  search
+}: {
+  emptySearchText?: string
+  errorHint?: string
+  installed: ReadonlySet<string>
+  node: string
+  renderAction: (model: CookbookModel, state: FitRowState) => ReactNode
+  search: string
+}) {
+  const list = useQuery({
+    queryFn: () => fetchCookbookModels(node, search),
+    queryKey: ['harvis', 'settings', 'models', 'cookbook', node, search],
+    staleTime: 60_000
+  })
+
+  if (list.isPending) {
+    return (
+      <div className="grid gap-1">
+        <ListRowSkeleton wide />
+        <ListRowSkeleton wide />
+      </div>
+    )
+  }
+
+  if (list.isError) {
+    return (
+      <p className="py-2 text-[0.8125rem] text-(--ui-text-secondary)" role="alert">
+        {list.error instanceof Error
+          ? `Could not load the list of models that fit this machine. ${list.error.message}`
+          : 'Could not load the list of models that fit this machine.'}
+        {errorHint && ` ${errorHint}`}
+      </p>
+    )
+  }
+
+  if ((list.data ?? []).length === 0) {
+    return (
+      <p className="py-2 text-[0.8125rem] text-(--ui-text-secondary)">
+        {search ? emptySearchText : 'No suggestions for this machine.'}
+      </p>
+    )
+  }
+
+  return (
+    <div className="divide-y">
+      {(list.data ?? []).map(m => {
+        const tag = m.ollama_tag || m.name
+        const have = installed.has(tag) || installed.has(`${tag}:latest`)
+        const blocked = m.downloadable === false
+
+        return (
+          <ListRow
+            action={renderAction(m, { blocked, have, tag })}
+            description={blocked ? (m.reason ?? 'Needs a GPU server, not this machine.') : fitHint(m)}
+            key={m.name}
+            title={
+              <span className="flex flex-wrap items-center gap-2">
+                <span className="break-all">{m.name}</span>
+                {m.fit_level && !blocked && (
+                  <Pill tone={fitTone(m.fit_level)}>{FIT_LABEL[m.fit_level.toLowerCase()] ?? m.fit_level}</Pill>
+                )}
+              </span>
+            }
+            wide
+          />
+        )
+      })}
+    </div>
+  )
+}
+
 /** Admin only: pick from what fits this machine, or type any model name to pull. */
 export function GetModel({
   busy,
@@ -200,20 +299,7 @@ export function GetModel({
   onDownload: (label: string, target: DownloadTarget) => void
 }) {
   const [text, setText] = useState('')
-  const [search, setSearch] = useState('')
-
-  useEffect(() => {
-    const id = window.setTimeout(() => setSearch(text.trim().length >= 2 ? text.trim() : ''), 350)
-
-    return () => window.clearTimeout(id)
-  }, [text])
-
-  const list = useQuery({
-    queryFn: () => fetchCookbookModels(node, search),
-    queryKey: ['harvis', 'settings', 'models', 'cookbook', node, search],
-    staleTime: 60_000
-  })
-
+  const search = useSettledSearch(text)
   const name = text.trim()
 
   return (
@@ -240,58 +326,24 @@ export function GetModel({
         </Button>
       </form>
 
-      {list.isPending ? (
-        <div className="grid gap-1">
-          <ListRowSkeleton wide />
-          <ListRowSkeleton wide />
-        </div>
-      ) : list.isError ? (
-        <p className="py-2 text-[0.8125rem] text-(--ui-text-secondary)" role="alert">
-          {list.error instanceof Error
-            ? `Could not load the list of models that fit this machine. ${list.error.message}`
-            : 'Could not load the list of models that fit this machine.'}{' '}
-          You can still type a model name above.
-        </p>
-      ) : (list.data ?? []).length === 0 ? (
-        <p className="py-2 text-[0.8125rem] text-(--ui-text-secondary)">
-          {search ? 'Nothing matches that. Press Download to try the exact name.' : 'No suggestions for this machine.'}
-        </p>
-      ) : (
-        <div className="divide-y">
-          {(list.data ?? []).map(m => {
-            const tag = m.ollama_tag || m.name
-            const have = installed.has(tag) || installed.has(`${tag}:latest`)
-            const blocked = m.downloadable === false
-
-            return (
-              <ListRow
-                action={
-                  <Button
-                    disabled={busy || have || blocked}
-                    onClick={() => onDownload(tag, targetFor(m))}
-                    size="sm"
-                    variant="outline"
-                  >
-                    <Download />
-                    {have ? 'Installed' : 'Download'}
-                  </Button>
-                }
-                description={blocked ? (m.reason ?? 'Needs a GPU server, not this machine.') : fitHint(m)}
-                key={m.name}
-                title={
-                  <span className="flex flex-wrap items-center gap-2">
-                    <span className="break-all">{m.name}</span>
-                    {m.fit_level && !blocked && (
-                      <Pill tone={fitTone(m.fit_level)}>{FIT_LABEL[m.fit_level.toLowerCase()] ?? m.fit_level}</Pill>
-                    )}
-                  </span>
-                }
-                wide
-              />
-            )
-          })}
-        </div>
-      )}
+      <FitList
+        emptySearchText="Nothing matches that. Press Download to try the exact name."
+        errorHint="You can still type a model name above."
+        installed={installed}
+        node={node}
+        renderAction={(m, { blocked, have, tag }) => (
+          <Button
+            disabled={busy || have || blocked}
+            onClick={() => onDownload(tag, targetFor(m))}
+            size="sm"
+            variant="outline"
+          >
+            <Download />
+            {have ? 'Installed' : 'Download'}
+          </Button>
+        )}
+        search={search}
+      />
       {busy && (
         <p className="flex items-center gap-1.5 pt-2 text-[0.75rem] text-(--ui-text-tertiary)">
           <Loader2 className="size-3 animate-spin" />

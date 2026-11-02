@@ -67,7 +67,11 @@ async def env_vars(user=Depends(get_current_user_optimized)):
     """Which provider/tool keys the backend container has set, values redacted.
 
     The values themselves never leave the container: editing and reveal are
-    refused below, and the Messaging page owns the per-platform credentials."""
+    refused below, and the Messaging page owns the per-platform credentials.
+    These are the host's keys, so only an admin sees their last four characters."""
+    from owui_compat.authz import is_admin
+
+    admin = is_admin(user)
     out: dict[str, dict[str, Any]] = {}
     for key, meta in _env_catalog().items():
         value = os.getenv(key) or ""
@@ -78,7 +82,7 @@ async def env_vars(user=Depends(get_current_user_optimized)):
             "description": meta.get("description") or "",
             "is_password": bool(meta.get("password")),
             "is_set": bool(value),
-            "redacted_value": _redact(value) if value else None,
+            "redacted_value": _redact(value) if value and admin else None,
             "tools": list(meta.get("tools") or []),
             "url": meta.get("url"),
         }
@@ -111,17 +115,25 @@ def _models_url(base_url: str) -> str:
     return f"{base_url}/models" if base_url.rstrip("/").endswith("/v1") else f"{base_url}/v1/models"
 
 
-async def _probe_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+async def _probe_endpoint(payload: dict[str, Any], user_id: int) -> dict[str, Any]:
     try:
         endpoint = providers.normalize_endpoint(payload, require_model=False)
+        guarded = providers.url_guarded(user_id)
+        if guarded:
+            await providers.refuse_private_url(endpoint["base_url"])
     except providers.EndpointValidationError as exc:
         raise _endpoint_error(exc) from exc
     api_key = payload.get("api_key")
     api_key = api_key.strip() if isinstance(api_key, str) else ""
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    client = (providers.guarded_client(timeout=8.0) if guarded
+              else httpx.AsyncClient(timeout=8.0, follow_redirects=False))
     try:
-        async with httpx.AsyncClient(timeout=8.0, follow_redirects=False) as client:
-            response = await client.get(_models_url(endpoint["base_url"]), headers=headers)
+        async with client:
+            async with client.stream("GET", _models_url(endpoint["base_url"]), headers=headers) as response:
+                await response.aread()
+    except providers.EndpointValidationError as exc:
+        raise _endpoint_error(exc) from exc
     except httpx.RequestError:
         return {"ok": False, "reachable": False, "models": [], "message": "Could not reach this endpoint."}
     if response.status_code in (401, 403):
@@ -150,7 +162,7 @@ async def validate_custom_endpoint(request: Request, user=Depends(get_current_us
         saved = await providers.resolve_endpoint(_pool(request), _uid(user), payload["id"])
         if saved and saved.get("api_key"):
             payload = {**payload, "api_key": saved["api_key"]}
-    return await _probe_endpoint(payload)
+    return await _probe_endpoint(payload, _uid(user))
 
 
 @router.post("/providers/validate")
@@ -165,7 +177,7 @@ async def validate_provider_credential(request: Request, user=Depends(get_curren
         return {"ok": False, "reachable": False, "models": [],
                 "message": "Only an endpoint URL can be tested here."}
     return await _probe_endpoint({"name": "Endpoint test", "base_url": body.get("value"),
-                                  "api_key": body.get("api_key")})
+                                  "api_key": body.get("api_key")}, _uid(user))
 
 
 @router.post("/providers/custom-endpoints")

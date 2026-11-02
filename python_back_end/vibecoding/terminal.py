@@ -18,11 +18,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["vibecode-terminal"])
 
 # JWT configuration (must match main.py)
-SECRET_KEY = os.getenv("JWT_SECRET", "key")
+from jwt_secret import get_jwt_secret
+
+SECRET_KEY = get_jwt_secret()
 ALGORITHM = "HS256"
 
 
-async def authenticate_websocket(token: str = None, cookies: dict = None) -> dict:
+async def authenticate_websocket(token: str = None, cookies: dict = None, pool=None) -> dict:
     """Authenticate WebSocket connection using JWT token or cookie
     
     Args:
@@ -43,25 +45,15 @@ async def authenticate_websocket(token: str = None, cookies: dict = None) -> dic
     if not auth_token:
         raise HTTPException(status_code=401, detail="No authentication provided")
     
-    try:
-        payload = jwt.decode(auth_token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id_str = payload.get("sub")
-        
-        if user_id_str is None:
-            raise HTTPException(status_code=401, detail="Invalid token")
-        
-        # Return minimal user info needed for authorization
-        return {
-            "id": int(user_id_str),
-            "username": payload.get("username", ""),
-            "email": payload.get("email", "")
-        }
-    except JWTError as e:
-        logger.error(f"JWT decode error: {e}")
+    # Same checks as every other route: signature and expiry, a scoped sidecar token
+    # refused, and a sign-in ended server-side refused. Only the id is trusted;
+    # nothing else in the token is read.
+    from auth_optimized import verified_user_id
+
+    user_id = await verified_user_id(auth_token, pool)
+    if user_id is None:
         raise HTTPException(status_code=401, detail="Invalid token")
-    except ValueError as e:
-        logger.error(f"User ID conversion error: {e}")
-        raise HTTPException(status_code=401, detail="Invalid token format")
+    return {"id": user_id, "username": "", "email": ""}
 
 
 @router.websocket("/ws/vibecoding/terminal")
@@ -110,7 +102,9 @@ async def terminal_websocket(
             if hasattr(websocket, 'cookies'):
                 cookies = websocket.cookies
             
-            user = await authenticate_websocket(token=token, cookies=cookies)
+            user = await authenticate_websocket(
+                token=token, cookies=cookies, pool=getattr(websocket.app.state, 'pg_pool', None)
+            )
             logger.info(f"✅ User authenticated: {user['id']}")
         except HTTPException as e:
             await websocket.send_json({"error": e.detail})

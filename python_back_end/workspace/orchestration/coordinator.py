@@ -29,7 +29,7 @@ import re
 import time
 from typing import AsyncGenerator
 
-from ..openclaw_client import OpenClawEvent
+from ..events import OpenClawEvent
 from .conversation import conversation_prefix
 from .isolation import WorkspaceIsolationManager
 from .profiles import get_profile

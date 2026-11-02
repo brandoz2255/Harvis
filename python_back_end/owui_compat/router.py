@@ -24,6 +24,7 @@ from typing import Callable, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from jose import JWTError, jwt
+from passlib.context import CryptContext
 
 from . import config as owui_config
 from . import persistence
@@ -54,6 +55,9 @@ from .orchestration_pool import register_orchestration_pool_routes
 from .translate import harvis_models_to_owui, harvis_user_to_owui
 
 logger = logging.getLogger(__name__)
+
+# Checked for unknown emails so a miss costs the same bcrypt time as a wrong password.
+_DUMMY_PASSWORD_HASH = CryptContext(schemes=["bcrypt"]).hash("harvis-unknown-account-timing-pad")
 
 
 @dataclass
@@ -146,6 +150,11 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
                 "SELECT id, username, email, avatar, password, account_status FROM users WHERE email = $1",
                 payload.email,
             )
+        if not user:
+            try:
+                deps.verify_password(payload.password, _DUMMY_PASSWORD_HASH)
+            except Exception:
+                pass
         if not user or not deps.verify_password(payload.password, user["password"]):
             raise HTTPException(status_code=401, detail="Incorrect email or password")
         from plugins.people import BLOCKED_MESSAGE, is_blocked
@@ -166,7 +175,7 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
         pool = _require_pool(request)
         signup_req = deps.signup_request_cls(
             username=payload.name, email=payload.email, password=payload.password,
-            note_to_host=payload.note_to_host,
+            note_to_host=payload.note_to_host, accept_terms=payload.accept_terms, terms_version=payload.terms_version,
         )
         async with pool.acquire() as conn:
             token_resp = await deps.signup_with_connection(
@@ -273,6 +282,16 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
             )
             if _hm and not any((m or {}).get("id") == _hm["id"] for m in data):
                 data.append(_hm)
+        except Exception:
+            pass
+        # The user's OPTIONAL linked OpenClaw: listed only while their link is verified.
+        try:
+            from .hermes_chat import openclaw_chat_model_entry
+            _om = await openclaw_chat_model_entry(
+                getattr(request.app.state, "pg_pool", None), getattr(user, "id", None)
+            )
+            if _om and not any((m or {}).get("id") == _om["id"] for m in data):
+                data.append(_om)
         except Exception:
             pass
         # Phase F: per-user cloud chat models (Claude now, GPT later). Appear only when this user
@@ -419,13 +438,13 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
     async def owui_ws_approve(workspace_id: str, request: Request, user=Depends(get_current_user)):
         from .workspace_bridge import resolve_workspace_approval
 
-        return await resolve_workspace_approval(request, workspace_id, True)
+        return await resolve_workspace_approval(request, workspace_id, True, user)
 
     @router.post("/api/owui/workspace/{workspace_id}/deny")
     async def owui_ws_deny(workspace_id: str, request: Request, user=Depends(get_current_user)):
         from .workspace_bridge import resolve_workspace_approval
 
-        return await resolve_workspace_approval(request, workspace_id, False)
+        return await resolve_workspace_approval(request, workspace_id, False, user)
 
     @router.post("/api/chat/completed")
     async def owui_chat_completed(request: Request, user=Depends(get_current_user)):
@@ -1020,6 +1039,14 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
     else:
         register_docs_mcp_routes(router, get_current_user)
 
+    # Read-only list / search / ask over the caller's own notebooks, same JWT door.
+    try:
+        from mcp.server.notebook_mcp import register_notebook_mcp_routes
+    except ImportError as exc:
+        logger.info("Notebook MCP route not registered (%s)", exc)
+    else:
+        register_notebook_mcp_routes(router, get_current_user)
+
     # The same door, for whatever the user has connected themselves. Registered
     # unconditionally: unlike CAD this has no feature flag of its own, and a
     # deployment with no connectors simply serves an empty tool list.
@@ -1029,6 +1056,8 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
     register_engine_auth_routes(router, get_current_user)
     from .hermes_connect import register_hermes_connect_routes
     register_hermes_connect_routes(router, get_current_user)
+    from .openclaw_connect import register_openclaw_connect_routes
+    register_openclaw_connect_routes(router, get_current_user)
     from .hermes_import import register_hermes_import_routes
     register_hermes_import_routes(router, get_current_user)
     from .hermes_skills import register_hermes_skill_routes

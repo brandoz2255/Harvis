@@ -20,6 +20,16 @@ from workspace.orchestration.tools import (  # noqa: E402
     WIRE_TOOL_SCHEMA, lane_for_tool, parse_tool_calls, wire_tool_names,
 )
 
+@pytest.fixture(autouse=True)
+def _no_mod_rules(monkeypatch):
+    # The fake pools here cannot hold a mods table, and unreadable mods make every tool ask first.
+    import plugins.mods as mods
+
+    async def none(pool, user_id):
+        return mods.ModRules()
+    monkeypatch.setattr(mods, "rules_for_user", none)
+
+
 DECK = "---\nkind: deck\ntitle: T\n---\n# T\nsub\n---\n## One\n- a\n"
 
 

@@ -155,13 +155,17 @@ async def list_nodes(current_user: Dict = Depends(get_current_user_from_request)
     """Ping each configured node's llmfit /health concurrently. Never raises — reports per-node."""
     names = list(config.NODES.keys())
     results = await asyncio.gather(*(client.health(config.NODES[n]["llmfit"]) for n in names))
+    from owui_compat.authz import is_admin
+
+    show_urls = is_admin(current_user)
     return {
         "nodes": [
             {
                 "name": n,
                 "role": config.NODES[n].get("role", "subhost"),
-                "llmfit_url": config.NODES[n]["llmfit"],
-                "ollama_url": config.NODES[n]["ollama"],
+                "builtin": config.is_baseline(n),
+                "llmfit_url": config.NODES[n]["llmfit"] if show_urls else None,
+                "ollama_url": config.NODES[n]["ollama"] if show_urls else None,
                 **h,
             }
             for n, h in zip(names, results)
@@ -247,18 +251,22 @@ async def get_system(node: str, current_user: Dict = Depends(get_current_user_fr
 async def list_installed(node: str, current_user: Dict = Depends(get_current_user_from_request)):
     """Models actually pulled into this node's Ollama — i.e. what you can swap to/use."""
     cfg = config.node_or_400(node)
+    from owui_compat.authz import is_admin
+
+    show_url = is_admin(current_user)
     ollama = cfg.get("ollama")
     if not ollama:
         return {"models": [], "ollama_url": ""}
     try:
-        data = await client.get_json(ollama, "/api/tags")
+        data = await client.get_json(ollama, "/api/tags", service="Ollama")
     except HTTPException as e:  # ollama unreachable → empty, not a hard error
-        return {"models": [], "ollama_url": ollama, "error": str(e.detail)[:200]}
+        error = str(e.detail)[:200] if show_url else "Ollama on this node is unreachable"
+        return {"models": [], "ollama_url": ollama if show_url else None, "error": error}
     from owui_compat.ollama_hosts import drop_cloud
 
     models = drop_cloud(data.get("models", [])) if isinstance(data, dict) else []
     models.sort(key=lambda m: (m.get("size", 0) if isinstance(m, dict) else 0), reverse=True)
-    return {"models": models, "ollama_url": ollama}
+    return {"models": models, "ollama_url": ollama if show_url else None}
 
 
 @router.get("/recommend")

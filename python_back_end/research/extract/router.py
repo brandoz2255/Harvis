@@ -11,6 +11,7 @@ import requests
 
 from ..config.settings import get_settings
 from ..core.utils import retry
+from .. import safe_fetch
 
 from .html_trafilatura import extract_html
 from .pdf import extract_pdf
@@ -37,8 +38,11 @@ class ExtractedDoc:
 
 def _head_content_type(url: str, timeout_s: int, user_agent: str) -> Optional[str]:
     try:
-        r = requests.head(url, allow_redirects=True, timeout=timeout_s, headers={"User-Agent": user_agent})
-        if r.ok:
+        if safe_fetch.enabled():
+            r = safe_fetch.fetch(url, method="HEAD", timeout=timeout_s, headers={"User-Agent": user_agent})
+        else:
+            r = requests.head(url, allow_redirects=True, timeout=timeout_s, headers={"User-Agent": user_agent})
+        if r.status_code < 400:
             ct = r.headers.get("Content-Type", "")
             return ct.split(";")[0].strip().lower() if ct else None
     except Exception as e:
@@ -51,6 +55,8 @@ def _guess_content_type(url: str) -> Optional[str]:
     return mt
 
 def _is_youtube(url: str) -> bool:
+    if safe_fetch.enabled():
+        return safe_fetch.is_youtube_host(url)
     return any(h in url for h in ("youtube.com", "youtu.be"))
 
 # ---- ExtractionRouter Class ----

@@ -11,13 +11,14 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Query, Form
+from fastapi import Depends, FastAPI, File, UploadFile, HTTPException, Query, Form
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 
 from .engines.vibevoice_engine import VibeVoiceEngine
+from .security import require_internal_token, safe_child_or_404
 from .engines.rvc_engine import get_rvc_engine, RVC_MODELS_DIR
 from .services.voice_catalog import get_voice_catalog_service, VoiceCatalogService
 from .models.voice_model import (
@@ -367,7 +368,7 @@ async def list_rvc_voices():
     }
 
 
-@app.post("/rvc/voices/import")
+@app.post("/rvc/voices/import", dependencies=[Depends(require_internal_token)])
 async def import_rvc_voice(
     name: str = Form(..., description="Voice name (e.g., 'Peter Griffin')"),
     slug: str = Form(..., description="URL-friendly slug (e.g., 'peter_griffin')"),
@@ -445,7 +446,7 @@ async def import_rvc_voice(
 @app.get("/rvc/voices/{slug}")
 async def get_rvc_voice(slug: str):
     """Get details about an RVC voice"""
-    voice_dir = RVC_MODELS_DIR / slug
+    voice_dir = safe_child_or_404(RVC_MODELS_DIR, slug, "RVC voice")
     metadata_path = voice_dir / "metadata.json"
     
     if not metadata_path.exists():
@@ -461,7 +462,7 @@ async def get_rvc_voice(slug: str):
 @app.delete("/rvc/voices/{slug}")
 async def delete_rvc_voice(slug: str):
     """Delete an RVC voice"""
-    voice_dir = RVC_MODELS_DIR / slug
+    voice_dir = safe_child_or_404(RVC_MODELS_DIR, slug, "RVC voice")
     
     if not voice_dir.exists():
         raise HTTPException(404, f"RVC voice not found: {slug}")
@@ -619,7 +620,7 @@ async def get_voice_categories():
     return {"categories": categories}
 
 
-@app.post("/rvc/voices/import-url")
+@app.post("/rvc/voices/import-url", dependencies=[Depends(require_internal_token)])
 async def import_voice_from_url(request: VoiceImportUrlRequest):
     """
     Import a voice model from URL (e.g., from voice-models.com)
@@ -770,7 +771,7 @@ async def get_audio(filename: str):
 @app.get("/voices/{voice_id}/sample")
 async def get_voice_sample(voice_id: str):
     """Get the reference audio sample for a voice"""
-    sample_path = VOICES_DIR / voice_id / "reference.wav"
+    sample_path = safe_child_or_404(VOICES_DIR, voice_id) / "reference.wav"
     
     if not sample_path.exists():
         raise HTTPException(404, f"Voice sample not found: {voice_id}")

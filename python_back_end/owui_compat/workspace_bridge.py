@@ -114,9 +114,9 @@ def _marker_content(
 # Human label for each dispatch lane (agent_id) — what the run card's engine chip shows.
 # Keyed by the SAME agent_id that selects the event stream in workspace_router, so the chip
 # can never claim an engine that isn't the one running. Unknown ids fall back to the id
-# itself rather than silently reading "OpenClaw".
+# itself. "main" was OpenClaw's id; it now runs Harvis's own agent.
 _ENGINE_LABELS = {
-    "main": "OpenClaw",
+    "main": "Harvis Agent",
     "agent-native": "Harvis Agent",
     "orchestrated": "Orchestrator",
     "claude": "Claude",
@@ -154,8 +154,7 @@ def _resolve_engine(mode: str, model_id: str) -> tuple[str, str]:
         # Everything else — local Ollama tags and the per-user cloud providers (groq,
         # cerebras, gemini, nvidia, mistral, OpenAI) — runs on Harvis's OWN tool-loop.
         # That is the only lane offering Agent Reach, so "Agent" means the same thing
-        # here as it does on a CLI engine. This used to default to "main" (OpenClaw),
-        # which has no reach tools; HARVIS_OWUI_WORKSPACE_AGENT=main restores that.
+        # here as it does on a CLI engine. HARVIS_OWUI_WORKSPACE_AGENT can pick another lane.
         agent_id = os.getenv("HARVIS_OWUI_WORKSPACE_AGENT", "agent-native")
     return agent_id, _ENGINE_LABELS.get(agent_id, agent_id)
 
@@ -323,7 +322,7 @@ async def _cannot_call_tools(model_id: str) -> bool:
     return bool(caps) and "tools" not in caps
 
 
-async def _sync_workspace_model(pool, model_name: str) -> None:
+async def _sync_workspace_model(pool, model_name: str, user_id: int) -> None:
     """Make the OpenClaw workspace follow the model picked in the OWUI dropdown.
 
     Points the active ``openclaw_llm_config`` row at ``model_name`` so model_proxy's
@@ -331,9 +330,8 @@ async def _sync_workspace_model(pool, model_name: str) -> None:
     (laptop vs rig) and falls back if it's unreachable. Without this, the workspace
     ignored the dropdown and always used the static DB config.
 
-    NOTE: the active config is a single global row (``WHERE is_active=TRUE``), so this
-    is effectively the same lever as Discord's ``set-model`` — the web-UI selection
-    becomes the shared workspace model. Best-effort: a failure leaves the prior model.
+    On a shared host only the caller's own row is touched, never another user's.
+    Best-effort: a failure leaves the prior model.
     """
     if pool is None:
         return
@@ -351,12 +349,20 @@ async def _sync_workspace_model(pool, model_name: str) -> None:
                 # config makes model_proxy fail to resolve it and silently fall back to qwen3.5 on
                 # the OpenClaw engine. The Chat lane (proxy_hermes_chat) routes it directly.
     base = os.getenv("OLLAMA_URL", "http://ollama:11434")
+    from plugins.exposure import shared
+
+    # One user on a local install: the dropdown pick moves whichever row is active.
+    # On a shared host that row is everyone's, so only the caller's own row moves.
+    scoped = shared()
+    owner = "user_id = $3 AND " if scoped else ""
+    args = (m, base, int(user_id)) if scoped else (m, base)
     try:
         async with pool.acquire() as conn:
             await conn.execute(
                 "UPDATE openclaw_llm_config SET model_id=$1, provider_url=$2, updated_at=NOW() "
-                "WHERE is_active = TRUE AND (model_id IS DISTINCT FROM $1 OR provider_url IS DISTINCT FROM $2)",
-                m, base,
+                f"WHERE {owner}is_active = TRUE "
+                "AND (model_id IS DISTINCT FROM $1 OR provider_url IS DISTINCT FROM $2)",
+                *args,
             )
         logger.info("owui workspace_bridge: workspace model synced to UI pick → %s", m)
     except Exception:
@@ -530,7 +536,7 @@ async def maybe_handle_workspace(
     # Only an explicit Agent/Orchestrate pick moves the shared row: it is one global
     # config, so an auto-detected launch must not change the model for everyone else.
     if launch_mode == "user":
-        await _sync_workspace_model(pool, model_name)
+        await _sync_workspace_model(pool, model_name, int(user_id))
     # Use the RAW user message as the brief — it carries the literal challenge
     # data (hashes, ciphertext, encoded blobs) that the hash/decode/crypto skill
     # detection in openclaw_client needs to fire its CodeAct flow. The detector's
@@ -573,7 +579,7 @@ async def maybe_handle_workspace(
         chat_history=history,
         # Resolved above from the picked model. Default "agent-native" → the native
         # SubAgentRunner, the only lane that offers Agent Reach. Override per-deploy
-        # via HARVIS_OWUI_WORKSPACE_AGENT ("main" = the old OpenClaw loop, "local" …).
+        # via HARVIS_OWUI_WORKSPACE_AGENT (e.g. "local").
         agent_id=_agent_id,
         user_id=user_id,
         model_name=model_name,
@@ -638,14 +644,18 @@ async def maybe_handle_workspace(
     )
 
 
-async def resolve_workspace_approval(request: Request, workspace_id: str, approved: bool) -> dict:
+async def resolve_workspace_approval(request: Request, workspace_id: str, approved: bool, user) -> dict:
     """Resolve a parked (opt-in) workspace run: launch it on approve, discard on
     deny. Returns a small JSON status the run-card uses to switch to streaming or
     show 'cancelled'. Safe no-op if the workspace isn't pending (already resolved,
-    or lost to a restart)."""
-    pending = _PENDING_RUNS.pop(workspace_id, None)
-    if pending is None:
+    or lost to a restart) or if it was parked by someone other than `user`."""
+    from owui_compat.authz import user_id_of
+
+    pending = _PENDING_RUNS.get(workspace_id)
+    caller = user_id_of(user)
+    if pending is None or caller is None or pending.get("user_id") is None or int(pending["user_id"]) != caller:
         return {"ok": False, "status": "not_pending"}
+    _PENDING_RUNS.pop(workspace_id, None)
     if not approved:
         logger.info("owui workspace_bridge: %s denied", workspace_id)
         return {"ok": True, "status": "denied"}

@@ -11,6 +11,9 @@ from pydantic import BaseModel
 
 # Import auth dependencies
 from auth_utils import get_current_user
+from owui_compat.authz import make_require_admin
+
+require_admin = make_require_admin(get_current_user)
 
 # Database connection
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://pguser:pgpassword@pgsql-db:5432/database")
@@ -29,7 +32,7 @@ async def debug_auth(user: Dict = Depends(get_current_user)):
         "user_keys": list(user.keys()) if user else []
     }
 
-@router.get("/debug/database")
+@router.get("/debug/database", dependencies=[Depends(require_admin)])
 async def debug_database():
     """Debug endpoint to test database connection and table"""
     try:
@@ -277,6 +280,26 @@ async def validate_move_operation(file_id: str, target_parent_id: Optional[str])
 # Add startup event to main.py to initialize database
 # This will be handled by the main FastAPI app startup event
 
+async def require_owned_parent(parent_id: str, user_id: int) -> uuid.UUID:
+    """The parent's id as a UUID, or 404 when it is not one of ``user_id``'s files.
+    Same answer for a missing parent and someone else's, so ids are not an oracle."""
+    missing = HTTPException(status_code=404, detail="Parent folder not found")
+    try:
+        parent_uuid = uuid.UUID(parent_id)
+    except ValueError:
+        raise missing
+    conn = await get_db_connection()
+    try:
+        owned = await conn.fetchval(
+            "SELECT 1 FROM vibe_files WHERE id = $1 AND user_id = $2", parent_uuid, user_id
+        )
+    finally:
+        await conn.close()
+    if not owned:
+        raise missing
+    return parent_uuid
+
+
 @router.post("/files", response_model=VibeFileResponse)
 async def create_vibe_file(
     file_data: VibeFileCreate,
@@ -290,6 +313,8 @@ async def create_vibe_file(
         # Get user ID - handle both dict formats
         user_id = int(user.get("id")) if user.get("id") is not None else int(user.get("user_id", 0))
         
+        parent_uuid = await require_owned_parent(file_data.parentId, user_id) if file_data.parentId else None
+
         # Calculate path based on parent
         path = await calculate_file_path(file_data.name, file_data.parentId)
         
@@ -322,8 +347,6 @@ async def create_vibe_file(
         # Insert into database
         conn = await get_db_connection()
         try:
-            parent_uuid = uuid.UUID(file_data.parentId) if file_data.parentId else None
-            
             new_file = await conn.fetchrow("""
                 INSERT INTO vibe_files (name, type, content, language, path, parent_id, session_id, user_id)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -348,6 +371,8 @@ async def create_vibe_file(
         finally:
             await conn.close()
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error creating vibe file: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to create file: {str(e)}")

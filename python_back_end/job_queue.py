@@ -427,11 +427,18 @@ async def shutdown_job_queue():
 
 async def process_tts_job(job: Job):
     """
-    Process TTS generation job
+    Process TTS generation job.
+
+    The finished clip is written into the OWNER's private audio namespace
+    (private_audio.py) — never the shared temp root — so /api/audio/{filename}
+    can serve it to that user alone. A job row with no owner cannot produce
+    playback-bound audio and fails instead of writing an unowned file.
     """
-    import tempfile
+    import io
     import soundfile as sf
     from model_manager import generate_speech_unified
+    import private_audio
+    import voice_paths
 
     data = job.data
     text = data.get("text", "")
@@ -439,11 +446,18 @@ async def process_tts_job(job: Job):
     tts_engine = data.get("tts_engine", "qwen")
     user_id = data.get("user_id")
 
+    if user_id is None:
+        logger.error(
+            f"❌ TTS job {job.id} has no owning user; refusing to produce unowned audio"
+        )
+        await job.fail("TTS job has no owning user")
+        return
+
     logger.info(f"🎙️ Processing TTS job {job.id} for user {user_id}")
 
     try:
         # Generate speech using unified TTS
-        audio_prompt = voice_id if voice_id and os.path.exists(voice_id) else None
+        audio_prompt = voice_paths.resolve_voice_prompt(voice_id)
 
         sr, wav = generate_speech_unified(
             text=text,
@@ -456,12 +470,13 @@ async def process_tts_job(job: Job):
         if sr is None or wav is None:
             raise Exception("TTS generation failed - no audio produced")
 
-        # Save audio file
+        # Save audio into the owner's private namespace
         filename = f"tts_{job.id}_{uuid.uuid4().hex[:8]}.wav"
-        filepath = os.path.join(tempfile.gettempdir(), filename)
-        sf.write(filepath, wav, sr)
-
-        audio_path = f"/api/audio/{filename}"
+        buffer = io.BytesIO()
+        sf.write(buffer, wav, sr, format="WAV")
+        audio_path = private_audio.write_private_audio(
+            user_id, filename, buffer.getvalue()
+        )
 
         # Calculate processing time (handle timezone-aware vs naive datetimes)
         processing_time = None

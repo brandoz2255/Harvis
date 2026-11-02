@@ -286,6 +286,33 @@ TOOL_SCHEMA = [
     {
         "type": "function",
         "function": {
+            "name": "propose_mod",
+            "description": (
+                "Draft a Harvis mod when the person asks for one: a new look (theme values), a small "
+                "widget (one sandboxed HTML file in a named slot) or rules (block or ask before a tool, "
+                "or add text to every message). The draft is OFF and does nothing until the person reads "
+                "its approval card in Settings > Mods and approves it; you cannot switch it on. Manifest "
+                "fields: harvis_mod_version \"0.1\", name (kebab-case), version (1.0.0), description, and "
+                "any of looks {setting: value}, ui {resource, slot, csp}, rules {hooks: [{event, action, "
+                "match, text}]}."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "manifest": {"type": "object", "description": "The mod manifest."},
+                    "resources": {
+                        "type": "object",
+                        "description": "For a ui mod: {\"<ui.resource>\": \"<the HTML text>\"}. Omit otherwise.",
+                    },
+                },
+                "required": ["manifest"],
+            },
+        },
+        "lane": LANE_UI_MOCK,
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "list_skills",
             "description": (
                 "List the saved skills a human has approved and switched on: one line each with its "

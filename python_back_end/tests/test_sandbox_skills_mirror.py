@@ -185,7 +185,7 @@ def test_bad_script_paths_write_nothing_anywhere(monkeypatch, tmp_path):
                 {"scripts/sub/a.py": "x"}, {"scripts/a.py": "x" * 30000}, "scripts/a.py", ["scripts/a.py"]):
         sandbox.sync_skills(7, "chat1", [_skill(bad)])
     found = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*") if p.is_file())
-    assert [f for f in found if not f.endswith("SKILL.md") and "/.harvis/" not in f] == []
+    assert [f for f in found if not f.endswith("SKILL.md") and "/.harvis/" not in f and "/.meta/" not in f] == []
     assert not (tmp_path / "root" / "u7" / "chat1" / "skills" / "docker-debug" / "scripts").exists()
 
 

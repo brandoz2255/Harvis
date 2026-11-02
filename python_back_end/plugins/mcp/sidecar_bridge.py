@@ -38,7 +38,6 @@ import json
 import logging
 import os
 import re
-from datetime import timedelta
 from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, Depends, Request
@@ -59,7 +58,7 @@ SIDECAR_MCP_URL = os.getenv(
     "HARVIS_CONNECTOR_MCP_URL", "http://backend:8000/api/connectors/mcp")
 # Long enough to outlive a slow run, short enough that a leaked argv is not a
 # standing key. Matches the CAD door rather than inventing a second lifetime.
-SIDECAR_TOKEN_MINUTES = 90
+from jwt_secret import MCP_TOKEN_MINUTES as SIDECAR_TOKEN_MINUTES  # noqa: E402
 
 PARSE_ERROR = -32700
 INVALID_REQUEST = -32600
@@ -154,7 +153,7 @@ def _text_result(text: str, ok: bool) -> dict:
     return {"content": [{"type": "text", "text": text}], "isError": not ok}
 
 
-async def _mirror_content(content: list, pool, workspace_id: str) -> list:
+async def _mirror_content(content: list, pool, workspace_id: str, user_id: Optional[int] = None) -> list:
     """Rewrite unreachable image URLs inside MCP content blocks. Never raises."""
     try:
         from .media_capture import mirror_media_urls
@@ -166,6 +165,7 @@ async def _mirror_content(content: list, pool, workspace_id: str) -> list:
             try:
                 text, _saved = await mirror_media_urls(
                     str(block.get("text") or ""), pool=pool, workspace_id=workspace_id,
+                    user_id=user_id,
                 )
                 out.append({**block, "text": text})
                 continue
@@ -261,7 +261,7 @@ async def handle_jsonrpc(
             # into this run's artifacts so the link the model repeats is one
             # that actually opens — and so the picture shows up in the rail.
             if workspace_id and not result.get("isError"):
-                content = await _mirror_content(content, pool, workspace_id)
+                content = await _mirror_content(content, pool, workspace_id, user_id)
             return _result(req_id, {
                 "content": content,
                 "isError": bool(result.get("isError")),
@@ -286,10 +286,9 @@ def sidecar_bridge_config(user_id: int | None, *, run_id: str = "") -> dict | No
         return None
     # Late import: `main` imports this package indirectly, so importing it at
     # module level would cycle. One signer for every Harvis token.
-    from main import create_access_token
+    from main import create_mcp_token
 
-    token = create_access_token({"sub": str(int(user_id))},
-                                timedelta(minutes=SIDECAR_TOKEN_MINUTES))
+    token = create_mcp_token(user_id)
     headers = {"Authorization": f"Bearer {token}"}
     if run_id:
         # Which run a connector's output belongs to. A header rather than a

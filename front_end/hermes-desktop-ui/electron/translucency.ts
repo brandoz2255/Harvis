@@ -11,7 +11,7 @@
  * then fail to bundle.
  */
 
-import { glassActive, type TranslucencyState, windowOpacityFor } from '../../shared/src/translucency'
+import { glassActive, type TranslucencyState, windowOpacityFor } from '../../hermes-shared/src/translucency'
 
 export {
   backgroundMaterialFor,
@@ -47,7 +47,7 @@ export {
   WINDOWS_BACKGROUND_MATERIALS,
   WINDOWS_GLASS_MIN_BUILD,
   type WindowsBackgroundMaterial
-} from '../../shared/src/translucency'
+} from '../../hermes-shared/src/translucency'
 
 /**
  * BrowserWindow constructor options for a chat window's backing, given the

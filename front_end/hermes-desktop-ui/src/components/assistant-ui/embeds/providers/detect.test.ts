@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type { FrameEmbed, TweetEmbed } from './types'
+import type { FrameEmbed } from './types'
 
 import { detectEmbed, isEmbeddableUrl } from './index'
 
@@ -104,12 +104,12 @@ describe('detectEmbed — maps', () => {
 })
 
 describe('detectEmbed — Twitter/X', () => {
-  it('resolves twitter.com and x.com status urls to a tweet descriptor', () => {
+  it('resolves twitter.com and x.com status urls to the iframe endpoint, never a script', () => {
     for (const url of ['https://twitter.com/jack/status/20', 'https://x.com/jack/status/20']) {
-      const descriptor = detectEmbed(url)
+      const embed = frame(url)
 
-      expect(descriptor?.renderer).toBe('tweet')
-      expect((descriptor as TweetEmbed).tweetId).toBe('20')
+      expect(embed.provider).toBe('twitter')
+      expect(embed.embedUrl).toBe('https://platform.twitter.com/embed/Tweet.html?dnt=true&id=20')
     }
   })
 })

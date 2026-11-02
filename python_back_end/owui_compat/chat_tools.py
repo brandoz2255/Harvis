@@ -146,6 +146,7 @@ class _Result:
 class _Found:
     results: list[_Result] = field(default_factory=list)
     refused: list[tuple[str, str]] = field(default_factory=list)  # (server, tool)
+    stopped: list[tuple[str, str, str]] = field(default_factory=list)  # (server, tool, mod reason)
     calls: int = 0
 
 
@@ -198,7 +199,8 @@ def _cap(text: str) -> str:
 
 
 async def _rounds(found: _Found, *, message: str, model_name: str, specs: list, names: dict,
-                  write_names: dict, registry, user_id: int, pool, deadline: float) -> None:
+                  write_names: dict, registry, user_id: int, pool, deadline: float,
+                  mod_rules=None) -> None:
     from plugins.mcp import tool_bridge
     from workspace.orchestration.model_router import ModelRouter
     from workspace.orchestration.tools import parse_tool_calls
@@ -234,6 +236,16 @@ async def _rounds(found: _Found, *, message: str, model_name: str, specs: list, 
                 observations.append(f"{name}: not available.")
                 continue
             server, tool = names[name]
+            # Chat cannot stop to ask, so a mod's ask-first rule stops the call here
+            # the same as a block does.
+            rule = mod_rules.tool_rule(name) if mod_rules else None
+            if rule:
+                if not any(s == server and t == tool for s, t, _ in found.stopped):
+                    found.stopped.append((server, tool, rule[1]))
+                observations.append(f"{server} · {tool}: not run — {rule[1]}.")
+                continue
+            if mod_rules:
+                mod_rules.log_tool("PreToolUse", name)
             key = (name, repr(sorted(args.items())) if isinstance(args, dict) else repr(args))
             if key in seen:
                 continue
@@ -249,6 +261,8 @@ async def _rounds(found: _Found, *, message: str, model_name: str, specs: list, 
                 )
             except Exception as exc:
                 text, ok = f"call failed ({exc.__class__.__name__})", False
+            if mod_rules:
+                mod_rules.log_tool("PostToolUse", name, ok=bool(ok))
             result = _Result(server, tool, bool(ok), _cap(str(text)))
             found.results.append(result)
             observations.append(_render(result))
@@ -296,6 +310,13 @@ def _compose(found: _Found, write_names: dict, match: _Match) -> str:
             "<connector_note>\nThe request involves actions that change things "
             f"({tools}). Nothing was changed. {_WORKSPACE_HOWTO} Tell the user this "
             "instead of claiming the action was done.\n</connector_note>"
+        )
+    if found.stopped:
+        lines = "\n".join(f"- {s} · {t}: {why}" for s, t, why in found.stopped)
+        parts.append(
+            "<connector_note>\nThe user's own mod rules stopped these lookups, so they "
+            f"were not run:\n{_neutralise(lines)}\nSay so instead of guessing what they "
+            "would have returned.\n</connector_note>"
         )
     return "\n\n".join(parts)
 
@@ -401,12 +422,16 @@ async def maybe_inject_connectors(request, owui_body: dict, user_id: int | None 
         # A pure write request ("create an issue …") has nothing to read first.
         if names and (match.read_cue or not match.write_intent):
             model_name = await _gather_model(owui_body, pool, int(user_id))
+            from plugins.mods import rules_for_user
+
+            mod_rules = await rules_for_user(pool, int(user_id))
             if model_name:
                 try:
                     await asyncio.wait_for(
                         _rounds(found, message=message, model_name=model_name, specs=specs,
                                 names=names, write_names=write_names, registry=registry,
-                                user_id=int(user_id), pool=pool, deadline=deadline),
+                                user_id=int(user_id), pool=pool, deadline=deadline,
+                                mod_rules=mod_rules),
                         timeout=max(1.0, deadline - time.monotonic()) + _GRACE_S,
                     )
                 except asyncio.TimeoutError:
