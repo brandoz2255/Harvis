@@ -294,6 +294,8 @@ export interface Translations {
     layoutEditorTitle: (modifier: string) => string
     harvisAssistant: string
     harvisAssistantEnd: string
+    islandMap: string
+    islandMapClose: string
   }
 
   keybinds: {

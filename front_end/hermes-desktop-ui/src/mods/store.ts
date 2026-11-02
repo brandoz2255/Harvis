@@ -13,6 +13,8 @@ export const $mods = atom<ModRow[]>([])
 // The island is a built-in surface of the `island` slot. It was always on before this setting
 // was read, so a signed-in account with nothing stored sees it until they turn it off (Settings > Mods).
 export const $islandVisible = atom(false)
+// The full-screen map. The titlebar opens it from any chat, so it is not tied to the idle Bots tab.
+export const $islandExplore = atom(false)
 let account: string | null = null
 let accountGeneration = 0
 let inflight: null | Promise<void> = null
@@ -25,6 +27,7 @@ $session.subscribe(session => {
   account = next
   accountGeneration += 1
   $mods.set([])
+  $islandExplore.set(false)
   inflight = null
   loadingAccount = true
   $islandVisible.set(next !== null && readKey(visibilityKey(next)) !== 'false')
@@ -33,6 +36,7 @@ $session.subscribe(session => {
 
 $islandVisible.subscribe(visible => {
   if (!loadingAccount && account) writeKey(visibilityKey(account), String(visible))
+  if (!visible) $islandExplore.set(false)
 })
 
 /** A mod may run only when it is switched on AND approved at exactly the bytes it holds now. */

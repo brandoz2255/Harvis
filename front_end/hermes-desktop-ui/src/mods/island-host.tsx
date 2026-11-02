@@ -6,6 +6,7 @@
 // the host, so an account switch disposes the old island before the new one mounts.
 import { useStore } from '@nanostores/react'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 
 import { Codicon } from '@/components/ui/codicon'
 import { mountIsland } from '@/island/mount.js'
@@ -19,6 +20,7 @@ import { useTheme } from '@/themes/context'
 import { accountArtStore, type ArtView, IslandArt } from './island-art'
 import { IslandBridge } from './island-bridge'
 import { IslandRoster } from './island-roster'
+import { $islandExplore } from './store'
 
 // A re-probe after a 401 publishes a new session object for the same person; only a
 // different (or signed-out) account makes in-flight work stale.
@@ -41,7 +43,7 @@ function AccountIslandHost({ accountId }: { accountId: string }) {
   const bridgeRef = useRef<IslandBridge | null>(null)
   const artRef = useRef<IslandArt | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
-  const [exploring, setExploring] = useState(false)
+  const exploring = useStore($islandExplore)
   // UI chrome fades in a beat after Explore opens, so the zoom-out lands first.
   const [uiIn, setUiIn] = useState(false)
   const [art, setArt] = useState<ArtView>({ custom: false, message: '', state: 'builtin' })
@@ -55,7 +57,14 @@ function AccountIslandHost({ accountId }: { accountId: string }) {
       return
     }
     const frame = requestAnimationFrame(() => setUiIn(true))
-    return () => cancelAnimationFrame(frame)
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') $islandExplore.set(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => {
+      cancelAnimationFrame(frame)
+      window.removeEventListener('keydown', onKey)
+    }
   }, [exploring])
 
   // The island's residents are this account's configured bots. The query key carries the
@@ -82,6 +91,8 @@ function AccountIslandHost({ accountId }: { accountId: string }) {
         const bot = stillCurrent() ? rosterRef.current.resolve(agentId) : undefined
 
         if (bot) {
+          // Picking a resident goes to its chat, so the map steps aside.
+          $islandExplore.set(false)
           void openRosterBot(bot, { isCurrent: stillCurrent })
         }
       }
@@ -147,7 +158,7 @@ function AccountIslandHost({ accountId }: { accountId: string }) {
       className={cn(
         "group/island overflow-hidden",
         // Same node in both states so the zoom transition survives the switch.
-        exploring ? "fixed inset-0 z-[100] bg-background" : "pointer-events-none absolute inset-0 z-10"
+        exploring ? "fixed inset-0 z-[65] bg-background" : "pointer-events-none absolute inset-0 z-10"
       )}
       data-slot="island"
       ref={boxRef}
@@ -205,7 +216,7 @@ function AccountIslandHost({ accountId }: { accountId: string }) {
       {exploring && <button
         aria-label="Return to bot island"
         className={cn("absolute right-1 top-14 inline-flex size-5 items-center justify-center rounded bg-background/70 text-muted-foreground transition-opacity duration-300 delay-200 hover:text-foreground motion-reduce:transition-none", uiIn ? "opacity-100" : "opacity-0")}
-        onClick={() => setExploring(false)}
+        onClick={() => $islandExplore.set(false)}
         type="button"
       >
         <Codicon name="close" size="0.7rem" />
@@ -217,7 +228,7 @@ function AccountIslandHost({ accountId }: { accountId: string }) {
             ? cn("left-4 top-14 transition-opacity duration-300 delay-200 motion-reduce:transition-none", uiIn ? "opacity-100" : "opacity-0")
             : 'top-4 left-4'
         )}
-        onClick={() => setExploring(value => !value)}
+        onClick={() => $islandExplore.set(!exploring)}
         type="button"
       >
         {exploring ? 'Back to bots' : 'Explore'}
@@ -225,5 +236,7 @@ function AccountIslandHost({ accountId }: { accountId: string }) {
     </div>
   )
 
-  return island
+  // The chat column is `isolate`, which would trap the full-screen map under the side panes.
+  // z-65 keeps it under the titlebar (z-70) so the map button and window controls stay usable.
+  return exploring ? createPortal(island, document.body) : island
 }
