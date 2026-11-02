@@ -15,9 +15,13 @@ import { harvisApi } from './api'
 export interface EmbedderStatus {
   state: 'not_installed' | 'ready' | 'unreachable' | 'unsupported'
   model: null | string
-  install_tag: string
-  download_mb: number
+  install_tag: null | string
+  download_mb: null | number
   reason: string
+  /** 'openai' when an operator pointed embeddings at a remote service instead of the local model server. */
+  provider?: string
+  /** True when the text of added sources is sent off this machine to be embedded. */
+  leaves_machine?: boolean
 }
 
 const NAV_PATH = '/notebooks'
@@ -27,7 +31,10 @@ export const embedderKey = ['harvis', 'notebooks-embedder'] as const
 export async function fetchEmbedderStatus(): Promise<EmbedderStatus> {
   const st = await harvisApi<EmbedderStatus>('/api/capabilities/notebooks-embedder')
 
-  setNavDimmed(NAV_PATH, st.state === 'ready' ? null : `not installed (${st.download_mb} MB download)`)
+  setNavDimmed(
+    NAV_PATH,
+    st.state === 'ready' ? null : st.download_mb ? `not installed (${st.download_mb} MB download)` : 'not ready'
+  )
 
   return st
 }

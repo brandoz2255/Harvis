@@ -28,7 +28,7 @@ WORDS_PER_MINUTE = 150
 PART_WORDS = 600
 MAX_PARTS = 8
 MIN_MINUTES, MAX_MINUTES = 1, 30
-MAX_SPEAKERS = 4  # the speech service ships four voices
+MAX_SPEAKERS = 4  # more than four voices is hard to follow in a script
 SOURCE_CHARS = 18000
 DEFAULT_NAMES = ("Alex", "Sam", "Jordan", "Riley")
 CALL_TIMEOUT_S = float(os.getenv("NOTEBOOK_PODCAST_CALL_TIMEOUT", "300"))
@@ -39,7 +39,30 @@ STYLE_NOTES = {
     "educational": "a clear teaching episode that explains ideas step by step with examples",
     "debate": "a friendly debate where the speakers take different sides and respond to each other",
     "storytelling": "a narrative that weaves the material into a story",
+    "brief": "a brief: a tight, bite-sized overview that gets to the core ideas fast, with no tangents",
+    "critique": (
+        "a critique: the speakers act as expert reviewers who give constructive feedback on the material, "
+        "covering what it does well, where it is weak, unclear or unsupported, and what is missing"
+    ),
 }
+
+# Extra rules per style, appended to the prompt. A critique may judge only what the material shows.
+STYLE_RULES = {
+    "brief": "Be concise: one idea per turn, no side stories, and a one-sentence takeaway at the end.",
+    "critique": (
+        "Judge the material only by what it says: name strengths, then weaknesses, gaps and claims it does not "
+        "support, and end with concrete suggestions. Do not bring in outside facts or opinions of the author."
+    ),
+}
+
+# Longest episode each style may be, in minutes. A brief that runs ten minutes is not a brief.
+STYLE_MAX_MINUTES = {"brief": 3}
+
+# Styles added to the picker on top of the original five; the route owners list these.
+PRESET_STYLES = [
+    {"id": "brief", "name": "Brief", "description": "A short, bite-sized overview of the core ideas (up to 3 minutes)"},
+    {"id": "critique", "name": "Critique", "description": "Expert reviewers give constructive feedback on the material"},
+]
 
 SCRIPT_SCHEMA = {
     "type": "object",
@@ -88,6 +111,13 @@ def speaker_names(custom: Optional[Sequence[Dict[str, Any]]], count: Optional[in
         if default.casefold() not in {n.casefold() for n in names}:
             names.append(default)
     return names[:wanted]
+
+
+def style_minutes(style: str, minutes: Optional[int]) -> int:
+    """The requested length, clamped to the style's own ceiling (a brief stays brief)."""
+    wanted = clamp_minutes(minutes)
+    ceiling = STYLE_MAX_MINUTES.get(style)
+    return min(wanted, ceiling) if ceiling else wanted
 
 
 def target_words(minutes: int) -> int:
@@ -215,6 +245,9 @@ def build_prompt(
     *, title: str, style: str, names: Sequence[str], part: int, parts: int, words: int, material: str, previous: Sequence[Dict[str, str]]
 ) -> str:
     feel = STYLE_NOTES.get(style, STYLE_NOTES["conversational"])
+    rule = STYLE_RULES.get(style)
+    if rule:
+        feel = f"{feel}. {rule.rstrip('.')}"
     cast = ", ".join(names)
     if len(names) == 1:
         cast_line = f"There is one speaker, {names[0]}, giving a spoken monologue."
@@ -286,7 +319,7 @@ async def generate_script(
     call: Caller,
 ) -> Dict[str, Any]:
     """Write the whole script. Returns ``{outline, transcript, words, target_words}``."""
-    goal = target_words(minutes)
+    goal = target_words(style_minutes(style, minutes))
     plan = plan_parts(goal)
     material = _chunks_of(content, len(plan))
     turns: List[Dict[str, str]] = []

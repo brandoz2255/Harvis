@@ -28,6 +28,15 @@ CREATE TABLE IF NOT EXISTS notebooks (
 -- Additive: emoji column for notebooks that predate it (idempotent)
 ALTER TABLE notebooks ADD COLUMN IF NOT EXISTS emoji TEXT;
 
+-- Additive: per-notebook chat configuration (persona / style / length / answer language).
+-- output_language NULL means "answer in the language of the question".
+ALTER TABLE notebooks ADD COLUMN IF NOT EXISTS chat_persona TEXT;
+ALTER TABLE notebooks ADD COLUMN IF NOT EXISTS chat_style TEXT NOT NULL DEFAULT 'default'
+    CHECK (chat_style IN ('default', 'learning_guide', 'analyst', 'custom'));
+ALTER TABLE notebooks ADD COLUMN IF NOT EXISTS chat_length TEXT NOT NULL DEFAULT 'default'
+    CHECK (chat_length IN ('shorter', 'default', 'longer'));
+ALTER TABLE notebooks ADD COLUMN IF NOT EXISTS output_language TEXT;
+
 -- Index for user lookups
 CREATE INDEX IF NOT EXISTS idx_notebooks_user_id ON notebooks(user_id);
 CREATE INDEX IF NOT EXISTS idx_notebooks_user_active ON notebooks(user_id, is_active);
@@ -43,7 +52,7 @@ CREATE TRIGGER update_notebooks_updated_at
 CREATE TABLE IF NOT EXISTS notebook_sources (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     notebook_id UUID NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
-    type TEXT NOT NULL CHECK (type IN ('pdf', 'text', 'url', 'markdown', 'doc', 'transcript', 'audio')),
+    type TEXT NOT NULL CHECK (type IN ('pdf', 'text', 'url', 'markdown', 'doc', 'transcript', 'audio', 'youtube', 'image', 'pptx', 'xlsx', 'epub')),
     title TEXT,
     storage_path TEXT, -- path to raw file or URL
     original_filename TEXT, -- original uploaded filename
@@ -85,6 +94,26 @@ CREATE INDEX IF NOT EXISTS idx_notebook_chunks_notebook_id ON notebook_chunks(no
 -- IVFFlat index for fast approximate nearest neighbor search
 -- Note: This index should be created after some data is in the table for optimal performance
 -- CREATE INDEX IF NOT EXISTS idx_notebook_chunks_embedding ON notebook_chunks USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+
+-- Which embedder produced the row and its real (unpadded) width. NULL on rows written
+-- before this was recorded. Needed before the column can be narrowed
+-- (see migrate_vector_768.sql): mixed embedders in one column cannot share an index.
+ALTER TABLE notebook_chunks ADD COLUMN IF NOT EXISTS embedding_model TEXT;
+ALTER TABLE notebook_chunks ADD COLUMN IF NOT EXISTS embedding_dim INTEGER;
+
+-- Keyword leg of hybrid retrieval. 'simple' (no stemming, no stopwords) so non-English
+-- notebooks index the same way English ones do. The ALTER rewrites the table once; a
+-- failure only logs a warning, because search_chunks_hybrid falls back to vector-only
+-- while the column is absent.
+DO $$
+BEGIN
+    ALTER TABLE notebook_chunks ADD COLUMN IF NOT EXISTS content_tsv tsvector
+        GENERATED ALWAYS AS (to_tsvector('simple', coalesce(content, ''))) STORED;
+    CREATE INDEX IF NOT EXISTS idx_notebook_chunks_tsv ON notebook_chunks USING gin (content_tsv);
+EXCEPTION
+    WHEN OTHERS THEN
+        RAISE WARNING 'notebook_chunks.content_tsv not ready: %', SQLERRM;
+END $$;
 
 -- Notebook Notes - user notes and AI-generated summaries
 CREATE TABLE IF NOT EXISTS notebook_notes (
@@ -185,7 +214,7 @@ CREATE TABLE IF NOT EXISTS onb_notebook_artifacts (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     notebook_id UUID NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
     user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    kind        TEXT NOT NULL CHECK (kind IN ('quiz', 'flashcards', 'study_guide', 'briefing', 'faq', 'timeline', 'mindmap')),
+    kind        TEXT NOT NULL CHECK (kind IN ('quiz', 'flashcards', 'study_guide', 'briefing', 'faq', 'timeline', 'mindmap', 'data_table', 'slides')),
     title       TEXT,
     format      TEXT NOT NULL DEFAULT 'json',   -- 'json' (quiz/flashcards) | 'markdown' (report kinds)
     content     JSONB NOT NULL,                  -- {questions:[…]} | {cards:[…]} | {markdown:"…"}
@@ -206,12 +235,12 @@ BEGIN
       FROM pg_constraint
      WHERE conrelid = 'onb_notebook_artifacts'::regclass
        AND conname = 'onb_notebook_artifacts_kind_check';
-    IF def IS NULL OR def NOT LIKE '%mindmap%' THEN
+    IF def IS NULL OR def NOT LIKE '%mindmap%' OR def NOT LIKE '%slides%' OR def NOT LIKE '%data_table%' THEN
         ALTER TABLE onb_notebook_artifacts
             DROP CONSTRAINT IF EXISTS onb_notebook_artifacts_kind_check;
         ALTER TABLE onb_notebook_artifacts
             ADD CONSTRAINT onb_notebook_artifacts_kind_check
-            CHECK (kind IN ('quiz', 'flashcards', 'study_guide', 'briefing', 'faq', 'timeline', 'mindmap'));
+            CHECK (kind IN ('quiz', 'flashcards', 'study_guide', 'briefing', 'faq', 'timeline', 'mindmap', 'data_table', 'slides'));
     END IF;
 END $$;
 
@@ -223,7 +252,7 @@ CREATE TABLE IF NOT EXISTS notebook_podcasts (
     title TEXT NOT NULL,
     status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'generating', 'completed', 'error')),
     style TEXT DEFAULT 'conversational' CHECK (style IN (
-        'conversational', 'interview', 'educational', 'debate', 'storytelling'
+        'conversational', 'interview', 'educational', 'debate', 'storytelling', 'brief', 'critique'
     )),
     speakers INTEGER DEFAULT 2,
     duration_minutes INTEGER DEFAULT 10,
@@ -240,6 +269,23 @@ CREATE TABLE IF NOT EXISTS notebook_podcasts (
 CREATE INDEX IF NOT EXISTS idx_notebook_podcasts_notebook_id ON notebook_podcasts(notebook_id);
 CREATE INDEX IF NOT EXISTS idx_notebook_podcasts_user_id ON notebook_podcasts(user_id);
 CREATE INDEX IF NOT EXISTS idx_notebook_podcasts_status ON notebook_podcasts(status);
+
+-- Additive: widen the style CHECK on DBs created before the Brief and Critique presets.
+DO $$
+DECLARE def TEXT;
+BEGIN
+    SELECT pg_get_constraintdef(oid) INTO def
+      FROM pg_constraint
+     WHERE conrelid = 'notebook_podcasts'::regclass
+       AND conname = 'notebook_podcasts_style_check';
+    IF def IS NOT NULL AND (def NOT LIKE '%brief%' OR def NOT LIKE '%critique%') THEN
+        ALTER TABLE notebook_podcasts DROP CONSTRAINT notebook_podcasts_style_check;
+        ALTER TABLE notebook_podcasts
+            ADD CONSTRAINT notebook_podcasts_style_check
+            CHECK (style IN ('conversational', 'interview', 'educational', 'debate', 'storytelling',
+                             'brief', 'critique'));
+    END IF;
+END $$;
 
 -- Podcast Speaker Profiles - custom speaker profiles for podcasts
 CREATE TABLE IF NOT EXISTS podcast_speaker_profiles (
@@ -270,7 +316,7 @@ BEGIN
     -- Try to add youtube to the source type check constraint
     ALTER TABLE notebook_sources DROP CONSTRAINT IF EXISTS notebook_sources_type_check;
     ALTER TABLE notebook_sources ADD CONSTRAINT notebook_sources_type_check 
-        CHECK (type IN ('pdf', 'text', 'url', 'markdown', 'doc', 'transcript', 'audio', 'youtube', 'image'));
+        CHECK (type IN ('pdf', 'text', 'url', 'markdown', 'doc', 'transcript', 'audio', 'youtube', 'image', 'pptx', 'xlsx', 'epub'));
 EXCEPTION
     WHEN OTHERS THEN
         -- Constraint might already exist with correct values
@@ -303,3 +349,23 @@ CREATE INDEX IF NOT EXISTS idx_onb_session_msgs ON notebook_chat_session_message
 -- Per-assistant-message citations: [{source_id, title, snippet, locator}] so the
 -- chat UI can show a hover preview + scroll-to/highlight the cited passage.
 ALTER TABLE notebook_chat_session_messages ADD COLUMN IF NOT EXISTS citations JSONB DEFAULT '[]';
+
+-- ─── Notebook sharing ─────────────────────────────────────────────────────────
+-- One row is either a share with a specific user (user_id set) or a link share
+-- (link_token set). link_token holds the SHA-256 of the token, never the token itself.
+-- Roles: viewer = read sources and notes (no chat), chat_only = chat without opening sources,
+-- editor = change the notebook. Revoking sets revoked_at; rows are kept for audit.
+CREATE TABLE IF NOT EXISTS notebook_shares (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    notebook_id UUID NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+    user_id INTEGER NULL REFERENCES users(id) ON DELETE CASCADE,
+    link_token TEXT UNIQUE NULL,
+    role TEXT NOT NULL CHECK (role IN ('viewer', 'chat_only', 'editor')),
+    created_by INTEGER NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    revoked_at TIMESTAMP WITH TIME ZONE NULL
+);
+CREATE INDEX IF NOT EXISTS idx_notebook_shares_notebook ON notebook_shares(notebook_id);
+CREATE INDEX IF NOT EXISTS idx_notebook_shares_user ON notebook_shares(user_id) WHERE revoked_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_notebook_shares_active_user
+    ON notebook_shares(notebook_id, user_id) WHERE user_id IS NOT NULL AND revoked_at IS NULL;

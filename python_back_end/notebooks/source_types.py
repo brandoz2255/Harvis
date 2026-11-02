@@ -24,11 +24,16 @@ TEXT_EXTS = frozenset({
     "ini", "toml", "py", "js", "ts", "tsx", "jsx", "java", "c", "cpp", "h", "go", "rs", "sh", "sql",
 })
 TRANSCRIPT_EXTS = frozenset({"srt", "vtt"})
+# PowerPoint, Excel and ePub are stored as DOC sources. notebook_sources.type has a CHECK
+# constraint that lists the kinds the schema knows, and the extension (kept in the source
+# metadata) tells the extractor which reader to use.
+OFFICE_EXTS = frozenset({"pptx", "xlsx", "xlsm", "epub"})
 
 TYPE_MAP: dict[str, SourceType] = {
     "pdf": SourceType.PDF,
     "doc": SourceType.DOC,
     "docx": SourceType.DOC,
+    **{e: SourceType.DOC for e in OFFICE_EXTS},
     **{e: SourceType.IMAGE for e in IMAGE_EXTS},
     **{e: SourceType.AUDIO for e in AUDIO_EXTS},
     **{e: SourceType.MARKDOWN for e in MARKDOWN_EXTS},
@@ -66,8 +71,8 @@ def classify_upload(filename: str, head: bytes = b"") -> Tuple[SourceType, str]:
         return SourceType.TEXT, ext or "txt"
     shown = f".{ext}" if ext else "that file"
     raise UnsupportedFile(
-        f"{shown} files are not supported. Use PDF, Word, text, Markdown, HTML, an image "
-        "(PNG, JPG, WebP, GIF) or audio (MP3, WAV, M4A, OGG, WebM)."
+        f"{shown} files are not supported. Use PDF, Word, PowerPoint, Excel, ePub, text, Markdown, HTML, "
+        "an image (PNG, JPG, WebP, GIF) or audio (MP3, WAV, M4A, OGG, WebM)."
     )
 
 

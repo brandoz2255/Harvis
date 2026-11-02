@@ -8,6 +8,17 @@ import { useState } from 'react'
 
 import { harvisApi } from './api'
 
+/** The parts of `notebook_sources.metadata` the UI reads; the backend may add other keys. */
+export interface SourceMetadata {
+  ingest_notice?: null | string
+  insights_error?: null | string
+  insights_status?: 'done' | 'error' | 'pending'
+  needs_reembed?: boolean
+  page_starts?: number[]
+  suggested_questions?: string[]
+  summary_insight_id?: null | string
+}
+
 export interface Source {
   id: string
   type: string
@@ -16,6 +27,7 @@ export interface Source {
   error_message: null | string
   chunk_count: null | number
   original_filename: null | string
+  metadata?: null | SourceMetadata
   created_at?: string
 }
 
@@ -51,6 +63,9 @@ export interface NotebookInfo {
   emoji: null | string
   source_count: number
   note_count: number
+  /** Set once the backend reports sharing; a missing value means the caller owns it. */
+  is_owner?: boolean
+  role?: 'chat_only' | 'editor' | 'owner' | 'viewer'
   created_at?: string
   updated_at: string
 }

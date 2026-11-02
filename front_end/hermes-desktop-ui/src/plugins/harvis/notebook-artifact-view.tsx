@@ -6,6 +6,7 @@
 import { Button, Codicon, Streamdown, useQueryClient } from '@hermes/plugin-sdk'
 import { useState } from 'react'
 
+import { DataTableView, SlidesView } from './notebook-artifact-data'
 import type { Artifact } from './notebook-artifacts'
 import { Flashcards } from './notebook-flashcards'
 import { MindMap } from './notebook-mindmap'
@@ -63,7 +64,11 @@ export function ArtifactView({
         </Button>
         <h4 className="min-w-0 flex-1 truncate text-sm font-semibold">{artifact.title}</h4>
       </div>
-      {content.questions?.length ? (
+      {artifact.kind === 'data_table' && content.columns?.length ? (
+        <DataTableView artifact={artifact} notebookId={notebookId} />
+      ) : artifact.kind === 'slides' && content.slides?.length ? (
+        <SlidesView artifact={artifact} notebookId={notebookId} />
+      ) : content.questions?.length ? (
         <Quiz questions={content.questions} />
       ) : content.cards?.length ? (
         <Flashcards cards={content.cards} />

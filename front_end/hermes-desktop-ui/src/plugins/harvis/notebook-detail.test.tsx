@@ -1,12 +1,21 @@
-import { cleanup, fireEvent, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { NotebookDetail } from './notebook-detail'
+import { requestQuestion, takePendingQuestion } from './notebook-selection'
 import { renderWithQuery, routeApi } from './notebook-test-utils'
 
 const { harvisApi } = vi.hoisted(() => ({ harvisApi: vi.fn() }))
 
 vi.mock('./api', () => ({ harvisApi }))
+
+vi.mock('./notebook-share', () => ({
+  NotebookShareButton: ({ isOwner, notebookId }: { isOwner: boolean; notebookId: string }) => (
+    <button data-owner={String(isOwner)} data-testid="share-button" type="button">
+      Share {notebookId}
+    </button>
+  )
+}))
 
 const NB = 'nb-1'
 
@@ -63,17 +72,85 @@ function mockRoutes(sources: unknown[]) {
 beforeEach(() => {
   harvisApi.mockReset()
   window.localStorage.clear()
+  takePendingQuestion(NB)
 })
 
 afterEach(cleanup)
 
 describe('NotebookDetail', () => {
+  it('mounts the share button in the notebook header, owner unless the server says otherwise', async () => {
+    mockRoutes([readySource])
+    const first = renderWithQuery(<NotebookDetail layout="columns" notebookId={NB} onDeleted={() => undefined} />)
+    const share = await first.findByTestId('share-button')
+    expect(share.textContent).toBe(`Share ${NB}`)
+    expect(share.getAttribute('data-owner')).toBe('true')
+    first.unmount()
+
+    harvisApi.mockImplementation(
+      routeApi({
+        [`GET /api/notebooks/${NB}/sources`]: () => [readySource],
+        [`GET /api/notebooks/${NB}/stats`]: () => stats,
+        [`GET /api/notebooks/${NB}/notes`]: () => ({ notes: [] }),
+        [`GET /api/notebooks/${NB}/chat/history`]: () => ({ messages: [] }),
+        [`GET /api/notebooks/${NB}`]: () => ({ ...notebook, is_owner: false, role: 'viewer' }),
+        [`GET /onb-api/notebooks/${NB}/artifacts`]: () => [],
+        [`POST /onb-api/notebooks/${NB}/suggest-questions`]: () => ({ questions: [] }),
+        'GET /api/workspace/providers': () => ({ providers: [] })
+      })
+    )
+    renderWithQuery(<NotebookDetail layout="columns" notebookId={NB} onDeleted={() => undefined} />)
+    await waitFor(() => expect(screen.getByTestId('share-button').getAttribute('data-owner')).toBe('false'))
+  })
+
+  it('offers Configure chat to the owner only', async () => {
+    const serve = (extra: Record<string, unknown>) =>
+      harvisApi.mockImplementation(
+        routeApi({
+          [`GET /api/notebooks/${NB}/sources`]: () => [readySource],
+          [`GET /api/notebooks/${NB}/stats`]: () => stats,
+          [`GET /api/notebooks/${NB}/notes`]: () => ({ notes: [] }),
+          [`GET /api/notebooks/${NB}/chat/history`]: () => ({ messages: [] }),
+          [`GET /api/notebooks/${NB}`]: () => ({ ...notebook, ...extra }),
+          [`GET /onb-api/notebooks/${NB}/artifacts`]: () => [],
+          [`POST /onb-api/notebooks/${NB}/suggest-questions`]: () => ({ questions: [] }),
+          'GET /api/workspace/providers': () => ({ providers: [] })
+        })
+      )
+
+    serve({ is_owner: true, role: 'owner' })
+    const owner = renderWithQuery(<NotebookDetail layout="columns" notebookId={NB} onDeleted={() => undefined} />)
+    expect(await owner.findByRole('button', { name: 'Configure chat' })).toBeTruthy()
+    owner.unmount()
+
+    serve({ is_owner: false, role: 'editor' })
+    renderWithQuery(<NotebookDetail layout="columns" notebookId={NB} onDeleted={() => undefined} />)
+    await waitFor(() => expect(screen.getByTestId('share-button').getAttribute('data-owner')).toBe('false'))
+    expect(screen.queryByRole('button', { name: 'Configure chat' })).toBeNull()
+  })
+
+  it('offers Ask all notebooks next to the share button', async () => {
+    mockRoutes([readySource])
+    renderWithQuery(<NotebookDetail layout="columns" notebookId={NB} onDeleted={() => undefined} />)
+    expect(await screen.findByRole('button', { name: /Ask all notebooks/ })).toBeTruthy()
+  })
+
+  it('jumps to the chat when a source hands it a question', async () => {
+    mockRoutes([readySource])
+    renderWithQuery(<NotebookDetail layout="tabs" notebookId={NB} onDeleted={() => undefined} />)
+    await screen.findByPlaceholderText('Ask something about these sources')
+    fireEvent.click(screen.getByText(/^Sources/))
+    expect(screen.queryByPlaceholderText('Ask something about these sources')).toBeNull()
+
+    act(() => requestQuestion(NB, 'What is Jezero?'))
+    expect(await screen.findByPlaceholderText('Ask something about these sources')).toBeTruthy()
+  })
+
   it('pins the emoji, title, source count and synopsis to the top of the chat', async () => {
     mockRoutes([readySource])
     renderWithQuery(<NotebookDetail layout="columns" notebookId={NB} onDeleted={() => undefined} />)
 
     expect(await screen.findByRole('heading', { level: 2, name: 'Mars Rover Exploration Texts' })).toBeTruthy()
-    expect(screen.getByText('🪐')).toBeTruthy()
+    expect(screen.getAllByText('🪐').length).toBeGreaterThan(0)
     expect(screen.getByText('Everything about Perseverance')).toBeTruthy()
     expect(screen.getByText(/^1 source/)).toBeTruthy()
   })
@@ -149,7 +226,7 @@ describe('NotebookDetail', () => {
     expect(await screen.findByText('Could not open this notebook')).toBeTruthy()
   })
 
-  it('lays the library, chat and studio rail out side by side when there is room', async () => {
+  it('lays Sources, Chat and Studio out side by side like Gemini Notebook, with notes in Studio', async () => {
     mockRoutes([])
     const { container } = renderWithQuery(
       <NotebookDetail layout="columns" notebookId={NB} onDeleted={() => undefined} />
@@ -157,10 +234,46 @@ describe('NotebookDetail', () => {
 
     await screen.findByRole('heading', { level: 2, name: 'Mars Rover Exploration Texts' })
     expect(container.querySelector('[data-layout="columns"]')).toBeTruthy()
+    expect(screen.getAllByRole('heading', { level: 3 }).map(h => h.textContent)).toEqual(['Sources', 'Chat', 'Studio'])
     expect(await screen.findByText(/No sources yet/)).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Quiz' })).toBeTruthy()
+    expect(await screen.findByText('No notes yet.')).toBeTruthy()
+    expect(screen.queryByRole('radio', { name: /^Notes/ })).toBeNull()
+  })
+
+  it('collapses either side panel to a strip and back', async () => {
+    mockRoutes([])
+    renderWithQuery(<NotebookDetail layout="columns" notebookId={NB} onDeleted={() => undefined} />)
+
+    await screen.findByText(/No sources yet/)
+    fireEvent.click(screen.getByRole('button', { name: 'Hide Sources' }))
+    expect(screen.queryByText(/No sources yet/)).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Hide Studio' }))
+    expect(screen.queryByRole('button', { name: 'Quiz' })).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show Sources' }))
+    expect(await screen.findByText(/No sources yet/)).toBeTruthy()
+  })
+
+  it('narrows to three tabs: Sources, Chat and Studio', async () => {
+    mockRoutes([readySource])
+    renderWithQuery(<NotebookDetail layout="tabs" notebookId={NB} onDeleted={() => undefined} />)
+
+    await screen.findByPlaceholderText('Ask something about these sources')
+    expect(screen.getByText(/^Sources/)).toBeTruthy()
     expect(screen.getByText('Studio')).toBeTruthy()
-    expect(screen.getByRole('button', { name: /Quiz/ })).toBeTruthy()
-    expect(screen.getByText(/^Notes/)).toBeTruthy()
+    expect(screen.queryByText(/^Notes \(/)).toBeNull()
+  })
+
+  it('keeps the way back and the name in the header bar', async () => {
+    mockRoutes([readySource])
+    const back = vi.fn()
+    renderWithQuery(<NotebookDetail layout="columns" notebookId={NB} onBack={back} onDeleted={() => undefined} />)
+
+    const header = await screen.findByTestId('notebook-toolbar')
+    await waitFor(() => expect(header.textContent).toContain('Mars Rover Exploration Texts'))
+    fireEvent.click(screen.getByRole('button', { name: 'All notebooks' }))
+    expect(back).toHaveBeenCalled()
   })
 
   it('names an untitled notebook once its first source is ready', async () => {

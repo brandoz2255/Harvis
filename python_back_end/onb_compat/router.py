@@ -31,6 +31,7 @@ from notebooks.router import (
     NOTEBOOK_STORAGE_PATH,
     purge_notebook,
 )
+from notebooks.access import redact_citations, require_access, scoped
 from notebooks.manager import (
     NotebookManager,
     NotebookNotFoundError,
@@ -47,6 +48,10 @@ from notebooks.models import (
 )
 from notebooks.ingestion import run_ingestion_task, IngestionService
 from notebooks.rag_chat import RAGChatService
+from notebooks.context_builder import ContextSelection, estimate_chars, saved_insight_chars, selection_from_config
+from notebooks.chat_config import normalize_config
+from notebooks.language import language_clause
+from .session_chat import answer_turn, build_citations_payload, pick_locator, unpack_citations
 
 logger = logging.getLogger(__name__)
 
@@ -237,7 +242,8 @@ async def get_notebook(
     manager: NotebookManager = Depends(get_notebook_manager),
 ):
     try:
-        nb = await manager.get_notebook(UUID(notebook_id), current_user["id"])
+        access = await require_access(manager, UUID(notebook_id), current_user["id"], "meta")
+        nb = await manager.get_notebook(UUID(notebook_id), access.owner_id)
         return nb_to_onb(nb)
     except NotebookNotFoundError:
         raise HTTPException(status_code=404, detail="Notebook not found")
@@ -734,52 +740,39 @@ def _msg_to_onb(row) -> Dict[str, Any]:
         "content": row["content"],
         "timestamp": _iso(row["created_at"]),
     }
-    cits = row.get("citations") if hasattr(row, "get") else None
+    cits, flags = unpack_citations(row.get("citations") if hasattr(row, "get") else None)
     if cits:
-        if isinstance(cits, str):
-            try:
-                cits = json.loads(cits)
-            except Exception:
-                cits = []
-        if cits:
-            out["citations"] = cits
+        out["citations"] = cits
+    # Flags ride in the citations column (no migration): unsupported = the answer cited
+    # nothing, refused = nothing close enough was found; context = what the model was shown.
+    if flags.get("unsupported"):
+        out["unsupported"] = True
+    if flags.get("refused"):
+        out["refused"] = True
+    if isinstance(flags.get("context"), dict):
+        out["context_used"] = flags["context"]
     return out
 
 
-def _pick_locator(quote: str) -> str:
-    """A clean, findable single-line locator from a cited chunk. Overlap chunks can
-    start mid-word (e.g. "e's Notebook LM!" from a "Google's Notebook LM!" cut), so
-    pick the first sentence-like line and drop a leading partial-word fragment."""
-    for line in (quote or "").splitlines():
-        line = line.strip()
-        if len(line) < 12:
-            continue
-        words = line.split()
-        # drop a leading mid-word fragment (first token starts lowercase)
-        if words and words[0][:1].islower():
-            words = words[1:]
-        cand = " ".join(words).strip()
-        if len(cand) >= 16:
-            return cand[:120]
-    return (quote or "").strip()[:120]
+def _redact_onb_message(msg: Dict[str, Any], access) -> Dict[str, Any]:
+    """The onb message for a person who cannot read sources: no passage text, no context report."""
+    if access.can_read_sources:
+        return msg
+    if msg.get("citations"):
+        msg["citations"] = redact_citations(access, msg["citations"])
+    msg.pop("context_used", None)
+    return msg
 
 
-def _build_citations_payload(cits) -> List[Dict[str, Any]]:
-    """One entry PER cited chunk, in context order — `index` i corresponds to the
-    model's `[cite:i]` marker. Each carries its OWN chunk snippet + locator so a chip
-    jumps to the exact passage that grounded that sentence (NOT a per-source first
-    chunk). The frontend assigns display numbers by distinct source_id + dedups."""
-    out: List[Dict[str, Any]] = []
-    for i, c in enumerate(cits or [], 1):
-        quote = (getattr(c, "quote", "") or "").strip()
-        out.append({
-            "index": i,
-            "source_id": str(getattr(c, "source_id", "") or ""),
-            "title": getattr(c, "source_title", None) or "",
-            "snippet": quote[:280],
-            "locator": _pick_locator(quote),
-        })
-    return out
+_pick_locator = pick_locator  # moved to session_chat; kept for importers
+
+
+def _build_citations_payload(cits, chunks=None) -> List[Dict[str, Any]]:
+    """One entry PER cited chunk, in context order: ``index`` i is the model's ``[cite:i]``.
+    Each carries its OWN snippet and locator so a chip jumps to the exact passage that
+    grounded that sentence, now with ``start_char``/``end_char``/``page`` too (see
+    session_chat.build_citations_payload). The frontend numbers by distinct source_id."""
+    return build_citations_payload(cits, chunks)
 
 
 def _context_source_ids(context: Dict[str, Any]) -> Optional[List[str]]:
@@ -806,6 +799,8 @@ async def list_chat_sessions(
 ):
     if not notebook_id:
         return []
+    # Someone whose share was revoked no longer sees even the titles of their old sessions.
+    await require_access(manager, UUID(notebook_id), current_user["id"], "meta")
     async with manager.db_pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT s.id, s.notebook_id, s.title, s.model_override, s.created_at, s.updated_at,
@@ -827,12 +822,19 @@ async def create_chat_session(
     nb = body.get("notebook_id")
     if not nb:
         raise HTTPException(status_code=400, detail="notebook_id required")
+    try:
+        nb_uuid = _clean_uuid(str(nb))
+        await require_access(manager, nb_uuid, current_user["id"], "chat")
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid notebook id")
+    except NotebookNotFoundError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
     async with manager.db_pool.acquire() as conn:
         row = await conn.fetchrow("""
             INSERT INTO notebook_chat_sessions (notebook_id, user_id, title, model_override)
             VALUES ($1, $2, $3, $4)
             RETURNING id, notebook_id, title, model_override, created_at, updated_at
-        """, UUID(nb), current_user["id"], body.get("title") or "New Chat", body.get("model_override"))
+        """, nb_uuid, current_user["id"], body.get("title") or "New Chat", body.get("model_override"))
     return _session_to_onb(row, 0)
 
 
@@ -850,12 +852,16 @@ async def get_chat_session(
         """, UUID(session_id), current_user["id"])
         if not s:
             raise HTTPException(status_code=404, detail="Session not found")
+        # A session stays private to its person, but their role on the notebook decides whether it
+        # still opens: a revoked share is a 404, a viewer a 403, and a chat_only person gets the
+        # answers without any text copied from the sources.
+        access = await require_access(manager, s["notebook_id"], current_user["id"], "chat")
         msgs = await conn.fetch("""
             SELECT id, role, content, citations, created_at FROM notebook_chat_session_messages
             WHERE session_id = $1 ORDER BY created_at
         """, UUID(session_id))
     d = _session_to_onb(s, len(msgs))
-    d["messages"] = [_msg_to_onb(m) for m in msgs]
+    d["messages"] = [_redact_onb_message(_msg_to_onb(m), access) for m in msgs]
     return d
 
 
@@ -970,29 +976,37 @@ async def chat_execute(
     uid = current_user["id"]
     async with manager.db_pool.acquire() as conn:
         s = await conn.fetchrow("""
-            SELECT id, notebook_id, model_override FROM notebook_chat_sessions
-            WHERE id = $1 AND user_id = $2
+            SELECT s.id, s.notebook_id, s.model_override FROM notebook_chat_sessions s
+            WHERE s.id = $1 AND s.user_id = $2
         """, UUID(session_id), uid)
     if not s:
         raise HTTPException(status_code=404, detail="Session not found")
+    # A session is private to its person; their role on the notebook decides whether it still works
+    # (a revoked share, or a viewer, gets nothing).
+    access = await require_access(manager, s["notebook_id"], uid, "chat")
+    chat_manager = scoped(manager, access)
 
     from plugins.people.controls import allowed_for
     model = await _person_model(request, uid, body.get("model_override") or s["model_override"])
-    source_ids = _context_source_ids(body.get("context") or {})
+    context = body.get("context") if isinstance(body.get("context"), dict) else {}
+    source_ids = _context_source_ids(context)
 
-    rag = RAGChatService(manager, allowed_models=await allowed_for(getattr(request.app.state, "pg_pool", None),
-                                                                   int(uid)))
-    cits = []
+    rag = RAGChatService(chat_manager, allowed_models=await allowed_for(getattr(request.app.state, "pg_pool", None),
+                                                                        int(uid)))
     try:
-        answer, cits = await rag.answer_for_session(
-            s["notebook_id"], message, model, source_ids=source_ids,
+        # Earlier turns, the notebook's chat settings and language, per-source levels and
+        # located citations all live in session_chat.answer_turn.
+        turn = await answer_turn(
+            manager=chat_manager, rag=rag, notebook_id=s["notebook_id"], user_id=uid, session_id=UUID(session_id),
+            # Per-source levels read the owner's rows, so a shared person gets the plain whole-notebook path.
+            message=message, model=model, context=context if access.is_owner else {},
+            legacy_source_ids=source_ids, rewrite=_rewrite_source_citations,
         )
+        turn.citations = redact_citations(access, turn.citations)
+        answer, stored_citations = turn.answer, turn.stored_citations()
     except Exception as e:
         logger.error(f"chat_execute failed: {e}")
-        answer = f"(error generating a response: {e})"
-    # Turn "[SOURCE N]" markers into clickable "[source:<id>]" references.
-    answer = _rewrite_source_citations(answer, cits)
-    citations_payload = _build_citations_payload(cits)
+        answer, stored_citations = f"(error generating a response: {e})", []
 
     async with manager.db_pool.acquire() as conn:
         u = await conn.fetchrow("""
@@ -1003,7 +1017,7 @@ async def chat_execute(
             INSERT INTO notebook_chat_session_messages (session_id, role, content, citations)
             VALUES ($1, 'ai', $2, $3::jsonb)
             RETURNING id, role, content, citations, created_at
-        """, UUID(session_id), answer, json.dumps(citations_payload))
+        """, UUID(session_id), answer, json.dumps(stored_citations))
         await conn.execute(
             "UPDATE notebook_chat_sessions SET updated_at = now() WHERE id = $1",
             UUID(session_id),
@@ -1018,37 +1032,54 @@ async def chat_context(
     current_user: Dict = Depends(get_current_user_from_request),
     manager: NotebookManager = Depends(get_notebook_manager),
 ):
-    """Preview the context for the current source/note selection (token/char counts)."""
-    cc = body.get("context_config") or {}
-    src_modes: Dict[str, str] = cc.get("sources") or {}
-    note_modes: Dict[str, str] = cc.get("notes") or {}
-    included_sources = [sid for sid, mode in src_modes.items() if mode not in ("off", "none", None, "")]
-    included_notes = [nid for nid, mode in note_modes.items() if mode not in ("off", "none", None, "")]
+    """Preview the context for the current source/note selection (token/char counts).
+
+    Each source carries a level (``insights`` | ``full content`` | ``not in``) and each note
+    is in or out. The returned ``context`` stamps every item with the ``mode`` it was read
+    at, and the client sends that object back unchanged to ``/chat/execute``, which is how
+    the chosen levels reach the answer (see notebooks.context_builder)."""
+    cc = body.get("context_config") if isinstance(body.get("context_config"), dict) else {}
+    selection = selection_from_config(cc)  # 'not in' and 'off' are left out, unlike before
+    uid = current_user["id"]
 
     char_count = 0
     ctx_sources: List[Dict[str, Any]] = []
     ctx_notes: List[Dict[str, Any]] = []
     async with manager.db_pool.acquire() as conn:
-        if included_sources:
+        if selection.sources:
             rows = await conn.fetch("""
                 SELECT s.id, s.title,
                        COALESCE(SUM(LENGTH(c.content)), 0) AS chars
                 FROM notebook_sources s
+                JOIN notebooks n ON n.id = s.notebook_id AND n.user_id = $2
                 LEFT JOIN notebook_chunks c ON c.source_id = s.id
                 WHERE s.id = ANY($1::uuid[])
                 GROUP BY s.id, s.title
-            """, [UUID(x) for x in included_sources])
-            for r in rows:
-                char_count += int(r["chars"] or 0)
-                ctx_sources.append({"id": str(r["id"]), "title": r["title"]})
-        if included_notes:
+            """, [UUID(x) for x in selection.sources], uid)
+            owned = {str(r["id"]): r for r in rows}
+            insight_sizes: Dict[str, int] = {}
+            if any(selection.sources[sid] == "insights" for sid in owned):
+                insight_sizes = await saved_insight_chars(
+                    conn, [sid for sid in owned if selection.sources[sid] == "insights"], uid
+                )
+            for sid, r in owned.items():
+                mode = selection.sources[sid]
+                char_count += estimate_chars(
+                    ContextSelection(sources={sid: mode}), chunk_chars={sid: int(r["chars"] or 0)},
+                    note_chars={}, insight_chars=insight_sizes,
+                )
+                ctx_sources.append({"id": sid, "title": r["title"], "mode": mode})
+        if selection.notes:
             rows = await conn.fetch("""
                 SELECT id, title, COALESCE(LENGTH(content), 0) AS chars
-                FROM notebook_notes WHERE id = ANY($1::uuid[])
-            """, [UUID(x) for x in included_notes])
+                FROM notebook_notes WHERE id = ANY($1::uuid[]) AND user_id = $2
+            """, [UUID(x) for x in selection.notes], uid)
             for r in rows:
-                char_count += int(r["chars"] or 0)
-                ctx_notes.append({"id": str(r["id"]), "title": r["title"]})
+                char_count += estimate_chars(
+                    ContextSelection(), chunk_chars={}, note_chars={str(r["id"]): int(r["chars"] or 0)},
+                    insight_chars={},
+                )
+                ctx_notes.append({"id": str(r["id"]), "title": r["title"], "mode": "full"})
 
     return {
         "context": {"sources": ctx_sources, "notes": ctx_notes},
@@ -1106,8 +1137,9 @@ _DEFAULT_TRANSFORM_INSTRUCTIONS = (
     "You are an expert analyst. Apply the requested transformation to the provided "
     "content accurately and concisely. Output only the transformed result."
 )
-# Per-process store for the global default-prompt (v1 — not DB-persisted).
-_onb_default_prompt = {"transformation_instructions": _DEFAULT_TRANSFORM_INSTRUCTIONS}
+# The person's own default instruction lives in their onb_user_settings row under this key
+# (a leading underscore keeps it out of the /settings the vendored UI sees).
+_DEFAULT_INSTR_KEY = "_transformation_instructions"
 
 
 def _transform_to_onb(t: Dict[str, Any], *, created: str = "", updated: str = "") -> Dict[str, Any]:
@@ -1154,16 +1186,34 @@ async def _resolve_transformation(tid: str, user_id, manager: NotebookManager) -
     return None
 
 
-async def _run_transformation_llm(prompt_template: str, content: str, model: str) -> str:
-    prompt = (prompt_template or "{content}").replace("{content}", (content or "")[:8000])
-    async with httpx.AsyncClient(timeout=180.0) as client:
-        resp = await client.post(
-            f"{_ONB_OLLAMA_URL}/api/generate",
-            json={"model": model, "prompt": prompt, "stream": False,
-                  "options": {"num_ctx": 8192, "num_predict": 3000}},
-        )
-        resp.raise_for_status()
-        return resp.json().get("response", "") or ""
+async def _run_transformation_llm(prompt_template: str, content: str, model: str, language: str = "") -> str:
+    """Run a prompt over text on the local model (notebooks.transform_llm is the one
+    implementation). ``language`` is a ``language_clause`` appended after the content."""
+    from notebooks.transform_llm import run_transformation_llm
+
+    template = prompt_template or "{content}"
+    if language:
+        template = f"{template}\n\n{language}"
+    return await run_transformation_llm(template, content, model)
+
+
+def _lang_kw(language: str) -> Dict[str, str]:
+    """``language`` only when there is one, so a caller that never sets a language is called
+    exactly as before."""
+    return {"language": language} if language else {}
+
+
+async def _notebook_language(manager, notebook_id: Any, user_id: Any) -> str:
+    """The sentence that tells a model which language to write in, from the notebook's chat
+    settings; '' when none is set, the notebook is not theirs or the settings cannot be read."""
+    getter = getattr(manager, "get_chat_config", None)
+    if getter is None or notebook_id is None or user_id is None:
+        return ""
+    try:
+        nb = notebook_id if isinstance(notebook_id, UUID) else _clean_uuid(str(notebook_id))
+        return language_clause(normalize_config(await getter(nb, user_id))["output_language"])
+    except Exception:
+        return ""
 
 
 # -- Transformations: list / create / default-prompt / execute / get / update / delete
@@ -1222,8 +1272,10 @@ async def onb_create_transformation(
 async def onb_get_default_prompt(
     request: Request,
     current_user: Dict = Depends(get_current_user_from_request),
+    manager: NotebookManager = Depends(get_notebook_manager),
 ):
-    return {"transformation_instructions": _onb_default_prompt["transformation_instructions"]}
+    s, _ = await _read_onb_settings(manager, current_user["id"])
+    return {"transformation_instructions": s.get(_DEFAULT_INSTR_KEY) or _DEFAULT_TRANSFORM_INSTRUCTIONS}
 
 
 @router.put("/transformations/default-prompt")
@@ -1231,11 +1283,14 @@ async def onb_put_default_prompt(
     body: Dict[str, Any],
     request: Request,
     current_user: Dict = Depends(get_current_user_from_request),
+    manager: NotebookManager = Depends(get_notebook_manager),
 ):
+    s, _ = await _read_onb_settings(manager, current_user["id"])
     val = (body or {}).get("transformation_instructions")
     if isinstance(val, str) and val.strip():
-        _onb_default_prompt["transformation_instructions"] = val
-    return {"transformation_instructions": _onb_default_prompt["transformation_instructions"]}
+        s[_DEFAULT_INSTR_KEY] = val.strip()[:4000]
+        await _write_onb_settings(manager, current_user["id"], settings=s)
+    return {"transformation_instructions": s.get(_DEFAULT_INSTR_KEY) or _DEFAULT_TRANSFORM_INSTRUCTIONS}
 
 
 @router.post("/transformations/execute")
@@ -1254,16 +1309,19 @@ async def onb_execute_transformation(
     model = await require_turn(getattr(request.app.state, "pg_pool", None), int(current_user["id"]),
                                (body or {}).get("model_id") or "")
     model = model or await _default_chat_model()
+    language = await _notebook_language(manager, (body or {}).get("notebook_id"), current_user["id"])
     try:
-        output = await _run_transformation_llm(t["prompt"], input_text, model)
+        output = await _run_transformation_llm(t["prompt"], input_text, model, **_lang_kw(language))
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"Model request failed: {e}")
     return {"output": output, "transformation_id": str(tid), "model_id": model}
 
 
 from .studio_generate import (  # noqa: E402  (moved out of this file; names kept for importers)
-    StudioError, _FLASHCARDS_SCHEMA, _QUIZ_SCHEMA, _normalize_flashcards, _normalize_quiz, generate_structured,
+    STRUCTURED_KINDS, StudioError, _FLASHCARDS_SCHEMA, _QUIZ_SCHEMA, _normalize_flashcards, _normalize_quiz,
+    generate_structured,
 )
+from . import studio_kinds as _studio_kinds  # noqa: E402
 
 
 def _artifact_row_to_log(row) -> Dict[str, Any]:
@@ -1375,7 +1433,7 @@ async def onb_notebook_generate(
     from .podcasts import _resolve_notebook_content
 
     kind = (body or {}).get("kind") or ""
-    if kind not in ("quiz", "flashcards", "mindmap") and kind not in _MARKDOWN_GENERATORS:
+    if kind not in STRUCTURED_KINDS and kind not in _MARKDOWN_GENERATORS:
         raise HTTPException(status_code=400, detail=f"Unknown generator: {kind}")
 
     # Ownership: 404 unless this notebook belongs to the caller (autoname pattern).
@@ -1396,7 +1454,7 @@ async def onb_notebook_generate(
         except (ValueError, TypeError):
             raise HTTPException(status_code=400, detail="Invalid source id in source_ids")
 
-    content = await _resolve_notebook_content(manager, notebook_id, None, source_ids=source_ids)
+    content = await _resolve_notebook_content(manager, notebook_id, None, current_user["id"], source_ids=source_ids)
     if not content or not content.strip():
         raise HTTPException(
             status_code=400,
@@ -1407,11 +1465,16 @@ async def onb_notebook_generate(
             ),
         )
     model = await _person_model(request, current_user["id"], (body or {}).get("model_id"))
+    language = await _notebook_language(manager, notebook_id, current_user["id"])
+    # Optional free-text instruction from the Studio ("focus on the risks, for a CFO").
+    instruction = _studio_kinds.clean_instruction((body or {}).get("prompt"))
 
     if kind in _MARKDOWN_GENERATORS:
         gen = _MARKDOWN_GENERATORS[kind]
         try:
-            output = await _run_transformation_llm(gen["prompt"], content, model)
+            output = await _run_transformation_llm(
+                _studio_kinds.apply_instruction(gen["prompt"], instruction), content, model, **_lang_kw(language)
+            )
         except httpx.HTTPError as e:
             raise HTTPException(status_code=502, detail=f"Model request failed: {e}")
         output = re.sub(r"<think>.*?</think>", "", output or "", flags=re.DOTALL | re.IGNORECASE).strip()
@@ -1429,15 +1492,24 @@ async def onb_notebook_generate(
             "markdown", {"markdown": output}, model,
         )
 
-    # Quiz, flashcards and mind map are structured JSON for the interactive viewers.
+    # Quiz, flashcards, mind map, data table and slides are structured JSON for the viewers.
     try:
-        title, shaped = await generate_structured(kind, content, model, _ONB_OLLAMA_URL)
+        title, shaped = await generate_structured(
+            kind, content, model, _ONB_OLLAMA_URL, language=language, instruction=instruction
+        )
     except StudioError as e:
         raise HTTPException(status_code=502, detail=str(e))
+    if kind in _studio_kinds.NEW_KINDS:
+        await _studio_kinds.ensure_kind_constraints(manager.db_pool)
     return await _persist_and_return_artifact(
         manager, notebook_id, current_user["id"], kind, title,
         "json", shaped, model,
     )
+
+
+from .studio_routes import register as _register_studio_exports  # noqa: E402
+
+_register_studio_exports(router, auth=get_current_user_from_request, get_manager=get_notebook_manager, clean_uuid=_clean_uuid)
 
 
 @router.get("/notebooks/{notebook_id}/artifacts")
@@ -1453,7 +1525,8 @@ async def onb_notebook_artifacts(
         nb_uuid = _clean_uuid(notebook_id)
     except (ValueError, TypeError):
         raise HTTPException(status_code=400, detail="Invalid notebook id")
-    user_id = current_user["id"]
+    # Studio items are stored under the owner; viewers and editors read the owner's.
+    user_id = (await require_access(manager, nb_uuid, current_user["id"], "read")).owner_id
     items: List[Dict[str, Any]] = []
     async with manager.db_pool.acquire() as conn:
         rows = await conn.fetch(
@@ -1546,7 +1619,7 @@ async def onb_suggest_questions(
     except NotebookNotFoundError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
-    content = await _resolve_notebook_content(manager, notebook_id, None)
+    content = await _resolve_notebook_content(manager, notebook_id, None, current_user["id"])
     if not content or not content.strip():
         return {"questions": []}
 
@@ -1727,6 +1800,10 @@ async def onb_create_source_insight(
         sid = _clean_uuid(source_id)
     except (ValueError, TypeError):
         raise HTTPException(status_code=404, detail="Source not found")
+    try:
+        await manager.get_source(sid, current_user["id"])
+    except SourceNotFoundError:
+        raise HTTPException(status_code=404, detail="Source not found")
     async with manager.db_pool.acquire() as conn:
         srow = await conn.fetchrow(
             "SELECT notebook_id, content_text FROM notebook_sources WHERE id = $1", sid)
@@ -1736,8 +1813,9 @@ async def onb_create_source_insight(
     if not content or not content.strip():
         raise HTTPException(status_code=400, detail="Source has no extracted content to transform")
     insight_model = await _person_model(request, current_user["id"], None)
+    language = await _notebook_language(manager, srow["notebook_id"], current_user["id"])
     try:
-        output = await _run_transformation_llm(t["prompt"], content, insight_model)
+        output = await _run_transformation_llm(t["prompt"], content, insight_model, **_lang_kw(language))
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"Model request failed: {e}")
     if not output.strip():
@@ -2134,6 +2212,7 @@ async def _all_models(request: Request, user_id: Any) -> List[Dict[str, Any]]:
       1. native  — Ollama, llama-server, vLLM, desktop and external hosts
       2. cloud   — per-user, and only when the credential is VERIFIED in Integrations
       3. Hermes  — when the engine flag is on and a Hermes is reachable
+      3b. OpenClaw — only while the person's own link is verified
 
     Every source is additive and fail-open: one being unreachable narrows the list,
     it never empties it. The bare Ollama tag list runs last as the floor, so the
@@ -2183,6 +2262,17 @@ async def _all_models(request: Request, user_id: Any) -> List[Dict[str, Any]]:
     except Exception:
         logger.warning("onb_compat: hermes model entry unavailable", exc_info=True)
 
+    # 3b. The user's OPTIONAL linked OpenClaw: listed only while their link is verified, so a
+    #     person who never linked one never sees it (mirrors owui_compat's _owui_models).
+    try:
+        from owui_compat.hermes_chat import openclaw_chat_model_entry
+
+        om = await openclaw_chat_model_entry(pool, user_id)
+        if om:
+            _add(om.get("id"), om.get("owned_by") or "openclaw", om.get("name"))
+    except Exception:
+        logger.warning("onb_compat: openclaw model entry unavailable", exc_info=True)
+
     # 4. Floor: the raw tag list, in case (1) failed outright.
     for m in await _list_ollama_models():
         _add(m.get("name") or m.get("model"), "ollama")
@@ -2197,7 +2287,7 @@ async def onb_get_settings(
     manager: NotebookManager = Depends(get_notebook_manager),
 ):
     s, _ = await _read_onb_settings(manager, current_user["id"])
-    return s
+    return {k: v for k, v in s.items() if not k.startswith("_")}
 
 
 @router.put("/settings")
@@ -2212,7 +2302,7 @@ async def onb_put_settings(
         if k in _SETTINGS_DEFAULTS:
             s[k] = v
     await _write_onb_settings(manager, current_user["id"], settings=s)
-    return s
+    return {k: v for k, v in s.items() if not k.startswith("_")}
 
 
 # Literal /models sub-paths declared BEFORE any /models/{id} param route.

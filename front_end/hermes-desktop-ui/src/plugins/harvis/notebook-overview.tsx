@@ -1,5 +1,5 @@
 /**
- * The notebook's overview, pinned to the top of its chat the way open-notebook
+ * The notebook's overview, pinned to the top of its chat the way Gemini Notebook
  * shows it: emoji, name, source count and date, the synopsis, and (before the
  * first question) suggested questions as chips. Edit, auto-name and delete sit
  * in a small row beside it, so the workspace needs no header band.
@@ -32,7 +32,10 @@ function EditDetails({ notebook, onDone }: { notebook: NotebookInfo; onDone: () 
         try {
           await harvisApi(`/api/notebooks/${notebook.id}`, {
             method: 'PATCH',
-            body: JSON.stringify({ title: title.trim(), description: description.trim() || null })
+            body: JSON.stringify({
+              title: title.trim(),
+              description: description.trim() || null
+            })
           })
           onDone()
         } catch (err) {
@@ -100,14 +103,17 @@ function dateLabel(iso: string | undefined) {
 
   return Number.isNaN(t)
     ? ''
-    : new Date(t).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })
+    : new Date(t).toLocaleDateString(undefined, {
+        day: 'numeric',
+        month: 'short',
+        year: 'numeric'
+      })
 }
 
 export function NotebookOverview({
   ask,
   empty,
   notebook,
-  onBack,
   onDeleted,
   sources
 }: {
@@ -115,7 +121,6 @@ export function NotebookOverview({
   /** No questions asked yet: show suggested questions. */
   empty: boolean
   notebook: NotebookInfo | undefined
-  onBack?: () => void
   onDeleted: () => void
   sources: Source[]
 }) {
@@ -202,13 +207,11 @@ export function NotebookOverview({
   const chips = empty ? (suggestions.data ?? []) : []
 
   return (
-    <div className="max-w-2xl pb-2">
-      <div className="mb-2 flex items-center gap-0.5">
-        {onBack && (
-          <Button aria-label="All notebooks" onClick={onBack} size="xs" title="All notebooks" variant="ghost">
-            <Codicon name="arrow-left" size="0.8rem" />
-          </Button>
-        )}
+    <div className="max-w-2xl pb-1">
+      <div className="mb-3 flex items-start gap-0.5">
+        <div className="grid size-12 shrink-0 place-items-center rounded-xl bg-(--ui-bg-tertiary) text-3xl leading-none">
+          {notebook?.emoji || '📓'}
+        </div>
         <span className="flex-1" />
         <Button disabled={!notebook} onClick={() => setEditing(true)} size="xs" variant="ghost">
           <Codicon name="edit" size="0.8rem" /> Edit
@@ -239,8 +242,7 @@ export function NotebookOverview({
           <Codicon name="trash" size="0.8rem" /> Delete
         </Button>
       </div>
-      <div className="mb-3 text-5xl leading-none">{notebook?.emoji || '📓'}</div>
-      <h2 className="text-2xl font-bold tracking-tight">{notebook?.title ?? 'Loading…'}</h2>
+      <h2 className="text-xl font-semibold tracking-tight text-balance">{notebook?.title ?? 'Loading…'}</h2>
       <p className="mt-1.5 text-xs text-(--ui-text-tertiary)">
         {sources.length} {sources.length === 1 ? 'source' : 'sources'}
         {date ? ` · ${date}` : ''}
@@ -254,13 +256,13 @@ export function NotebookOverview({
       ) : readyCount > 0 ? null : sources.length > 0 ? (
         <p className="mt-4 text-sm text-(--ui-text-tertiary)">Reading your sources…</p>
       ) : (
-        <p className="mt-4 text-sm text-(--ui-text-tertiary)">Add a source on the left to start asking questions.</p>
+        <p className="mt-4 text-sm text-(--ui-text-tertiary)">Add a source to start asking questions.</p>
       )}
       {chips.length > 0 && (
         <div className="mt-5 flex flex-wrap gap-2">
           {chips.map(q => (
             <button
-              className="rounded-full border bg-(--ui-bg-secondary) px-3 py-1.5 text-left text-xs text-(--ui-text-secondary) transition hover:border-(--ui-stroke-secondary) hover:text-foreground"
+              className="rounded-xl border bg-(--ui-bg-editor) px-3 py-1.5 text-left text-xs text-(--ui-text-secondary) transition hover:border-(--ui-stroke-secondary) hover:text-foreground"
               key={q}
               onClick={() => ask(q)}
               type="button"
@@ -271,7 +273,7 @@ export function NotebookOverview({
         </div>
       )}
       {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
-      {!empty && <div className="mt-6 border-b" />}
+      {!empty && <div className="mt-5 border-b" />}
     </div>
   )
 }

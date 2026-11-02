@@ -1,7 +1,7 @@
-"""Structured Studio artifacts: quiz, flashcards and mind map.
+"""Structured Studio artifacts: quiz, flashcards, mind map, data table and slide deck.
 
 Moved out of router.py so the parsing can be tested without the web stack and so
-the three kinds share one hardened path: a schema-constrained request (Ollama
+the kinds share one hardened path: a schema-constrained request (Ollama
 ``format``), an 8k context so the source text is not silently cut, a JSON reader
 that survives code fences, <think> blocks and output cut off mid-way, one retry,
 and a plain-language error when the model still returns nothing usable.
@@ -13,6 +13,11 @@ import re
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import httpx
+
+from .studio_kinds import (
+    DATA_TABLE_PROMPT, DATA_TABLE_SCHEMA, SLIDES_PROMPT, SLIDES_SCHEMA,
+    apply_instruction, clean_instruction, normalize_data_table, normalize_slides,
+)
 
 CONTENT_CHARS = 9000
 NUM_CTX = 8192
@@ -263,6 +268,13 @@ _KINDS: Dict[str, Dict[str, Any]] = {
             "fences. Use ONLY the content; do not invent facts.\n\n{content}"
         ),
     },
+    "data_table": {"schema": DATA_TABLE_SCHEMA, "prompt": DATA_TABLE_PROMPT},
+    "slides": {"schema": SLIDES_SCHEMA, "prompt": SLIDES_PROMPT},
+}
+STRUCTURED_KINDS = tuple(_KINDS)
+_NOUNS = {
+    "quiz": "quiz", "flashcards": "flashcards", "mindmap": "mind map",
+    "data_table": "data table", "slides": "slide deck",
 }
 
 
@@ -274,6 +286,12 @@ def _shape(kind: str, data: Any) -> Tuple[str, Dict[str, Any]]:
     if kind == "flashcards":
         items = _normalize_flashcards(data) if isinstance(data, dict) else _normalize_flashcards({"cards": data})
         return (f"Flashcards · {len(items)} cards", {"cards": items}) if items else ("", {})
+    if kind == "data_table":
+        table = normalize_data_table(data)
+        return (f"Data table · {table['title']}", table) if table else ("", {})
+    if kind == "slides":
+        deck = normalize_slides(data)
+        return (f"Slides · {deck['title']}", deck) if deck else ("", {})
     tree = _normalize_mindmap(data)
     return (f"Mind map · {tree['title']}", {"tree": tree}) if tree else ("", {})
 
@@ -302,16 +320,26 @@ async def _ask(prompt: str, schema: Dict[str, Any], model: str, ollama_url: str,
         raise StudioError(f"The model server could not be reached ({type(exc).__name__}).") from exc
 
 
-async def generate_structured(kind: str, content: str, model: str, ollama_url: str) -> Tuple[str, Dict[str, Any]]:
-    """Make a quiz, flashcard set or mind map. Returns ``(title, content)`` or raises StudioError."""
+async def generate_structured(
+    kind: str, content: str, model: str, ollama_url: str, *, language: str = "", instruction: str = ""
+) -> Tuple[str, Dict[str, Any]]:
+    """Make a quiz, flashcard set, mind map, data table or slide outline.
+
+    ``language`` is a ready-made clause ("Write in French."), ``instruction`` the user's own words.
+    Both go into the template, outside the part of ``content`` that is cut to ``CONTENT_CHARS``.
+    Returns ``(title, content)`` or raises StudioError.
+    """
     spec = _KINDS[kind]
-    prompt = spec["prompt"].replace("{content}", (content or "")[:CONTENT_CHARS])
+    template = apply_instruction(spec["prompt"], clean_instruction(instruction))
+    if language:
+        template = template.replace("{content}", f"{language}\n\n{{content}}", 1)
+    prompt = template.replace("{content}", (content or "")[:CONTENT_CHARS])
     for attempt, temperature in enumerate((0.4, 0.8)):
         raw = await _ask(prompt, spec["schema"], model, ollama_url, temperature)
         title, shaped = _shape(kind, parse_json_lenient(raw))
         if shaped:
             return title, shaped
-    noun = {"quiz": "quiz", "flashcards": "flashcards", "mindmap": "mind map"}[kind]
+    noun = _NOUNS[kind]
     raise StudioError(
         f"{model} did not return a usable {noun}. Small models sometimes fail at this; try again, "
         "or choose a larger model from the model picker."

@@ -64,4 +64,82 @@ describe('NotebookSourceViewer', () => {
     expect(screen.queryByRole('dialog')).toBeNull()
     expect(harvisApi).not.toHaveBeenCalled()
   })
+
+  describe('with a cited passage', () => {
+    const content = 'Page one text.\nPage two begins here. Jezero crater held a lake.\nMore.'
+
+    const load = (extra: Record<string, unknown> = {}) =>
+      harvisApi.mockResolvedValue({
+        source_id: 's1',
+        title: 'Mars page',
+        type: 'pdf',
+        content,
+        length: content.length,
+        ...extra
+      })
+
+    it('marks the range from the stored offsets and scrolls it into view', async () => {
+      load()
+      const scroll = vi.fn()
+      Element.prototype.scrollIntoView = scroll
+      const start = content.indexOf('Jezero')
+
+      renderWithQuery(
+        <NotebookSourceViewer
+          notebookId="nb-1"
+          onClose={() => undefined}
+          source={source}
+          target={{ end_char: start + 26, page: 2, snippet: 'Jezero crater held a lake.', start_char: start }}
+        />
+      )
+
+      const mark = await screen.findByTestId('cited-passage')
+      expect(mark.textContent).toBe('Jezero crater held a lake.')
+      expect(screen.getByText('Cited passage marked (page 2).')).toBeTruthy()
+      expect(scroll).toHaveBeenCalled()
+    })
+
+    it('finds the passage by its snippet when the citation has no offsets', async () => {
+      load()
+
+      renderWithQuery(
+        <NotebookSourceViewer
+          notebookId="nb-1"
+          onClose={() => undefined}
+          source={source}
+          target={{ quote: 'Page two begins here.' }}
+        />
+      )
+
+      expect((await screen.findByTestId('cited-passage')).textContent).toBe('Page two begins here')
+    })
+
+    it('jumps to the page start when only the page is known', async () => {
+      load({ page_starts: [0, 15] })
+
+      renderWithQuery(
+        <NotebookSourceViewer notebookId="nb-1" onClose={() => undefined} source={source} target={{ page: 2 }} />
+      )
+
+      expect(await screen.findByTestId('cited-page')).toBeTruthy()
+      expect(screen.queryByTestId('cited-passage')).toBeNull()
+      expect(screen.getByText('Jumped to page 2; the exact passage could not be marked.')).toBeTruthy()
+    })
+
+    it('says so when the passage cannot be found', async () => {
+      load()
+
+      renderWithQuery(
+        <NotebookSourceViewer
+          notebookId="nb-1"
+          onClose={() => undefined}
+          source={source}
+          target={{ snippet: 'Something that was never in this source' }}
+        />
+      )
+
+      expect(await screen.findByText('The cited passage could not be found in the text.')).toBeTruthy()
+      expect(screen.queryByTestId('cited-passage')).toBeNull()
+    })
+  })
 })

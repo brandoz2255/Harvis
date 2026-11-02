@@ -41,6 +41,7 @@ beforeEach(() => {
         log = []
         return { ok: true }
       },
+      [`GET /api/notebooks/${NB}/notes`]: () => ({ notes: [] }),
       'GET /api/workspace/providers': () => ({ providers: [] })
     })
   )
@@ -49,13 +50,13 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('NotebookStudioRail', () => {
-  it('labels Audio Overview as under construction and still offers Mind map', async () => {
+  it('offers Audio Overview without an under-construction label, and Mind Map', async () => {
     renderWithQuery(<NotebookStudioRail notebookId={NB} sources={ready} title="Mars" />)
-    const audio = await screen.findByRole('button', { name: /Audio Overview/ })
-    expect(audio.textContent).toContain('Under construction')
+    const audio = await screen.findByRole('button', { name: 'Audio Overview' })
+    expect(audio.textContent).not.toContain('Under construction')
     expect((audio as HTMLButtonElement).disabled).toBe(false)
-    expect(audio.getAttribute('title')).toContain('custom voices are coming')
-    expect(screen.getByRole('button', { name: /Mind map/ })).toBeTruthy()
+    expect(audio.getAttribute('title')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Mind Map' })).toBeTruthy()
   })
 
   it('shows a script-only podcast with the reason and does not offer to play it', async () => {
@@ -80,14 +81,14 @@ describe('NotebookStudioRail', () => {
     renderWithQuery(<NotebookStudioRail notebookId={NB} sources={[]} title="Mars" />)
 
     expect(await screen.findByText('Add a source to start making things.')).toBeTruthy()
-    expect((screen.getByRole('button', { name: /Quiz/ }) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByRole('button', { name: 'Quiz' }) as HTMLButtonElement).disabled).toBe(true)
   })
 
-  it('makes a quiz, opens it to take, and keeps it in the Generated log', async () => {
+  it('makes a quiz, opens it to take, and keeps it in the Studio output list', async () => {
     renderWithQuery(<NotebookStudioRail notebookId={NB} sources={ready} title="Mars" />)
-    await screen.findByText(/Nothing yet/)
+    await screen.findByText(/Studio output will be saved here/)
 
-    fireEvent.click(screen.getByRole('button', { name: /Quiz/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Quiz' }))
 
     await waitFor(() =>
       expect(harvisApi).toHaveBeenCalledWith(
@@ -100,6 +101,31 @@ describe('NotebookStudioRail', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Back to Studio' }))
     expect(await screen.findByText('Quiz: Mars')).toBeTruthy()
+  })
+
+  it('lays the tiles out in Gemini Notebook order with Reports grouped, and keeps notes in Studio', async () => {
+    renderWithQuery(<NotebookStudioRail notebookId={NB} sources={ready} title="Mars" />)
+    await screen.findByText(/Studio output will be saved here/)
+    const tiles = screen
+      .getAllByRole('button')
+      .map(b => b.textContent?.trim())
+      .filter(t => t && !t.startsWith('Customize'))
+    expect(tiles.slice(0, 8)).toEqual([
+      'Audio Overview',
+      'Mind Map',
+      'Reports',
+      'Flashcards',
+      'Quiz',
+      'Slide Deck',
+      'Data Table',
+      'Transform a source'
+    ])
+    expect(screen.getByText('No notes yet.')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Reports' }))
+    for (const name of ['Briefing Doc', 'Study Guide', 'FAQ', 'Timeline']) {
+      expect(screen.getByRole('button', { name: new RegExp(`^${name}`) })).toBeTruthy()
+    }
   })
 
   it('deletes a log item only on the second click', async () => {

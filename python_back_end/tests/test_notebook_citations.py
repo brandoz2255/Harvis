@@ -90,7 +90,12 @@ def test_citations_always_carry_a_quote():
     assert text == "Yes [1] and [2]."
 
 
-def test_uncited_answer_falls_back_to_top_passages_with_quotes():
+def test_uncited_answer_gets_no_citations_and_is_marked_unsupported():
+    from notebooks.rag_answer import resolve_answer
+
     svc = RAGChatService.__new__(RAGChatService)
     text, cites = svc._resolve_answer("An answer with no markers.", chunks())
-    assert len(cites) == 3 and all(c.quote for c in cites)
+    assert cites == [] and text == "An answer with no markers."
+    assert resolve_answer("An answer with no markers.", chunks())[2] is True
+    assert resolve_answer("Yes [SOURCE 1].", chunks())[2] is False
+    assert resolve_answer("I don't see information about that in your sources.", chunks())[2] is False

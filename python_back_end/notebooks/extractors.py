@@ -14,10 +14,11 @@ import re
 import shutil
 import subprocess
 import tempfile
-from typing import List, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .models import SourceType
-from .source_types import AUDIO_EXTS, HTML_EXTS, extension_of, html_to_text, looks_like_html, read_text_file
+from .source_types import AUDIO_EXTS, HTML_EXTS, OFFICE_EXTS, extension_of, html_to_text, looks_like_html, read_text_file
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,38 @@ def _missing(path: Optional[str]) -> bool:
     return not path or not os.path.exists(path)
 
 
-async def extract_pdf(path: str) -> str:
+@dataclass
+class Extracted:
+    """Text of a source plus where its pages start inside that text.
+
+    ``page_starts[i]`` is the character offset in ``text`` where page (or slide) ``i + 1``
+    begins. ``None`` for formats with no pages. ``meta`` is merged into the source's
+    metadata (for example how many pages were read by OCR).
+    """
+
+    text: str
+    page_starts: Optional[List[int]] = None
+    meta: Dict[str, Any] = field(default_factory=dict)
+
+
+def join_pages(pages: Sequence[Tuple[int, str]], meta: Optional[Dict[str, Any]] = None) -> Extracted:
+    """Join per-page text with a blank line and record each page's start offset."""
+    starts: List[int] = []
+    parts: List[str] = []
+    cursor = 0
+    for _no, page_text in pages:
+        starts.append(cursor)
+        parts.append(page_text)
+        cursor += len(page_text) + 2
+    return Extracted("\n\n".join(parts), starts, dict(meta or {}))
+
+
+# A page with fewer characters than this has no usable text layer (a scan, or a figure).
+MIN_PAGE_CHARS = 20
+
+
+async def extract_pdf_pages(path: str) -> List[Tuple[int, str]]:
+    """``[(page_no, text)]`` from the PDF's text layer, 1-based, one entry per page."""
     if _missing(path):
         raise IngestionError("The uploaded file is no longer on the server. Remove this source and upload it again.")
     try:
@@ -41,33 +73,59 @@ async def extract_pdf(path: str) -> str:
     except ImportError as exc:
         raise IngestionError("PDF reading is not installed on this server (pypdf).") from exc
 
-    def _read() -> str:
+    def _read() -> List[Tuple[int, str]]:
         reader = PdfReader(path)
         if reader.is_encrypted:
             try:
                 reader.decrypt("")
             except Exception:
                 raise IngestionError("This PDF is password protected. Remove the password and upload it again.")
-        pages = []
-        for page in reader.pages:
+        pages: List[Tuple[int, str]] = []
+        for number, page in enumerate(reader.pages, start=1):
             try:
-                pages.append(page.extract_text() or "")
+                pages.append((number, page.extract_text() or ""))
             except Exception as exc:
                 logger.warning("Skipped an unreadable PDF page: %s", exc)
-        return "\n\n".join(pages)
+                pages.append((number, ""))
+        return pages
 
     try:
-        text = await asyncio.to_thread(_read)
+        return await asyncio.to_thread(_read)
     except IngestionError:
         raise
     except Exception as exc:
         raise IngestionError(f"This PDF could not be opened ({str(exc)[:120]}). It may be damaged.") from exc
-    if len(text.strip()) < 10:
-        raise IngestionError(
-            "This PDF has no selectable text, so it is probably a scan. Upload its pages as images "
-            "(PNG or JPG) and Notebooks will read them with OCR."
-        )
-    return text
+
+
+async def extract_pdf_document(path: str) -> Extracted:
+    """A PDF's text with page offsets. A PDF with almost no text layer is read with OCR."""
+    pages = await extract_pdf_pages(path)
+    total = sum(len(t.strip()) for _n, t in pages)
+    meta: Dict[str, Any] = {"page_count": len(pages)}
+    if pages and total < MIN_PAGE_CHARS * len(pages):
+        from .extractors_office import ocr_pdf_pages
+
+        sparse = [n for n, t in pages if len(t.strip()) < MIN_PAGE_CHARS]
+        outcome = await asyncio.to_thread(ocr_pdf_pages, path, sparse)
+        by_page = dict(pages)
+        for number, text in outcome.texts.items():
+            by_page[number] = text
+        pages = sorted(by_page.items())
+        meta.update(outcome.meta())
+        total = sum(len(t.strip()) for _n, t in pages)
+        if total < 10:
+            raise IngestionError(
+                "This PDF has no selectable text and OCR found no readable text in it"
+                + (f" (it read {outcome.attempted} page{'s' if outcome.attempted != 1 else ''})" if outcome.attempted else "")
+                + ". Upload a sharper scan, or its pages as images."
+            )
+    elif total < 10:
+        raise IngestionError("This PDF has no text in it.")
+    return join_pages(pages, meta)
+
+
+async def extract_pdf(path: str) -> str:
+    return (await extract_pdf_document(path)).text
 
 
 async def extract_doc(path: str) -> str:
@@ -207,14 +265,85 @@ def _decode(resp) -> str:
         return resp.content.decode("utf-8", errors="replace")
 
 
+# Wall-clock ceiling for one page fetch. httpx's timeout is per read, so on its own
+# a server that keeps sending would hold the worker (and its memory) indefinitely.
+URL_FETCH_DEADLINE_S = 60.0
+
+
+class _Fetched:
+    """The slice of an httpx response that extract_url reads, built from capped bytes."""
+
+    def __init__(self, headers, content: bytes, encoding: Optional[str]):
+        self.headers = headers
+        self.content = content
+        self._encoding = encoding or "utf-8"
+
+    @property
+    def text(self) -> str:
+        try:
+            return self.content.decode(self._encoding, errors="replace")
+        except LookupError:
+            return self.content.decode("utf-8", errors="replace")
+
+
+async def _fetch_capped(url: str, *, headers: dict, timeout: float) -> _Fetched:
+    """Same per-hop SSRF validation and address pinning as ``agent_reach.tools._safe_get``,
+    but the body is streamed and counted so an oversized or compressed-bomb response is
+    dropped at the cap instead of being read into memory first. Only gzip/deflate are
+    requested and decoded (bounded); br, zstd and unknown encodings are refused."""
+    import httpx
+    from urllib.parse import urlparse, urljoin
+
+    from agent_reach import tools as reach
+
+    async def _run() -> _Fetched:
+        current = url
+        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout), follow_redirects=False) as client:
+            for _hop in range(reach._MAX_REDIRECTS + 1):
+                parsed = urlparse(current)
+                if parsed.scheme not in ("https", "http"):
+                    raise reach.ReachBlocked(f"redirect to non-http(s) scheme: {parsed.scheme!r}")
+                if not parsed.hostname:
+                    raise reach.ReachBlocked("URL missing host")
+                ips = reach._resolve_public_ips(
+                    parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80)
+                )
+                resp = await client.send(reach._pinned_request(client, current, ips[0], headers), stream=True)
+                try:
+                    stream = resp.extensions.get("network_stream")
+                    if stream is not None:
+                        peer = stream.get_extra_info("server_addr")
+                        if peer and not reach._ip_is_public(str(peer[0])):
+                            raise reach.ReachBlocked("connection landed on a non-public address")
+                    if resp.is_redirect:
+                        location = resp.headers.get("location") or ""
+                        if not location:
+                            raise reach.ReachBlocked("redirect without a Location header")
+                        current = urljoin(current, location)
+                        continue
+                    resp.raise_for_status()
+                    declared = resp.headers.get("content-length") or ""
+                    if declared.isdigit() and int(declared) > reach._MAX_BODY_BYTES:
+                        raise reach.ReachBlocked("response body too large")
+                    # aiter_raw + our own bounded zlib: httpx's aiter_bytes() would decode
+                    # br/zstd (and gzip) a whole chunk at a time, before any size check.
+                    body, _ = await reach._read_capped_body(resp)
+                    return _Fetched(resp.headers, body, resp.encoding)
+                finally:
+                    await resp.aclose()
+        raise reach.ReachBlocked(f"too many redirects (>{reach._MAX_REDIRECTS})")
+
+    return await asyncio.wait_for(_run(), URL_FETCH_DEADLINE_S)
+
+
 async def extract_url(url: str) -> str:
     """A public web page as readable text. Fetched through the SSRF-safe reach client."""
-    from agent_reach.tools import ReachBlocked, _safe_get
+    from agent_reach.tools import ReachBlocked
 
     import httpx
 
     try:
-        resp = await _safe_get(url, headers={"User-Agent": _BROWSER_UA, "Accept": "text/html,*/*;q=0.8"}, timeout=25.0)
+        resp = await _fetch_capped(url, headers={"User-Agent": _BROWSER_UA, "Accept": "text/html,*/*;q=0.8"}, timeout=25.0)
     except ReachBlocked as exc:
         raise IngestionError(
             f"That address cannot be added: {str(exc)[:160]}. Only public web pages are allowed, "
@@ -225,7 +354,7 @@ async def extract_url(url: str) -> str:
             f"The site answered HTTP {exc.response.status_code}, so the page could not be read. "
             "If it needs a login, copy the text and add it as a pasted text source."
         ) from exc
-    except httpx.TimeoutException as exc:
+    except (httpx.TimeoutException, asyncio.TimeoutError) as exc:
         raise IngestionError("The site took too long to answer. Try again in a moment.") from exc
     except Exception as exc:
         raise IngestionError(f"The page could not be fetched ({str(exc)[:120]}).") from exc
@@ -294,7 +423,7 @@ async def extract_youtube(url: str) -> str:
     return text
 
 
-async def extract_for(source) -> str:
+async def extract_document(source) -> Extracted:
     """Dispatch on the source type. ``source.storage_path`` is a file path or the URL."""
     kind, path = source.type, source.storage_path
     ext = ""
@@ -302,20 +431,30 @@ async def extract_for(source) -> str:
     if isinstance(meta, dict):
         ext = (meta.get("extension") or "").lower()
     if kind == SourceType.PDF:
-        return await extract_pdf(path)
+        return await extract_pdf_document(path)
     if kind == SourceType.DOC:
-        return await extract_doc(path)
+        # PowerPoint, Excel and ePub are stored as DOC sources: the type column only
+        # holds the kinds the schema's CHECK lists, and the extension says which reader.
+        if ext in OFFICE_EXTS:
+            from . import extractors_office
+
+            return await extractors_office.extract_office(path, ext)
+        return Extracted(await extract_doc(path))
     if kind == SourceType.URL:
-        return await extract_url(path)
+        return Extracted(await extract_url(path))
     if kind == SourceType.YOUTUBE:
-        return await extract_youtube(path)
+        return Extracted(await extract_youtube(path))
     if kind == SourceType.IMAGE:
-        return await extract_image(path)
+        return Extracted(await extract_image(path))
     if kind == SourceType.AUDIO:
-        return await extract_audio(path)
+        return Extracted(await extract_audio(path))
     if kind in (SourceType.TEXT, SourceType.MARKDOWN, SourceType.TRANSCRIPT):
-        return await extract_text_file(path, ext)
+        return Extracted(await extract_text_file(path, ext))
     raise IngestionError(f"Sources of type {getattr(kind, 'value', kind)} are not supported yet.")
 
 
-__all__ = ["IngestionError", "extract_for", "youtube_video_id", "AUDIO_EXTS"]
+async def extract_for(source) -> str:
+    return (await extract_document(source)).text
+
+
+__all__ = ["IngestionError", "Extracted", "extract_for", "extract_document", "youtube_video_id", "AUDIO_EXTS"]

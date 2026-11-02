@@ -4,14 +4,17 @@ Handles text extraction, chunking, and embedding generation
 """
 
 import asyncio
+import inspect
 import logging
 import os
 import re
+from bisect import bisect_right
 from typing import List, Tuple, Dict, Any, Optional
 from uuid import UUID
 import requests
 
-from .extractors import IngestionError, extract_for
+from . import embedding_provider
+from .extractors import Extracted, IngestionError, extract_document
 from .models import SourceStatus
 from .manager import NotebookManager
 
@@ -29,11 +32,37 @@ MAX_CONSECUTIVE_EMBED_FAILURES = 3
 # A source where more than this share of chunks could not be embedded is an error,
 # because the chunks that remain would give answers from a random slice of it.
 MAX_SKIPPED_SHARE = 0.5
+EMBED_BATCH_SIZE = 16  # texts per Ollama /api/embed request
+# Text beyond this is not indexed; the source records that it was cut (NOTEBOOK_MAX_SOURCE_CHARS).
+DEFAULT_MAX_SOURCE_CHARS = 2_000_000
 
 NO_EMBEDDER_MESSAGE = (
     "Notebooks could not index this source because no embedding model answered. "
     "Install one (ollama pull nomic-embed-text) and press Retry."
 )
+REMOTE_EMBEDDER_MESSAGE = (
+    "Notebooks could not index this source because the embedding service did not answer. "
+    "Check NOTEBOOK_EMBED_BASE_URL, NOTEBOOK_EMBED_MODEL and the key on the server, then press Retry."
+)
+
+
+def max_source_chars() -> int:
+    try:
+        value = int(os.getenv("NOTEBOOK_MAX_SOURCE_CHARS", "") or DEFAULT_MAX_SOURCE_CHARS)
+    except ValueError:
+        value = DEFAULT_MAX_SOURCE_CHARS
+    return max(10_000, value)
+
+
+def page_of(offset: int, page_starts: Optional[List[int]]) -> Optional[int]:
+    """1-based page (or slide) that holds character ``offset``, or None when pages are unknown."""
+    if not page_starts:
+        return None
+    return max(1, bisect_right(page_starts, offset))
+
+
+_PARAGRAPH_BREAK = re.compile(r"\n\s*\n")
+_SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+")
 
 
 class IngestionService:
@@ -50,6 +79,9 @@ class IngestionService:
 
     def __init__(self, manager: NotebookManager):
         self.manager = manager
+        # Set by _embed_chunks: the model and native width (before padding) of this source's vectors.
+        self.embedding_model: Optional[str] = None
+        self.embedding_dim: Optional[int] = None
 
     async def ingest_source(self, source_id: UUID, user_id: int) -> None:
         """
@@ -66,26 +98,53 @@ class IngestionService:
             await self.manager.clear_chunks(source_id)
             logger.info(f"Starting ingestion for source {source_id} (type: {source.type})")
 
-            text = await self._extract_text(source)
+            extracted = await self._extract_document(source)
+            text = extracted.text
             if not text or len(text.strip()) < 10:
                 raise IngestionError("No text could be extracted from this source.")
+
+            page_starts = extracted.page_starts
+            meta: Dict[str, Any] = dict(extracted.meta)
+            limit = max_source_chars()
+            if len(text) > limit:
+                meta["text_truncated_from"] = len(text)
+                meta["ingest_notice"] = (
+                    f"This source is very long, so only its first {limit:,} characters were indexed."
+                )
+                text = text[:limit]
+                page_starts = [p for p in page_starts if p < limit] if page_starts else page_starts
 
             async with self.manager.db_pool.acquire() as conn:
                 await conn.execute(
                     "UPDATE notebook_sources SET content_text = $1 WHERE id = $2", text, source_id
                 )
 
-            chunks = self._chunk_text(text, source)
+            chunks = self._chunk_text(text, source, page_starts)
             if not chunks:
                 raise IngestionError("The text could not be split into passages.")
             logger.info(f"Created {len(chunks)} chunks for source {source_id}")
 
             chunk_data, skipped = await self._embed_chunks(chunks)
-            chunk_count = await self.manager.create_chunks(source_id, source.notebook_id, chunk_data)
+            chunk_count = await self._store_chunks(source_id, source.notebook_id, chunk_data)
 
-            meta: Dict[str, Any] = {"chunk_count": chunk_count, "text_length": len(text), "skipped_chunks": skipped}
+            # Keys are always written so a Retry replaces what the previous run left behind.
+            meta.update(
+                chunk_count=chunk_count,
+                text_length=len(text),
+                skipped_chunks=skipped,
+                page_starts=page_starts or None,
+                embedding_model=self.embedding_model,
+                embedding_dim=self.embedding_dim,
+            )
+            meta.setdefault("ingest_notice", None)
+            from . import auto_insights
+
+            schedule_insights = auto_insights.should_run(len(text))
+            meta["insights_status"] = "pending" if schedule_insights else None
             await self.manager.update_source_status(source_id, SourceStatus.READY, metadata_update=meta)
             logger.info(f"Successfully ingested source {source_id} with {chunk_count} chunks ({skipped} skipped)")
+            if schedule_insights:
+                auto_insights.schedule_default_insights(self.manager, source_id, user_id)
 
         except IngestionError as e:
             logger.warning(f"Ingestion failed for source {source_id}: {e}")
@@ -96,28 +155,93 @@ class IngestionService:
                 source_id, SourceStatus.ERROR, error_message=f"Something went wrong reading this source: {str(e)[:200]}"
             )
 
+    async def _store_chunks(self, source_id: UUID, notebook_id: UUID, chunk_data: list) -> int:
+        """create_chunks, passing the embedding model and native width once the manager takes them."""
+        extra: Dict[str, Any] = {}
+        try:
+            params = inspect.signature(self.manager.create_chunks).parameters
+        except (TypeError, ValueError):
+            params = {}
+        takes_any = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+        if takes_any or "embedding_model" in params:
+            extra["embedding_model"] = self.embedding_model
+        if takes_any or "embedding_dim" in params:
+            extra["embedding_dim"] = self.embedding_dim
+        return await self.manager.create_chunks(source_id, notebook_id, chunk_data, **extra)
+
+    def _uses_remote(self) -> bool:
+        return embedding_provider.configured_provider_name() == "openai"
+
+    def _active_model(self) -> Optional[str]:
+        if self._uses_remote():
+            try:
+                return embedding_provider.remote_settings().model
+            except embedding_provider.ProviderConfigError:
+                return None
+        return IngestionService._working_model
+
+    def _can_batch(self) -> bool:
+        """Batching needs the stock single-text embedder (an override, as in tests or a
+        subclass, is honoured one text at a time) and, for Ollama, a model already chosen."""
+        if "_get_embedding" in vars(self) or type(self)._get_embedding is not IngestionService._get_embedding:
+            return False
+        return self._uses_remote() or IngestionService._working_model is not None
+
+    async def _embed_group(self, texts: List[str]) -> List[Optional[List[float]]]:
+        """Vectors for one group of texts. A group the server rejected outright is retried
+        one text at a time, which also lets model selection start over."""
+        if len(texts) == 1 or not self._can_batch():
+            return [await self._get_embedding(t) for t in texts[:1]]
+        if self._uses_remote():
+            vectors = await self._embed_remote(texts)
+        else:
+            model = IngestionService._working_model
+            vectors = await asyncio.to_thread(self._try_embedding_batch, OLLAMA_URL, model, texts)
+        if any(v is not None for v in vectors):
+            return vectors
+        return [await self._get_embedding(t) for t in texts]
+
     async def _embed_chunks(self, chunks) -> Tuple[list, int]:
         """Embed every chunk. Never stores a placeholder vector.
 
         Raises IngestionError when nothing could be embedded or too much was lost,
-        so the source shows as failed and Retry has something to do.
+        so the source shows as failed and Retry has something to do. All vectors of one
+        source must come from one model and one width: a vector that differs from the
+        first is dropped like a failed one.
         """
         chunk_data = []
         skipped = 0
         streak = 0
-        for i, (chunk_text, metadata) in enumerate(chunks):
+        self.embedding_model = None
+        self.embedding_dim = None
+        texts = [c for c, _meta in chunks]
+        i = 0
+        while i < len(texts):
             if streak >= MAX_CONSECUTIVE_EMBED_FAILURES:
-                skipped += 1
-                continue
-            embedding = await self._get_embedding(chunk_text)
-            if embedding:
-                streak = 0
-                chunk_data.append((chunk_text, self._normalize_embedding_dimension(embedding, TARGET_DIM), metadata, i))
-            else:
-                streak += 1
-                skipped += 1
+                skipped += len(texts) - i
+                break
+            size = EMBED_BATCH_SIZE if self._can_batch() else 1
+            group = texts[i : i + size]
+            vectors = await self._embed_group(group)
+            model = self._active_model()
+            for offset, vector in enumerate(vectors):
+                index = i + offset
+                if vector and self.embedding_dim is None:
+                    self.embedding_dim, self.embedding_model = len(vector), model
+                if vector and (len(vector) != self.embedding_dim or (model and model != self.embedding_model)):
+                    logger.warning("Dropped a vector from a different embedding model or width")
+                    vector = None
+                if vector:
+                    streak = 0
+                    chunk_data.append(
+                        (chunks[index][0], self._normalize_embedding_dimension(vector, TARGET_DIM), chunks[index][1], index)
+                    )
+                else:
+                    streak += 1
+                    skipped += 1
+            i += len(group)
         if not chunk_data:
-            raise IngestionError(NO_EMBEDDER_MESSAGE)
+            raise IngestionError(REMOTE_EMBEDDER_MESSAGE if self._uses_remote() else NO_EMBEDDER_MESSAGE)
         if skipped / len(chunks) > MAX_SKIPPED_SHARE:
             raise IngestionError(
                 f"Only {len(chunk_data)} of {len(chunks)} passages could be indexed because the embedding model "
@@ -127,11 +251,11 @@ class IngestionService:
             logger.warning(f"{skipped} of {len(chunks)} chunks could not be embedded and were left out")
         return chunk_data, skipped
 
-    async def _extract_text(self, source) -> str:
-        """Extract text from a source. Raises IngestionError with a user-facing reason."""
+    async def _extract_document(self, source) -> Extracted:
+        """Extract text (and page offsets) from a source. Raises IngestionError with a user-facing reason."""
         logger.info(f"Extracting text for source type: {source.type}, path: {source.storage_path}")
         try:
-            return await extract_for(source)
+            return await extract_document(source)
         except IngestionError:
             # Pasted text is stored in the DB as well as on disk; fall back to it
             # if the file was cleaned up.
@@ -141,85 +265,133 @@ class IngestionService:
                 async with self.manager.db_pool.acquire() as conn:
                     stored = await conn.fetchval("SELECT content_text FROM notebook_sources WHERE id = $1", source.id)
                 if stored:
-                    return stored
+                    return Extracted(stored)
             raise
 
-    def _chunk_text(self, text: str, source) -> List[Tuple[str, Dict[str, Any]]]:
+    def _chunk_text(
+        self, text: str, source, page_starts: Optional[List[int]] = None
+    ) -> List[Tuple[str, Dict[str, Any]]]:
         """
         Split text into overlapping chunks.
-        Returns list of (chunk_text, metadata) tuples.
+        Returns list of (chunk_text, metadata) tuples. Metadata carries ``start_char`` and
+        ``end_char`` (offsets into ``text`` as given, so into the stored content_text) and,
+        when ``page_starts`` is known, the 1-based ``page`` the chunk starts on.
         """
-        chunks = []
+        chunks: List[Tuple[str, Dict[str, Any]]] = []
 
-        # Clean up text
-        text = text.strip()
-        if not text:
+        lead = len(text) - len(text.lstrip())
+        body = text.strip()
+        if not body:
             return chunks
 
-        # Split into paragraphs first
-        paragraphs = re.split(r'\n\s*\n', text)
+        # Paragraph spans in body coordinates; ``i`` is the index in the raw split, as before.
+        edges: List[Tuple[int, int]] = []
+        position = 0
+        for m in _PARAGRAPH_BREAK.finditer(body):
+            edges.append((position, m.start()))
+            position = m.end()
+        edges.append((position, len(body)))
+        spans: List[Tuple[int, int, int]] = []
+        for i, (a, b) in enumerate(edges):
+            piece = body[a:b]
+            if piece.strip():
+                spans.append((i, a + len(piece) - len(piece.lstrip()), b - (len(piece) - len(piece.rstrip()))))
 
-        current_chunk = ""
-        current_metadata = {"source_title": source.title, "paragraphs": []}
+        def length(pieces: List[Tuple[int, int]]) -> int:
+            return sum(b - a for a, b in pieces) + 2 * (len(pieces) - 1) if pieces else 0
 
-        for i, para in enumerate(paragraphs):
-            para = para.strip()
-            if not para:
-                continue
+        def overlap(pieces: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+            """Pieces covering the last CHUNK_OVERLAP characters of the chunk string."""
+            if length(pieces) <= CHUNK_OVERLAP:
+                return list(pieces)
+            remaining, out = CHUNK_OVERLAP, []
+            for a, b in reversed(pieces):
+                if remaining <= 0:
+                    break
+                if b - a >= remaining:
+                    out.append((b - remaining, b))
+                    break
+                out.append((a, b))
+                remaining -= (b - a) + 2
+            out.reverse()
+            return out
 
+        def emit(pieces: List[Tuple[int, int]], paragraphs: List[int]) -> None:
+            chunk = "\n\n".join(body[a:b] for a, b in pieces).strip()
+            start, end = pieces[0][0] + lead, pieces[-1][1] + lead
+            meta: Dict[str, Any] = {
+                "source_title": source.title, "paragraphs": paragraphs, "start_char": start, "end_char": end,
+            }
+            page = page_of(start, page_starts)
+            if page:
+                meta["page"] = page
+            chunks.append((chunk, meta))
+
+        current: List[Tuple[int, int]] = []
+        paragraphs: List[int] = []
+        for i, a, b in spans:
             # If adding this paragraph exceeds chunk size, save current and start new
-            if len(current_chunk) + len(para) > CHUNK_SIZE and current_chunk:
-                chunks.append((current_chunk.strip(), current_metadata.copy()))
-
-                # Start new chunk with overlap
-                overlap_text = current_chunk[-CHUNK_OVERLAP:] if len(current_chunk) > CHUNK_OVERLAP else current_chunk
-                current_chunk = overlap_text + "\n\n" + para
-                current_metadata = {"source_title": source.title, "paragraphs": [i]}
+            if current and length(current) + (b - a) > CHUNK_SIZE:
+                emit(current, paragraphs)
+                current = overlap(current) + [(a, b)]
+                paragraphs = [i]
             else:
-                current_chunk += ("\n\n" if current_chunk else "") + para
-                current_metadata["paragraphs"].append(i)
-
-        # Don't forget the last chunk
-        if current_chunk.strip():
-            chunks.append((current_chunk.strip(), current_metadata))
+                current.append((a, b))
+                paragraphs.append(i)
+        if current:
+            emit(current, paragraphs)
 
         # If we have very few chunks, try to balance them
         if len(chunks) == 1 and len(chunks[0][0]) > CHUNK_SIZE * 2:
             # Re-chunk with sentence-level splitting
-            chunks = self._chunk_by_sentences(text, source)
+            chunks = self._chunk_by_sentences(body, source, lead, page_starts)
 
         return chunks
 
-    def _chunk_by_sentences(self, text: str, source) -> List[Tuple[str, Dict[str, Any]]]:
-        """Chunk text by sentences for more granular splitting"""
-        # Simple sentence splitting
-        sentences = re.split(r'(?<=[.!?])\s+', text)
+    def _chunk_by_sentences(
+        self, text: str, source, base_offset: int = 0, page_starts: Optional[List[int]] = None
+    ) -> List[Tuple[str, Dict[str, Any]]]:
+        """Chunk text by sentences for more granular splitting.
 
-        chunks = []
-        current_chunk = ""
-        current_sentences = []
+        ``base_offset`` is where ``text`` begins inside the stored content_text.
+        """
+        spans: List[Tuple[int, int]] = []
+        position = 0
+        for m in _SENTENCE_BREAK.finditer(text):
+            spans.append((position, m.start()))
+            position = m.end()
+        spans.append((position, len(text)))
 
-        for i, sentence in enumerate(sentences):
-            if len(current_chunk) + len(sentence) > CHUNK_SIZE and current_chunk:
-                chunks.append((current_chunk.strip(), {
-                    "source_title": source.title,
-                    "sentence_indices": current_sentences.copy()
-                }))
+        chunks: List[Tuple[str, Dict[str, Any]]] = []
 
-                # Overlap
-                overlap_start = max(0, len(current_sentences) - 2)
-                current_chunk = " ".join(sentences[overlap_start:i]) + " " + sentence
-                current_sentences = list(range(overlap_start, i + 1))
+        def emit(indices: List[int]) -> None:
+            start = spans[indices[0]][0] + base_offset
+            end = spans[indices[-1]][1] + base_offset
+            meta: Dict[str, Any] = {
+                "source_title": source.title, "sentence_indices": list(indices), "start_char": start, "end_char": end,
+            }
+            page = page_of(start, page_starts)
+            if page:
+                meta["page"] = page
+            joined = " ".join(text[a:b] for a, b in (spans[k] for k in indices))
+            chunks.append((joined.strip(), meta))
+
+        def size(indices: List[int]) -> int:
+            return sum(spans[k][1] - spans[k][0] for k in indices) + len(indices) - 1
+
+        current: List[int] = []
+        for i, (a, b) in enumerate(spans):
+            if current and size(current) + (b - a) > CHUNK_SIZE:
+                emit(current)
+                # Carry the last two sentences into the next chunk, unless that alone is half a chunk.
+                carried = current[-2:]
+                while carried and size(carried) > CHUNK_SIZE // 2:
+                    carried = carried[1:]
+                current = carried + [i]
             else:
-                current_chunk += (" " if current_chunk else "") + sentence
-                current_sentences.append(i)
-
-        if current_chunk.strip():
-            chunks.append((current_chunk.strip(), {
-                "source_title": source.title,
-                "sentence_indices": current_sentences
-            }))
-
+                current.append(i)
+        if current:
+            emit(current)
         return chunks
 
     async def _get_embedding(self, text: str) -> Optional[List[float]]:
@@ -229,6 +401,9 @@ class IngestionService:
         thread; called directly they froze the whole event loop for up to a
         minute per chunk.
         """
+        if self._uses_remote():
+            return (await self._embed_remote([text]))[0]
+
         # If we already found a working model, use it directly
         if IngestionService._working_model:
             result = await asyncio.to_thread(self._try_embedding, OLLAMA_URL, IngestionService._working_model, text)
@@ -285,6 +460,19 @@ class IngestionService:
             logger.warning("Could not list Ollama models for embedding fallback", exc_info=True)
             return []
         return sorted(names, key=lambda n: "embed" not in n.lower())
+
+    async def _embed_remote(self, texts: List[str]) -> List[Optional[List[float]]]:
+        """Vectors from the OpenAI-compatible provider the operator configured."""
+        try:
+            provider = embedding_provider.remote_provider()
+        except embedding_provider.ProviderConfigError as exc:
+            logger.error("Embedding provider is misconfigured: %s", exc)
+            return [None] * len(texts)
+        return (await asyncio.to_thread(provider.embed, texts)).vectors
+
+    def _try_embedding_batch(self, base_url: str, model: str, texts: List[str]) -> List[Optional[List[float]]]:
+        """Embed several texts with one Ollama request (``/api/embed``); older servers get one request each."""
+        return embedding_provider.OllamaProvider(base_url, model).embed(texts).vectors
 
     def _try_embedding(self, base_url: str, model: str, text: str) -> Optional[List[float]]:
         """Try to get an embedding from a specific model. Returns None on failure."""

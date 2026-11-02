@@ -30,6 +30,10 @@ from .models import (
     YouTubeSourceRequest, SearchRequest
 )
 from . import podcast_audio
+from .access import (
+    Access, clear_own_chat_history, get_own_chat_history, get_source_in, guard, note_author_in,
+    redact_citations, scoped,
+)
 from .manager import NotebookManager, NotebookNotFoundError, SourceNotFoundError, NoteNotFoundError
 
 logger = logging.getLogger(__name__)
@@ -79,6 +83,13 @@ async def get_current_user_from_request(request: Request) -> Dict:
     return await get_current_user_optimized(credentials=credentials, request=request, pool=pool)
 
 
+async def require_admin_user(current_user: Dict = Depends(get_current_user_from_request)) -> Dict:
+    from owui_compat.authz import is_admin
+    if not is_admin(current_user):
+        raise HTTPException(status_code=403, detail="Administrator privileges are required for this operation.")
+    return current_user
+
+
 def _pool_of(request: Optional[Request]):
     return getattr(getattr(getattr(request, "app", None), "state", None), "pg_pool", None)
 
@@ -91,6 +102,9 @@ async def _person_model(request: Optional[Request], current_user: Dict, model: O
     """
     from plugins.people.controls import require_turn
     return await require_turn(_pool_of(request), int(current_user["id"]), model or "", count=count)
+
+
+_need = guard(get_current_user_from_request, get_notebook_manager)
 
 
 # ─── Notebook CRUD ─────────────────────────────────────────────────────────────
@@ -144,12 +158,14 @@ async def create_notebook(
 async def get_notebook(
     notebook_id: UUID,
     request: Request = None,
+    access: Access = Depends(_need("meta")),
     current_user: Dict = Depends(get_current_user_from_request),
     manager: NotebookManager = Depends(get_notebook_manager)
 ):
     """Get a single notebook by ID"""
     try:
-        return await manager.get_notebook(notebook_id, current_user["id"])
+        notebook = await manager.get_notebook(notebook_id, access.owner_id)
+        return notebook.model_copy(update={"role": access.role, "is_owner": access.is_owner})
     except NotebookNotFoundError:
         raise HTTPException(status_code=404, detail="Notebook not found")
     except Exception as e:
@@ -162,6 +178,7 @@ async def update_notebook(
     notebook_id: UUID,
     request_body: UpdateNotebookRequest,
     request: Request = None,
+    access: Access = Depends(_need("owner")),
     current_user: Dict = Depends(get_current_user_from_request),
     manager: NotebookManager = Depends(get_notebook_manager)
 ):
@@ -290,6 +307,7 @@ async def purge_notebook(manager: NotebookManager, notebook_id: UUID, user_id: i
 async def delete_notebook(
     notebook_id: UUID,
     request: Request = None,
+    access: Access = Depends(_need("owner")),
     current_user: Dict = Depends(get_current_user_from_request),
     manager: NotebookManager = Depends(get_notebook_manager)
 ):
@@ -314,12 +332,13 @@ async def delete_notebook(
 async def list_sources(
     notebook_id: UUID,
     request: Request = None,
+    access: Access = Depends(_need("read")),
     current_user: Dict = Depends(get_current_user_from_request),
     manager: NotebookManager = Depends(get_notebook_manager)
 ):
     """List all sources for a notebook"""
     try:
-        return await manager.list_sources(notebook_id, current_user["id"])
+        return await manager.list_sources(notebook_id, access.owner_id)
     except NotebookNotFoundError:
         raise HTTPException(status_code=404, detail="Notebook not found")
     except Exception as e:
@@ -334,14 +353,12 @@ async def upload_source(
     title: Optional[str] = Form(None),
     background_tasks: BackgroundTasks = None,
     request: Request = None,
+    access: Access = Depends(_need("write")),
     current_user: Dict = Depends(get_current_user_from_request),
     manager: NotebookManager = Depends(get_notebook_manager)
 ):
     """Upload a file as a source (PDF, Word, text, Markdown, HTML, image, or audio)"""
     try:
-        # Verify notebook ownership
-        await manager.get_notebook(notebook_id, current_user["id"])
-
         # Determine source type from the extension (images and audio have their own
         # readers; an unknown extension is accepted only if the bytes are text).
         from .source_types import UnsupportedFile, classify_upload
@@ -359,7 +376,7 @@ async def upload_source(
             raise HTTPException(status_code=415, detail=str(exc))
 
         # Create storage directory
-        user_dir = os.path.join(NOTEBOOK_STORAGE_PATH, str(current_user["id"]), str(notebook_id))
+        user_dir = os.path.join(NOTEBOOK_STORAGE_PATH, str(access.owner_id), str(notebook_id))
         os.makedirs(user_dir, exist_ok=True)
 
         # Save file
@@ -372,7 +389,7 @@ async def upload_source(
         # Create source record
         source = await manager.create_source(
             notebook_id=notebook_id,
-            user_id=current_user["id"],
+            user_id=access.owner_id,
             source_type=source_type,
             title=title or filename,
             storage_path=storage_path,
@@ -387,7 +404,7 @@ async def upload_source(
                 run_ingestion_task,
                 manager,
                 source.id,
-                current_user["id"]
+                access.owner_id
             )
 
         return SourceUploadResponse(
@@ -410,18 +427,16 @@ async def add_url_source(
     url_request: SourceUrlRequest,
     background_tasks: BackgroundTasks = None,
     request: Request = None,
+    access: Access = Depends(_need("write")),
     current_user: Dict = Depends(get_current_user_from_request),
     manager: NotebookManager = Depends(get_notebook_manager)
 ):
     """Add a URL as a source"""
     try:
-        # Verify notebook ownership
-        await manager.get_notebook(notebook_id, current_user["id"])
-
         # Create source record with URL as storage_path
         source = await manager.create_source(
             notebook_id=notebook_id,
-            user_id=current_user["id"],
+            user_id=access.owner_id,
             source_type=SourceType.URL,
             title=url_request.title or url_request.url,
             storage_path=url_request.url,
@@ -435,7 +450,7 @@ async def add_url_source(
                 run_ingestion_task,
                 manager,
                 source.id,
-                current_user["id"]
+                access.owner_id
             )
 
         return SourceUploadResponse(
@@ -457,16 +472,14 @@ async def add_text_source(
     content: str = Form(...),
     background_tasks: BackgroundTasks = None,
     request: Request = None,
+    access: Access = Depends(_need("write")),
     current_user: Dict = Depends(get_current_user_from_request),
     manager: NotebookManager = Depends(get_notebook_manager)
 ):
     """Add plain text or pasted content as a source"""
     try:
-        # Verify notebook ownership
-        await manager.get_notebook(notebook_id, current_user["id"])
-
         # Create storage directory
-        user_dir = os.path.join(NOTEBOOK_STORAGE_PATH, str(current_user["id"]), str(notebook_id))
+        user_dir = os.path.join(NOTEBOOK_STORAGE_PATH, str(access.owner_id), str(notebook_id))
         os.makedirs(user_dir, exist_ok=True)
 
         # Save text to file
@@ -479,7 +492,7 @@ async def add_text_source(
         # Create source record
         source = await manager.create_source(
             notebook_id=notebook_id,
-            user_id=current_user["id"],
+            user_id=access.owner_id,
             source_type=SourceType.TEXT,
             title=title,
             storage_path=storage_path,
@@ -494,7 +507,7 @@ async def add_text_source(
                 run_ingestion_task,
                 manager,
                 source.id,
-                current_user["id"]
+                access.owner_id
             )
 
         return SourceUploadResponse(
@@ -514,12 +527,13 @@ async def get_source_status(
     notebook_id: UUID,
     source_id: UUID,
     request: Request = None,
+    access: Access = Depends(_need("read")),
     current_user: Dict = Depends(get_current_user_from_request),
     manager: NotebookManager = Depends(get_notebook_manager)
 ):
     """Get the ingestion status of a source"""
     try:
-        source = await manager.get_source(source_id, current_user["id"])
+        source = await get_source_in(manager, access, source_id)
         return IngestionStatusResponse(
             source_id=source.id,
             status=source.status,
@@ -533,17 +547,25 @@ async def get_source_status(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _page_starts(raw: Any) -> Optional[List[int]]:
+    if not isinstance(raw, list):
+        return None
+    starts = [int(p) for p in raw if isinstance(p, (int, float)) and not isinstance(p, bool) and p >= 0]
+    return starts or None
+
+
 @router.get("/{notebook_id}/sources/{source_id}/content")
 async def get_source_content(
     notebook_id: UUID,
     source_id: UUID,
     request: Request = None,
+    access: Access = Depends(_need("read")),
     current_user: Dict = Depends(get_current_user_from_request),
     manager: NotebookManager = Depends(get_notebook_manager)
 ):
     """Get the extracted text content of a source"""
     try:
-        source = await manager.get_source(source_id, current_user["id"])
+        source = await get_source_in(manager, access, source_id)
         async with manager.db_pool.acquire() as conn:
             content_text = await conn.fetchval(
                 "SELECT content_text FROM notebook_sources WHERE id = $1",
@@ -555,6 +577,8 @@ async def get_source_content(
             "type": source.type.value if hasattr(source.type, 'value') else str(source.type),
             "content": content_text or "",
             "length": len(content_text) if content_text else 0,
+            # Character offset where each PDF/slide page starts in "content"; null when not known.
+            "page_starts": _page_starts((source.metadata or {}).get("page_starts")),
         }
     except SourceNotFoundError:
         raise HTTPException(status_code=404, detail="Source not found")
@@ -568,6 +592,7 @@ async def stream_source_status(
     notebook_id: UUID,
     source_id: UUID,
     request: Request = None,
+    access: Access = Depends(_need("read")),
     current_user: Dict = Depends(get_current_user_from_request),
     manager: NotebookManager = Depends(get_notebook_manager)
 ):
@@ -579,7 +604,7 @@ async def stream_source_status(
         last_chunk_count = 0
         while True:
             try:
-                source = await manager.get_source(source_id, current_user["id"])
+                source = await get_source_in(manager, access, source_id)
                 status = source.status.value if hasattr(source.status, 'value') else str(source.status)
                 chunk_count = source.chunk_count or 0
                 error_msg = source.error_message or ""
@@ -630,16 +655,17 @@ async def delete_source(
     notebook_id: UUID,
     source_id: UUID,
     request: Request = None,
+    access: Access = Depends(_need("write")),
     current_user: Dict = Depends(get_current_user_from_request),
     manager: NotebookManager = Depends(get_notebook_manager)
 ):
     """Delete a source and its chunks"""
     try:
         # Get source to find storage path
-        source = await manager.get_source(source_id, current_user["id"])
+        source = await get_source_in(manager, access, source_id)
 
         # Delete from database (cascade deletes chunks)
-        deleted = await manager.delete_source(source_id, current_user["id"])
+        deleted = await manager.delete_source(source_id, access.owner_id)
 
         if not deleted:
             raise HTTPException(status_code=404, detail="Source not found")
@@ -668,16 +694,17 @@ async def retry_source_ingestion(
     source_id: UUID,
     background_tasks: BackgroundTasks,
     request: Request = None,
+    access: Access = Depends(_need("write")),
     current_user: Dict = Depends(get_current_user_from_request),
     manager: NotebookManager = Depends(get_notebook_manager)
 ):
     """Retry ingestion for a stuck/failed source"""
     try:
-        source = await manager.get_source(source_id, current_user["id"])
+        source = await get_source_in(manager, access, source_id)
         await manager.update_source_status(source_id, SourceStatus.PENDING)
 
         from .ingestion import run_ingestion_task
-        background_tasks.add_task(run_ingestion_task, manager, source_id, current_user["id"])
+        background_tasks.add_task(run_ingestion_task, manager, source_id, access.owner_id)
 
         return {"message": "Re-ingestion started", "source_id": str(source_id)}
 
@@ -697,6 +724,7 @@ async def list_notes(
     limit: int = 50,
     offset: int = 0,
     request: Request = None,
+    access: Access = Depends(_need("read")),
     current_user: Dict = Depends(get_current_user_from_request),
     manager: NotebookManager = Depends(get_notebook_manager)
 ):
@@ -704,7 +732,7 @@ async def list_notes(
     try:
         notes, total = await manager.list_notes(
             notebook_id=notebook_id,
-            user_id=current_user["id"],
+            user_id=access.owner_id,
             note_type=note_type,
             limit=limit,
             offset=offset
@@ -726,6 +754,7 @@ async def create_note(
     notebook_id: UUID,
     note_request: CreateNoteRequest,
     request: Request = None,
+    access: Access = Depends(_need("write")),
     current_user: Dict = Depends(get_current_user_from_request),
     manager: NotebookManager = Depends(get_notebook_manager)
 ):
@@ -733,7 +762,7 @@ async def create_note(
     try:
         return await manager.create_note(
             notebook_id=notebook_id,
-            user_id=current_user["id"],
+            user_id=access.owner_id,
             request=note_request
         )
     except NotebookNotFoundError:
@@ -748,12 +777,13 @@ async def get_note(
     notebook_id: UUID,
     note_id: UUID,
     request: Request = None,
+    access: Access = Depends(_need("read")),
     current_user: Dict = Depends(get_current_user_from_request),
     manager: NotebookManager = Depends(get_notebook_manager)
 ):
     """Get a specific note"""
     try:
-        return await manager.get_note(note_id, current_user["id"])
+        return await manager.get_note(note_id, await note_author_in(manager, access, note_id))
     except NoteNotFoundError:
         raise HTTPException(status_code=404, detail="Note not found")
     except Exception as e:
@@ -767,12 +797,13 @@ async def update_note(
     note_id: UUID,
     note_request: UpdateNoteRequest,
     request: Request = None,
+    access: Access = Depends(_need("write")),
     current_user: Dict = Depends(get_current_user_from_request),
     manager: NotebookManager = Depends(get_notebook_manager)
 ):
     """Update a note"""
     try:
-        return await manager.update_note(note_id, current_user["id"], note_request)
+        return await manager.update_note(note_id, await note_author_in(manager, access, note_id), note_request)
     except NoteNotFoundError:
         raise HTTPException(status_code=404, detail="Note not found")
     except Exception as e:
@@ -785,12 +816,13 @@ async def delete_note(
     notebook_id: UUID,
     note_id: UUID,
     request: Request = None,
+    access: Access = Depends(_need("write")),
     current_user: Dict = Depends(get_current_user_from_request),
     manager: NotebookManager = Depends(get_notebook_manager)
 ):
     """Delete a note"""
     try:
-        deleted = await manager.delete_note(note_id, current_user["id"])
+        deleted = await manager.delete_note(note_id, await note_author_in(manager, access, note_id))
         if not deleted:
             raise HTTPException(status_code=404, detail="Note not found")
         return {"message": "Note deleted successfully"}
@@ -810,6 +842,7 @@ async def chat_with_notebook(
     notebook_id: UUID,
     chat_request: NotebookChatRequest,
     request: Request = None,
+    access: Access = Depends(_need("chat")),
     current_user: Dict = Depends(get_current_user_from_request),
     manager: NotebookManager = Depends(get_notebook_manager)
 ):
@@ -822,8 +855,9 @@ async def chat_with_notebook(
     allowed = await allowed_for(_pool_of(request), int(current_user["id"]))
     try:
         from .rag_chat import RAGChatService
+        from .router_chat import legacy_citation_dicts
 
-        rag_service = RAGChatService(manager, allowed_models=allowed)
+        rag_service = RAGChatService(scoped(manager, access), allowed_models=allowed)
         response = await rag_service.chat(
             notebook_id=notebook_id,
             user_id=current_user["id"],
@@ -834,23 +868,18 @@ async def chat_with_notebook(
         response_dict = {
             "answer": response.answer,
             "reasoning": response.reasoning,
-            "citations": [
-                {
-                    "source_id": str(c.source_id) if c.source_id else None,
-                    "source_title": c.source_title,
-                    "chunk_id": str(c.chunk_id) if c.chunk_id else None,
-                    "page": c.page,
-                    "section": c.section,
-                    "quote": c.quote
-                }
-                for c in response.citations
-            ],
+            "citations": redact_citations(
+                access, await legacy_citation_dicts(manager, notebook_id, access.owner_id, response.citations)
+            ),
             "model_used": response.model_used,
             "message_id": str(response.message_id) if response.message_id else None,
+            "refused": response.refused,
+            "unsupported": response.unsupported,
+            "context": getattr(response, "context", None),
         }
         
         # Include raw_chunks if present (for debugging)
-        if response.raw_chunks:
+        if response.raw_chunks and access.can_read_sources:
             response_dict["raw_chunks"] = [
                 {
                     "chunk": {
@@ -861,6 +890,7 @@ async def chat_with_notebook(
                         "chunk_index": c.chunk.chunk_index,
                     },
                     "score": c.score,
+                    "vector_score": c.vector_score,
                     "source_title": c.source_title
                 }
                 for c in response.raw_chunks
@@ -881,17 +911,13 @@ async def get_chat_history(
     limit: int = 50,
     offset: int = 0,
     request: Request = None,
+    access: Access = Depends(_need("chat")),
     current_user: Dict = Depends(get_current_user_from_request),
     manager: NotebookManager = Depends(get_notebook_manager)
 ):
     """Get chat history for a notebook"""
     try:
-        messages, total = await manager.get_chat_history(
-            notebook_id=notebook_id,
-            user_id=current_user["id"],
-            limit=limit,
-            offset=offset
-        )
+        messages, total = await get_own_chat_history(manager, access, limit=limit, offset=offset)
         return ChatHistoryResponse(
             messages=messages,
             total_count=total,
@@ -908,12 +934,13 @@ async def get_chat_history(
 async def clear_chat_history(
     notebook_id: UUID,
     request: Request = None,
+    access: Access = Depends(_need("chat")),
     current_user: Dict = Depends(get_current_user_from_request),
     manager: NotebookManager = Depends(get_notebook_manager)
 ):
     """Clear chat history for a notebook"""
     try:
-        await manager.clear_chat_history(notebook_id, current_user["id"])
+        await clear_own_chat_history(manager, access)
         return {"message": "Chat history cleared"}
     except NotebookNotFoundError:
         raise HTTPException(status_code=404, detail="Notebook not found")
@@ -928,12 +955,13 @@ async def clear_chat_history(
 async def get_notebook_stats(
     notebook_id: UUID,
     request: Request = None,
+    access: Access = Depends(_need("meta")),
     current_user: Dict = Depends(get_current_user_from_request),
     manager: NotebookManager = Depends(get_notebook_manager)
 ):
     """Get statistics for a notebook"""
     try:
-        return await manager.get_notebook_stats(notebook_id, current_user["id"])
+        return await manager.get_notebook_stats(notebook_id, access.owner_id)
     except NotebookNotFoundError:
         raise HTTPException(status_code=404, detail="Notebook not found")
     except Exception as e:
@@ -941,7 +969,7 @@ async def get_notebook_stats(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/debug/embedding-status")
+@router.get("/debug/embedding-status", dependencies=[Depends(require_admin_user)])
 async def check_embedding_status():
     """Check Ollama embedding service status and available models"""
     import requests
@@ -1020,19 +1048,17 @@ async def add_youtube_source(
     youtube_request: "YouTubeSourceRequest",
     background_tasks: BackgroundTasks = None,
     request: Request = None,
+    access: Access = Depends(_need("write")),
     current_user: Dict = Depends(get_current_user_from_request),
     manager: NotebookManager = Depends(get_notebook_manager)
 ):
     """Add a YouTube video as a source (transcript will be extracted)"""
     from .models import YouTubeSourceRequest
     try:
-        # Verify notebook ownership
-        await manager.get_notebook(notebook_id, current_user["id"])
-
         # Create source record with YouTube URL
         source = await manager.create_source(
             notebook_id=notebook_id,
-            user_id=current_user["id"],
+            user_id=access.owner_id,
             source_type=SourceType.YOUTUBE,
             title=youtube_request.title or youtube_request.url,
             storage_path=youtube_request.url,
@@ -1046,7 +1072,7 @@ async def add_youtube_source(
                 run_ingestion_task,
                 manager,
                 source.id,
-                current_user["id"]
+                access.owner_id
             )
 
         return SourceUploadResponse(
@@ -1101,7 +1127,10 @@ async def transform_source(
     picked = await _person_model(request, current_user, picked)
 
     try:
+        await manager.get_notebook(notebook_id, current_user["id"])
         source = await manager.get_source(source_id, current_user["id"])
+        if source.notebook_id != notebook_id:
+            raise SourceNotFoundError(f"Source {source_id} not found")
         
         async with manager.db_pool.acquire() as conn:
             content_text = await conn.fetchval(
@@ -1205,12 +1234,14 @@ async def list_transformations(
 @router.get("/podcasts/styles")
 async def list_podcast_styles():
     """List available podcast styles"""
+    from .podcast_script import PRESET_STYLES
     return {"styles": [
         {"id": "conversational", "name": "Conversational", "description": "Casual, friendly discussion between speakers"},
         {"id": "interview", "name": "Interview", "description": "Q&A format with a host interviewing guests"},
         {"id": "educational", "name": "Educational", "description": "Structured teaching with clear explanations"},
         {"id": "debate", "name": "Debate", "description": "Multiple perspectives discussing and debating topics"},
         {"id": "storytelling", "name": "Storytelling", "description": "Narrative format weaving information into a story"},
+        *PRESET_STYLES,
     ]}
 
 
@@ -1646,7 +1677,8 @@ async def generate_standalone_podcast_stream(
                 yield f"event: progress\ndata: {json.dumps({'step': 'audio', 'message': f'Speaking {len(transcript)} lines...'})}\n\n"
                 try:
                     segments = [{"speaker": t["speaker"], "text": t["dialogue"]} for t in transcript]
-                    result.update(await podcast_audio.make_audio(segments))
+                    result.update(await podcast_audio.make_audio(
+                        segments, voices=podcast_audio.chosen_voices(podcast_request.custom_speakers)))
                     result["status"] = "completed"
                 except podcast_audio.PodcastAudioError as audio_err:
                     logger.warning(f"Podcast audio failed: {audio_err}")
@@ -1693,6 +1725,7 @@ async def generate_standalone_podcast_stream(
 @router.get("/podcasts/audio/{filename}")
 async def serve_standalone_podcast_audio(
     filename: str,
+    request: Request,
     current_user: Dict = Depends(get_current_user_from_request)
 ):
     """Serve audio file for standalone podcast generation"""
@@ -1700,6 +1733,8 @@ async def serve_standalone_podcast_audio(
     PODCAST_OUTPUT_PATH = os.environ.get("PODCAST_OUTPUT_PATH", "/tmp/podcasts")
 
     safe_filename = os.path.basename(filename)
+    if not await podcast_audio.user_owns_audio(_pool_of(request), int(current_user["id"]), safe_filename):
+        raise HTTPException(status_code=404, detail="Audio file not found")
 
     # Check podcast output directory first, then system temp (Chatterbox writes here)
     for search_dir in [os.path.join(PODCAST_OUTPUT_PATH, "audio"), tempfile.gettempdir()]:
@@ -1712,10 +1747,16 @@ async def serve_standalone_podcast_audio(
 
 
 @router.get("/podcasts/tts-audio/{filename}")
-async def proxy_tts_audio(filename: str):
+async def proxy_tts_audio(
+    filename: str,
+    request: Request,
+    current_user: Dict = Depends(get_current_user_from_request),
+):
     """Proxy audio files from tts-service container"""
     import httpx
     safe_filename = os.path.basename(filename)
+    if not await podcast_audio.user_owns_audio(_pool_of(request), int(current_user["id"]), safe_filename):
+        raise HTTPException(status_code=404, detail="Audio file not found")
     local = podcast_audio.local_file(safe_filename)
     if local is not None:
         from fastapi.responses import FileResponse
@@ -1777,7 +1818,8 @@ async def generate_standalone_podcast_audio_from_script(
 
         try:
             made = await podcast_audio.make_audio(
-                [{"speaker": seg["speaker"], "text": seg["dialogue"]} for seg in cleaned_transcript]
+                [{"speaker": seg["speaker"], "text": seg["dialogue"]} for seg in cleaned_transcript],
+                voices=podcast_audio.chosen_voices(audio_request.custom_speakers),
             )
             audio_path, audio_url, duration_seconds = made["audio_path"], made["audio_url"], made["duration_seconds"]
         except podcast_audio.PodcastAudioError as tts_err:
@@ -2241,6 +2283,17 @@ async def search_knowledge_base(
 # Included last so the catch-all `/{notebook_id}` routes above keep their order.
 from .discover import router as _discover_router  # noqa: E402
 from .capabilities import router as _capabilities_router  # noqa: E402
+from .router_chat import make_router as _make_chat_router  # noqa: E402
+from .router_shares import make_router as _make_shares_router  # noqa: E402
 
 router.include_router(_capabilities_router)
 router.include_router(_discover_router)
+# Streaming chat, chat settings and re-index; built with this module's own dependencies.
+router.include_router(_make_chat_router(
+    get_user=get_current_user_from_request,
+    get_manager=get_notebook_manager,
+    person_model=_person_model,
+    pool_of=_pool_of,
+))
+# Sharing: who else may open a notebook, as which role (see access.py for the role rules).
+router.include_router(_make_shares_router(get_user=get_current_user_from_request, get_manager=get_notebook_manager))
