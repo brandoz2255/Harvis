@@ -6,7 +6,7 @@ fetches and document saves MUST go through these endpoints so that:
   1. RFC-1918 / loopback URLs are blocked before any network call.
   2. HTML content is sanitized and truncated before it reaches the LLM context.
   3. DOCX artifacts are created via the existing artifact system (DB + file storage).
-  4. Every call is authenticated via the shared OPENCLAW_GATEWAY_TOKEN.
+  4. Every call is authenticated via the shared HARVIS_GATEWAY_TOKEN.
 
 Endpoints:
   POST /api/tools/web-fetch      — fetch + extract text from a public URL
@@ -18,11 +18,9 @@ Endpoints:
 """
 
 import asyncio
-import ipaddress
 import logging
 import os
 import re
-import socket
 import json
 import base64
 import time
@@ -33,10 +31,16 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from workspace.gateway_auth import resolve_gateway_caller
+from tools.url_safety import (  # noqa: F401  (old importers reach these through here)
+    _PublicOnlyTransport,
+    _blocked_reason,
+    _ensure_resolved_addresses_public,
+    _validate_browser_url,
+    _validate_url,
+)
 
 logger = logging.getLogger(__name__)
 
-OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 
 # Truncate extracted text to this many characters (~8 000 tokens)
 _MAX_TEXT_CHARS = 32_000
@@ -49,66 +53,6 @@ _RATE_WINDOW_S = int(os.getenv("OPENCLAW_WEB_RATE_WINDOW_S", "60"))
 _RATE_MAX_SEARCH = int(os.getenv("OPENCLAW_WEB_RATE_MAX_SEARCH", "10"))
 _RATE_MAX_FETCH = int(os.getenv("OPENCLAW_WEB_RATE_MAX_FETCH", "20"))
 _rate_state: Dict[str, Dict[str, List[float]]] = {}  # key -> {"search":[ts], "fetch":[ts]}
-
-# Domain policy
-_ALLOWLIST = [h.strip().lower() for h in os.getenv("OPENCLAW_WEB_ALLOWLIST", "").split(",") if h.strip()]
-_DENYLIST = [h.strip().lower() for h in os.getenv("OPENCLAW_WEB_DENYLIST", "").split(",") if h.strip()]
-
-def _blocked_reason(ip: str) -> Optional[str]:
-    """Why this address may not be fetched, or None. Anything not globally routable is out:
-    RFC 1918, loopback, link-local (cloud metadata), CGNAT 100.64/10 (the tailnet), ULA, reserved."""
-    try:
-        addr = ipaddress.ip_address(ip.split("%", 1)[0])
-    except ValueError:
-        return None
-    mapped = getattr(addr, "ipv4_mapped", None)
-    if mapped is not None:
-        addr = mapped
-    if addr.is_global and not addr.is_multicast:
-        return None
-    return "a private or internal address"
-
-
-def _ensure_resolved_addresses_public(hostname: str) -> None:
-    """
-    Block IP literals or hostnames whose DNS resolves to private/internal addresses
-    (SSRF / DNS-rebinding protection).
-    """
-    host = (hostname or "").strip("[]")
-    try:
-        ipaddress.ip_address(host.split("%", 1)[0])
-        candidates = [host]
-    except ValueError:
-        try:
-            candidates = [info[4][0] for info in socket.getaddrinfo(host, None)]
-        except OSError:
-            # Unresolvable: the fetch itself fails with a clear error.
-            return
-    for ip in candidates:
-        reason = _blocked_reason(ip)
-        if reason:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Requests to {hostname} are not allowed: it resolves to {reason}",
-            )
-
-
-class _PublicOnlyTransport(httpx.AsyncBaseTransport):
-    """Re-checks every hop, so a public URL cannot redirect the backend onto pgsql,
-    the tailnet or the metadata address. httpx hands each redirect back here."""
-
-    def __init__(self) -> None:
-        self._inner = httpx.AsyncHTTPTransport()
-
-    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        if request.url.scheme not in ("http", "https"):
-            raise HTTPException(status_code=400, detail="Only http and https URLs can be fetched")
-        await asyncio.to_thread(_ensure_resolved_addresses_public, request.url.host)
-        return await self._inner.handle_async_request(request)
-
-    async def aclose(self) -> None:
-        await self._inner.aclose()
-
 
 openclaw_proxy_router = APIRouter(prefix="/api/tools", tags=["openclaw-tools"])
 
@@ -152,56 +96,6 @@ async def _audit(
     except Exception:
         # Never break the tool call due to logging.
         return
-
-
-# ─── URL validation ────────────────────────────────────────────────────────────
-
-def _validate_url(url: str, *, live_web: bool = False) -> None:
-    """
-    Reject URLs that point to private/internal addresses.
-
-    Allowed: http:// and https:// pointing to routable public IPs.
-    Rejected: RFC-1918, loopback, link-local, localhost, other schemes.
-
-    When live_web=True, domain allow/deny lists are skipped (user acknowledged
-    unrestricted access).  Private-IP and localhost checks are ALWAYS enforced.
-    """
-    try:
-        parsed = urlparse(url)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Malformed URL")
-
-    if parsed.scheme not in ("http", "https"):
-        raise HTTPException(
-            status_code=400,
-            detail=f"URL scheme '{parsed.scheme}' is not allowed. Only http/https.",
-        )
-
-    hostname = parsed.hostname or ""
-    if not hostname:
-        raise HTTPException(status_code=400, detail="URL has no hostname")
-
-    # Reject by hostname — always enforced regardless of live_web
-    lowered = hostname.lower()
-    if lowered in ("localhost", "localhost.localdomain"):
-        raise HTTPException(status_code=400, detail="Requests to localhost are not allowed")
-
-    # Domain allow/deny lists (suffix match) — skipped in live_web mode
-    if not live_web:
-        if _DENYLIST:
-            for bad in _DENYLIST:
-                if lowered == bad or lowered.endswith("." + bad):
-                    raise HTTPException(status_code=400, detail=f"Domain '{lowered}' is blocked")
-        if _ALLOWLIST:
-            ok = False
-            for good in _ALLOWLIST:
-                if lowered == good or lowered.endswith("." + good):
-                    ok = True
-                    break
-            if not ok:
-                raise HTTPException(status_code=400, detail=f"Domain '{lowered}' is not allowlisted")
-
-    _ensure_resolved_addresses_public(lowered)
 
 
 def _is_live_web(request: Request) -> bool:
@@ -265,130 +159,6 @@ async def _require_interactive(
         if exp.timestamp() < time.time():
             raise HTTPException(status_code=403, detail="Capability token expired")
     return int(row.get("user_id") or 0)
-
-
-def _validate_browser_url(url: str, *, live_web: bool = False) -> None:
-    parsed = urlparse(url)
-    if parsed.scheme != "https":
-        raise HTTPException(status_code=400, detail="Tier 3 browsing requires https URLs")
-    hostname = (parsed.hostname or "").lower()
-    if not hostname:
-        raise HTTPException(status_code=400, detail="URL has no hostname")
-    if hostname in ("localhost", "localhost.localdomain"):
-        raise HTTPException(status_code=400, detail="Requests to localhost are not allowed")
-
-    # With X-Live-Web (workspace live_web), skip hostname allowlist — same policy as web-fetch.
-    # OPENCLAW_BROWSER_ALLOWLIST=* also skips the allowlist (still enforces https + non-private DNS).
-    if not live_web:
-        raw_allow = os.getenv("OPENCLAW_BROWSER_ALLOWLIST", "").strip()
-        if raw_allow != "*":
-            allow = [h.strip().lower() for h in raw_allow.split(",") if h.strip()]
-        else:
-            allow = ["*"]  # sentinel: skip check below
-        if allow != ["*"] and not allow:
-            # Default Tier 3 hosts — broad research set (override with OPENCLAW_BROWSER_ALLOWLIST)
-            allow = [
-                "example.com",
-                "www.example.com",
-                # Google
-                "google.com",
-                "google.dev",
-                "googleapis.com",
-                "gstatic.com",
-                "googleusercontent.com",
-                "gemini.google.com",
-                "ai.google.dev",
-                "blog.google",
-                "chromium.org",
-                # Microsoft / GitHub
-                "github.com",
-                "gist.github.com",
-                "raw.githubusercontent.com",
-                "microsoft.com",
-                "azure.com",
-                "visualstudio.com",
-                "bing.com",
-                "msn.com",
-                # Search & reference
-                "duckduckgo.com",
-                "www.duckduckgo.com",
-                "wikipedia.org",
-                "wikimedia.org",
-                "archive.org",
-                # Social / comms
-                "reddit.com",
-                "x.com",
-                "twitter.com",
-                "linkedin.com",
-                "facebook.com",
-                "instagram.com",
-                "youtube.com",
-                "youtu.be",
-                "discord.com",
-                "slack.com",
-                # News / media
-                "news.ycombinator.com",
-                "ycombinator.com",
-                "bbc.co.uk",
-                "bbc.com",
-                "reuters.com",
-                "nytimes.com",
-                "theguardian.com",
-                "apnews.com",
-                # AI / dev tools
-                "claude.ai",
-                "anthropic.com",
-                "console.anthropic.com",
-                "docs.anthropic.com",
-                "openai.com",
-                "platform.openai.com",
-                "cursor.com",
-                "docs.cursor.com",
-                "httpstat.us",
-                "ollama.com",
-                "huggingface.co",
-                "kaggle.com",
-                "colab.research.google.com",
-                # Docs & learning
-                "stackoverflow.com",
-                "serverfault.com",
-                "superuser.com",
-                "stackexchange.com",
-                "developer.mozilla.org",
-                "docs.python.org",
-                "nodejs.org",
-                "npmjs.com",
-                "pypi.org",
-                "react.dev",
-                "nextjs.org",
-                "tailwindcss.com",
-                "kubernetes.io",
-                "docker.com",
-                "docs.docker.com",
-                # Cloud & infra docs
-                "aws.amazon.com",
-                "cloud.google.com",
-                "docs.aws.amazon.com",
-                # Registries & CDNs (common page assets)
-                "unpkg.com",
-                "jsdelivr.net",
-                "cdn.jsdelivr.net",
-                "cdnjs.cloudflare.com",
-                "cloudflare.com",
-                "fastly.com",
-                # Commerce / general
-                "amazon.com",
-                "apple.com",
-            ]
-        if allow != ["*"]:
-            ok = any(hostname == h or hostname.endswith("." + h) for h in allow)
-            if not ok:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Domain '{hostname}' is not allowlisted for interactive browsing",
-                )
-
-    _ensure_resolved_addresses_public(hostname)
 
 
 class BrowserSessionRequest(BaseModel):
@@ -752,6 +522,20 @@ class WebFetchRequest(BaseModel):
     purpose: str = "research"
 
 
+async def _gateway_acts_for(request: Request, claimed_user_id: int) -> int:
+    """The user a gateway call may act for.
+
+    A BYO token belongs to exactly one user, so it can only act for that user
+    whatever the body says. The bundled token is shared by every user's runs and
+    carries no identity, so there the body's id is only a claim; callers that read
+    a user's data must check that data against it.
+    """
+    kind, token_user_id = await resolve_gateway_caller(request, request.headers.get("Authorization"))
+    if kind == "byo" and token_user_id is not None and int(token_user_id) != int(claimed_user_id):
+        raise HTTPException(status_code=403, detail="user_id does not match the gateway token")
+    return int(claimed_user_id)
+
+
 class WebSearchRequest(BaseModel):
     query: str
     max_results: int = 8
@@ -776,7 +560,7 @@ async def web_search(
     """
     Perform a web search and return structured results only (no page content).
 
-    Auth: Authorization: Bearer <OPENCLAW_GATEWAY_TOKEN>
+    Auth: Authorization: Bearer <HARVIS_GATEWAY_TOKEN>
     Intended for Tier 2 research: search → pick URLs → use /api/tools/web-fetch.
     """
     authorization = request.headers.get("Authorization")
@@ -847,7 +631,7 @@ async def web_fetch(
     """
     Fetch a public URL and return sanitized, truncated text.
 
-    Auth: Authorization: Bearer <OPENCLAW_GATEWAY_TOKEN>
+    Auth: Authorization: Bearer <HARVIS_GATEWAY_TOKEN>
     Rejects RFC-1918, loopback, localhost.  Strips scripts/styles before extraction.
     """
     authorization = request.headers.get("Authorization")
@@ -954,11 +738,10 @@ async def document_save(
     """
     Convert markdown content to a DOCX artifact and persist it.
 
-    Auth: Authorization: Bearer <OPENCLAW_GATEWAY_TOKEN>
+    Auth: Authorization: Bearer <HARVIS_GATEWAY_TOKEN>
     Returns artifact_id and download_url on success.
     """
-    authorization = request.headers.get("Authorization")
-    await _verify_openclaw_token(request, authorization)
+    await _gateway_acts_for(request, req.user_id)
 
     pool = getattr(request.app.state, "pg_pool", None)
     if pool is None:
@@ -1073,12 +856,11 @@ async def file_analyze(
     """
     Analyze an uploaded file with Kimi vision and return structured document layout.
 
-    Auth: Authorization: Bearer <OPENCLAW_GATEWAY_TOKEN>
+    Auth: Authorization: Bearer <HARVIS_GATEWAY_TOKEN>
     Loads the file stored by POST /api/uploads, converts to images, sends to Kimi
     vision, returns JSON structure OpenClaw can use with harvis-document skill.
     """
-    authorization = request.headers.get("Authorization")
-    await _verify_openclaw_token(request, authorization)
+    await _gateway_acts_for(request, req.user_id)
 
     pool = getattr(request.app.state, "pg_pool", None)
     if pool is None:
@@ -1087,7 +869,7 @@ async def file_analyze(
     # ── Load file from uploads dir ─────────────────────────────────────────────
     # Find the file — we store it as {file_id}.{ext} + {file_id}.meta.json
     meta_path = os.path.join(_UPLOADS_DIR, f"{req.file_id}.meta.json")
-    if not os.path.exists(meta_path):
+    if os.path.basename(req.file_id) != req.file_id or not os.path.exists(meta_path):
         raise HTTPException(status_code=404, detail=f"File {req.file_id} not found")
 
     try:
@@ -1096,6 +878,12 @@ async def file_analyze(
             meta = _json.load(f)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to read file metadata: {exc}")
+
+    # A sidecar with no recorded owner is refused too. Same 404 as a missing file,
+    # so the id is not an oracle for which uploads exist.
+    meta_owner = meta.get("user_id")
+    if meta_owner is None or int(meta_owner) != req.user_id:
+        raise HTTPException(status_code=404, detail=f"File {req.file_id} not found")
 
     mime_type: str = meta.get("mime_type", "application/octet-stream")
     stored_path: str = meta.get("stored_path", "")
@@ -1182,7 +970,9 @@ async def file_analyze(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        from moonshot_api import moonshot_http_client, user_guarded
+
+        async with moonshot_http_client(moonshot_base, user_guarded(req.user_id), timeout=120.0) as client:
             resp = await client.post(
                 f"{moonshot_base}/chat/completions",
                 json=payload,
@@ -1248,10 +1038,10 @@ async def vision_query(
 ) -> Dict[str, Any]:
     """Analyze a base64 image with Kimi K2.5 vision.
 
-    Auth: Authorization: Bearer <OPENCLAW_GATEWAY_TOKEN>
+    Auth: Authorization: Bearer <HARVIS_GATEWAY_TOKEN>
     Called by OpenClaw agents when they receive Discord image attachments.
     """
-    _verify_openclaw_token(request.headers.get("Authorization"))
+    await _verify_openclaw_token(request, request.headers.get("Authorization"))
 
     # Resize if needed — cap at 1024px on longest side to stay within Moonshot limits
     try:

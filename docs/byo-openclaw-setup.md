@@ -1,3 +1,5 @@
+> **Retired 2026-10-30:** the bundled OpenClaw service is gone and Hermes is the recommended agent. This guide now describes only the optional external OpenClaw link (an instance you run yourself).
+
 # BYO OpenClaw Setup Guide
 
 Run your own OpenClaw instance alongside Harvis to unlock full agent capabilities: GitHub PR automation, unrestricted code execution, kubectl cluster access, and your own model choice.

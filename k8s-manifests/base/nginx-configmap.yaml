@@ -74,13 +74,8 @@ data:
             ssl_protocols TLSv1.2 TLSv1.3;
             ssl_ciphers HIGH:!aNULL:!MD5;
 
-            # Serve audio files from shared temp directory
-            # Matches backend response paths like /api/audio/response_uuid.wav
-            location /api/audio/ {
-                alias /tmp/;
-                add_header Content-Type application/octet-stream;
-                autoindex on;
-            }
+            # /api/audio/ is not aliased to /tmp here: the backend route serves only generated
+            # <name>.wav|mp3 files, an alias with autoindex listed all of /tmp with no auth.
 
             # Vibecoding WebSocket terminal (direct to backend)
             location ~ ^/api/vibecoding/container/([^/]+)/terminal$ {

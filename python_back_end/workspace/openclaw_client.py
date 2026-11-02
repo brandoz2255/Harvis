@@ -1,7 +1,7 @@
 """
 OpenClaw WebSocket client for Harvis Workspaces.
 
-Manages connections to the OpenClaw gateway (ws://harvis-ai-openclaw:18789)
+Manages connections to a user-linked OpenClaw gateway (there is no bundled one)
 and streams activity log events back to the calling code.
 
 Protocol (OpenClaw gateway v3):
@@ -60,6 +60,8 @@ from cryptography.hazmat.primitives.serialization import (
 )
 from websockets.exceptions import ConnectionClosed, WebSocketException
 
+from gateway_token import fallback_gateway_token, gateway_token
+
 logger = logging.getLogger(__name__)
 
 
@@ -67,14 +69,16 @@ def _debug400831(location: str, message: str, data: dict, run_id: str, hypothesi
     return  # debug logging removed
 
 
-OPENCLAW_URL = os.getenv("OPENCLAW_URL", "ws://harvis-ai-openclaw:18789")
-OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
+# No default host: Harvis no longer bundles a gateway. Callers pass the user's linked URL
+# (see openclaw_resolver); an empty value fails fast in _connect instead of timing out on DNS.
+OPENCLAW_URL = os.getenv("OPENCLAW_URL", "")
+OPENCLAW_GATEWAY_TOKEN = gateway_token()
 
 # Optional failover: if connecting to the primary OpenClaw fails, try this URL.
-# Used to keep a remote primary (e.g. desktop GPU box) with the local bundled
-# container as the safety net. Empty string disables fallback.
+# Used to keep a remote primary (e.g. desktop GPU box) with a second gateway as the
+# safety net. Empty string disables fallback.
 OPENCLAW_FALLBACK_URL = os.getenv("OPENCLAW_FALLBACK_URL", "")
-OPENCLAW_FALLBACK_TOKEN = os.getenv("OPENCLAW_FALLBACK_TOKEN", "") or OPENCLAW_GATEWAY_TOKEN
+OPENCLAW_FALLBACK_TOKEN = fallback_gateway_token()
 
 # HOME directory used by the OpenClaw gateway we're talking to. The dockerized
 # container runs as `node` with HOME=/home/node; a host-installed OpenClaw on
@@ -85,8 +89,8 @@ OPENCLAW_FALLBACK_TOKEN = os.getenv("OPENCLAW_FALLBACK_TOKEN", "") or OPENCLAW_G
 OPENCLAW_HOME = os.getenv("OPENCLAW_HOME", "/home/node").rstrip("/")
 
 # Identity files (mounted into backend container).
-# docker-compose mounts ./openclaw/config -> /app/openclaw_config:ro
-_IDENTITY_DIR = os.getenv("HARVIS_OPENCLAW_IDENTITY_DIR", "/app/openclaw_config")
+# docker-compose mounts ./engine-config -> /app/engine_config
+_IDENTITY_DIR = os.getenv("HARVIS_OPENCLAW_IDENTITY_DIR", "/app/engine_config")
 _IDENTITY_FILES = (
     ("IDENTITY", "IDENTITY.md"),
     ("SOUL", "SOUL.md"),
@@ -606,26 +610,7 @@ def _looks_like_memory_echo(text: str) -> bool:
     )
 
 
-class OpenClawEvent:
-    """A single event streamed from the OpenClaw gateway."""
-
-    def __init__(self, event_type: str, data: dict):
-        self.type = event_type   # "token" | "tool_call" | "tool_result" | "log" | "done" | "error"
-        self.data = data
-        # Sub-agent tracking: populated by OpenClawClient._handle_agent_event.
-        # run_id  — OpenClaw's internal runId for this agent invocation.
-        # agent_label — human-readable label: "Agent" | "Sub-Agent 1" | "Sub-Agent 2" …
-        self.run_id: Optional[str] = None
-        self.agent_label: Optional[str] = None
-
-    def to_sse(self) -> str:
-        """Format as a Server-Sent Event string for streaming to the frontend."""
-        payload: dict = {"type": self.type, **self.data}
-        if self.run_id:
-            payload["run_id"] = self.run_id
-        if self.agent_label:
-            payload["agent_label"] = self.agent_label
-        return f"data: {json.dumps(payload)}\n\n"
+from .events import OpenClawEvent  # noqa: E402,F401  (re-exported for old importers)
 
 
 class OpenClawClient:
@@ -748,6 +733,10 @@ class OpenClawClient:
         the fallback. On fallback success, mutates `self.gateway_url`/token so any
         later reconnects in the same stream stay on the working endpoint.
         """
+        from openclaw_availability import require_openclaw
+        require_openclaw()
+        if not self.gateway_url:
+            raise RuntimeError("OpenClaw is not linked: no gateway URL (link one under Settings > Integrations)")
         try:
             return await self._connect_to(self.gateway_url, self.gateway_token)
         except (OSError, asyncio.TimeoutError, ConnectionError, WebSocketException) as primary_exc:
