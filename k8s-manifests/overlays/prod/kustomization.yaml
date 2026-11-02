@@ -9,7 +9,6 @@ resources:
   - merged-ollama-backend.yaml
   # - tts-worker.yaml  # REMOVED: TTS/Whisper now runs in main backend pod
   - document-worker.yaml
-  - openclaw.yaml
   - llama-embed.yaml
 
 # Namespace
@@ -29,9 +28,6 @@ images:
   # - name: harvis-tts-worker  # REMOVED: TTS/Whisper now runs in main backend
   #   newName: dulc3/harvis-tts-worker
   #   newTag: unbroken
-  - name: dulc3/openclaw-browser
-    newName: dulc3/openclaw-browser
-    newTag: latest
 # Patches for production
 patches:
   - target:
@@ -59,8 +55,11 @@ patches:
         path: /spec/template/spec/containers/0/image
         value: dulc3/harvis-document-worker:test2
 
-  # Inject OpenClaw + Kimi K2.5 env vars into the backend container (index 0 = harvis-backend)
-  # so the Python orchestrator knows where to find OpenClaw and has the Moonshot API key.
+  # The retired OpenClaw gateway is disabled, including BYO and fallback routing.
+  # Gateway-dependent features are unavailable; native Build remains independent.
+  # Existing cluster objects are not deleted by apply; the old PV retained data.
+  # Inject the gateway token and cloud-provider keys into the backend container
+  # (index 0 = harvis-backend). No harvis-ai-openclaw-secret is required any more.
   - target:
       kind: Deployment
       name: harvis-ai-merged-ollama-backend
@@ -68,8 +67,21 @@ patches:
       - op: add
         path: /spec/template/spec/containers/0/env/-
         value:
-          name: OPENCLAW_URL
-          value: "ws://harvis-ai-openclaw:18789"
+          name: HARVIS_OPENCLAW_DISABLED
+          value: "true"
+      # The code reads HARVIS_GATEWAY_TOKEN first and falls back to the legacy
+      # OPENCLAW_GATEWAY_TOKEN (python_back_end/gateway_token.py), so a cluster that
+      # still has the old Secret keeps authenticating. Both are optional: a Secret
+      # or key that is missing leaves its variable unset instead of blocking the pod.
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: HARVIS_GATEWAY_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: harvis-ai-backend-secret
+              key: gateway-token
+              optional: true
       - op: add
         path: /spec/template/spec/containers/0/env/-
         value:
@@ -78,14 +90,19 @@ patches:
             secretKeyRef:
               name: harvis-ai-openclaw-secret
               key: openclaw-gateway-token
+              optional: true
+      # MOONSHOT_API_KEY / NVIDIA_API_KEY now come from harvis-ai-backend-secret
+      # (keys moonshot-api-key / nvidia-api-key). Both optional: when a key is
+      # absent the cloud provider is simply unavailable and the pod still starts.
       - op: add
         path: /spec/template/spec/containers/0/env/-
         value:
           name: MOONSHOT_API_KEY
           valueFrom:
             secretKeyRef:
-              name: harvis-ai-openclaw-secret
+              name: harvis-ai-backend-secret
               key: moonshot-api-key
+              optional: true
       - op: add
         path: /spec/template/spec/containers/0/env/-
         value:
@@ -97,10 +114,10 @@ patches:
           name: NVIDIA_API_KEY
           valueFrom:
             secretKeyRef:
-              name: harvis-ai-openclaw-secret
+              name: harvis-ai-backend-secret
               key: nvidia-api-key
               optional: true
       # HARVIS_GITHUB_TOKEN / HARVIS_GITHUB_USER / HARVIS_GITHUB_EMAIL removed —
       # GitHub auth is now handled by the HarvisAI GitHub App (App ID 2995570).
       # The harvis-github skill mints short-lived installation tokens at runtime
-      # using GH_APP_ID + GH_INSTALLATION_ID + GH_PRIVATE_KEY in the openclaw pod.
+      # using GH_APP_ID + GH_INSTALLATION_ID + GH_PRIVATE_KEY.

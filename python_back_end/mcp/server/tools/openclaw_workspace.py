@@ -12,17 +12,19 @@ from typing import Optional
 import httpx
 from pydantic import BaseModel
 
+from gateway_token import gateway_token
+
 from ..registry import Tool, register
 
 logger = logging.getLogger(__name__)
 
 BACKEND_URL = os.getenv("BACKEND_INTERNAL_URL", "http://localhost:8000")
-OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
+GATEWAY_TOKEN = gateway_token()
 
 
 def _auth_headers() -> dict:
     return {
-        "Authorization": f"Bearer {OPENCLAW_GATEWAY_TOKEN}",
+        "Authorization": f"Bearer {GATEWAY_TOKEN}",
         "Content-Type": "application/json",
     }
 
