@@ -8,7 +8,16 @@
 import { harvisApi } from './api'
 
 export type ArtifactKind =
-  'briefing' | 'faq' | 'flashcards' | 'mindmap' | 'podcast' | 'quiz' | 'study_guide' | 'timeline'
+  | 'briefing'
+  | 'data_table'
+  | 'faq'
+  | 'flashcards'
+  | 'mindmap'
+  | 'podcast'
+  | 'quiz'
+  | 'slides'
+  | 'study_guide'
+  | 'timeline'
 export type GeneratableKind = Exclude<ArtifactKind, 'podcast'>
 
 export interface QuizQuestion {
@@ -33,12 +42,44 @@ export interface MindTree {
   children: MindNode[]
 }
 
+export interface TableRow {
+  cells: string[]
+  source?: string
+}
+
+export interface DataTable {
+  title?: string
+  columns: string[]
+  rows: TableRow[]
+}
+
+export interface Slide {
+  title: string
+  bullets?: string[]
+  notes?: string
+  source?: string
+}
+
+export interface SlideDeck {
+  title?: string
+  slides: Slide[]
+}
+
 export interface Artifact {
   id: string
   kind: ArtifactKind
   title: string
   format: 'audio' | 'json' | 'markdown'
-  content: { cards?: Flashcard[]; markdown?: string; questions?: QuizQuestion[]; tree?: MindTree } | null
+  content: {
+    cards?: Flashcard[]
+    columns?: string[]
+    markdown?: string
+    questions?: QuizQuestion[]
+    rows?: TableRow[]
+    slides?: Slide[]
+    title?: string
+    tree?: MindTree
+  } | null
   status: string
   audio_url: null | string
   error_message: null | string
@@ -53,7 +94,9 @@ export const CREATE_KINDS: { icon: string; kind: GeneratableKind; label: string 
   { icon: 'file', kind: 'briefing', label: 'Briefing Doc' },
   { icon: 'comment-discussion', kind: 'faq', label: 'FAQ' },
   { icon: 'history', kind: 'timeline', label: 'Timeline' },
-  { icon: 'list-tree', kind: 'mindmap', label: 'Mind map' }
+  { icon: 'list-tree', kind: 'mindmap', label: 'Mind map' },
+  { icon: 'table', kind: 'data_table', label: 'Data Table' },
+  { icon: 'layout', kind: 'slides', label: 'Slide Deck' }
 ]
 
 export const KIND_ICON: Record<ArtifactKind, string> = {
@@ -69,11 +112,33 @@ const base = (notebookId: string) => `/onb-api/notebooks/${encodeURIComponent(no
 
 export const listArtifacts = (notebookId: string) => harvisApi<Artifact[]>(`${base(notebookId)}/artifacts`)
 
-export const generateArtifact = (notebookId: string, kind: GeneratableKind, model?: null | string) =>
+export interface GenerateOptions {
+  /** Free text that steers the layout and focus (the server caps it at 2000 characters). */
+  prompt?: string
+  /** Only these sources feed the artifact; omit to use all of them. */
+  sourceIds?: string[]
+}
+
+export const PROMPT_MAX = 2000
+
+export const generateArtifact = (
+  notebookId: string,
+  kind: GeneratableKind,
+  model?: null | string,
+  { prompt, sourceIds }: GenerateOptions = {}
+) =>
   harvisApi<Artifact>(`${base(notebookId)}/generate`, {
     method: 'POST',
-    body: JSON.stringify({ kind, model_id: model || undefined })
+    body: JSON.stringify({
+      kind,
+      model_id: model || undefined,
+      prompt: prompt?.trim() ? prompt.trim().slice(0, PROMPT_MAX) : undefined,
+      source_ids: sourceIds?.length ? sourceIds : undefined
+    })
   })
+
+export const exportUrl = (notebookId: string, artifactId: string, format: 'csv' | 'pptx') =>
+  `${base(notebookId)}/artifacts/${encodeURIComponent(artifactId)}/export.${format}`
 
 export const deleteArtifact = (notebookId: string, artifactId: string) =>
   harvisApi(`${base(notebookId)}/artifacts/${encodeURIComponent(artifactId)}`, { method: 'DELETE' })

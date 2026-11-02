@@ -7,12 +7,13 @@ standalone podcast pipeline (`standalone_podcasts` table +
 `open_notebook.podcast.generator.PodcastGenerator`) and the GPU tts-service
 (`http://tts-service:8001`).
 
-Scope decision (built-in profiles cut): episode/speaker/language profiles are
-read-only built-ins derived from `open_notebook.podcast.script` (PODCAST_STYLES
-+ DEFAULT_SPEAKERS). Profile CRUD (create/update/delete/duplicate) returns 501
-"editing not enabled" — only the list endpoints return usable, fully-populated
-built-ins so the frontend's `needsModelSetup()` never shows the amber
-"setup required" banner.
+Profiles: the built-in episode/speaker profiles derived from
+`open_notebook.podcast.script` (PODCAST_STYLES + DEFAULT_SPEAKERS) are always
+listed first, fully populated so the frontend's `needsModelSetup()` never shows
+the amber "setup required" banner. Users add their own on top (create / update /
+delete / duplicate, stored per user by `notebooks/podcast_profiles.py`); a custom
+speaker profile picks a Kokoro voice per speaker, and generation uses it. Built-ins
+are read-only (403 on edit).
 
 Episode lifecycle (generate / list / delete / retry) is real and persists to
 `standalone_podcasts`. Reuses the native notebooks router's auth + manager
@@ -39,7 +40,9 @@ from notebooks.router import (
     get_notebook_manager,
     get_current_user_from_request,
 )
-from notebooks.manager import NotebookManager
+from notebooks.manager import NotebookManager, NotebookNotFoundError
+from notebooks import podcast_audio, podcast_profiles
+from notebooks.podcast_profiles import DEFAULT_SPEAKER_PROFILE_ID, ProfileError
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +100,7 @@ def _iso(dt) -> Optional[str]:
 # false (no amber banner).
 
 # A single speaker profile id every episode profile references via speaker_config.
-_DEFAULT_SPEAKER_PROFILE_ID = "default-duo"
+_DEFAULT_SPEAKER_PROFILE_ID = DEFAULT_SPEAKER_PROFILE_ID
 
 _LANGUAGES = [
     {"code": "en", "name": "English"},
@@ -138,6 +141,7 @@ def _build_speaker_profiles() -> List[Dict[str, Any]]:
     return [
         {
             "id": _DEFAULT_SPEAKER_PROFILE_ID,
+            "builtin": True,
             "name": "Host & Guest (default)",
             "description": "Built-in two-voice conversational duo synthesized by the GPU TTS service.",
             "voice_model": DEFAULT_VOICE_MODEL,
@@ -162,11 +166,17 @@ async def _build_episode_profiles() -> List[Dict[str, Any]]:
             "conversational": "A casual, friendly discussion between two people.",
         }
 
+    # Brief and Critique come from the notebooks script writer, not open_notebook's table.
+    from notebooks.podcast_script import PRESET_STYLES
+    styles = {**styles, **{p["id"]: p["description"] for p in PRESET_STYLES}}
+
     profiles = []
     for style_key, description in styles.items():
         profiles.append(
             {
                 "id": style_key,  # the style key doubles as the profile id
+                "builtin": True,
+                "style": style_key,
                 "name": style_key.replace("_", " ").title(),
                 "description": description,
                 "speaker_config": _DEFAULT_SPEAKER_PROFILE_ID,
@@ -263,11 +273,13 @@ async def _generate_episode_task(
     speakers: int,
     duration_minutes: int,
     model: Optional[str] = None,
+    cast: Optional[List[Dict[str, Any]]] = None,
 ):
     """Background task: write the script (notebooks/podcast_script.py), speak it
     (notebooks/podcast_audio.py) and write the result onto the existing
     standalone_podcasts row. Audio failure leaves a readable script with the
-    reason in error_message; an unreadable script is an error."""
+    reason in error_message; an unreadable script is an error. `cast` is the chosen
+    speaker profile's speakers ([{name, voice_id}]); None means the default duo."""
     audio_path = None
     audio_url = None
     duration_seconds = None
@@ -287,7 +299,6 @@ async def _generate_episode_task(
         # 1. Write the script in parts sized to the requested length, with the
         #    asked-for speakers only. A script that cannot be read is an error,
         #    never a finished podcast. See notebooks/podcast_script.py.
-        from notebooks import podcast_audio
         from notebooks.podcast_script import PodcastScriptError, generate_script, ollama_caller, speaker_names
         from notebooks.router import _default_ollama_model
 
@@ -299,7 +310,7 @@ async def _generate_episode_task(
                 title=title,
                 style=style,
                 minutes=duration_minutes,
-                names=speaker_names(None, speakers),
+                names=speaker_names(cast, speakers),
                 call=ollama_caller(chosen, ollama_url),
             )
         except PodcastScriptError as exc:
@@ -313,7 +324,8 @@ async def _generate_episode_task(
             # 2. Speak it. Failure keeps the script and says why.
             try:
                 made = await podcast_audio.make_audio(
-                    [{"speaker": t["speaker"], "text": t["dialogue"]} for t in transcript]
+                    [{"speaker": t["speaker"], "text": t["dialogue"]} for t in transcript],
+                    voices=podcast_audio.chosen_voices(cast),
                 )
                 audio_path, audio_url, duration_seconds = made["audio_path"], made["audio_url"], made["duration_seconds"]
             except podcast_audio.PodcastAudioError as exc:
@@ -359,10 +371,13 @@ async def _resolve_notebook_content(
     manager: NotebookManager,
     notebook_id: Optional[str],
     direct_content: Optional[str],
+    user_id: int,
     source_ids: Optional[List[UUID]] = None,
 ) -> str:
     """Fetch source/note text for a notebook when the request gives no direct
-    content. Mirrors the native _fetch_podcast_content fall-back.
+    content. Mirrors the native _fetch_podcast_content fall-back. Only the
+    owning `user_id`'s notebook yields text, so a stored or posted notebook id
+    that belongs to someone else resolves to nothing.
 
     When `source_ids` is given (Studio "generate from the SELECTED sources"),
     only those sources are used — up to 12, notes excluded — so generation is
@@ -386,21 +401,23 @@ async def _resolve_notebook_content(
             if source_ids:
                 src_rows = await conn.fetch(
                     """
-                    SELECT title, content_text FROM notebook_sources
-                    WHERE notebook_id = $1 AND id = ANY($2::uuid[])
-                      AND content_text IS NOT NULL
-                    ORDER BY created_at ASC LIMIT 12
+                    SELECT s.title, s.content_text FROM notebook_sources s
+                    JOIN notebooks n ON n.id = s.notebook_id AND n.user_id = $3
+                    WHERE s.notebook_id = $1 AND s.id = ANY($2::uuid[])
+                      AND s.content_text IS NOT NULL
+                    ORDER BY s.created_at ASC LIMIT 12
                     """,
-                    nb_uuid, source_ids,
+                    nb_uuid, source_ids, user_id,
                 )
             else:
                 src_rows = await conn.fetch(
                     """
-                    SELECT title, content_text FROM notebook_sources
-                    WHERE notebook_id = $1 AND content_text IS NOT NULL
-                    ORDER BY created_at ASC LIMIT 5
+                    SELECT s.title, s.content_text FROM notebook_sources s
+                    JOIN notebooks n ON n.id = s.notebook_id AND n.user_id = $2
+                    WHERE s.notebook_id = $1 AND s.content_text IS NOT NULL
+                    ORDER BY s.created_at ASC LIMIT 5
                     """,
-                    nb_uuid,
+                    nb_uuid, user_id,
                 )
             for r in src_rows:
                 if r["content_text"]:
@@ -412,10 +429,10 @@ async def _resolve_notebook_content(
                 note_rows = await conn.fetch(
                     """
                     SELECT title, content FROM notebook_notes
-                    WHERE notebook_id = $1 AND content IS NOT NULL
+                    WHERE notebook_id = $1 AND user_id = $2 AND content IS NOT NULL
                     ORDER BY created_at ASC LIMIT 5
                     """,
-                    nb_uuid,
+                    nb_uuid, user_id,
                 )
                 for r in note_rows:
                     if r["content"]:
@@ -428,20 +445,73 @@ async def _resolve_notebook_content(
     return "".join(parts)
 
 
-# ─── Profile endpoints (read-only built-ins) ───────────────────────────────────
+# ─── Profile endpoints (built-ins first, then the caller's own) ────────────────
+
+def _pool(manager: NotebookManager):
+    return manager.db_pool
+
+
+def _fail(exc: ProfileError):
+    raise HTTPException(status_code=exc.status, detail=exc.detail)
+
+
+async def _own_or_builtin(manager, user_id: int, kind: str, profile_id: str) -> Dict[str, Any]:
+    """A profile the caller may read: a built-in, or one they own. Anyone else's is a 404."""
+    builtins = _build_speaker_profiles() if kind == "speaker" else await _build_episode_profiles()
+    found = next((p for p in builtins if p["id"] == profile_id), None)
+    if found is None:
+        found = await podcast_profiles.get_profile(_pool(manager), user_id, kind, profile_id)
+    if found is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return found
+
+
+async def _refuse_builtin(kind: str, profile_id: str):
+    if podcast_profiles.as_uuid(profile_id) is not None:
+        return
+    builtins = _build_speaker_profiles() if kind == "speaker" else await _build_episode_profiles()
+    if any(p["id"] == profile_id for p in builtins):
+        raise HTTPException(status_code=403, detail="Built-in profiles are read-only. Duplicate one to change it.")
+    raise HTTPException(status_code=404, detail="Profile not found")
+
+
+async def _clean(manager, user_id: int, kind: str, body: Any) -> Dict[str, Any]:
+    try:
+        if kind == "speaker":
+            return podcast_profiles.clean_speaker(body)
+        clean = podcast_profiles.clean_episode(body)
+        # An episode profile may only point at a built-in cast or one the caller owns.
+        await podcast_profiles.resolve_cast(_pool(manager), user_id, clean["speaker_config"])
+        return clean
+    except ProfileError as exc:
+        _fail(exc)
+
+
+async def _with_models(profile: Dict[str, Any], kind: str) -> Dict[str, Any]:
+    """Custom episode profiles carry the same non-null model refs the built-ins do."""
+    if kind != "episode" or profile.get("outline_llm"):
+        return profile
+    from .router import _default_chat_model
+    chat_model = await _default_chat_model()
+    return {**profile, "outline_llm": chat_model, "transcript_llm": chat_model}
+
 
 @router.get("/episode-profiles")
 async def list_episode_profiles(
     current_user: Dict = Depends(get_current_user_from_request),
+    manager: NotebookManager = Depends(get_notebook_manager),
 ):
-    return await _build_episode_profiles()
+    own = await podcast_profiles.list_profiles(_pool(manager), int(current_user["id"]), "episode")
+    return await _build_episode_profiles() + [await _with_models(p, "episode") for p in own]
 
 
 @router.get("/speaker-profiles")
 async def list_speaker_profiles(
     current_user: Dict = Depends(get_current_user_from_request),
+    manager: NotebookManager = Depends(get_notebook_manager),
 ):
-    return _build_speaker_profiles()
+    own = await podcast_profiles.list_profiles(_pool(manager), int(current_user["id"]), "speaker")
+    return _build_speaker_profiles() + own
 
 
 @router.get("/languages")
@@ -451,74 +521,133 @@ async def list_languages(
     return _LANGUAGES
 
 
-# Profile CRUD is intentionally disabled (built-in profiles cut). The frontend
-# only ever calls create/update/delete/duplicate from the profile editor, which
-# is not surfaced when built-ins satisfy needsModelSetup(). Return 501 so the
-# UI's toast handler shows "editing not enabled" rather than silently echoing.
-
-_EDIT_DISABLED_DETAIL = "Profile editing is not enabled — built-in profiles only."
-
-
-@router.post("/episode-profiles", status_code=501)
-async def create_episode_profile(
+@router.get("/podcasts/voices")
+async def list_voices(
     current_user: Dict = Depends(get_current_user_from_request),
 ):
-    raise HTTPException(status_code=501, detail=_EDIT_DISABLED_DETAIL)
+    """The Kokoro voices a speaker can be given (the speech service's own list)."""
+    return {"voices": podcast_audio.voice_catalog(), "model": "kokoro"}
 
 
-@router.put("/episode-profiles/{profile_id}", status_code=501)
+async def _create(kind: str, request: Request, user, manager):
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Expected a JSON body.")
+    clean = await _clean(manager, int(user["id"]), kind, body)
+    try:
+        made = await podcast_profiles.create_profile(_pool(manager), int(user["id"]), kind, clean)
+    except ProfileError as exc:
+        _fail(exc)
+    return await _with_models(made, kind)
+
+
+async def _update(kind: str, profile_id: str, request: Request, user, manager):
+    await _refuse_builtin(kind, profile_id)
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Expected a JSON body.")
+    clean = await _clean(manager, int(user["id"]), kind, body)
+    made = await podcast_profiles.update_profile(_pool(manager), int(user["id"]), kind, profile_id, clean)
+    if made is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return await _with_models(made, kind)
+
+
+async def _delete(kind: str, profile_id: str, user, manager):
+    await _refuse_builtin(kind, profile_id)
+    if not await podcast_profiles.delete_profile(_pool(manager), int(user["id"]), kind, profile_id):
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return {"success": True, "message": "Profile deleted"}
+
+
+async def _duplicate(kind: str, profile_id: str, user, manager):
+    source = await _own_or_builtin(manager, int(user["id"]), kind, profile_id)
+    body = {**source, "name": f"{source['name']} (copy)"[:80]}
+    if kind == "speaker":
+        # Built-in voice ids are "automatic"; keep whatever the source holds.
+        body["speakers"] = [dict(s) for s in source.get("speakers", [])]
+    clean = await _clean(manager, int(user["id"]), kind, body)
+    try:
+        made = await podcast_profiles.create_profile(_pool(manager), int(user["id"]), kind, clean)
+    except ProfileError as exc:
+        _fail(exc)
+    return await _with_models(made, kind)
+
+
+@router.post("/episode-profiles")
+async def create_episode_profile(
+    request: Request,
+    current_user: Dict = Depends(get_current_user_from_request),
+    manager: NotebookManager = Depends(get_notebook_manager),
+):
+    return await _create("episode", request, current_user, manager)
+
+
+@router.put("/episode-profiles/{profile_id}")
 async def update_episode_profile(
     profile_id: str,
+    request: Request,
     current_user: Dict = Depends(get_current_user_from_request),
+    manager: NotebookManager = Depends(get_notebook_manager),
 ):
-    raise HTTPException(status_code=501, detail=_EDIT_DISABLED_DETAIL)
+    return await _update("episode", profile_id, request, current_user, manager)
 
 
-@router.delete("/episode-profiles/{profile_id}", status_code=501)
+@router.delete("/episode-profiles/{profile_id}")
 async def delete_episode_profile(
     profile_id: str,
     current_user: Dict = Depends(get_current_user_from_request),
+    manager: NotebookManager = Depends(get_notebook_manager),
 ):
-    raise HTTPException(status_code=501, detail=_EDIT_DISABLED_DETAIL)
+    return await _delete("episode", profile_id, current_user, manager)
 
 
-@router.post("/episode-profiles/{profile_id}/duplicate", status_code=501)
+@router.post("/episode-profiles/{profile_id}/duplicate")
 async def duplicate_episode_profile(
     profile_id: str,
     current_user: Dict = Depends(get_current_user_from_request),
+    manager: NotebookManager = Depends(get_notebook_manager),
 ):
-    raise HTTPException(status_code=501, detail=_EDIT_DISABLED_DETAIL)
+    return await _duplicate("episode", profile_id, current_user, manager)
 
 
-@router.post("/speaker-profiles", status_code=501)
+@router.post("/speaker-profiles")
 async def create_speaker_profile(
+    request: Request,
     current_user: Dict = Depends(get_current_user_from_request),
+    manager: NotebookManager = Depends(get_notebook_manager),
 ):
-    raise HTTPException(status_code=501, detail=_EDIT_DISABLED_DETAIL)
+    return await _create("speaker", request, current_user, manager)
 
 
-@router.put("/speaker-profiles/{profile_id}", status_code=501)
+@router.put("/speaker-profiles/{profile_id}")
 async def update_speaker_profile(
     profile_id: str,
+    request: Request,
     current_user: Dict = Depends(get_current_user_from_request),
+    manager: NotebookManager = Depends(get_notebook_manager),
 ):
-    raise HTTPException(status_code=501, detail=_EDIT_DISABLED_DETAIL)
+    return await _update("speaker", profile_id, request, current_user, manager)
 
 
-@router.delete("/speaker-profiles/{profile_id}", status_code=501)
+@router.delete("/speaker-profiles/{profile_id}")
 async def delete_speaker_profile(
     profile_id: str,
     current_user: Dict = Depends(get_current_user_from_request),
+    manager: NotebookManager = Depends(get_notebook_manager),
 ):
-    raise HTTPException(status_code=501, detail=_EDIT_DISABLED_DETAIL)
+    return await _delete("speaker", profile_id, current_user, manager)
 
 
-@router.post("/speaker-profiles/{profile_id}/duplicate", status_code=501)
+@router.post("/speaker-profiles/{profile_id}/duplicate")
 async def duplicate_speaker_profile(
     profile_id: str,
     current_user: Dict = Depends(get_current_user_from_request),
+    manager: NotebookManager = Depends(get_notebook_manager),
 ):
-    raise HTTPException(status_code=501, detail=_EDIT_DISABLED_DETAIL)
+    return await _duplicate("speaker", profile_id, current_user, manager)
 
 
 # ─── Episode endpoints ─────────────────────────────────────────────────────────
@@ -539,18 +668,56 @@ async def generate_podcast(
     model = await require_turn(getattr(request.app.state, "pg_pool", None), int(current_user["id"]), "") or None
 
     episode_profile = body.get("episode_profile") or "conversational"
-    speaker_profile = body.get("speaker_profile") or _DEFAULT_SPEAKER_PROFILE_ID
+    speaker_profile = body.get("speaker_profile")
     episode_name = body.get("episode_name") or "Untitled Episode"
     notebook_id = body.get("notebook_id")
     direct_content = body.get("content")
     briefing_suffix = body.get("briefing_suffix")
 
-    # episode_profile id is the style key (see _build_episode_profiles).
-    style = episode_profile if episode_profile in {
-        p["id"] for p in await _build_episode_profiles()
-    } else "conversational"
+    # A built-in episode profile id is its style key (see _build_episode_profiles); a
+    # custom one is a uuid that must be the caller's own, and carries its own style,
+    # cast and standing briefing. With no profile at all the defaults apply and the
+    # profile table is never touched.
+    pool = manager.db_pool
+    user_id = current_user["id"]
+    custom_episode = None
+    if podcast_profiles.as_uuid(episode_profile) is not None:
+        custom_episode = await podcast_profiles.get_profile(pool, user_id, "episode", episode_profile)
+        if custom_episode is None:
+            raise HTTPException(status_code=404, detail="Episode profile not found")
+        style = custom_episode["style"]
+    else:
+        style = episode_profile if episode_profile in {
+            p["id"] for p in await _build_episode_profiles()
+        } else "conversational"
 
-    content = await _resolve_notebook_content(manager, notebook_id, direct_content)
+    # An explicitly requested speaker profile must exist for this user; one inherited
+    # from the episode profile quietly falls back to the default duo if it was deleted.
+    try:
+        if speaker_profile:
+            cast = await podcast_profiles.resolve_cast(pool, user_id, speaker_profile)
+        else:
+            cast = await podcast_profiles.resolve_cast(
+                pool, user_id, (custom_episode or {}).get("speaker_config"), strict=False
+            )
+    except ProfileError as exc:
+        _fail(exc)
+
+    if notebook_id:
+        # Accept bare uuid or "notebook:<uuid>"; 404 unless it is the caller's.
+        raw = notebook_id.split(":", 1)[1] if ":" in notebook_id else notebook_id
+        try:
+            nb_uuid = UUID(raw)
+        except (ValueError, AttributeError, TypeError):
+            raise HTTPException(status_code=400, detail="Invalid notebook id")
+        try:
+            await manager.get_notebook(nb_uuid, current_user["id"])
+        except NotebookNotFoundError:
+            raise HTTPException(status_code=404, detail="Notebook not found")
+
+    content = await _resolve_notebook_content(manager, notebook_id, direct_content, current_user["id"])
+    if not briefing_suffix and custom_episode and content.strip():
+        briefing_suffix = custom_episode.get("default_briefing") or None
     if briefing_suffix:
         content = f"{content}\n\n{briefing_suffix}" if content else briefing_suffix
 
@@ -563,17 +730,17 @@ async def generate_podcast(
     # standalone_podcasts.notebook_id is TEXT NOT NULL.
     nb_id_text = notebook_id or "notebook:standalone"
 
-    user_id = current_user["id"]
+    speakers = len(cast) if cast else 2
 
     async with manager.db_pool.acquire() as conn:
         row = await conn.fetchrow(
             """
             INSERT INTO standalone_podcasts
-                (notebook_id, user_id, title, status, style, speakers, duration_minutes)
-            VALUES ($1, $2, $3, 'pending', $4, 2, 10)
+                (notebook_id, user_id, title, status, style, speakers, duration_minutes, speaker_profiles)
+            VALUES ($1, $2, $3, 'pending', $4, $5, 10, $6::jsonb)
             RETURNING id
             """,
-            nb_id_text, user_id, episode_name, style,
+            nb_id_text, user_id, episode_name, style, speakers, json.dumps(cast or []),
         )
 
     podcast_id = row["id"]
@@ -586,9 +753,10 @@ async def generate_podcast(
         episode_name,
         content,
         style,
-        2,   # speakers (Host + Guest built-in duo)
+        speakers,  # 2 for the built-in Host + Guest duo
         10,  # duration_minutes
         model,
+        cast,
     )
 
     return {
@@ -676,7 +844,7 @@ async def retry_episode(
     async with manager.db_pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT id, notebook_id, title, style, speakers, duration_minutes
+            SELECT id, notebook_id, title, style, speakers, duration_minutes, speaker_profiles
             FROM standalone_podcasts
             WHERE id = $1 AND user_id = $2
             """,
@@ -695,7 +863,7 @@ async def retry_episode(
             ep_uuid,
         )
 
-    content = await _resolve_notebook_content(manager, row["notebook_id"], None)
+    content = await _resolve_notebook_content(manager, row["notebook_id"], None, user_id)
     if not content.strip():
         # Re-mark error rather than silently producing an empty podcast.
         async with manager.db_pool.acquire() as conn:
@@ -719,6 +887,8 @@ async def retry_episode(
         row["speakers"] or 2,
         row["duration_minutes"] or 10,
         model,
+        # The cast the episode was made with (empty for the default duo).
+        [m for m in _json_list(row.get("speaker_profiles")) if isinstance(m, dict) and m.get("name")] or None,
     )
 
     return {
@@ -730,11 +900,18 @@ async def retry_episode(
 # ─── Audio proxy ───────────────────────────────────────────────────────────────
 
 @router.get("/podcasts/tts-audio/{filename}")
-async def proxy_tts_audio(filename: str):
+async def proxy_tts_audio(
+    filename: str,
+    current_user: Dict = Depends(get_current_user_from_request),
+    manager: NotebookManager = Depends(get_notebook_manager),
+):
     """Proxy audio bytes from the tts-service container. Mirrors the native
     notebooks router's /podcasts/tts-audio/{filename} proxy."""
     safe_filename = os.path.basename(filename)
     from notebooks import podcast_audio
+
+    if not await podcast_audio.user_owns_audio(manager.db_pool, int(current_user["id"]), safe_filename):
+        raise HTTPException(status_code=404, detail="Audio file not found")
 
     local = podcast_audio.local_file(safe_filename)
     if local is not None:

@@ -30,8 +30,10 @@ import { useSearchParams } from 'react-router'
 import { harvisApi } from './api'
 import { relativeTime } from './format'
 import { NotebookDetail, UNTITLED } from './notebook-detail'
+import { AskAllButton } from './notebook-ask-all'
 import { embedderKey, fetchEmbedderStatus, NotebooksInstallPanel } from './notebooks-install'
 import { listKey, type NotebookInfo as NotebookRow } from './notebook-shared'
+import { NotebookJoinButton, roleLabel } from './notebook-share'
 
 interface SearchHit {
   kind: 'note' | 'source'
@@ -48,7 +50,13 @@ function SearchHits({ onPick, query }: { onPick: (notebookId: string) => void; q
     queryFn: () =>
       harvisApi<{ results: SearchHit[] }>('/api/notebooks/search', {
         method: 'POST',
-        body: JSON.stringify({ query, type: 'text', limit: 20, search_sources: true, search_notes: true })
+        body: JSON.stringify({
+          query,
+          type: 'text',
+          limit: 20,
+          search_sources: true,
+          search_notes: true
+        })
       }).then(r => r.results ?? []),
     queryKey: ['harvis', 'notebooks', 'search', query],
     staleTime: 30_000
@@ -146,6 +154,53 @@ function NotebookCard({
   )
 }
 
+interface SharedWithMe {
+  emoji: null | string
+  notebook_id: string
+  owner_username: null | string
+  role: string
+  title: string
+}
+
+/** Notebooks other people shared with you (`GET /api/notebooks/shares/received`); hidden when there are none. */
+function SharedWithYou({ onOpen }: { onOpen: (notebookId: string) => void }) {
+  const shared = useQuery({
+    queryFn: () => harvisApi<SharedWithMe[]>('/api/notebooks/shares/received'),
+    queryKey: [...listKey, 'shared-with-me'],
+    retry: false
+  })
+
+  const rows = Array.isArray(shared.data) ? shared.data : []
+
+  if (rows.length === 0) {
+    return null
+  }
+
+  return (
+    <section aria-label="Shared with you" className="space-y-2">
+      <h3 className="text-sm font-medium">Shared with you</h3>
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+        {rows.map(r => (
+          <RowButton
+            className="flex items-center gap-2 rounded-lg border bg-(--ui-bg-secondary) p-3 text-left hover:bg-accent/40"
+            key={r.notebook_id}
+            onClick={() => onOpen(r.notebook_id)}
+          >
+            <span className="text-xl">{r.emoji || '📓'}</span>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-sm font-medium">{r.title}</span>
+              <span className="block truncate text-xs text-(--ui-text-tertiary)">
+                {roleLabel(r.role)}
+                {r.owner_username ? `, from ${r.owner_username}` : ''}
+              </span>
+            </span>
+          </RowButton>
+        ))}
+      </div>
+    </section>
+  )
+}
+
 function NewNotebookCard({ busy, onCreate }: { busy: boolean; onCreate: () => void }) {
   return (
     <RowButton
@@ -176,7 +231,10 @@ export function NotebooksPage() {
     queryKey: listKey
   })
 
-  const embedder = useQuery({ queryFn: fetchEmbedderStatus, queryKey: embedderKey })
+  const embedder = useQuery({
+    queryFn: fetchEmbedderStatus,
+    queryKey: embedderKey
+  })
 
   const q = search.trim().toLowerCase()
   const deferredQuery = useDeferredValue(search.trim())
@@ -212,6 +270,7 @@ export function NotebooksPage() {
     return (
       <div className="flex h-full min-w-0 flex-col overflow-hidden bg-(--ui-chat-surface-background) pt-[calc(var(--titlebar-height)+0.5rem)]">
         <NotebookDetail
+          expecting={params.get('make') ?? undefined}
           key={open}
           notebookId={open}
           onBack={backToGrid}
@@ -229,9 +288,13 @@ export function NotebooksPage() {
       onSearchChange={setSearch}
       searchPlaceholder="Search notebooks"
       searchTrailingAction={
-        <Button disabled={creating} onClick={() => void create()} size="sm">
-          <Codicon name="add" size="0.8rem" /> New notebook
-        </Button>
+        <div className="flex items-center gap-1.5">
+          <AskAllButton variant="outline" />
+          <NotebookJoinButton onJoined={openNotebook} />
+          <Button disabled={creating} onClick={() => void create()} size="sm">
+            <Codicon name="add" size="0.8rem" /> New notebook
+          </Button>
+        </div>
       }
       searchValue={search}
     >
@@ -263,6 +326,7 @@ export function NotebooksPage() {
               ))}
             </div>
           )}
+          {!q && <SharedWithYou onOpen={openNotebook} />}
           <SearchHits onPick={openNotebook} query={deferredQuery} />
         </div>
       </div>
@@ -273,7 +337,9 @@ export function NotebooksPage() {
         onClose={() => setDeleting(null)}
         onConfirm={async () => {
           if (deleting) {
-            await harvisApi(`/api/notebooks/${deleting.id}`, { method: 'DELETE' })
+            await harvisApi(`/api/notebooks/${deleting.id}`, {
+              method: 'DELETE'
+            })
             refresh()
           }
         }}

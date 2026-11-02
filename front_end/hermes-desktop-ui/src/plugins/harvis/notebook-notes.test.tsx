@@ -102,4 +102,50 @@ describe('NotebookNotes', () => {
 
     expect(await screen.findByText('Notebook not found')).toBeTruthy()
   })
+
+  it('renders the citations saved with an answer and opens the passage when one is clicked', async () => {
+    const cited = {
+      ...notes[1],
+      content: 'The rover landed in 2021 [1].',
+      source_meta: {
+        citations: [
+          {
+            end_char: 26,
+            page: 2,
+            quote: 'Jezero crater held a lake.',
+            source_id: 's1',
+            source_title: 'Mars page',
+            start_char: 0
+          }
+        ],
+        question: 'When?'
+      }
+    }
+
+    harvisApi.mockImplementation(
+      routeApi({
+        [`GET /api/notebooks/${NB}/notes`]: () => ({ notes: [cited], total_count: 1, has_more: false }),
+        [`GET /api/notebooks/${NB}/sources/s1/content`]: () => ({
+          content: 'Jezero crater held a lake. More.',
+          length: 32,
+          source_id: 's1',
+          title: 'Mars page',
+          type: 'pdf'
+        })
+      })
+    )
+
+    renderWithQuery(<NotebookNotes notebookId={NB} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Source 1: Mars page, page 2' }))
+
+    expect((await screen.findByTestId('cited-passage')).textContent).toBe('Jezero crater held a lake.')
+  })
+
+  it('keeps a note without citations as plain text', async () => {
+    renderWithQuery(<NotebookNotes notebookId={NB} />)
+    await screen.findAllByRole('listitem')
+
+    expect(screen.queryByTitle('Open this passage in its source')).toBeNull()
+  })
 })

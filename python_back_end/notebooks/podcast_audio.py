@@ -20,8 +20,63 @@ import httpx
 
 AUDIO_DIR = Path(os.getenv("NOTEBOOK_PODCAST_AUDIO_DIR", "/data/artifacts/notebook_podcasts"))
 VOICES = ("af_heart", "am_michael", "bf_emma", "bm_george")
+# Every voice the speech service's default model (Kokoro v1.0) offers, in the service's own
+# order. Copied from KOKORO_VOICES in services/voice-onnx/app/models.py; a test keeps the two
+# in step, so a voice picked here is one the service will accept.
+KOKORO_VOICES = (
+    "af_alloy", "af_aoede", "af_bella", "af_heart", "af_jessica",
+    "af_kore", "af_nicole", "af_nova", "af_river", "af_sarah", "af_sky",
+    "am_adam", "am_echo", "am_eric", "am_fenrir", "am_liam", "am_michael",
+    "am_onyx", "am_puck", "am_santa",
+    "bf_alice", "bf_emma", "bf_isabella", "bf_lily",
+    "bm_daniel", "bm_fable", "bm_george", "bm_lewis",
+    "ef_dora", "em_alex", "em_santa",
+    "ff_siwis",
+    "hf_alpha", "hf_beta", "hm_omega", "hm_psi",
+    "if_sara", "im_nicola",
+    "jf_alpha", "jf_gongitsune", "jf_nezumi", "jf_tebukuro", "jm_kumo",
+    "pf_dora", "pm_alex", "pm_santa",
+    "zf_xiaobei", "zf_xiaoni", "zf_xiaoxiao", "zf_xiaoyi",
+    "zm_yunjian", "zm_yunxi", "zm_yunxia", "zm_yunyang",
+)
+_LANGUAGE_OF = {"a": "en-US", "b": "en-GB", "e": "es", "f": "fr", "h": "hi",
+                "i": "it", "j": "ja", "p": "pt-BR", "z": "zh"}
 PAUSE_SECONDS = 0.3
 _FILENAME_OK = frozenset("abcdef0123456789-")
+
+
+def is_voice(voice: object) -> bool:
+    return isinstance(voice, str) and voice in KOKORO_VOICES
+
+
+def voice_catalog() -> list[dict]:
+    """The pickable voices: ``{id, name, gender, language}`` (same labels the service reports)."""
+    return [
+        {
+            "id": v,
+            "name": v.split("_", 1)[-1].replace("-", " ").title(),
+            "gender": {"f": "female", "m": "male"}.get(v[1:2], "unknown"),
+            "language": _LANGUAGE_OF.get(v[:1], "en-US"),
+        }
+        for v in KOKORO_VOICES
+    ]
+
+
+def _speaker_key(speaker: str) -> str:
+    return " ".join((speaker or "Speaker").split()).casefold()
+
+
+def chosen_voices(cast: Optional[list]) -> dict[str, str]:
+    """``{speaker key: voice id}`` for the cast members with a real voice picked.
+
+    Members left on "automatic" and ids the service does not offer are skipped, so a bad
+    stored value falls back to an automatic voice instead of failing the episode.
+    """
+    out: dict[str, str] = {}
+    for member in cast or []:
+        if isinstance(member, dict) and is_voice(member.get("voice_id")):
+            out.setdefault(_speaker_key(str(member.get("name") or "")), member["voice_id"])
+    return out
 
 
 def speech_url() -> str:
@@ -33,11 +88,13 @@ def voice_for(speaker: str, order: dict[str, str]) -> str:
     """Each new speaker takes the next voice; a fifth reuses the first.
 
     Speakers are matched ignoring case and spacing, so "Alex" and "alex " are one
-    person with one voice for the whole episode.
+    person with one voice for the whole episode. ``order`` may start with voices the
+    user picked; automatic speakers then take the next default voice nobody holds.
     """
-    key = " ".join((speaker or "Speaker").split()).casefold()
+    key = _speaker_key(speaker)
     if key not in order:
-        order[key] = VOICES[len(order) % len(VOICES)]
+        free = [v for v in VOICES if v not in order.values()]
+        order[key] = free[0] if free else VOICES[len(order) % len(VOICES)]
     return order[key]
 
 
@@ -72,9 +129,14 @@ def join_wavs(clips: list[bytes], pause: float = PAUSE_SECONDS) -> tuple[bytes, 
     return out.getvalue(), frames / params.framerate
 
 
-async def synthesize(segments: list[dict], model: Optional[str] = None) -> tuple[str, float]:
-    """Speak every ``{speaker, text}`` segment; return (filename, seconds)."""
-    order: dict[str, str] = {}
+async def synthesize(
+    segments: list[dict], model: Optional[str] = None, voices: Optional[dict[str, str]] = None
+) -> tuple[str, float]:
+    """Speak every ``{speaker, text}`` segment; return (filename, seconds).
+
+    ``voices`` maps speaker keys (see ``chosen_voices``) to the voice the user picked.
+    """
+    order: dict[str, str] = dict(voices or {})
     clips: list[bytes] = []
     async with httpx.AsyncClient(timeout=120.0) as client:
         for seg in segments:
@@ -107,11 +169,26 @@ def local_file(filename: str) -> Optional[Path]:
     return path if path.is_file() else None
 
 
-async def make_audio(segments: list[dict]) -> dict:
+async def user_owns_audio(pool, user_id: int, filename: str) -> bool:
+    """True when ``filename`` is the audio of an episode this user generated."""
+    if pool is None or not filename:
+        return False
+    tail = "/" + filename
+    async with pool.acquire() as conn:
+        for table, cols in (("standalone_podcasts", ("audio_path", "audio_url")),
+                            ("notebook_podcasts", ("audio_path",))):
+            test = " OR ".join(f"RIGHT({c}, LENGTH($2)) = $2" for c in cols)
+            if await conn.fetchval(f"SELECT 1 FROM {table} WHERE user_id = $1 AND ({test}) LIMIT 1",
+                                   user_id, tail):
+                return True
+    return False
+
+
+async def make_audio(segments: list[dict], voices: Optional[dict[str, str]] = None) -> dict:
     """Speak a script and return ``{audio_path, audio_url, duration_seconds}``.
 
-    Uses the optional ``tts-service`` when ``TTS_URL`` is set, otherwise the default
-    speech sidecar. Raises PodcastAudioError with a plain message on any failure so
+    Uses the optional ``tts-service`` when ``TTS_URL`` is set (it has its own voices, so
+    ``voices`` does not apply there), otherwise the default speech sidecar. Raises PodcastAudioError with a plain message on any failure so
     the caller can save the script and show the reason instead of silently dropping
     the audio.
     """
@@ -122,7 +199,7 @@ async def make_audio(segments: list[dict]) -> dict:
     where = tts_url or speech_url()
     try:
         if not tts_url:
-            name, seconds = await synthesize(segments)
+            name, seconds = await synthesize(segments, voices=voices)
             path = f"/api/notebooks/podcasts/tts-audio/{name}"
             return {"audio_path": path, "audio_url": path, "duration_seconds": seconds}
         voice_mapping = {(s.get("speaker") or "Speaker"): "__default__" for s in segments}

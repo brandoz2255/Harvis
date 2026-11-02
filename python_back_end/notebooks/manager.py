@@ -4,7 +4,7 @@ NotebookManager - Database operations for NotebookLM feature
 
 import logging
 import json
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, Sequence, Tuple
 from uuid import UUID
 from asyncpg import Pool
 from datetime import datetime
@@ -16,6 +16,9 @@ from .models import (
     SourceType, SourceStatus, NoteType, MessageRole,
     Citation, ChunkWithScore
 )
+from . import shares as _shares
+from .hybrid_search import HybridChunk, hybrid_search
+from .summary_context import SummaryPassages, load_summary_passages
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +41,52 @@ class SourceNotFoundError(NotebookManagerError):
 class NoteNotFoundError(NotebookManagerError):
     """Note not found"""
     pass
+
+
+class NotebookAccessError(NotebookManagerError):
+    """The caller can see the notebook but their role does not allow this"""
+    pass
+
+
+class NotebookValidationError(NotebookManagerError, ValueError):
+    """A value the caller supplied is not allowed"""
+    pass
+
+
+CHAT_STYLES = ("default", "learning_guide", "analyst", "custom")
+CHAT_LENGTHS = ("shorter", "default", "longer")
+MAX_PERSONA_CHARS = 2000
+MAX_LANGUAGE_CHARS = 40
+_CHAT_CONFIG_FIELDS = {
+    "persona": "chat_persona",
+    "style": "chat_style",
+    "length": "chat_length",
+    "output_language": "output_language",
+}
+
+
+def _validate_chat_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
+    """Map public field names to column values, rejecting anything outside the contract."""
+    unknown = set(fields) - set(_CHAT_CONFIG_FIELDS)
+    if unknown:
+        raise NotebookValidationError(f"unknown chat setting: {', '.join(sorted(unknown))}")
+    updates: Dict[str, Any] = {}
+    for name, value in fields.items():
+        if name == "style":
+            if value not in CHAT_STYLES:
+                raise NotebookValidationError(f"style must be one of {', '.join(CHAT_STYLES)}")
+        elif name == "length":
+            if value not in CHAT_LENGTHS:
+                raise NotebookValidationError(f"length must be one of {', '.join(CHAT_LENGTHS)}")
+        else:
+            limit = MAX_PERSONA_CHARS if name == "persona" else MAX_LANGUAGE_CHARS
+            if value is not None and not isinstance(value, str):
+                raise NotebookValidationError(f"{name} must be text")
+            value = (value or "").strip() or None
+            if value is not None and len(value) > limit:
+                raise NotebookValidationError(f"{name} must be at most {limit} characters")
+        updates[_CHAT_CONFIG_FIELDS[name]] = value
+    return updates
 
 
 class NotebookManager:
@@ -295,11 +344,15 @@ class NotebookManager:
         self,
         source_id: UUID,
         notebook_id: UUID,
-        chunks: List[Tuple[str, List[float], Dict[str, Any], int]]
+        chunks: List[Tuple[str, List[float], Dict[str, Any], int]],
+        embedding_model: Optional[str] = None,
+        embedding_dim: Optional[int] = None,
     ) -> int:
         """
         Batch insert chunks with embeddings.
-        Each chunk is a tuple of (content, embedding, metadata, chunk_index)
+        Each chunk is a tuple of (content, embedding, metadata, chunk_index).
+        embedding_model / embedding_dim record which embedder produced the batch and its
+        real width (the stored vector may be zero-padded wider); NULL when not given.
         """
         if not chunks:
             return 0
@@ -321,12 +374,16 @@ class NotebookManager:
                     content, 
                     embedding_str, 
                     json.dumps(metadata, default=str),
-                    chunk_index
+                    chunk_index,
+                    embedding_model,
+                    embedding_dim,
                 ))
 
             await conn.executemany("""
-                INSERT INTO notebook_chunks (source_id, notebook_id, content, embedding, metadata, chunk_index)
-                VALUES ($1, $2, $3, $4::vector, $5, $6)
+                INSERT INTO notebook_chunks
+                    (source_id, notebook_id, content, embedding, metadata, chunk_index,
+                     embedding_model, embedding_dim)
+                VALUES ($1, $2, $3, $4::vector, $5, $6, $7, $8)
             """, records)
 
             logger.info(f"Created {len(chunks)} chunks for source {source_id}")
@@ -374,6 +431,46 @@ class NotebookManager:
                 ))
 
             return results
+
+    async def search_chunks_hybrid(
+        self,
+        notebook_id: UUID,
+        user_id: int,
+        query_text: str,
+        query_embedding: Optional[List[float]],
+        top_k: int = 5,
+        source_ids: Optional[Sequence[Any]] = None,
+        exclude_source_ids: Optional[Sequence[Any]] = None,
+    ) -> List[HybridChunk]:
+        """Vector + keyword search fused by reciprocal rank (see hybrid_search.py).
+
+        Any role with access may search, because chat needs it; a caller that shows chunk
+        text to the person must also check the role (chat_only must not see sources).
+        """
+        if await self.get_notebook_access(notebook_id, user_id) is None:
+            raise NotebookNotFoundError(f"Notebook {notebook_id} not found")
+        return await hybrid_search(
+            self.db_pool, notebook_id, query_text, query_embedding, top_k, source_ids, exclude_source_ids
+        )
+
+    async def source_summaries(
+        self,
+        notebook_id: UUID,
+        user_id: int,
+        source_ids: Optional[Sequence[Any]] = None,
+        *,
+        text_fallback: bool = False,
+    ) -> SummaryPassages:
+        """Stored per-source summaries of ready sources as prompt passages (see summary_context).
+
+        Any role with access may read them, because chat needs them; a caller that shows the
+        passage text to the person must also check the role (chat_only must not see sources).
+        """
+        if await self.get_notebook_access(notebook_id, user_id) is None:
+            raise NotebookNotFoundError(f"Notebook {notebook_id} not found")
+        return await load_summary_passages(
+            self.db_pool, notebook_id, source_ids, text_fallback=text_fallback
+        )
 
     # ─── Note Management ───────────────────────────────────────────────────────
 
@@ -615,6 +712,92 @@ class NotebookManager:
 
             logger.info(f"Cleared chat history for notebook {notebook_id}")
             return True
+
+    # ─── Chat configuration ────────────────────────────────────────────────────
+
+    async def get_chat_config(self, notebook_id: UUID, user_id: int) -> Dict[str, Any]:
+        """{persona, style, length, output_language}; readable by any role with access."""
+        if await self.get_notebook_access(notebook_id, user_id) is None:
+            raise NotebookNotFoundError(f"Notebook {notebook_id} not found")
+        async with self.db_pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT chat_persona, chat_style, chat_length, output_language
+                FROM notebooks WHERE id = $1 AND is_active = TRUE
+            """, notebook_id)
+        if not row:
+            raise NotebookNotFoundError(f"Notebook {notebook_id} not found")
+        return {
+            "persona": row["chat_persona"],
+            "style": row["chat_style"],
+            "length": row["chat_length"],
+            "output_language": row["output_language"],
+        }
+
+    async def set_chat_config(self, notebook_id: UUID, user_id: int, **fields: Any) -> Dict[str, Any]:
+        """Change the given fields (persona, style, length, output_language); owner only.
+
+        persona and output_language take None or "" to clear. Raises NotebookValidationError
+        on a bad value or unknown field.
+        """
+        updates = _validate_chat_fields(fields)
+        role = await self.get_notebook_access(notebook_id, user_id)
+        if role is None:
+            raise NotebookNotFoundError(f"Notebook {notebook_id} not found")
+        if role != "owner":
+            raise NotebookAccessError("Only the owner can change this notebook's chat settings")
+        if updates:
+            assignments = ", ".join(f"{col} = ${i}" for i, col in enumerate(updates, start=2))
+            async with self.db_pool.acquire() as conn:
+                await conn.execute(
+                    f"UPDATE notebooks SET {assignments} WHERE id = $1 AND is_active = TRUE",
+                    notebook_id, *updates.values(),
+                )
+        return await self.get_chat_config(notebook_id, user_id)
+
+    # ─── Sharing ───────────────────────────────────────────────────────────────
+
+    async def get_notebook_access(self, notebook_id: UUID, user_id: int) -> Optional[str]:
+        """'owner' | 'editor' | 'viewer' | 'chat_only' | None for an active notebook."""
+        return await _shares.get_access(self.db_pool, notebook_id, user_id)
+
+    async def create_user_share(
+        self, notebook_id: UUID, owner_id: int, target_user_id: int, role: str
+    ) -> Dict[str, Any]:
+        """Owner shares with one user (replaces that user's role if already shared)."""
+        await self.get_notebook(notebook_id, owner_id)
+        return await self._share_call(
+            _shares.create_user_share, self.db_pool, notebook_id, owner_id, target_user_id, role
+        )
+
+    async def create_link_share(self, notebook_id: UUID, owner_id: int, role: str) -> Dict[str, Any]:
+        """Owner makes a link. The result's `token` is the only copy; only its hash is stored."""
+        await self.get_notebook(notebook_id, owner_id)
+        return await self._share_call(_shares.create_link_share, self.db_pool, notebook_id, owner_id, role)
+
+    async def list_shares(
+        self, notebook_id: UUID, owner_id: int, include_revoked: bool = False
+    ) -> List[Dict[str, Any]]:
+        await self.get_notebook(notebook_id, owner_id)
+        return await _shares.list_shares(self.db_pool, notebook_id, include_revoked)
+
+    async def revoke_share(self, notebook_id: UUID, owner_id: int, share_id: UUID) -> bool:
+        await self.get_notebook(notebook_id, owner_id)
+        return await _shares.revoke_share(self.db_pool, notebook_id, share_id)
+
+    async def resolve_link_token(self, raw_token: str) -> Optional[Dict[str, Any]]:
+        """{share_id, notebook_id, role} for a live link, else None. Grants nothing by itself."""
+        return await _shares.resolve_link_token(self.db_pool, raw_token)
+
+    async def accept_link_share(self, raw_token: str, user_id: int) -> Optional[Dict[str, Any]]:
+        """Redeem a link for this signed-in user: {notebook_id, role}, or None for a dead link."""
+        return await _shares.accept_link_share(self.db_pool, raw_token, user_id)
+
+    @staticmethod
+    async def _share_call(fn, *args):
+        try:
+            return await fn(*args)
+        except ValueError as exc:
+            raise NotebookValidationError(str(exc)) from None
 
     # ─── Utility Methods ───────────────────────────────────────────────────────
 

@@ -35,6 +35,10 @@ async def embedder_status() -> dict[str, Any]:
     unsupported: the server answers but is not Ollama (no /api/tags), so Harvis
     cannot pull for it and the operator has to load an embedder there themselves.
     """
+    from .embedding_provider import configured_provider_name
+
+    if configured_provider_name() == "openai":
+        return await _remote_status()
     url = os.getenv("OLLAMA_URL", "http://host.docker.internal:11434").rstrip("/")
     probe = f"GET {url}/api/tags"
     base = {
@@ -66,4 +70,45 @@ async def embedder_status() -> dict[str, Any]:
         **base,
         "state": "not_installed",
         "reason": f"needs the {EMBEDDER_TAG} embedding model ({EMBEDDER_DOWNLOAD_MB} MB) to read your sources",
+    }
+
+
+async def _remote_status() -> dict[str, Any]:
+    """Status when NOTEBOOK_EMBED_PROVIDER=openai. Documents are sent to that server, so the
+    answer says so; nothing is installed from here and no document text is sent by the probe."""
+    from .embedding_provider import ProviderConfigError, remote_headers, remote_settings
+
+    base: dict[str, Any] = {
+        "id": "notebooks",
+        "provider": "openai",
+        "leaves_machine": True,
+        "model": None,
+        "install_tag": None,
+        "download_mb": None,
+    }
+    try:
+        settings = remote_settings()
+    except ProviderConfigError as exc:
+        return {**base, "state": "unsupported", "probe": None, "reason": str(exc)}
+    base["probe"] = f"GET {settings.base_url}/models"
+    try:
+        if settings.guarded:
+            from plugins.hermes_ui.providers import guarded_client
+
+            hc = guarded_client(timeout=_TIMEOUT)
+        else:
+            hc = httpx.AsyncClient(timeout=_TIMEOUT)
+        async with hc:
+            r = await hc.get(f"{settings.base_url}/models", headers=remote_headers(settings))
+    except Exception as exc:
+        return {**base, "state": "unreachable", "reason": f"embedding service unreachable ({type(exc).__name__})"}
+    if r.status_code in (401, 403):
+        return {**base, "state": "unreachable", "reason": "the embedding service rejected the key (check NOTEBOOK_EMBED_API_KEY)"}
+    if r.status_code != 200:
+        return {**base, "state": "unreachable", "reason": f"embedding service answered HTTP {r.status_code}"}
+    return {
+        **base,
+        "state": "ready",
+        "model": settings.model,
+        "reason": f"{settings.model} at the configured embedding service; the text of your sources is sent there",
     }

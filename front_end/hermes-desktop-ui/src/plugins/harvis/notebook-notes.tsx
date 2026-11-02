@@ -8,6 +8,8 @@ import { useState } from 'react'
 
 import { harvisApi } from './api'
 import { relativeTime } from './format'
+import { CitationList, CitedMarkdown, type OpenCitation, useCitationViewer } from './notebook-citation-link'
+import { asCitations, citationLookup } from './notebook-citations'
 import { createNote, errorText, listKey, type Note, notesKey, sortNotes, statsKey } from './notebook-shared'
 
 const NOTE_BADGE: Record<Note['type'], string> = {
@@ -70,7 +72,7 @@ function NewNote({ notebookId, onDone }: { notebookId: string; onDone: () => voi
   )
 }
 
-function NoteCard({ note, notebookId }: { note: Note; notebookId: string }) {
+function NoteCard({ note, notebookId, onOpen }: { note: Note; notebookId: string; onOpen: OpenCitation }) {
   const queryClient = useQueryClient()
   const [editing, setEditing] = useState(false)
   const [title, setTitle] = useState(note.title ?? '')
@@ -103,6 +105,7 @@ function NoteCard({ note, notebookId }: { note: Note; notebookId: string }) {
   }
 
   const patch = (body: Record<string, unknown>) => call({ method: 'PATCH', body: JSON.stringify(body) })
+  const citations = citationLookup(asCitations(note.source_meta?.citations))
 
   return (
     <li className={cn('space-y-1.5 rounded-lg border p-3', note.is_pinned && 'border-primary/40')}>
@@ -177,8 +180,13 @@ function NoteCard({ note, notebookId }: { note: Note; notebookId: string }) {
         <>
           {note.title && <p className="text-sm font-medium">{note.title}</p>}
           <div className="prose prose-sm max-w-none text-sm dark:prose-invert">
-            <Streamdown mode="static">{note.content}</Streamdown>
+            {citations.size > 0 ? (
+              <CitedMarkdown citations={citations} onOpen={onOpen} text={note.content} />
+            ) : (
+              <Streamdown mode="static">{note.content}</Streamdown>
+            )}
           </div>
+          {citations.size > 0 && <CitationList citations={citations} onOpen={onOpen} />}
         </>
       )}
       {error && <p className="text-xs text-destructive">{error}</p>}
@@ -189,6 +197,7 @@ function NoteCard({ note, notebookId }: { note: Note; notebookId: string }) {
 export function NotebookNotes({ notebookId }: { notebookId: string }) {
   const queryClient = useQueryClient()
   const notes = useNotes(notebookId)
+  const { open, viewer } = useCitationViewer(notebookId)
   const [adding, setAdding] = useState(false)
   const list = notes.data ?? []
 
@@ -196,7 +205,7 @@ export function NotebookNotes({ notebookId }: { notebookId: string }) {
     <section className="space-y-2">
       <div className="flex items-center gap-2">
         <p className="flex-1 text-xs text-(--ui-text-tertiary)">
-          Keep your own notes here, or save an answer, summary or script from the other tabs.
+          Keep your own notes here, or save an answer, summary or script from the chat or Studio.
         </p>
         {!adding && (
           <Button onClick={() => setAdding(true)} size="sm" variant="outline">
@@ -224,10 +233,11 @@ export function NotebookNotes({ notebookId }: { notebookId: string }) {
       ) : (
         <ul className="space-y-2">
           {list.map(n => (
-            <NoteCard key={n.id} note={n} notebookId={notebookId} />
+            <NoteCard key={n.id} note={n} notebookId={notebookId} onOpen={open} />
           ))}
         </ul>
       )}
+      {viewer}
     </section>
   )
 }

@@ -13,8 +13,10 @@ import { type ComponentProps, memo, useEffect, useMemo, useState } from 'react'
 import { ExpandableBlock } from '@/components/chat/expandable-block'
 import { PreviewAttachment } from '@/components/chat/preview-attachment'
 import { chunkByLines, SyntaxHighlighter } from '@/components/chat/shiki-highlighter'
+import { RemoteImageGate } from '@/components/chat/remote-image-gate'
 import { ZoomableImage } from '@/components/chat/zoomable-image'
 import { ErrorBoundary } from '@/components/error-boundary'
+import { Codicon } from '@/components/ui/codicon'
 import { detectArtifact } from '@/lib/artifact-detect'
 import { normalizeExternalUrl, openExternalLink, PrettyLink } from '@/lib/external-link'
 import { isHarvisDocLanguage, openHarvisDocFence } from '@/lib/harvis-doc'
@@ -206,7 +208,9 @@ function MediaAttachment({ path }: { path: string }) {
     return (
       <span className="my-3 block max-w-md rounded-xl border border-(--ui-stroke-tertiary) bg-muted/35 p-3">
         <span className="mb-2 block truncate text-xs font-medium text-muted-foreground">{name}</span>
-        <audio className="block w-full" controls onError={() => setFailed(true)} preload="metadata" src={src} />
+        <RemoteImageGate kind="audio" src={src}>
+          <audio className="block w-full" controls onError={() => setFailed(true)} preload="metadata" src={src} />
+        </RemoteImageGate>
         {failed && <OpenMediaButton kind="audio" path={path} />}
       </span>
     )
@@ -216,12 +220,14 @@ function MediaAttachment({ path }: { path: string }) {
     return (
       <span className="my-3 block max-w-2xl rounded-xl border border-(--ui-stroke-tertiary) bg-muted/35 p-3">
         <span className="mb-2 block truncate text-xs font-medium text-muted-foreground">{name}</span>
-        <video
-          className="block max-h-112 w-full rounded-lg bg-black"
-          controls
-          onError={() => setFailed(true)}
-          src={src}
-        />
+        <RemoteImageGate kind="video" src={src}>
+          <video
+            className="block max-h-112 w-full rounded-lg bg-black"
+            controls
+            onError={() => setFailed(true)}
+            src={src}
+          />
+        </RemoteImageGate>
         {failed && <OpenMediaButton kind="video" path={path} />}
       </span>
     )
@@ -256,7 +262,35 @@ function childrenToText(children: unknown): string {
   return ''
 }
 
+/** `[📓 Mars](#/notebooks?nb=<id>)` from a chat action: a pill that opens the notebook in the app. */
+const NOTEBOOK_HREF_RE = /^#\/notebooks\?nb=[\w-]+(?:&make=\w+)?$/
+
+function NotebookPill({ children, href }: { children: ComponentProps<'a'>['children']; href: string }) {
+  const label = childrenToText(children).replace(/^📓\s*/u, '') || 'Notebook'
+
+  return (
+    <a
+      className="not-prose mx-0.5 inline-flex max-w-full items-center gap-1.5 rounded-full border border-(--ui-stroke-secondary) bg-(--ui-bg-elevated) px-2.5 py-0.5 align-middle text-xs font-medium text-(--ui-text-primary) no-underline transition-colors hover:bg-(--ui-row-hover-background) focus-visible:outline-2 focus-visible:outline-(--ui-accent)"
+      data-testid="notebook-pill"
+      href={href}
+      onClick={event => {
+        event.preventDefault()
+        window.location.hash = href.slice(1)
+      }}
+      title={`Open the notebook ${label}`}
+    >
+      <Codicon name="notebook" size="0.8rem" />
+      <span className="truncate">{label}</span>
+      <Codicon name="arrow-right" size="0.7rem" />
+    </a>
+  )
+}
+
 function MarkdownLink({ children, className, href, ...props }: ComponentProps<'a'>) {
+  if (href && NOTEBOOK_HREF_RE.test(href)) {
+    return <NotebookPill href={href}>{children}</NotebookPill>
+  }
+
   const mediaPath = mediaPathFromMarkdownHref(href)
 
   if (mediaPath) {
@@ -430,17 +464,19 @@ function MarkdownImageContent({ className, src, alt, ...props }: ComponentProps<
   // width, so the box overshoots the rendered image and strands the download
   // button — which anchors to the container — out in the margin.
   return (
-    <ZoomableImage
-      alt={alt}
-      className={cn(
-        'm-0 block h-auto w-auto max-h-(--image-preview-height) max-w-full rounded-lg object-contain shadow-[0_0.0625rem_0.125rem_color-mix(in_srgb,#000_4%,transparent),0_0.625rem_1.5rem_color-mix(in_srgb,#000_5%,transparent)]',
-        className
-      )}
-      containerClassName="my-2 block w-fit max-w-[min(100%,var(--image-preview-max-width))]"
-      slot="aui_markdown-image"
-      src={resolvedSrc}
-      {...props}
-    />
+    <RemoteImageGate src={resolvedSrc}>
+      <ZoomableImage
+        alt={alt}
+        className={cn(
+          'm-0 block h-auto w-auto max-h-(--image-preview-height) max-w-full rounded-lg object-contain shadow-[0_0.0625rem_0.125rem_color-mix(in_srgb,#000_4%,transparent),0_0.625rem_1.5rem_color-mix(in_srgb,#000_5%,transparent)]',
+          className
+        )}
+        containerClassName="my-2 block w-fit max-w-[min(100%,var(--image-preview-max-width))]"
+        slot="aui_markdown-image"
+        src={resolvedSrc}
+        {...props}
+      />
+    </RemoteImageGate>
   )
 }
 

@@ -86,6 +86,9 @@ const transformations = [
 ]
 
 beforeEach(() => {
+  // Radix Select needs these in jsdom.
+  Element.prototype.hasPointerCapture ??= () => false
+  Element.prototype.scrollIntoView ??= () => {}
   harvisApi.mockReset()
   harvisApi.mockImplementation(
     routeApi({
@@ -100,6 +103,17 @@ beforeEach(() => {
         styles: [{ id: 'conversational', name: 'Conversational', description: '' }]
       }),
       [`GET /api/notebooks/podcasts/by-notebook/${NB}`]: () => ({ podcasts, count: 3 }),
+      'GET /onb-api/speaker-profiles': () => [
+        { id: 'default-duo', name: 'Host & Guest (default)', builtin: true, speakers: [] },
+        {
+          id: 'p-1',
+          name: 'Morning show',
+          speakers: [
+            { name: 'Ana', voice_id: 'af_bella' },
+            { name: 'Ben', voice_id: 'bm_george' }
+          ]
+        }
+      ],
       [`GET /api/notebooks/${NB}/transformations`]: () => ({ transformations, total_count: 1, has_more: false }),
       [`POST /api/notebooks/${NB}/sources/s1/transform`]: () => transformations[0],
       [`POST /api/notebooks/${NB}/notes`]: () => ({ id: 'n9' })
@@ -192,6 +206,30 @@ describe('NotebookStudio', () => {
     // Progress clears once the stream closes and the list is refetched.
     await waitFor(() => expect(screen.queryByText('Writing the outline…')).toBeNull())
     expect(harvisApi.mock.calls.filter(c => String(c[0]).includes('/podcasts/by-notebook/')).length).toBeGreaterThan(1)
+  })
+
+  it('has no under-construction label and sends the chosen voice set with the request', async () => {
+    const fetchMock = vi.fn(async () => new Response(new ReadableStream({ start: c => c.close() }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderWithQuery(<NotebookStudio notebookId={NB} sources={sources} title="Mars" />)
+    await screen.findByText('Mars — audio overview')
+    expect(screen.queryByText('Under construction')).toBeNull()
+
+    await waitFor(() => expect(harvisApi).toHaveBeenCalledWith('/onb-api/speaker-profiles'))
+    fireEvent.keyDown(screen.getByRole('combobox', { name: 'Voices' }), { key: 'Enter' })
+    fireEvent.click(await screen.findByRole('option', { name: 'Morning show' }))
+    fireEvent.click(screen.getByRole('button', { name: /generate/i }))
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled())
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(JSON.parse(init.body as string)).toMatchObject({
+      speakers: 2,
+      custom_speakers: [
+        { name: 'Ana', voice_id: 'af_bella' },
+        { name: 'Ben', voice_id: 'bm_george' }
+      ]
+    })
   })
 
   it('surfaces the stream error event instead of hanging', async () => {

@@ -5,8 +5,6 @@ Handles retrieval-augmented generation chat over notebook sources
 
 import logging
 import os
-import json
-import re
 import asyncio
 from typing import List, Optional, Dict, Any, Tuple
 from uuid import UUID
@@ -18,6 +16,16 @@ from .models import (
 )
 from .manager import NotebookManager
 from .ingestion import IngestionService
+from .chat_config import default_config, normalize_config
+from .chat_history import load_recent_turns
+from .grounding import REFUSAL_TEXT, is_grounded, min_similarity
+from .rag_answer import AnswerResult, Retrieval, is_unsupported, resolve_answer
+from .rag_llm import post_chat
+from .query_rewrite import REWRITE_TIMEOUT, rewrite_followup
+from .rag_limits import NUM_CTX, clamp_top_k, rag_chunk_limit
+from .rag_prompt import build_messages as _build_messages
+from .rag_prompt import build_prompt_parts, compose_messages, num_predict_for
+from .summary_context import SummaryPassages, context_report, is_overview_question
 
 logger = logging.getLogger(__name__)
 
@@ -43,10 +51,22 @@ FALLBACK_MODELS = [
 # `response` blank, so they go last among discovered models rather than never.
 _REASONING_HINTS = ("gpt-oss", "deepseek-r1", "qwq", "-r1", "qwen3")
 
-# Performance settings
-MAX_CONTEXT_CHARS = 8000  # Limit context to prevent slow processing
-MAX_CHUNKS = 3  # Limit chunks to improve speed
+# Performance settings. How many passages an answer retrieves and how many characters
+# of them the prompt carries are set in rag_limits (NOTEBOOK_RAG_CHUNKS, NOTEBOOK_RAG_CONTEXT_CHARS).
 LLM_TIMEOUT = 180  # 3 minute timeout for LLM calls
+DEFAULT_NUM_PREDICT = 512  # reply cap; a notebook's chat length can raise or lower it
+
+CHAT_SYSTEM_NO_SOURCES = "You are a helpful research assistant. Sources could not be searched right now."
+
+
+NO_SUMMARIES_REPLY = (
+    "None of the sources set to Summary have a summary yet. Set them to Full, or try again once "
+    "their summaries have finished."
+)
+
+
+def _wanted_sources(source_ids: Optional[List[str]]) -> Optional[set]:
+    return {str(s) for s in source_ids} if source_ids else None
 
 
 class RAGChatService:
@@ -61,6 +81,203 @@ class RAGChatService:
         self.allowed_models = allowed_models
         self.ingestion_service = IngestionService(manager)
 
+    # ─── shared steps (the streaming route reuses retrieve_context / build_messages) ───
+
+    async def load_history(
+        self, notebook_id: UUID, user_id: Optional[int], session_id: Any = None
+    ) -> List[Dict[str, str]]:
+        """Recent turns of this person's conversation, oldest first; [] if unavailable."""
+        pool = getattr(self.manager, "db_pool", None)
+        if pool is None or user_id is None:
+            return []
+        try:
+            return await load_recent_turns(pool, notebook_id=notebook_id, user_id=user_id, session_id=session_id)
+        except Exception:
+            logger.warning("Could not load chat history; answering without it", exc_info=True)
+            return []
+
+    async def load_config(self, notebook_id: UUID, user_id: Optional[int]) -> Dict[str, Optional[str]]:
+        """The notebook's {persona, style, length, output_language}; defaults if unavailable."""
+        if user_id is None:
+            return default_config()
+        getter = getattr(self.manager, "get_chat_config", None)
+        if getter is None:
+            return default_config()
+        try:
+            return normalize_config(await getter(notebook_id, user_id))
+        except Exception:
+            logger.warning("Could not load chat config; using defaults", exc_info=True)
+            return default_config()
+
+    async def retrieve(
+        self,
+        notebook_id: UUID,
+        user_id: Optional[int],
+        message: str,
+        *,
+        history: Optional[List[Dict[str, str]]] = None,
+        top_k: Optional[int] = None,
+        source_ids: Optional[List[str]] = None,
+        summary_source_ids: Optional[List[str]] = None,
+        allow_overview: bool = False,
+        model: Optional[str] = None,
+    ) -> Retrieval:
+        """Rewrite a follow-up into a standalone query, embed it and fetch the passages.
+
+        ``summary_source_ids`` are sources at the Summary level: they are not searched, their stored
+        summary is added as a passage instead (one without a summary is left out and reported). A
+        broad overview question (only with ``allow_overview``) skips the search and similarity floor
+        and reads every source's summary, or the start of its text when it has none.
+        """
+        top_k = clamp_top_k(top_k) if top_k else rag_chunk_limit()
+        summary_ids = list(dict.fromkeys(str(s) for s in (summary_source_ids or [])))
+        overview = allow_overview and is_overview_question(message)
+        loader = getattr(self.manager, "source_summaries", None) if (summary_ids or overview) and user_id is not None else None
+
+        if loader is not None and overview:
+            whole = await self._overview(loader, notebook_id, user_id, message, source_ids)
+            if whole is not None:
+                return whole
+
+        summaries = SummaryPassages()
+        unreadable: List[str] = []
+        if summary_ids:
+            if loader is None:
+                unreadable = summary_ids
+            else:
+                try:
+                    summaries = await loader(notebook_id, user_id, summary_ids)
+                except Exception:
+                    logger.warning("Could not read source summaries; leaving those sources out", exc_info=True)
+                    unreadable = summary_ids
+
+        scope = [s for s in (source_ids or []) if str(s) not in set(summary_ids)] if source_ids else None
+        if source_ids and not scope:
+            # Everything the person left on is at the Summary level: nothing to search.
+            retrieval = Retrieval(chunks=[], rewritten_query=message, embedded=True)
+        else:
+            query = await rewrite_followup(
+                message, history, lambda prompt: self._complete_short(prompt, model or DEFAULT_MODEL)
+            )
+            embedding = await self.ingestion_service.get_query_embedding(query)
+            chunks = await self._search(
+                notebook_id, user_id, query, embedding, top_k, scope, exclude=summary_ids or None
+            )
+            retrieval = Retrieval(chunks=chunks, rewritten_query=query, embedded=bool(embedding))
+
+        if summary_ids:
+            retrieval.report = context_report("summary", summaries, unreadable=unreadable)
+            if summaries.chunks:
+                retrieval.chunks = summaries.chunks + retrieval.chunks
+                retrieval.floor_exempt = True
+            elif not retrieval.chunks and retrieval.embedded:
+                retrieval.empty_reply = NO_SUMMARIES_REPLY
+        return retrieval
+
+    async def _overview(
+        self, loader: Any, notebook_id: UUID, user_id: int, message: str, source_ids: Optional[List[str]]
+    ) -> Optional[Retrieval]:
+        """Every source's summary (or its opening) for a broad question; None to search as usual."""
+        try:
+            passages = await loader(notebook_id, user_id, source_ids or None, text_fallback=True)
+        except Exception:
+            logger.warning("Could not read source summaries for an overview; searching instead", exc_info=True)
+            return None
+        if not passages.chunks:
+            return None
+        return Retrieval(
+            chunks=passages.chunks, rewritten_query=message, embedded=True, floor_exempt=True,
+            report=context_report("overview", passages),
+        )
+
+    async def retrieve_context(
+        self,
+        notebook_id: UUID,
+        user_id: Optional[int],
+        message: str,
+        *,
+        history: Optional[List[Dict[str, str]]] = None,
+        top_k: Optional[int] = None,
+        source_ids: Optional[List[str]] = None,
+        model: Optional[str] = None,
+    ) -> Tuple[List[ChunkWithScore], str]:
+        """``(chunks, rewritten_query)``; use ``retrieve`` when you also need to know if embedding failed."""
+        found = await self.retrieve(
+            notebook_id, user_id, message, history=history, top_k=top_k, source_ids=source_ids, model=model
+        )
+        return found.chunks, found.rewritten_query
+
+    def build_messages(
+        self,
+        notebook: Any,
+        chunks: List[ChunkWithScore],
+        history: Optional[List[Dict[str, str]]],
+        message: str,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, str]]:
+        """``[system (rules + sources), *prior turns, user]`` for a grounded answer."""
+        return _build_messages(notebook, chunks, history, message, config)
+
+    async def _search(
+        self,
+        notebook_id: UUID,
+        user_id: Optional[int],
+        query: str,
+        embedding: Optional[List[float]],
+        top_k: int,
+        source_ids: Optional[List[str]],
+        exclude: Optional[List[str]] = None,
+    ) -> List[ChunkWithScore]:
+        wanted = _wanted_sources(source_ids)
+        skipped = _wanted_sources(exclude) or set()
+        hybrid = getattr(self.manager, "search_chunks_hybrid", None) if user_id is not None else None
+        if hybrid is not None:
+            try:
+                extra = {"exclude_source_ids": list(skipped)} if skipped else {}
+                chunks = await hybrid(notebook_id, user_id, query, embedding, top_k, source_ids=source_ids, **extra)
+            except Exception:
+                logger.warning("Hybrid search failed; falling back to vector search", exc_info=True)
+            else:
+                return [c for c in chunks if (not wanted or str(c.chunk.source_id) in wanted)
+                        and str(c.chunk.source_id) not in skipped][:top_k]
+
+        if not embedding:
+            return []
+        fetch_k = max(top_k * 5, top_k) if wanted or skipped else top_k
+        chunks = await self.manager.search_chunks(notebook_id, embedding, top_k=fetch_k)
+        if wanted:
+            chunks = [c for c in chunks if str(c.chunk.source_id) in wanted]
+        if skipped:
+            chunks = [c for c in chunks if str(c.chunk.source_id) not in skipped]
+        # Here the score is a cosine similarity, which is what the grounding floor compares.
+        return [c if c.vector_score is not None else c.model_copy(update={"vector_score": c.score})
+                for c in chunks[:top_k]]
+
+    async def _save_exchange(
+        self, notebook_id: UUID, user_id: int, question: str, answer: str, **assistant_fields: Any
+    ):
+        """Save the question, then the answer; returns the saved answer message."""
+        await self.manager.add_chat_message(
+            notebook_id=notebook_id, user_id=user_id, role=MessageRole.USER, content=question
+        )
+        return await self.manager.add_chat_message(
+            notebook_id=notebook_id, user_id=user_id, role=MessageRole.ASSISTANT, content=answer,
+            **assistant_fields
+        )
+
+    @staticmethod
+    def _generation_extras(history: Optional[List[Dict[str, str]]], config: Dict[str, Any]) -> Dict[str, Any]:
+        """Keyword arguments for ``_generate_response`` beyond the four every call passes."""
+        extras: Dict[str, Any] = {}
+        if history:
+            extras["history"] = history
+        num_predict = num_predict_for(config)
+        if num_predict:
+            extras["num_predict"] = num_predict
+        return extras
+
+    # ─── chat ──────────────────────────────────────────────────────────────────
+
     async def chat(
         self,
         notebook_id: UUID,
@@ -69,64 +286,59 @@ class RAGChatService:
     ) -> NotebookChatResponse:
         """
         Process a chat message with RAG.
-        1. Get embedding for the query
-        2. Retrieve relevant chunks
-        3. Build context-aware prompt
-        4. Generate response with citations
+        1. Load the notebook's chat settings and recent turns
+        2. Retrieve relevant chunks (a follow-up is rewritten into a standalone query first)
+        3. Refuse when nothing retrieved is close enough to the question
+        4. Generate a response from the sources, prior turns and question
         5. Save to chat history
         """
-        # Get query embedding
-        query_embedding = await self.ingestion_service.get_query_embedding(request.message)
+        # Refuse before retrieving: search_chunks filters on the notebook id alone.
+        notebook = await self.manager.get_notebook(notebook_id, user_id)
+        config = await self.load_config(notebook_id, user_id)
+        # Read the history before this turn is saved, or the question would be in its own history.
+        history = await self.load_history(notebook_id, user_id)
 
-        if not query_embedding:
-            # Fall back to chat without RAG if embedding fails
-            logger.warning("Could not get query embedding, chatting without RAG")
-            return await self._chat_without_rag(
-                notebook_id, user_id, request
-            )
-
-        # Retrieve relevant chunks (limit for performance)
-        effective_top_k = min(request.top_k, MAX_CHUNKS)
-        chunks = await self.manager.search_chunks(
-            notebook_id,
-            query_embedding,
-            top_k=effective_top_k
+        found = await self.retrieve(
+            notebook_id, user_id, request.message, history=history, top_k=request.top_k,
+            source_ids=request.source_ids, summary_source_ids=request.summary_source_ids,
+            allow_overview=True, model=request.model
         )
-
-        if not chunks:
+        if not found.chunks:
+            if found.empty_reply:
+                message = await self._save_exchange(
+                    notebook_id, user_id, request.message, found.empty_reply, model_used=request.model
+                )
+                return NotebookChatResponse(
+                    answer=found.empty_reply, citations=[], model_used=request.model, message_id=message.id,
+                    context=found.report,
+                )
+            if not found.embedded:
+                # Fall back to chat without RAG if embedding fails
+                logger.warning("Could not get query embedding, chatting without RAG")
+                return await self._chat_without_rag(notebook_id, user_id, request)
             # No chunks found - notebook might be empty
-            return await self._chat_empty_notebook(
-                notebook_id, user_id, request
+            return await self._chat_empty_notebook(notebook_id, user_id, request)
+
+        if not found.floor_exempt and not is_grounded(found.chunks):
+            logger.info("Refusing: best passage below similarity floor %.2f (notebook %s)", min_similarity(), notebook_id)
+            message = await self._save_exchange(
+                notebook_id, user_id, request.message, REFUSAL_TEXT, model_used=request.model
+            )
+            return NotebookChatResponse(
+                answer=REFUSAL_TEXT, citations=[], model_used=request.model, message_id=message.id,
+                raw_chunks=found.chunks if request.include_reasoning else None, refused=True
             )
 
-        # Build the RAG prompt
-        system_prompt, context_text, citations = self._build_rag_prompt(chunks)
-
-        # Generate response from LLM
+        system_prompt, context_text, _ = build_prompt_parts(notebook, found.chunks, config)
         answer, reasoning, answered_by = await self._generate_response(
-            request.message,
-            system_prompt,
-            context_text,
-            request.model
+            request.message, system_prompt, context_text, request.model,
+            **self._generation_extras(history, config)
         )
 
-        # Process citations in the answer
-        answer, final_citations = self._resolve_answer(answer, chunks)
+        answer, final_citations, unsupported = resolve_answer(answer, found.chunks)
 
-        # Save user message to history
-        await self.manager.add_chat_message(
-            notebook_id=notebook_id,
-            user_id=user_id,
-            role=MessageRole.USER,
-            content=request.message
-        )
-
-        # Save assistant message to history
-        message = await self.manager.add_chat_message(
-            notebook_id=notebook_id,
-            user_id=user_id,
-            role=MessageRole.ASSISTANT,
-            content=answer,
+        message = await self._save_exchange(
+            notebook_id, user_id, request.message, answer,
             reasoning=reasoning if request.include_reasoning else None,
             citations=final_citations,
             model_used=answered_by
@@ -138,7 +350,70 @@ class RAGChatService:
             citations=final_citations,
             model_used=answered_by,
             message_id=message.id,
-            raw_chunks=chunks if request.include_reasoning else None
+            raw_chunks=found.chunks if request.include_reasoning else None,
+            unsupported=unsupported,
+            context=found.report,
+        )
+
+    async def answer_for_session_detailed(
+        self,
+        notebook_id: UUID,
+        message: str,
+        model: str,
+        source_ids: Optional[List[str]] = None,
+        top_k: Optional[int] = None,
+        *,
+        user_id: Optional[int] = None,
+        history: Optional[List[Dict[str, str]]] = None,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> AnswerResult:
+        """``answer_for_session`` with the flags (``refused``, ``unsupported``) kept.
+
+        ``user_id`` turns on hybrid retrieval and the notebook's saved chat settings; the
+        caller must already have checked that this person owns the notebook. ``history`` is
+        the session's prior turns (``chat_history.load_recent_turns``), ``config`` overrides
+        the saved settings.
+        """
+        if config is None:
+            config = await self.load_config(notebook_id, user_id)
+        else:
+            config = normalize_config(config)
+        found = await self.retrieve(
+            notebook_id, user_id, message, history=history, top_k=top_k, source_ids=source_ids, model=model
+        )
+        extras = self._generation_extras(history, config)
+
+        if not found.chunks and not found.embedded:
+            answer, _, answered_by = await self._generate_response(
+                message, CHAT_SYSTEM_NO_SOURCES, "", model, **extras
+            )
+            return AnswerResult(answer.strip(), [], model_used=answered_by, rewritten_query=found.rewritten_query)
+
+        if not found.chunks:
+            return AnswerResult(
+                "I don't have any sources in context to answer from. Add a source "
+                "(or include one in the context) and ask again.",
+                [], model_used=model, rewritten_query=found.rewritten_query,
+            )
+
+        if not is_grounded(found.chunks):
+            logger.info("Refusing: best passage below similarity floor %.2f (notebook %s)", min_similarity(), notebook_id)
+            return AnswerResult(
+                REFUSAL_TEXT, [], refused=True, model_used=model, chunks=found.chunks,
+                rewritten_query=found.rewritten_query,
+            )
+
+        system_prompt, context_text, citations = build_prompt_parts(None, found.chunks, config)
+        answer, reasoning, answered_by = await self._generate_response(
+            message, system_prompt, context_text, model, **extras
+        )
+        # Return the ORDERED context sources (citations[N-1] == "SOURCE N" in the
+        # prompt) so the caller can map the model's [SOURCE N] markers to real
+        # source ids for clickable inline citations.
+        return AnswerResult(
+            answer.strip(), citations, unsupported=is_unsupported(answer, found.chunks),
+            reasoning=reasoning, model_used=answered_by, chunks=found.chunks,
+            rewritten_query=found.rewritten_query,
         )
 
     async def answer_for_session(
@@ -147,7 +422,11 @@ class RAGChatService:
         message: str,
         model: str,
         source_ids: Optional[List[str]] = None,
-        top_k: int = MAX_CHUNKS,
+        top_k: Optional[int] = None,
+        *,
+        user_id: Optional[int] = None,
+        history: Optional[List[Dict[str, str]]] = None,
+        config: Optional[Dict[str, Any]] = None,
     ) -> Tuple[str, List[Citation]]:
         """Stateless RAG answer for an onb_compat chat session.
 
@@ -155,96 +434,11 @@ class RAGChatService:
         fine-grained context control). The caller persists the turn to its own
         session tables. `source_ids=None` searches all of the notebook's chunks.
         """
-        query_embedding = await self.ingestion_service.get_query_embedding(message)
-        if not query_embedding:
-            answer, _, _ = await self._generate_response(
-                message,
-                "You are a helpful research assistant. Sources could not be searched right now.",
-                "", model,
-            )
-            return answer.strip(), []
-
-        fetch_k = max(top_k * 5, top_k) if source_ids else top_k
-        chunks = await self.manager.search_chunks(notebook_id, query_embedding, top_k=fetch_k)
-        if source_ids:
-            wanted = {str(s) for s in source_ids}
-            chunks = [c for c in chunks if str(c.chunk.source_id) in wanted][:top_k]
-        else:
-            chunks = chunks[:top_k]
-
-        if not chunks:
-            return (
-                "I don't have any sources in context to answer from. Add a source "
-                "(or include one in the context) and ask again."
-            ), []
-
-        system_prompt, context_text, citations = self._build_rag_prompt(chunks)
-        answer, _, _ = await self._generate_response(message, system_prompt, context_text, model)
-        # Return the ORDERED context sources (citations[N-1] == "SOURCE N" in the
-        # prompt) so the caller can map the model's [SOURCE N] markers to real
-        # source ids for clickable inline citations.
-        return answer.strip(), citations
-
-    def _build_rag_prompt(
-        self,
-        chunks: List[ChunkWithScore]
-    ) -> Tuple[str, str, List[Citation]]:
-        """Build the RAG prompt with retrieved context"""
-
-        system_prompt = """You are a helpful research assistant analyzing a notebook's sources.
-Your task is to answer questions based ONLY on the provided source materials.
-
-Important guidelines:
-1. ONLY use information from the provided sources - do not use external knowledge
-2. If the information is not in the sources, say "I don't see information about that in your sources"
-3. Cite sources using the bracketed source NUMBER exactly as shown in the context headers — e.g. [SOURCE 1] or [SOURCE 2] (you may add the paragraph, e.g. [SOURCE 1: Para 3]). Always cite by the SOURCE number, never by the title.
-4. Be direct and concise in your answers
-5. If multiple sources provide relevant information, synthesize them together
-6. Quote relevant passages when appropriate using quotation marks
-
-Remember: You are a research assistant helping the user understand their uploaded materials."""
-
-        # Build context from chunks
-        context_parts = []
-        citations = []
-
-        for i, chunk_with_score in enumerate(chunks, 1):
-            chunk = chunk_with_score.chunk
-            source_title = chunk_with_score.source_title or "Unknown Source"
-
-            # Build source reference
-            metadata = chunk.metadata or {}
-            page_info = ""
-            if "page" in metadata:
-                page_info = f", Page {metadata['page']}"
-            elif "paragraphs" in metadata:
-                page_info = f", Para {metadata['paragraphs'][0]+1}" if metadata['paragraphs'] else ""
-
-            source_ref = f"[S{i}] {source_title}{page_info}"
-
-            context_parts.append(f"""
---- SOURCE {i}: {source_title}{page_info} ---
-{chunk.content}
----
-""")
-
-            citations.append(Citation(
-                source_id=chunk.source_id,
-                source_title=source_title,
-                chunk_id=chunk.id,
-                page=metadata.get("page"),
-                section=metadata.get("section"),
-                quote=chunk.content[:200] + "..." if len(chunk.content) > 200 else chunk.content
-            ))
-
-        context_text = "\n".join(context_parts)
-        
-        # Limit context size for performance
-        if len(context_text) > MAX_CONTEXT_CHARS:
-            context_text = context_text[:MAX_CONTEXT_CHARS] + "\n\n[Context truncated for performance...]"
-            logger.info(f"Context truncated from {len(context_text)} to {MAX_CONTEXT_CHARS} chars")
-
-        return system_prompt, context_text, citations
+        result = await self.answer_for_session_detailed(
+            notebook_id, message, model, source_ids, top_k,
+            user_id=user_id, history=history, config=config,
+        )
+        return result.answer, result.citations
 
     @staticmethod
     def _models_to_try(model: str, allowed: Optional[List[str]] = None) -> List[str]:
@@ -278,135 +472,70 @@ Remember: You are a research assistant helping the user understand their uploade
                 ordered.append(name)
         return ordered if allowed is None else [m for m in ordered if m in allowed]
 
+
+    async def _complete_short(self, prompt: str, model: str) -> Optional[str]:
+        """One short local completion (the query rewrite). Never leaves the machine."""
+        models = await asyncio.to_thread(self._models_to_try, model, self.allowed_models)
+        options = {"temperature": 0, "num_predict": 80, "num_ctx": NUM_CTX}  # same num_ctx: no model reload
+        for try_model in models[:2]:
+            try:
+                got = await post_chat(
+                    OLLAMA_URL, try_model, [{"role": "user", "content": prompt}], options, REWRITE_TIMEOUT
+                )
+            except requests.exceptions.ConnectionError:
+                return None
+            except Exception:
+                logger.debug("Query rewrite with %s failed", try_model, exc_info=True)
+                continue
+            if got:
+                return got[0]
+        return None
+
     async def _generate_response(
         self,
         query: str,
         system_prompt: str,
         context: str,
-        model: str
+        model: str,
+        history: Optional[List[Dict[str, str]]] = None,
+        num_predict: Optional[int] = None,
     ) -> Tuple[str, Optional[str], str]:
         """Generate a response, returning (answer, reasoning, model that actually answered)."""
-
-        full_prompt = f"""{system_prompt}
-
-SOURCES:
-{context}
-
-USER QUESTION: {query}
-
-Please provide a helpful answer based on the sources above. Remember to cite sources when using specific information."""
-
+        messages = compose_messages(system_prompt, context, history, query)
+        options = {
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "num_predict": num_predict or DEFAULT_NUM_PREDICT,
+            "num_ctx": NUM_CTX,
+        }
         models_to_try = self._models_to_try(model, self.allowed_models)
 
         # Try local Ollama with multiple models
         for try_model in models_to_try:
             try:
                 logger.info(f"Trying LLM with model: {try_model}")
-                # Offload the blocking HTTP call to a thread so the async event loop
-                # (and the rest of the backend) isn't frozen for the whole generation.
-                response = await asyncio.to_thread(
-                    requests.post,
-                    f"{OLLAMA_URL}/api/generate",
-                    json={
-                        "model": try_model,
-                        "prompt": full_prompt,
-                        "stream": False,
-                        "think": False,
-                        "options": {
-                            "temperature": 0.7,
-                            "top_p": 0.9,
-                            "num_predict": 512,  # Limit response length for speed
-                            "num_ctx": 4096,     # Smaller context window
-                        }
-                    },
-                    timeout=LLM_TIMEOUT
-                )
-
-                if response.status_code == 200:
-                    data = response.json()
-                    answer = data.get("response", "") or ""
-
-                    # Reasoning models (gpt-oss, etc.) may put chain-of-thought in a
-                    # separate Ollama `thinking` field and/or inline <think>...</think>.
-                    reasoning = data.get("thinking") or None
-                    if "<think>" in answer and "</think>" in answer:
-                        inline_reasoning, answer = self._separate_thinking(answer)
-                        reasoning = reasoning or inline_reasoning
-
-                    answer = answer.strip()
-                    if not answer:
-                        # Reasoning-only response (all tokens went to the thinking
-                        # channel, `response` is blank). Don't persist an empty
-                        # bubble — fall through to the next (non-reasoning) model.
-                        logger.warning(
-                            f"Model {try_model} returned empty content "
-                            f"(reasoning-only); trying next model"
-                        )
-                        continue
-
-                    logger.info(f"Successfully generated response with model: {try_model}")
-                    return answer, reasoning, try_model
-
-                elif response.status_code == 404:
-                    logger.debug(f"Model {try_model} not found locally, trying next...")
-                    continue
-                else:
-                    logger.warning(f"LLM request with {try_model} failed: {response.status_code}")
-                    continue
-
+                got = await post_chat(OLLAMA_URL, try_model, messages, options, LLM_TIMEOUT)
             except requests.exceptions.ConnectionError:
-                logger.warning(f"Local Ollama not accessible")
+                logger.warning("Local Ollama not accessible")
                 break
             except Exception as e:
                 logger.warning(f"Error with model {try_model}: {e}")
                 continue
+            if got:
+                logger.info(f"Successfully generated response with model: {try_model}")
+                return got[0], got[1], try_model
 
         # Cloud fallback only when an operator configured one; the prompt carries source text.
         for try_model in (models_to_try if CLOUD_OLLAMA_URL else []):
             try:
                 logger.info(f"Trying cloud Ollama with model: {try_model}")
-                response = await asyncio.to_thread(
-                    requests.post,
-                    f"{CLOUD_OLLAMA_URL}/api/generate",
-                    json={
-                        "model": try_model,
-                        "prompt": full_prompt,
-                        "stream": False,
-                        "think": False,
-                        "options": {
-                            "num_predict": 512,
-                            "num_ctx": 4096,
-                        }
-                    },
-                    timeout=LLM_TIMEOUT
-                )
-
-                if response.status_code == 200:
-                    data = response.json()
-                    answer = data.get("response", "") or ""
-
-                    reasoning = data.get("thinking") or None
-                    if "<think>" in answer and "</think>" in answer:
-                        inline_reasoning, answer = self._separate_thinking(answer)
-                        reasoning = reasoning or inline_reasoning
-
-                    answer = answer.strip()
-                    if not answer:
-                        logger.warning(
-                            f"Cloud model {try_model} returned empty content "
-                            f"(reasoning-only); trying next model"
-                        )
-                        continue
-
-                    logger.info(f"Successfully generated response with cloud model: {try_model}")
-                    return answer, reasoning, try_model
-
-                elif response.status_code == 404:
-                    continue
-                    
+                got = await post_chat(CLOUD_OLLAMA_URL, try_model, messages, options, LLM_TIMEOUT)
             except Exception as e:
                 logger.warning(f"Cloud error with {try_model}: {e}")
                 continue
+            if got:
+                logger.info(f"Successfully generated response with cloud model: {try_model}")
+                return got[0], got[1], try_model
 
         logger.error("All LLM models failed; tried %s", ", ".join(models_to_try))
         return (
@@ -416,62 +545,21 @@ Please provide a helpful answer based on the sources above. Remember to cite sou
             model,
         )
 
-    def _separate_thinking(self, text: str) -> Tuple[str, str]:
-        """Separate thinking/reasoning from final answer"""
-        reasoning = ""
-        remaining = text
-
-        while "<think>" in remaining and "</think>" in remaining:
-            start = remaining.find("<think>")
-            end = remaining.find("</think>")
-
-            if start != -1 and end != -1 and end > start:
-                thought = remaining[start + len("<think>"):end].strip()
-                if thought:
-                    reasoning += thought + "\n\n"
-                remaining = remaining[:start] + remaining[end + len("</think>"):]
-            else:
-                break
-
-        return reasoning.strip(), remaining.strip()
-
     def _extract_citations(
         self,
         answer: str,
         chunks: List[ChunkWithScore]
     ) -> List[Citation]:
         """Citations for the chunks the answer cites, in order of first mention."""
-        return self._resolve_answer(answer, chunks)[1]
+        return resolve_answer(answer, chunks)[1]
 
     def _resolve_answer(
         self,
         answer: str,
         chunks: List[ChunkWithScore]
     ) -> Tuple[str, List[Citation]]:
-        """The answer with its markers renumbered ``[1] [2]...`` and the matching citations.
-
-        Every citation carries ``quote``, the snippet of the passage it points at.
-        If the model cited nothing, the top few reasonably similar passages are
-        listed instead so the answer is never unsourced.
-        """
-        from .citations import resolve_citations, snippet
-
-        text, cited, explicit = resolve_citations(answer, chunks)
-        if not cited and chunks and not explicit:
-            cited = [c for c in chunks[:3] if c.score > 0.5]
-
-        citations = []
-        for cws in cited:
-            chunk = cws.chunk
-            metadata = chunk.metadata or {}
-            citations.append(Citation(
-                source_id=chunk.source_id,
-                source_title=cws.source_title,
-                chunk_id=chunk.id,
-                page=metadata.get("page"),
-                section=metadata.get("section"),
-                quote=snippet(chunk.content)
-            ))
+        """The answer with its markers renumbered ``[1] [2]...`` and the matching citations."""
+        text, citations, _ = resolve_answer(answer, chunks)
         return text, citations
 
     async def _chat_without_rag(
@@ -524,20 +612,8 @@ If they're asking about their sources, suggest they try again or check if their 
                 "answered. Check that Ollama is running with a model pulled."
             )
 
-        # Save to history
-        await self.manager.add_chat_message(
-            notebook_id=notebook_id,
-            user_id=user_id,
-            role=MessageRole.USER,
-            content=request.message
-        )
-
-        message = await self.manager.add_chat_message(
-            notebook_id=notebook_id,
-            user_id=user_id,
-            role=MessageRole.ASSISTANT,
-            content=answer,
-            model_used=used_model
+        message = await self._save_exchange(
+            notebook_id, user_id, request.message, answer, model_used=used_model
         )
 
         return NotebookChatResponse(
@@ -564,20 +640,8 @@ To use the RAG chat feature, please:
 
 I can only answer questions based on the sources you provide in this notebook."""
 
-        # Save to history
-        await self.manager.add_chat_message(
-            notebook_id=notebook_id,
-            user_id=user_id,
-            role=MessageRole.USER,
-            content=request.message
-        )
-
-        message = await self.manager.add_chat_message(
-            notebook_id=notebook_id,
-            user_id=user_id,
-            role=MessageRole.ASSISTANT,
-            content=answer,
-            model_used=request.model
+        message = await self._save_exchange(
+            notebook_id, user_id, request.message, answer, model_used=request.model
         )
 
         return NotebookChatResponse(

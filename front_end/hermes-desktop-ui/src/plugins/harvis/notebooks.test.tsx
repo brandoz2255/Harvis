@@ -118,7 +118,7 @@ describe("NotebooksPage", () => {
       }),
     );
     expect(
-      await screen.findByRole("heading", { level: 2, name: /Mars Rover/ }),
+      await screen.findByRole("heading", { level: 1, name: /Mars Rover/ }),
     ).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "All notebooks" }));
@@ -133,7 +133,7 @@ describe("NotebooksPage", () => {
     renderAt("/notebooks?nb=nb-1");
 
     expect(
-      await screen.findByRole("heading", { level: 2, name: /Mars Rover/ }),
+      await screen.findByRole("heading", { level: 1, name: /Mars Rover/ }),
     ).toBeTruthy();
     expect(
       screen.queryByRole("button", {
@@ -161,9 +161,35 @@ describe("NotebooksPage", () => {
     );
     expect(
       await screen.findByRole("heading", {
-        level: 2,
+        level: 1,
         name: /Untitled notebook/,
       }),
     ).toBeTruthy();
+  });
+  it("offers Join a notebook and lists notebooks shared with you", async () => {
+    harvisApi.mockImplementation(
+      routeApi({
+        "GET /api/notebooks/shares/received": () => [
+          {
+            notebook_id: "nb-9",
+            title: "Lab notes from Sam",
+            emoji: null,
+            description: null,
+            role: "viewer",
+            owner_username: "sam",
+            updated_at: "2026-09-02T00:00:00Z",
+          },
+        ],
+        "GET /api/notebooks?": () => ({ notebooks: [mars] }),
+        "POST /api/notebooks/search": () => ({ results: [] }),
+      }),
+    );
+    renderAt("/notebooks");
+
+    expect(
+      await screen.findByRole("button", { name: "Join a notebook" }),
+    ).toBeTruthy();
+    expect(await screen.findByText(/Lab notes from Sam/)).toBeTruthy();
+    expect(screen.getByText(/sam/)).toBeTruthy();
   });
 });

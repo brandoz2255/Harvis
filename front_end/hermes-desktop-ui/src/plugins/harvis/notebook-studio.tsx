@@ -24,7 +24,6 @@ import { useEffect, useRef, useState } from 'react'
 import { harvisApi } from './api'
 import { relativeTime } from './format'
 import { blockedReason, useCapabilities } from './notebook-capabilities'
-import { UnderConstruction } from './notebook-badge'
 import {
   createNote,
   errorText,
@@ -44,8 +43,27 @@ import {
   transformationsKey,
   useChosenModel
 } from './notebook-shared'
+import { levelOf, useContextLevels } from './notebook-selection'
+import { castFor, DEFAULT_PROFILE, useSpeakerProfiles, VoicePicker } from './notebook-voices'
 
 const DURATIONS = [3, 5, 10, 15] as const
+
+/** Shown even when an older server's style list lacks them; a server that knows them keeps its own wording. */
+export const PRESET_STYLES: TransformationType[] = [
+  { description: 'A short digest of the main points, three minutes at most', id: 'brief', name: 'Brief' },
+  { description: 'Hosts weigh up what the sources do and do not show', id: 'critique', name: 'Critique' }
+]
+
+/** Longest episode a style allows, in minutes. */
+export const STYLE_MAX_MINUTES: Record<string, number> = { brief: 3 }
+
+export const withPresetStyles = (styles: readonly TransformationType[]): TransformationType[] => [
+  ...styles,
+  ...PRESET_STYLES.filter(p => !styles.some(s => s.id === p.id))
+]
+
+export const durationsFor = (style: string): number[] =>
+  DURATIONS.filter(d => d <= (STYLE_MAX_MINUTES[style] ?? Infinity))
 
 function KeepAsNote({ content, notebookId, title }: { content: string; notebookId: string; title: string }) {
   const queryClient = useQueryClient()
@@ -307,9 +325,11 @@ export function AudioOverview({
   const queryClient = useQueryClient()
   const caps = useCapabilities()
   const speechOff = blockedReason(caps?.podcast_audio)
-  const ready = sources.filter(s => s.status === 'ready')
+  const levels = useContextLevels(notebookId)
+  const ready = sources.filter(s => s.status === 'ready' && levelOf(levels, s.id) !== 'off')
   const [style, setStyle] = useState('conversational')
   const [minutes, setMinutes] = useState<string>('5')
+  const [voices, setVoices] = useState(DEFAULT_PROFILE)
   const [progress, setProgress] = useState('')
   const [error, setError] = useState('')
   const abort = useRef<AbortController | null>(null)
@@ -322,6 +342,8 @@ export function AudioOverview({
     queryKey: ['harvis', 'notebooks', 'podcast-styles'],
     staleTime: Infinity
   })
+
+  const profiles = useSpeakerProfiles()
 
   const podcasts = useQuery({
     queryFn: () =>
@@ -337,16 +359,19 @@ export function AudioOverview({
     setProgress('Starting…')
     setError('')
 
+    const cast = castFor(profiles.data, voices)
+
     try {
       await readSse(
         '/api/notebooks/podcasts/generate/stream',
         {
-          duration_minutes: Number(minutes),
+          duration_minutes: Math.min(Number(minutes), STYLE_MAX_MINUTES[style] ?? Infinity),
           generate_audio: true,
           ...(chosen ? { model: chosen } : {}),
           notebook_id: notebookId,
           source_ids: ready.map(s => s.id),
-          speakers: 2,
+          speakers: cast?.length ?? 2,
+          ...(cast ? { custom_speakers: cast } : {}),
           style,
           title: `${title} — audio overview`
         },
@@ -374,17 +399,18 @@ export function AudioOverview({
 
   return (
     <div className="space-y-2">
-      <div className="flex items-center gap-2">
-        <h3 className="text-sm font-medium">Audio overview</h3>
-        <UnderConstruction note="Podcasts work, but custom voices are coming." />
-      </div>
+      <h3 className="text-sm font-medium">Audio overview</h3>
       <p className="text-xs text-(--ui-text-tertiary)">
-        Two hosts talk through everything in your sources. The script is written first, then voiced. Podcasts work today
-        with the built-in voices; custom voices are coming.
+        Hosts talk through everything in your sources. The script is written first, then voiced. Pick the default voices
+        or make your own set.
       </p>
       {speechOff && <p className="text-xs text-destructive">{speechOff}</p>}
       {ready.length === 0 ? (
-        <p className="text-xs text-(--ui-text-tertiary)">Add a source and wait for it to be read first.</p>
+        <p className="text-xs text-(--ui-text-tertiary)">
+          {sources.some(s => s.status === 'ready')
+            ? 'Every source is set to Off. Turn one on in the Sources tab.'
+            : 'Add a source and wait for it to be read first.'}
+        </p>
       ) : (
         <div className="flex flex-wrap items-center gap-1.5">
           <Select onValueChange={setStyle} value={style}>
@@ -392,19 +418,24 @@ export function AudioOverview({
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {(styles.data ?? [{ id: 'conversational', name: 'Conversational', description: '' }]).map(s => (
-                <SelectItem key={s.id} value={s.id}>
-                  {s.name}
-                </SelectItem>
-              ))}
+              {withPresetStyles(styles.data ?? [{ id: 'conversational', name: 'Conversational', description: '' }]).map(
+                s => (
+                  <SelectItem key={s.id} value={s.id}>
+                    {s.name}
+                  </SelectItem>
+                )
+              )}
             </SelectContent>
           </Select>
-          <Select onValueChange={setMinutes} value={minutes}>
+          <Select
+            onValueChange={setMinutes}
+            value={String(Math.min(Number(minutes), STYLE_MAX_MINUTES[style] ?? Infinity))}
+          >
             <SelectTrigger aria-label="Length" className="h-7 w-28 text-xs">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {DURATIONS.map(d => (
+              {durationsFor(style).map(d => (
                 <SelectItem key={d} value={String(d)}>
                   {d} minutes
                 </SelectItem>
@@ -422,6 +453,7 @@ export function AudioOverview({
           )}
         </div>
       )}
+      {ready.length > 0 && <VoicePicker onChange={setVoices} profiles={profiles.data} value={voices} />}
       {progress && (
         <p className="text-xs text-(--ui-text-tertiary)">
           <Codicon name="loading" size="0.8rem" spinning /> {progress}
