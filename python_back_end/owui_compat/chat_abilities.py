@@ -111,7 +111,9 @@ _TAIL = (
     "Never say you cannot make a file, and never offer only an outline or script "
     "instead. With no document-format instructions this turn, say you can and ask the "
     "user to resend as \"make me a <deck|document|spreadsheet|PDF> about ...\". Posters, flyers, logos and video are not supported here. If a "
-    "feature needs a particular phrase, give that exact phrase; never call it impossible."
+    "feature needs a particular phrase, give that exact phrase; never call it impossible. "
+    "You have no shell in this reply: never write command output you did not get from "
+    "a tool; say you did not run it and give the agent phrase."
 )
 
 

@@ -61,6 +61,10 @@ def _ip_is_public(ip_str: str) -> bool:
         ip = ipaddress.ip_address(ip_str)
     except ValueError:
         return False
+    from tools.blocked_networks import ip_blocked
+
+    if ip_blocked(ip_str):  # HARVIS_BLOCKED_NETWORKS: public, but off limits (a campus)
+        return False
     if (
         ip.is_private
         or ip.is_loopback
@@ -89,6 +93,10 @@ def _resolve_public_ips(hostname: str, port: int) -> list[str]:
     host = (hostname or "").strip().lower().rstrip(".")
     if not host or host == "localhost" or host.endswith(".local"):
         raise ReachBlocked("URL host is not allowed (SSRF protection)")
+    from tools.blocked_networks import domain_blocked
+
+    if domain_blocked(host):
+        raise ReachBlocked(f"{host} is on this install's blocked list (HARVIS_BLOCKED_DOMAINS)")
     try:
         infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
     except socket.gaierror as exc:

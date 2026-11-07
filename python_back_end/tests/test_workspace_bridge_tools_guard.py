@@ -65,7 +65,7 @@ class _Harness:
         self.synced, self.started = [], []
         _caps(monkeypatch, caps)
 
-        async def detect(history):
+        async def detect(history, model_hint=None):
             return td.WorkspaceSuggestion({"should_suggest": True, "confidence": 0.95,
                                            "task_type": "file", "task_brief": "b", "reason": "r"})
 

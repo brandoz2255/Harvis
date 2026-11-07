@@ -20,13 +20,16 @@
 # the repo runner keeps no-new-privileges, so there it is inert.
 #
 # Build:  docker build -t harvis-repo-sandbox:local ./repo-sandbox-engine
+#
+# No network scanners (nmap, masscan…): a box is never meant to probe networks, and
+# on Kubernetes it has no network at all. The forensics tools here read files.
 FROM node:20-bookworm
 
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         python3 python3-venv python3-pip ca-certificates curl \
         sudo file xxd binutils bsdextrautils jq unzip p7zip-full \
-        libimage-exiftool-perl binwalk foremost tshark tcpdump john nmap dnsutils \
+        libimage-exiftool-perl binwalk foremost tshark tcpdump john dnsutils \
         python3-scapy python3-pycryptodome socat \
     && rm -rf /var/lib/apt/lists/*
 

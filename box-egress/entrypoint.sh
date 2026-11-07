@@ -4,6 +4,11 @@
 # (a lab mirror, say). A leading dot means the domain and its subdomains.
 # HARVIS_BOX_EGRESS_BLOCK_DOMAINS: comma list added to blocked.txt.
 # HARVIS_BOX_EGRESS_BLOCKLIST=off: empty blocked.txt.
+# HARVIS_BLOCKED_DOMAINS: comma list added to blocked.txt even with the blocklist off
+#   (a school or workplace domain, e.g. .school.example.edu).
+# HARVIS_BLOCKED_NETWORKS: comma list of CIDRs no box may reach, even when public
+#   (e.g. a campus's own 203.0.113.0/24). Checked against every address a name
+#   resolves to, like the private ranges.
 # HARVIS_BOX_EGRESS_MAX_UPLOAD_MB (10): largest plain-HTTP request body.
 # HARVIS_BOX_EGRESS_MAX_CONNS (64): open connections per socket, all boxes.
 set -eu
@@ -25,10 +30,25 @@ cp /etc/squid/packages.base.txt /etc/squid/packages.txt
 domains "${HARVIS_BOX_EGRESS_EXTRA_DOMAINS:-}" >> /etc/squid/packages.txt
 
 if [ "${HARVIS_BOX_EGRESS_BLOCKLIST:-on}" = off ]; then
-    : > /etc/squid/blocked.txt
+    domains "${HARVIS_BLOCKED_DOMAINS:-}" | sort -u > /etc/squid/blocked.txt
 else
-    { grep -v '^#' /etc/squid/blocked.base.txt; domains "${HARVIS_BOX_EGRESS_BLOCK_DOMAINS:-}"; } \
+    { grep -v '^#' /etc/squid/blocked.base.txt; domains "${HARVIS_BOX_EGRESS_BLOCK_DOMAINS:-}"
+      domains "${HARVIS_BLOCKED_DOMAINS:-}"; } \
         | grep -v '^$' | sort -u > /etc/squid/blocked.txt
+fi
+
+# Blocked networks: only address characters get through, so the list cannot
+# smuggle another squid directive in. A malformed entry stops the proxy rather
+# than being skipped: a typo must not quietly reopen a campus range.
+nets=$(domains "${HARVIS_BLOCKED_NETWORKS:-}")
+: > /etc/squid/blocked_nets.conf
+if [ -n "$nets" ]; then
+    bad=$(printf '%s\n' "$nets" | grep -vE '^[0-9a-fA-F.:]+/[0-9]{1,3}$' || true)
+    if [ -n "$bad" ]; then
+        echo "box-egress: HARVIS_BLOCKED_NETWORKS has entries that are not CIDRs: $bad" >&2
+        exit 1
+    fi
+    printf 'acl blocked_nets dst %s\nhttp_access deny blocked_nets\n' "$(echo $nets)" > /etc/squid/blocked_nets.conf
 fi
 
 upload_mb=$(num "${HARVIS_BOX_EGRESS_MAX_UPLOAD_MB:-}" 10)

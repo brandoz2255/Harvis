@@ -66,8 +66,9 @@ KNOWN_PROVIDERS=(
   "8000|vLLM|/v1/models"
 )
 
-HEALTH_URL="http://localhost:9000/api/health/services"
-SETUP_URL="http://localhost:9000/api/setup/status"
+BASE_URL="http://localhost:9000"
+HEALTH_URL="${BASE_URL}/api/health/services"
+SETUP_URL="${BASE_URL}/api/setup/status"
 # The health report lists the model provider under this key. That server is the
 # user's own (plug-and-play via HARVIS_LLM_BASE_URL), not a container of this
 # stack — it being absent or down is information, never install failure.
@@ -1031,6 +1032,32 @@ check_stack_containers() {
   done
 }
 
+# Kubernetes mode: k3s servicelb publishes :9000 on the node IP only, so
+# localhost:9000 never answers and the poll always ended in a false "✗ No response".
+use_k8s_urls() {
+  local sudo="" node ip=""
+  [ "$(id -u)" -eq 0 ] || sudo="sudo"
+  node="$($sudo k3s kubectl get nodes -l node-role.kubernetes.io/control-plane=true \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  [ -n "$node" ] && ip="$($sudo k3s kubectl get node "$node" \
+    -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null || true)"
+  [ -n "$ip" ] || ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  [ -n "$ip" ] || return 0
+  BASE_URL="http://${ip}:9000"
+  HEALTH_URL="${BASE_URL}/api/health/services"
+  SETUP_URL="${BASE_URL}/api/setup/status"
+}
+
+inspect_hint() {
+  if [ "$K8S_ACTION" = "up" ]; then
+    echo "  Inspect with:  ./install.sh --k8s-status"
+    echo "                 sudo k3s kubectl -n harvis logs deploy/backend --tail=100"
+  else
+    echo "  Inspect with:  docker compose ps"
+    echo "                 docker compose logs --tail=100 backend nginx pgsql"
+  fi
+}
+
 poll_health() {
   echo ""
   echo "Waiting for the stack to come up (polling ${HEALTH_URL}) ..."
@@ -1049,8 +1076,7 @@ poll_health() {
   if [ -z "$body" ]; then
     echo ""
     echo "✗ No response from ${HEALTH_URL} after 180s — nginx (or the backend behind it) never came up."
-    echo "  Inspect with:  docker compose ps"
-    echo "                 docker compose logs --tail=100 backend nginx pgsql"
+    inspect_hint
     return 1
   fi
   local blockers
@@ -1059,12 +1085,11 @@ poll_health() {
     echo ""
     [ -n "${blockers% }" ] && echo "✗ The backend reports trouble with: ${blockers% }"
     [ -n "$STACK_DOWN" ] && echo "✗ Container(s) not running:${STACK_DOWN}"
-    echo "  Inspect with:  docker compose ps"
-    echo "                 docker compose logs --tail=100 backend nginx pgsql"
+    inspect_hint
     return 1
   fi
   echo ""
-  echo "✓ Harvis is up → http://localhost:9000/harvis/"
+  echo "✓ Harvis is up → ${BASE_URL}/harvis/"
   # The endpoint returns {"needs_setup":..,"setup_complete":..} — extract the
   # one field we need without anchoring to the whole body (a second key was
   # added later, and an anchored match silently yields empty → a false
@@ -1310,6 +1335,7 @@ launch_k8s() {
   echo "Building Harvis images ..."
   docker compose build
   run_k8s up
+  use_k8s_urls
   poll_health
 }
 

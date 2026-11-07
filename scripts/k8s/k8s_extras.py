@@ -12,6 +12,7 @@ import os
 import re
 import stat
 
+import k8s_boxes as boxes
 import k8s_build_space as build_space
 import k8s_harden as harden
 import k8s_models as models
@@ -144,6 +145,7 @@ def extra_env(gen, name):
     host = {v["name"]: v["hostPath"]["path"] for v in vols if "hostPath" in v}
     env["HARVIS_HOST_MOUNTS"] = json.dumps(
         [{"Destination": m["mountPath"], "Source": host[m["name"]]} for m in mounts if m["name"] in host])
+    env.update(boxes.backend_env(gen))
     if gen.o.lan_models_port and gen.o.ollama_image:
         env["HARVIS_LAN_MODELS_URL"] = gen.o.lan_models_url
         env["HARVIS_LAN_MODELS_PORT"] = str(gen.o.lan_models_port)
@@ -345,6 +347,7 @@ def add_all(gen):
     public_services(gen)
     network_policies(gen)
     backend_rbac(gen)
+    boxes.add(gen, BACKEND_SA)
     models.ollama(gen)
     models.lan_models(gen)
     db_backup(gen)

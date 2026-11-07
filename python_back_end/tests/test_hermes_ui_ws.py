@@ -116,3 +116,39 @@ async def test_socket_ends_quietly_when_the_browser_vanished_mid_send(monkeypatc
             raise RuntimeError('WebSocket is not connected. Need to call "accept" first.')
 
     await ws_mod.hermes_ws(GoneSocket())  # must return, not raise
+
+
+@pytest.mark.asyncio
+async def test_a_global_pick_in_an_open_chat_switches_that_chat_too(monkeypatch):
+    # The composer sends --global for the main chat. Saving only the default left the
+    # chat on its first model for every later turn (2026-11-07).
+    from plugins.hermes_ui import sessions, ws_settings
+
+    live = sessions.Live(id="s1", user_id=1, model="nemotron:30b")
+    emitted, saved = [], {}
+
+    async def apply(pool, uid, provider, model):
+        saved.update(provider=provider, model=model)
+        return {"ok": True, "provider": provider, "model": model}
+
+    async def model_error(pool, uid, token, model):
+        return None
+
+    monkeypatch.setattr(ws_settings, "apply_model_choice", apply)
+    monkeypatch.setattr(ws_settings.session_ops, "model_error", model_error)
+
+    class Conn:
+        pool, user_id, token = None, 1, "t"
+
+        async def _open(self, rid, params):
+            return live, [], None
+
+        async def emit(self, kind, sid, payload):
+            emitted.append((kind, payload.get("model")))
+
+    out = await Connection.m_config_set(
+        Conn(), 9, {"key": "model", "session_id": "s1", "value": "qwen3.8:27b --provider harvis --global"})
+
+    assert out["result"]["ok"] and saved == {"provider": "harvis", "model": "qwen3.8:27b"}
+    assert live.model == "qwen3.8:27b"
+    assert emitted and emitted[-1][0] == "session.info"

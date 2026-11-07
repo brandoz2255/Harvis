@@ -499,3 +499,20 @@ async def test_prompt_submit_web_search_flag_sets_the_session_and_the_turn_extra
     assert conn.live.web_search is False and "features" not in _turn_extra(conn.live, None)
     for t in list(conn.turns.values()):
         t.cancel()
+
+
+def test_an_image_sent_to_a_text_only_model_says_so():
+    # The exact chunk llama.cpp behind the PAIR router sent (2026-11-07), and a truncated copy.
+    body = ('{"error":{"message":"{\\"error\\":{\\"code\\":500,\\"message\\":\\"image input is not supported - '
+            'hint: if this is unexpected, you may need to provide the mmproj\\",\\"type\\":\\"server_error\\"}}",'
+            '"type":"api_error"}}')
+    for msg in (f"Upstream error 500: {body}", f"Upstream error 500: {body[:150]}"):
+        text = errors.from_chunk({"message": msg, "type": "proxy_error"})
+        assert "can't read images" in text and "not responding" not in text and "{" not in text
+
+
+def test_a_500_is_a_server_failure_not_a_dead_server():
+    text = errors.from_chunk({"message": "Upstream error 500: model crashed while loading"})
+    assert "not responding" not in text and "failed on this request" in text
+    assert "model crashed while loading" in text
+    assert "{" not in errors.from_chunk({"message": 'Upstream error 500: {"error":{"code":500}}'})

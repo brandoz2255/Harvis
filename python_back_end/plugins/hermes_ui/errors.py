@@ -24,6 +24,14 @@ _BY_STATUS = {
 _PROVIDER_401 = "The model provider rejected the API key. Check the key for this provider, then retry."
 _SERVER_DOWN = "The model server is not responding. Check that it is running, then retry."
 _FALLBACK = "Something went wrong while answering. Retry, and check the Harvis logs if it keeps happening."
+_SERVER_ERROR = "The model server failed on this request. Retry, or pick a different model."
+_NO_IMAGES = ("This model can't read images. Pick a model that can see images, or start a new chat "
+              "without the image (it stays in this chat's history and is sent again every turn).")
+# Causes worth naming whatever the status: a 500 from llama.cpp/Ollama often carries one.
+_BY_CAUSE = [
+    (re.compile(r"image input is not supported|does not support (?:image|vision)|mmproj|"
+                r"model is not multimodal|vision is not supported", re.I), _NO_IMAGES),
+]
 
 
 def detail_text(raw: Any) -> str:
@@ -61,9 +69,20 @@ class TurnError(RuntimeError):
 def from_http(status: int, body: Any, *, upstream: bool = False) -> TurnError:
     """``upstream``: the status came from the model provider, not from Harvis itself."""
     detail = detail_text(body)
+    for pattern, cause in _BY_CAUSE:
+        if pattern.search(detail) or pattern.search(str(body)):
+            return TurnError(cause, raw=f"HTTP {status}: {str(body)[:400]}", status=status)
     sentence = _PROVIDER_401 if upstream and status == 401 else _BY_STATUS.get(status)
     if sentence is None:
-        sentence = _SERVER_DOWN if status >= 500 else _FALLBACK
+        # Only a gateway status means nothing answered; a 500 is the server answering with a failure.
+        if status in (502, 503, 504):
+            sentence = _SERVER_DOWN
+        elif status >= 500:
+            sentence = _SERVER_ERROR
+            if detail and len(detail) <= 160 and "{" not in detail and "Traceback" not in detail:
+                sentence = f"{sentence} ({detail.rstrip('.')})"
+        else:
+            sentence = _FALLBACK
     # A 4xx body often names the real reason in a short sentence ("model 'x' not found").
     if status in (400, 404) and detail and len(detail) <= 160 and "{" not in detail and "Traceback" not in detail:
         sentence = f"{sentence} ({detail.rstrip('.')})"

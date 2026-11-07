@@ -139,6 +139,14 @@ _RUNNER_PROFILE = f"{'sudo' if _RUNNER_SUDO else 'locked'}-v2-{_RUNNER_EGRESS}"
 _disk_cap_unsupported = False
 
 
+def _k8s_boxes() -> bool:
+    """Chat boxes run as Kubernetes pods (workspace/k8s_box.py) on a Kubernetes
+    install without Build Space: the installer sets HARVIS_K8S_BOXES there. With
+    Build Space on, the Docker path below is used as before."""
+    from . import k8s_box
+    return k8s_box.enabled()
+
+
 def is_enabled() -> bool:
     """Default: ON. The env var is a kill-switch only.
 
@@ -655,6 +663,10 @@ class WorkspaceTerminalManager:
     async def ensure_isolated(self, session_id: str, workspace_path: str) -> _TerminalState:
         """Get/create the session's hardened runner container. Lazy, idempotent."""
         key = f"vc:{self._safe_id(session_id)}"
+        if _k8s_boxes():
+            from . import k8s_box
+            name = await k8s_box.ensure(session_id, workspace_path)
+            return _TerminalState(workspace_id=key, container_name=name, created_at=time.time())
         async with self._lock:
             state = self._terminals.get(key)
             if state:
@@ -673,6 +685,10 @@ class WorkspaceTerminalManager:
         sandbox delete takes effect. True when a container was removed."""
         key = f"vc:{self._safe_id(session_id)}"
         name = f"harvis-vc-run-{self._safe_id(session_id)[:40]}"
+        if _k8s_boxes():
+            from . import k8s_box
+            self._terminals.pop(key, None)
+            return await k8s_box.drop(session_id)
         async with self._lock:
             self._terminals.pop(key, None)
             if self._client is None:
@@ -827,9 +843,13 @@ class WorkspaceTerminalManager:
         treat that as a refusal to run, never as a cue to execute in-process."""
         if not cmd or not cmd.strip():
             raise ValueError("empty command")
+        timeout = min(_MAX_TIMEOUT_S, max(1.0, timeout_s or _DEFAULT_TIMEOUT_S))
+        if _k8s_boxes():
+            from . import k8s_box
+            return await k8s_box.exec_isolated(session_id, workspace_path, cmd, timeout,
+                                               workdir, exec_output_sink.get())
         if self._client is None:
             raise RuntimeError("docker client unavailable")
-        timeout = min(_MAX_TIMEOUT_S, max(1.0, timeout_s or _DEFAULT_TIMEOUT_S))
         state = await self.ensure_isolated(session_id, workspace_path)
         state.last_used_at = time.time()
         return await self._exec_in_container(state.container_name, cmd, timeout, workdir)
@@ -1701,6 +1721,12 @@ class WorkspaceTerminalManager:
         — stop + remove container, leave the volume in either mode.
         """
         now = time.time()
+        if _k8s_boxes():
+            try:
+                from . import k8s_box
+                await k8s_box.sweep_idle()
+            except Exception as exc:  # noqa: BLE001 — a sweep failure never stops the janitor
+                logger.warning("k8s box idle sweep failed: %s", exc)
 
         # Prune finished background-job records past retention. Running jobs
         # are never pruned here — their tail loop owns their lifecycle (and

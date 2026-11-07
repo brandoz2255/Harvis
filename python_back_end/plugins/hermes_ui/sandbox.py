@@ -51,7 +51,7 @@ UPLOADS = "uploads"          # where a chat's attachments are copied for the age
 # Mirrors terminal_container._RUNNER_SUDO, which decides whether the box can really sudo.
 _SUDO_LINE = ("Install whatever you need with `sudo apt-get install -y <pkg>` (or pip/npm);\n"
               "  common challenge tools are already there: file, strings, xxd, exiftool, binwalk,\n"
-              "  foremost, tshark, tcpdump, john, nmap, 7z, scapy, pycryptodome."
+              "  foremost, tshark, tcpdump, john, 7z, scapy, pycryptodome."
               if os.getenv("HARVIS_BUILD_RUNNER_SUDO", "true").strip().lower() not in ("0", "false", "no", "off")
               else "There is no root or sudo here; install into a virtualenv or local node_modules.")
 
@@ -596,10 +596,17 @@ def workspace_guide(user_id: int, session_id: str) -> str:
     prefix = app_prefix(user_id, session_id)
     gpu = "The GPU is ON for this sandbox." if gpu_wanted(user_id, session_id) else (
         "There is no GPU in this sandbox; prefer CPU builds.")
+    if os.getenv("HARVIS_K8S_BOXES", "").strip().lower() in ("1", "true", "yes", "on"):
+        net = ("with NO network access on this install (no internet, no Harvis services): a\n"
+               "command that needs the internet will fail, so say that instead of trying around it")
+    else:
+        net = "with internet access but no access to Harvis's services"
     return f"""You are working in this chat's own sandbox: a Linux container (Debian, Node 20,
-Python 3, git) with internet access but no access to Harvis's services. Its folder is
+Python 3, git) {net}. Its folder is
 /workspace; everything you create there persists and the user sees it in the Files pane.
 - It is your own computer. {_SUDO_LINE}
+- Only report command output you actually got from exec in this run. If a command fails
+  or cannot run, show the real error; never invent or re-quote output from earlier chat.
 - Files the user attaches to the chat are copied into /workspace/uploads/. Work on the
   real file there with real tools; never guess at a binary file's contents.
 - Read your core files first: /workspace/SOUL.md (who you are), /workspace/USER.md (what

@@ -1,5 +1,245 @@
 # Recent Changes and Fixes Documentation
 
+## Date: 2026-11-07 — qwen context windows, box image missing from k3s, sources-only check
+
+**qwen context (measured, then set as a saved `num_ctx`).**
+- `qwen3.8:27b-mtp-q4_K_M` (this computer, 4090; hybrid, full attention every 4th layer): 32k 63 tok/s all on GPU;
+  64k 53 tok/s; 128k 20 tok/s. Set to **65536**. Before-state saved in the session scratchpad.
+- `qwen3.8:27b-q4_K_M` (vision; PAIR, pooled 4090 + 3090): 32k 37.1, 64k 37.0, 128k 17.2 tok/s. Set to **65536**
+  through the PAIR router's `/api/create` (it accepted and reports the parameter).
+- Harvis reports these windows itself (saved `num_ctx`, `ollama_hosts.py`, previous entry).
+
+**Boxes could not start.** Every box pod was `ErrImagePull`: k3s had every Harvis image except
+`harvis-repo-sandbox:local`, although the installer had stamped it imported (it threw the import output away). The UI
+warm-up then retried ~220 times an hour.
+- `workspace/k8s_box.py`: `imagePullPolicy: Never` (no Docker Hub request for a local image); a missing image is
+  reported as "re-run ./install.sh --k8s"; a box that failed to start is not retried for 60 s (cleared on success or
+  delete).
+- `scripts/k8s/harvis-k8s.sh` `import_images`: keeps the import output, dies on failure, and only stamps an image
+  that `k3s ctr images ls` actually lists.
+
+**Sources-only answers.** Replayed the grounded turn (long CTF paste + 5 web results, with and without an image) on
+the real qwen through PAIR 5 times: every reply had 1,700–2,350 chars of answer with reasoning in its own field.
+`model_proxy`, the Hermes stream parser and relay, `doc_guard` and the Sources trailer all pass content through.
+The known empty-answer path is closed by the answer guard (no firing since the backend restart). Not reproduced after
+the restart; needs the stored reply of a new occurrence.
+
+**Checked.** `tests/test_k8s_box.py` 12 passed (pull policy, cooldown); `scripts/k8s` 115 passed.
+
+## Date: 2026-11-07 — Nemotron gets a 128k context window (was 32k; Harvis assumed 24k)
+
+**Problem.** Models got far less context than they support. Nemotron-3.5-Lightning-30B (trained for 1,048,576) loaded
+at Ollama's 24 GB-card default of 32,768, and Harvis reported 24,576 for every model.
+
+**Root cause.** `HARVIS_OLLAMA_NUM_CTX` reaches Ollama as `options.num_ctx` on `/v1/chat/completions`, which Ollama
+ignores; only a saved `num_ctx` on the model (or the server-wide `OLLAMA_CONTEXT_LENGTH`) changes the load size.
+`owui_compat/ollama_hosts.SERVED_CONTEXT_CAP` then capped the reported window at 24,576.
+
+**Measured (this computer, RTX 4090, Ollama 0.34.0).** Above 32k a few GiB of Nemotron sit in system RAM, but it is a
+hybrid model with few attention layers: 64k → 24.4 GiB total, 128k → 24.8, 256k → 25.7. Speed at 128k: 137.5 tok/s
+generate vs 149.3 at 32k (-8%).
+
+**Fix.**
+- This computer's Ollama: the Nemotron tag was re-saved in place with `num_ctx 131072` (`/api/create` from itself,
+  same weights, stop words and capabilities kept). A `/v1` request now loads it at 131,072, including through PAIR,
+  which forwards it to this machine. Undo: `curl http://<node-ip>:11434/api/create -d
+  '{"model":"<tag>","from":"<tag>","parameters":{"num_ctx":32768}}'` (the definition before is in the session
+  scratchpad).
+- `owui_compat/ollama_hosts.py`: a saved `num_ctx` is the reported window (capped at the trained max), shared across
+  hosts by tag (PAIR reports no parameters). Others keep the 24,576 cap. The chat's context gauge and summarising
+  follow it.
+
+**Checked.** Live probe: Nemotron reports 131,072 on both `local` and `pair`; gemma4 and qwen3.8 stay 24,576. New
+`tests/test_ollama_saved_ctx.py`; host/context suites 37 passed.
+
+## Date: 2026-11-07 — Chat always answers; Sources only under an answer; model switch sticks
+
+**Problems.** (1) Some chat turns showed nothing, or only a Sources list. (2) A pasted CTF prompt was web-searched
+verbatim. (3) After the first message, picking another model did nothing: the chat stayed on its first model.
+
+**Root causes.**
+- Thinking models (Nemotron, qwen3.x) sometimes spent the whole reply on reasoning: `empty turn ... keys=['content',
+  'reasoning']`, up to 12k completion tokens. `plugins/hermes_ui/models.thinking_models()` read only `OLLAMA_URL`
+  (the cluster Ollama holds just the embedder), so no model was known to think and the user's effort level was never
+  sent. The proxy's `options.think=false` is ignored on `/v1`; tested on PAIR: only `reasoning_effort: "none"` works
+  (14 tokens straight to the answer vs ~240).
+- `chat_reach` appended Sources whatever the answer was, so an empty reply showed only links.
+- The reach gate's classifiers ran with thinking on and came back unparsable; a long paste full of capitalised names
+  was a regex "yes", so the paste itself became the query.
+- The composer sends `config.set model ... --global` for the main chat. `ws_settings.m_config_set` only saved the
+  default and never changed the open session, whose model was fixed by its first message.
+
+**Fixes.**
+- `plugins/hermes_ui/models.py`: `thinking_models()` reads every model host (`_model_hosts`); a host that reports
+  no capabilities defers to one that does.
+- `owui_compat/answer_guard.py` (new), wrapped round the native lane in `chat_completion.py`: a reply with no content
+  and no error is retried once in the same stream with `reasoning_effort: "none"` (only when it reasoned); still
+  empty → a plain sentence (`NO_ANSWER`).
+- `owui_compat/chat_reach.py`: Sources only under a real answer (`_answered`), streamed and non-streamed; a paste
+  (>400 chars or 4+ lines) is not searched on the regex alone (`_looks_pasted` → classifier decides).
+- `workspace/orchestration/model_router.py`: optional `reasoning_effort`; `reach_gate` classifiers send `"none"` to
+  thinking models.
+- `workspace/orchestration/runner.py`: after a reasoning-only empty turn, the rest of the run has thinking off.
+- `plugins/hermes_ui/ws_settings.py`: a `--global` pick with a session id also switches that session and emits
+  `session.info`.
+
+**Checked.** New `tests/test_answer_guard.py` (8) and a ws test for the global switch; reach/gate/chat/runner/router
+suites 136 passed, hermes ws/settings 53 passed (1 pre-existing failure in `test_hermes_ui_settings.py`), in the
+backend image.
+
+## Date: 2026-11-07 — Text-only models can answer about images (vision handoff)
+
+**Problem.** A chat with an image failed on text-only models (Nemotron-3.5-Lightning-30B GGUF: `500 image input is
+not supported`), and kept failing every turn because the image stays in history. The model has no vision projector
+(its Hugging Face repo is text-generation with no mmproj), so it cannot be made to see.
+
+**Fix.** `python_back_end/owui_compat/vision_bridge.py` (new), called in `chat_completion.py` just before the native
+lane. When some Ollama host reports the picked model's capabilities without "vision", each image part becomes a text
+description written by a local vision model: `HARVIS_VISION_MODEL` if set, else one already in memory, else the
+smallest installed. Descriptions are cached by image hash (history images are described once). Unknown capabilities
+(a router reporting none) leave images alone. Remote image links are not fetched. Failures become notes, never errors.
+Off switch: `HARVIS_VISION_BRIDGE=0`. Cloud and Hermes-agent lanes are untouched.
+
+**Checked.** Live against this machine's hosts: Nemotron detected as text-only, qwen3.8 as vision; gemma4:e4b
+described a test image ("ERROR 42: disk full on /dev/sda1") correctly in 15 s including load. New
+`tests/test_vision_bridge.py`; with chat/hermes tests 50 passed in the backend image.
+
+## Date: 2026-11-07 — "The model server is not responding" was really "this model can't read images"
+
+**Problem.** A Hermes chat failed every turn with "The model server is not responding. Check that it is running,
+then retry." All model hosts were up.
+
+**Root cause.** The chat had an image, and the picked model (Nemotron-3.5-Lightning-30B GGUF on PAIR, text only)
+answered `500: image input is not supported - hint: ... mmproj`. `plugins/hermes_ui/errors.from_http` turned every
+status >= 500 into the "not responding" sentence. The image stays in the chat history, so every later turn failed too.
+
+**Fix.** `errors.py`: known causes are named first, whatever the status (image sent to a text-only model → "This model
+can't read images…"); only 502/503/504 say "not responding"; another 5xx says the server failed on the request, with
+its short reason when it is plain text.
+
+**Checked.** New tests in `tests/test_hermes_ui_chat_core.py` use the exact chunk from the log (full and truncated);
+Hermes chat/ws tests 84 passed in the backend image.
+
+## Date: 2026-11-07 — Nothing Harvis runs may reach the school network (the user's school)
+
+**Problem.** Boxes and agent fetches only refused private/LAN addresses. the school sits on public addresses
+(a public range, owner confirmed via ARIN), so a box (Docker mode), the agent browser or an agent web fetch could reach it. The
+box image also shipped nmap.
+
+**Fix.**
+- New `.env` settings `HARVIS_BLOCKED_NETWORKS` (CIDRs) and `HARVIS_BLOCKED_DOMAINS`; set to `<campus range>` and
+  `<.school-domain>`. Passed to the backend and box-egress in `docker-compose.yaml`.
+- `box-egress`: the entrypoint writes `/etc/squid/blocked_nets.conf` (deny by resolved address, so any name pointing
+  at the campus is refused too) and adds the domains to `blocked.txt` even with the blocklist off. A malformed CIDR
+  stops the proxy instead of being skipped.
+- `python_back_end/tools/blocked_networks.py` (new): `ip_blocked` / `domain_blocked`, used by `agent_reach/tools.py`
+  (agent fetch, every redirect hop) and `tools/openclaw_proxy.py` (web proxy, enforced in live-web mode too).
+- K8s: `--blocked-cidr` (from `HARVIS_BLOCKED_NETWORKS` in `harvis-k8s.sh`) adds the ranges to the agent browser's
+  egress `except` list; a typo stops the install.
+- `repo-sandbox-engine/Dockerfile`: nmap removed; the agent's box guide no longer lists it.
+- K8s chat boxes already have no network at all (deny-all NetworkPolicy, no capabilities).
+
+**Checked.** Real squid in `harvis-box-egress:local`, offline: campus by name, bare IP, `<school-domain>` and subdomains,
+HTTP and CONNECT all `TCP_DENIED/403`; a public test host passes the rules (503, no network). Generator 115 passed;
+backend 349 passed incl. new `tests/test_blocked_networks.py`.
+
+## Date: 2026-11-07 — Chat boxes on Kubernetes run as pods (no Docker socket)
+
+**Problem.** Every box command failed with `EXEC ERROR: the isolated runner container is unavailable (docker client
+unavailable)`.
+
+**Root cause.** Chat boxes were sibling Docker containers started through `/var/run/docker.sock`. In K8s mode the
+backend only gets the socket with Build Space on, and the installer (rightly) refuses Build Space on an
+internet-facing install with Harvis sign-in (`scripts/exposure-tunnel.sh:44`). Turning Build Space on was tried and
+backed out.
+
+**Fix.** On a K8s install without Build Space, a box is a pod:
+- `python_back_end/workspace/k8s_box.py` (new): creates, reuses, replaces and idle-sweeps box pods through the API
+  server with the backend's service account, and runs commands over `pods/exec` (websocket, `v4.channel.k8s.io`),
+  streaming output to the live sink. Same result shape as the Docker runner; any failure raises (fail closed).
+- `workspace/terminal_container.py`: `exec_isolated`, `ensure_isolated`, `drop_isolated` and `sweep_idle` use it when
+  `HARVIS_K8S_BOXES=1`.
+- `scripts/k8s/k8s_boxes.py` (new, via `k8s_extras.add_all`): namespace `harvis-boxes` with Pod Security
+  `restricted` enforced; deny-all NetworkPolicy; 25-pod quota; a Retain PV over the host's chat-folders directory
+  bound to one PVC (each box mounts only its own chat folder via subPath); a Role there for the backend SA (pods,
+  pods/exec only). Backend env gets `HARVIS_K8S_BOX_*` and `HARVIS_BUILD_RUNNER_SUDO=false`.
+- `scripts/k8s/harvis-k8s.sh`: imports `harvis-repo-sandbox:local` into k3s; `--k8s-off` removes the box namespace
+  and PV (folders stay on disk).
+- `plugins/hermes_ui/sandbox.py`: the agent's box guide says there is no network on K8s and forbids reporting
+  output it did not get from exec. `rest_sandbox.py`: warm-up works on K8s; the Terminal tab says it isn't available
+  there yet.
+
+**Not yet on K8s.** Terminal tab, app previews, box web access (box-egress), sudo, pids limit.
+
+**Checked.** `scripts/k8s` 113 passed (new `test_k8s_boxes.py`); backend box/sandbox/terminal tests 632 passed in
+the backend image (new `tests/test_k8s_box.py`), 1 pre-existing failure in `test_hermes_ui_settings.py`. Real
+manifests rendered offline for this host. Not yet run against the cluster.
+
+## Date: 2026-11-07 — `./install.sh --k8s` no longer ends in a false "✗ No response"
+
+**Problem.** Every K8s install ended with `✗ No response from http://localhost:9000/api/health/services after
+180s` plus `docker compose` hints, even though Harvis was running (see docs/handoffs/2026-10-22-k8s-start-and-tunnel.md).
+
+**Root cause.** k3s servicelb publishes :9000 on the node IP only; localhost:9000 never answers. `poll_health` and the
+first-admin check polled hard-coded localhost URLs.
+
+**Fix.** `install.sh`: new `use_k8s_urls` (control-plane node InternalIP, falling back to `hostname -I`) runs in
+`launch_k8s` before `poll_health`; the success line uses `${BASE_URL}`; failure hints come from `inspect_hint`
+(`--k8s-status` / `kubectl logs` in K8s mode, `docker compose` otherwise). `scripts/k8s/harvis-k8s.sh` drops
+"(and http://localhost:9000)". Docker mode is unchanged.
+
+**Checked.** `bash -n` on both scripts. On this host `use_k8s_urls` resolves `http://<node-ip>:9000`, which
+returns `healthy` and `needs_setup:false`; localhost:9000 returns nothing. Also updated the fake detector in
+`tests/test_workspace_bridge_tools_guard.py` for the new `model_hint` argument.
+
+## Date: 2026-11-07 — Chat never reached the box; model invented nmap output
+
+**Problem.** "go to your box and hit a nmap on an example ip" got a made-up scan of scanme.nmap.org. No run started,
+no command ran, though the chat's box was up.
+
+**Root cause.** In auto mode the workspace detector decides chat vs. run. With no `MOONSHOT_API_KEY` it uses a local
+model on `OLLAMA_URL`, but the cluster Ollama only holds `nomic-embed-text` (chat models are on PAIR / this computer).
+Every turn logged `no local model resolvable ... skipping workspace detection`, so nothing ever launched. Plain chat
+has no tools, and the abilities note said features exist "even though they are not tool calls you can see", so the
+model wrote fake output.
+
+**Fix.**
+- `workspace/task_detector.py`: when `OLLAMA_URL` has no chat model, the detector uses the model the user is chatting
+  with, routed through `ollama_hosts.route` to the machine that serves it (`_detector_target`). `workspace_bridge`
+  passes `model_hint=_model_id`. Cloud ids are skipped.
+- `workspace/task_detector.py`: `_box_override` forces a run (no classifier) when the message names "your
+  box/sandbox/terminal/shell/vm/container" or "the sandbox", pairs a run verb with a CLI tool (nmap, tshark, curl,
+  traceroute, ...), or is a typed command line (`nmap -F 10.0.0.1`). Prose like "do you use curl?" or "ping me
+  later" does not trigger.
+- `owui_compat/chat_abilities.py`: the note now says the chat reply has no shell and must never write command output
+  it did not get from a tool. Worst-case note length is 891 chars (budget 900).
+
+**Checked.** Override regex against 7 should-trigger / 7 should-not messages; routing fallback with a stubbed host
+returns the chat model on its host and skips cloud ids. The full pytest suite was not run (no local venv with deps).
+Needs a backend redeploy to take effect.
+
+## Date: 2026-11-07 — PAIR relay so k8s pods can use the PAIR router again
+
+**Problem.** Harvis stopped pooling qwen across the 4090 and 3090. The backend logged `Ollama host pair
+(http://192.168.1.121:11435) unreachable: HTTP 403` and fell back to this computer's Ollama only.
+
+**Root cause.** NVIDIA PAIR's ollama-proxy now refuses plaintext requests from anything but loopback
+(`{"code":"loopback-only", ... cluster peers must use the mTLS ingress}`). It has no flag to turn that off; it only
+offers extra loopback alias addresses.
+
+**Fix.** `scripts/pair/pair-relay.py` is a small asyncio TCP relay on the k3s pod bridge `10.42.0.1:11436` (cni0, not
+reachable from the LAN or the tunnel) that pipes each connection to `[::1]:11435`. `.env` now has
+`HARVIS_OLLAMA_HOSTS=pair=http://10.42.0.1:11436|...`. It runs as a user systemd unit
+(`scripts/pair/harvis-pair-relay.service`) that restarts every 5 s until cni0 exists.
+
+**Checked.** From the backend pod the relay lists all PAIR tags. The sandbox, preview-runner and browser-runner pods are
+refused by their NetworkPolicies; unrestricted service pods (harvis-mcp etc.) can reach it, as they already reach the
+host's Ollama.
+
+**Files.** `scripts/pair/pair-relay.py`, `scripts/pair/harvis-pair-relay.service`, `.env` (untracked).
+
+**Status.** Live `backend-env` secret still has the old URL until `./install.sh --k8s` or a patch + backend restart.
+
 ## Date: 2026-10-21 — k8s install could hang on its own firewall (branch `harvis1.5`)
 
 **Problem.** `./install.sh --k8s --expose lan+tunnel` on test VM 204 hung at the database-password step, which runs

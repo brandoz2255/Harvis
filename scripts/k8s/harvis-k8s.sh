@@ -216,7 +216,14 @@ print(hashlib.sha256(json.dumps([d["RootFS"]["Layers"], c], sort_keys=True).enco
     stamp="$STATE_DIR/images/$(printf '%s' "$img" | tr '/:@' '___').id"
     if [ "$($SUDO cat "$stamp" 2>/dev/null || true)" = "$id" ]; then continue; fi
     say "  importing $img into k3s ..."
-    docker save "$img" | $SUDO k3s ctr images import - >/dev/null
+    local out
+    # Output is kept, not thrown away: an import that loaded nothing used to look like
+    # success, get stamped, and never be retried (harvis-repo-sandbox, 2026-11-07).
+    out="$(docker save "$img" | $SUDO k3s ctr images import - 2>&1)" || die "importing $img into k3s failed: $out"
+    if ! $SUDO k3s ctr images ls -q 2>/dev/null | grep -qxF "docker.io/library/$img" \
+        && ! $SUDO k3s ctr images ls -q 2>/dev/null | grep -qxF "$img"; then
+      die "importing $img into k3s loaded nothing (k3s ctr said: ${out:-nothing}); remove $stamp and re-run"
+    fi
     printf '%s' "$id" | $SUDO tee "$stamp" >/dev/null
   done < <(docker compose config --format json | python3 -c '
 import json, sys
@@ -228,7 +235,12 @@ for n, s in sorted(d["services"].items()):
     if str(s.get("restart", "")).strip("\"") in ("no", "") and n not in needed:
         continue
     if s.get("build"):
-        print(s.get("image") or f"{proj}-{n}:latest")' | sort -u)
+        print(s.get("image") or f"{proj}-{n}:latest")
+# A chat box is not a compose service on Kubernetes: the backend starts it as a pod
+# (workspace/k8s_box.py), from the image the one-shot repo-sandbox-image builds.
+boxes = d["services"].get("repo-sandbox-image") or {}
+if boxes.get("image"):
+    print(boxes["image"])' | sort -u)
   python3 -c 'import json, sys; print(json.dumps(dict(l.rstrip("\n").split("\t", 1) for l in open(sys.argv[1]) if l.strip())))' \
     "$ids" > "$IMAGE_IDS_FILE"
   rm -f "$ids"
@@ -265,6 +277,9 @@ render() { # $1 node  $2 node ip  $3 dns ip
   # Comma-separated private ranges the agent browser may still open (e.g. a lab wiki).
   local cidr
   for cidr in $(env_get HARVIS_BROWSER_ALLOW_CIDRS | tr ',' ' '); do gen_args+=(--browser-allow-cidr "$cidr"); done
+  # Public ranges nothing Harvis runs may reach (a campus): the browser's policy here,
+  # box-egress's proxy through its environment.
+  for cidr in $(env_get HARVIS_BLOCKED_NETWORKS | tr ',' ' '); do gen_args+=(--blocked-cidr "$cidr"); done
   if [ "$TUNNEL" = "1" ]; then
     # cloudflared comes from compose's tunnel profile. --profile would replace
     # COMPOSE_PROFILES, so the profile is added to it instead. Under the network
@@ -475,7 +490,7 @@ cmd_up() {
   report_tunnel
   post_install_checks
   say ""
-  say "✓ Harvis runs on Kubernetes → http://$ip:9000  (and http://localhost:9000)"
+  say "✓ Harvis runs on Kubernetes → http://$ip:9000"
   if [ "$TUNNEL" = "1" ]; then
     if [ "$(env_get HARVIS_TUNNEL_AUTH)" = harvis ]; then
       say "  From the internet: your Cloudflare hostname; new sign-ups wait for you in Settings → People"
@@ -509,6 +524,10 @@ cmd_off() {
     say "Removing Harvis from Kubernetes (data stays on this machine) ..."
     kc delete ns "$NS" --wait=true --timeout=300s >/dev/null
     kc delete clusterrole,clusterrolebinding "harvis-$NS-node-reader" --ignore-not-found >/dev/null
+    # Chat boxes (k8s_boxes.py): their namespace, then the volume over the chat folders.
+    # Retain policy: deleting the volume object leaves the folders on disk.
+    kc delete ns "$NS-boxes" --ignore-not-found --wait=true --timeout=120s >/dev/null || true
+    kc delete pv "harvis-$NS-box-sandboxes" --ignore-not-found >/dev/null || true
     say "✓ Kubernetes namespace $NS removed"
   fi
   $SUDO rm -f "$STATE_DIR/mode"

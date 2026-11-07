@@ -81,7 +81,15 @@ def browser_egress(gen):
         return
     dns = {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}}],
            "ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}]}
-    egress = [dns, {"to": [{"ipBlock": {"cidr": "0.0.0.0/0", "except": list(PRIVATE)}}]}]
+    blocked = []
+    for c in getattr(gen.o, "blocked_cidr", None) or []:
+        try:
+            net = ipaddress.ip_network(c, strict=False)
+        except ValueError:
+            raise SystemExit(f"HARVIS_BLOCKED_NETWORKS: {c!r} is not a range like 203.0.113.0/24")
+        if net.version == 4:
+            blocked.append(str(net))
+    egress = [dns, {"to": [{"ipBlock": {"cidr": "0.0.0.0/0", "except": list(PRIVATE) + blocked}}]}]
     allowed = []
     for c in getattr(gen.o, "browser_allow_cidr", None) or []:
         try:

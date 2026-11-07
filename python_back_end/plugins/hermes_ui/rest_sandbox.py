@@ -149,7 +149,8 @@ async def _warm(user_id: int, sid: str) -> None:
     opens a terminal or asks Harvis to run something."""
     try:
         mgr = await _manager()
-        if mgr._client is not None:  # noqa: SLF001
+        from workspace import k8s_box
+        if mgr._client is not None or k8s_box.enabled():  # noqa: SLF001
             await mgr.ensure_isolated(sandbox.runner_key(user_id, sid), sandbox.session_dir(user_id, sid))
     except Exception:  # noqa: BLE001 — the terminal still starts it on demand
         log.warning("sandbox autostart failed for u%s/%s", user_id, sid, exc_info=True)
@@ -298,6 +299,10 @@ async def _open_shell(user_id: int, cwd: str, cols: int, rows: int):
     sid, _, inner = await asyncio.to_thread(sandbox.resolve, user_id, cwd, create=True)
     mgr = get_terminal_manager()
     if mgr._client is None:  # noqa: SLF001 — the manager exposes no public client
+        from workspace import k8s_box
+        if k8s_box.enabled():
+            raise sandbox.SandboxError("The Terminal tab isn't available on Kubernetes yet. "
+                                       "Ask Harvis in the chat to run commands in your box instead.")
         raise sandbox.SandboxError("Docker isn't reachable from the Harvis backend, so the sandbox can't start.")
     state = await mgr.ensure_isolated(sandbox.runner_key(user_id, sid), sandbox.session_dir(user_id, sid))
     api = mgr._client.api  # noqa: SLF001

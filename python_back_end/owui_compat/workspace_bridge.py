@@ -466,7 +466,7 @@ async def maybe_handle_workspace(
         logger.info("owui workspace_bridge: %d attachment(s) need the sandbox → auto launch", len(box_files))
     else:
         try:
-            suggestion = await detect_workspace_task(history)
+            suggestion = await detect_workspace_task(history, model_hint=_model_id)
         except Exception:
             logger.exception("owui workspace_bridge: detect_workspace_task failed")
             return None

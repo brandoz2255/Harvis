@@ -78,18 +78,25 @@ class SettingsMethods:
             return _ok(rid, {"ok": True})
         if key == "model":
             model, provider, scope = parse_model_switch(str(value or ""))
-            if scope == "global":
-                await apply_model_choice(self.pool, self.user_id, provider, model)
-            elif params.get("session_id"):
+            s = None
+            if params.get("session_id"):
                 s, _, err = await self._open(rid, params)
                 if err:
                     return err
-                problem = await session_ops.model_error(self.pool, self.user_id, self.token, model)
-                if problem:
-                    return _err(rid, ERR_PARAMS, problem)
+                if provider == "harvis" or scope == "session":
+                    problem = await session_ops.model_error(self.pool, self.user_id, self.token, model)
+                    if problem:
+                        return _err(rid, ERR_PARAMS, problem)
+            if scope == "global":
+                # The composer sends --global for the main chat: the pick becomes the
+                # default AND the model of the chat it was made in. Saving only the default
+                # left the open chat on its first model for every later turn.
+                choice = await apply_model_choice(self.pool, self.user_id, provider, model)
+                model = "" if choice.get("model") == "harvis-default" else str(choice.get("model") or model)
+            if s is not None:
                 s.model = model
                 await self.emit("session.info", s.id, sessions.runtime_info(s))
-            return _ok(rid, {"ok": True, "model": model, "provider": provider, "scope": scope})
+            return _ok(rid, {"ok": True, "model": model or "harvis-default", "provider": provider, "scope": scope})
         default = settings_store.get_path(CONFIG, key)
         patch = settings_store.patch_for_path(key, settings_store.coerce_like(default, value))
         await settings_store.apply_config_patch(self.pool, self.user_id, patch, CONFIG)

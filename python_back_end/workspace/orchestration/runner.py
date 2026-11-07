@@ -736,6 +736,7 @@ class SubAgentRunner:
         completed = False
         steps = 0
         stall_retries = 0
+        thinking_off = False  # set after a reasoning-only empty turn
         last_fp = await asyncio.to_thread(_ws_fingerprint, workspace_path)  # baseline (off the event loop)
         made_edit = False
         idle = 0
@@ -998,6 +999,10 @@ class SubAgentRunner:
                 msg = await self.router.complete(
                     model_name=model_name, messages=messages,
                     tools=filter_wire_schema(disabled) + docs_specs + mcp_specs, temperature=0.2,
+                    # A model that already burned a turn reasoning with no answer runs the
+                    # rest of the run with thinking off ("none" is the switch Ollama and the
+                    # PAIR router honour); retrying it as-is just reasons again.
+                    reasoning_effort="none" if thinking_off else None,
                     # Per-user cloud credentials (the five free tiers, OpenAI, Moonshot)
                     # live per-user in the database, so the router can only reach them
                     # with this run's pool + user. Without them a cloud model falls back
@@ -1076,6 +1081,8 @@ class SubAgentRunner:
                         # invisible otherwise, and the cause differs (truncation,
                         # a reasoning-only channel, a malformed call).
                         stall_retries += 1
+                        if msg.get("reasoning") or msg.get("reasoning_content"):
+                            thinking_off = True
                         logger.info(
                             "subagent %s: empty turn (no tool call, no content), "
                             "retrying (%d/%d); finish_reason=%r keys=%s usage=%s",

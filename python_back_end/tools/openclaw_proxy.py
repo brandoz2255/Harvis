@@ -64,6 +64,10 @@ def _blocked_reason(ip: str) -> Optional[str]:
     mapped = getattr(addr, "ipv4_mapped", None)
     if mapped is not None:
         addr = mapped
+    from tools.blocked_networks import ip_blocked
+
+    if ip_blocked(ip):
+        return "a network this install blocks (HARVIS_BLOCKED_NETWORKS)"
     if addr.is_global and not addr.is_multicast:
         return None
     return "a private or internal address"
@@ -185,6 +189,10 @@ def _validate_url(url: str, *, live_web: bool = False) -> None:
     lowered = hostname.lower()
     if lowered in ("localhost", "localhost.localdomain"):
         raise HTTPException(status_code=400, detail="Requests to localhost are not allowed")
+    from tools.blocked_networks import domain_blocked
+
+    if domain_blocked(lowered):  # always, live web or not
+        raise HTTPException(status_code=400, detail=f"Domain '{lowered}' is blocked on this install")
 
     # Domain allow/deny lists (suffix match) — skipped in live_web mode
     if not live_web:
