@@ -1,0 +1,60 @@
+# Sites no box may reach, in any egress mode: tunnels that would expose a box or
+# relay traffic onward, anonymous file drops and pastebins, and out-of-band
+# callback catchers. Squid sees only the host name of an HTTPS request, so this
+# blocks whole sites. Lab additions go in HARVIS_BOX_EGRESS_BLOCK_DOMAINS;
+# HARVIS_BOX_EGRESS_BLOCKLIST=off drops this list (public installs that need it).
+.ngrok.io
+.ngrok.app
+.ngrok.dev
+.ngrok-free.app
+.ngrok-free.dev
+.trycloudflare.com
+.loca.lt
+.localtunnel.me
+.serveo.net
+.localhost.run
+.lhr.life
+.bore.pub
+.pinggy.io
+.pinggy.link
+.playit.gg
+.tunnelto.dev
+.devtunnels.ms
+.pastebin.com
+.paste.ee
+.hastebin.com
+.termbin.com
+.ix.io
+.0x0.st
+.transfer.sh
+.file.io
+.tmpfiles.org
+.temp.sh
+.catbox.moe
+.gofile.io
+.bashupload.com
+.oshi.at
+.filebin.net
+.dpaste.com
+.dpaste.org
+.rentry.co
+.rentry.org
+.controlc.com
+.webhook.site
+.requestbin.net
+.pipedream.net
+.requestcatcher.com
+.beeceptor.com
+.interact.sh
+.oast.fun
+.oast.live
+.oast.me
+.oast.online
+.oast.pro
+.oast.site
+.oastify.com
+.burpcollaborator.net
+.dnslog.cn
+.canarytokens.com
+.canarytokens.org
+api.telegram.org

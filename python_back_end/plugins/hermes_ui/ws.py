@@ -313,11 +313,14 @@ class Connection(SettingsMethods, SessionMethods, SlashMethods, ApprovalMethods,
             # Harvis-only: chat._stream_completion keeps `extra` off custom endpoints.
             files = attachments.turn_files(msgs)
             if files:
-                extra = {**extra, "files": files}
+                extra = {**extra, "files": files, "harvis_turn_file_ids": attachments.latest_turn_file_ids(msgs)}
                 if endpoint and attachments.latest_turn_has_files(msgs):
                     await self._relay(s, "text", attachments.CUSTOM_ENDPOINT_NOTE, parts, thoughts)
-                if mode == "auto" and attachments.latest_turn_has_files(msgs):
-                    mode = "chat"  # the workspace detector never sees file text, and a run is not handed the file
+                if mode == "auto" and attachments.latest_turn_has_files(msgs) and not sandbox.enabled():
+                    # Without a sandbox a run has nowhere to put the file, so chat answers from the pasted text.
+                    # With one, workspace_bridge copies the files into the box and launches a run itself
+                    # for a file chat cannot show whole (a pcap, an archive, a long log).
+                    mode = "chat"
             # Only thinking models get a level: Ollama rejects one on any other model.
             effort = (("none" if plain else ollama_effort(s.effort or DEFAULT_EFFORT))
                       if model and not endpoint and model in await thinking_models() else "")

@@ -1,0 +1,16 @@
+# Package registries the "packages" egress mode lets a box reach. One per line;
+# a leading dot also allows subdomains. Lab additions go in
+# HARVIS_BOX_EGRESS_EXTRA_DOMAINS, not here.
+deb.debian.org
+security.debian.org
+archive.ubuntu.com
+security.ubuntu.com
+ports.ubuntu.com
+pypi.org
+files.pythonhosted.org
+registry.npmjs.org
+registry.yarnpkg.com
+index.crates.io
+static.crates.io
+proxy.golang.org
+sum.golang.org

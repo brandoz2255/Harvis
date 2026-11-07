@@ -619,16 +619,6 @@ async def lifespan(app: FastAPI):
         )
         logger.info("✅ Database connection pool created")
 
-        # Repo Runner: periodically reap idle / finished preview sandboxes so the
-        # advertised idle-teardown actually fires (only when the feature is on).
-        try:
-            from owui_compat import repo_sandbox as _repo_sandbox
-            if _repo_sandbox.run_enabled():
-                asyncio.create_task(_repo_sandbox.run_sweeper())
-                logger.info("✅ Repo-sandbox idle sweeper started")
-        except Exception as _exc:  # noqa: BLE001
-            logger.warning("repo-sandbox sweeper not started: %s", _exc)
-
         # Workspace terminals: periodic janitor — stops idle terminal
         # containers and prunes finished background-job records (Phase E1).
         try:
@@ -1248,12 +1238,14 @@ async def lifespan(app: FastAPI):
         logger.warning(f"⚠️ Cron tick loop failed to start: {e}")
         app.state.cron_tick_task = None
 
-    # Repo-sandbox idle sweeper — reaps idle preview dev-server containers.
-    # Wrapped in try/except so a missing/broken repo_sandbox never blocks startup.
+    # Repo-sandbox idle sweeper — reaps idle preview dev-server containers, only
+    # when the feature is on. Wrapped so a broken repo_sandbox never blocks startup.
+    app.state.repo_sandbox_sweeper_task = None
     try:
         from owui_compat import repo_sandbox
-        app.state.repo_sandbox_sweeper_task = asyncio.create_task(repo_sandbox.run_sweeper())
-        logger.info("🧹 Repo-sandbox idle sweeper started")
+        if repo_sandbox.run_enabled():
+            app.state.repo_sandbox_sweeper_task = asyncio.create_task(repo_sandbox.run_sweeper())
+            logger.info("🧹 Repo-sandbox idle sweeper started")
     except Exception as e:
         logger.warning(f"⚠️ Repo-sandbox sweeper failed to start: {e}")
         app.state.repo_sandbox_sweeper_task = None

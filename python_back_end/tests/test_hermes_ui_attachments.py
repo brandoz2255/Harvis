@@ -275,14 +275,29 @@ async def test_run_turn_without_files_adds_no_files_key(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_turn_with_a_file_in_the_latest_message_answers_in_chat_mode(monkeypatch):
+async def test_run_turn_with_a_file_in_the_latest_message_answers_in_chat_mode_without_a_sandbox(monkeypatch):
     calls = {}
     _stub_turn(monkeypatch, calls)
+    monkeypatch.setenv("HARVIS_SANDBOX_ENABLED", "false")
     live = sessions.Live(id="s1", user_id=1, model="gemma4:e2b", running=True)
     msgs = [{"role": "user", "content": "what is in the sheet?",
              "attachments": [attachments.reference(ROWS["f1"])]}]
     await Connection._run_turn(_TurnConn(), live, msgs)
     assert calls["mode"] == "chat"
+
+
+@pytest.mark.asyncio
+async def test_run_turn_with_a_file_and_a_sandbox_stays_auto_and_names_the_new_file(monkeypatch):
+    # workspace_bridge decides: a pcap goes to the box, a small sheet is still read in chat.
+    calls = {}
+    _stub_turn(monkeypatch, calls)
+    monkeypatch.delenv("HARVIS_SANDBOX_ENABLED", raising=False)
+    live = sessions.Live(id="s1", user_id=1, model="gemma4:e2b", running=True)
+    msgs = [{"role": "user", "content": "what is in the sheet?",
+             "attachments": [attachments.reference(ROWS["f1"])]}]
+    await Connection._run_turn(_TurnConn(), live, msgs)
+    assert calls["mode"] == "auto"
+    assert calls["extra"]["harvis_turn_file_ids"] == ["f1"]
 
 
 @pytest.mark.asyncio

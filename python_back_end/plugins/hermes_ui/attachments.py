@@ -107,6 +107,14 @@ def latest_turn_has_files(msgs: list[dict]) -> bool:
     return bool(last_user and last_user.get("attachments"))
 
 
+def latest_turn_file_ids(msgs: list[dict]) -> list[str]:
+    """Upload ids on the newest user message only. ``turn_files`` repeats a chat's
+    files on every turn; this is what the user attached just now."""
+    last_user: Optional[dict] = next((m for m in reversed(msgs) if m.get("role") == "user"), None)
+    return [r["id"] for r in (last_user or {}).get("attachments") or []
+            if isinstance(r, dict) and isinstance(r.get("id"), str) and r["id"]]
+
+
 _REF_RE = re.compile(r"@file:`?([0-9a-fA-F-]{36})`?|/api/v1/files/([0-9a-fA-F-]{36})/content")
 _DATA_URL_RE = re.compile(r"^data:([^;,]*)(;base64)?,", re.IGNORECASE)
 MAX_STAGED_BYTES = 25 * 1024 * 1024

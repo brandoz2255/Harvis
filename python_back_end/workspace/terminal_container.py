@@ -1,8 +1,8 @@
 """
 Per-workspace ephemeral Docker terminal.
 
-Each Harvis workspace can spin up its own isolated container, on the same
-internal Docker network as OpenClaw + backend. The agent calls
+Each Harvis workspace can spin up its own isolated container, with no network
+by default (HARVIS_TERMINAL_NETWORK) and no capabilities. The agent calls
 `POST /api/tools/terminal/{workspace_id}/exec` with a shell command and
 gets back stdout / stderr / exit_code.
 
@@ -14,7 +14,7 @@ Design choices for MVP:
 - Resource caps: 1 CPU / 512 MB by default (env-tunable)
 - Teardown is explicit (call `teardown(workspace_id)`) — also runs on a periodic
   sweep that kills containers idle > HARVIS_TERMINAL_IDLE_TIMEOUT
-- Feature-flagged via `HARVIS_TERMINAL_ENABLED` (default false)
+- Feature-flagged via `HARVIS_TERMINAL_ENABLED` (compose turns it on)
 """
 
 import asyncio
@@ -46,7 +46,9 @@ logger = logging.getLogger(__name__)
 
 
 _BASE_IMAGE = os.getenv("HARVIS_TERMINAL_IMAGE", "ubuntu:24.04")
-_NETWORK = os.getenv("HARVIS_TERMINAL_NETWORK", "harvis_openclaw-internal")
+# "none" by default: the old default, openclaw-internal, also holds pgsql and
+# harvis-mcp, so agent-run code could reach the database.
+_NETWORK = os.getenv("HARVIS_TERMINAL_NETWORK", "none")
 _MEM_LIMIT = os.getenv("HARVIS_TERMINAL_MEM", "512m")
 _CPU_QUOTA = float(os.getenv("HARVIS_TERMINAL_CPUS", "1.0"))
 _DEFAULT_TIMEOUT_S = float(os.getenv("HARVIS_TERMINAL_DEFAULT_TIMEOUT_S", "30"))
@@ -85,20 +87,56 @@ _RUNNER_IMAGE = os.getenv(
     "HARVIS_BUILD_RUNNER_IMAGE",
     os.getenv("HARVIS_ADAPTIVE_REPO_SANDBOX_IMAGE", "harvis-repo-sandbox:local"),
 )
-# Network mirrors the repo-sandbox: NO Harvis service rides it (the runner can
-# never reach pgsql / ollama / openclaw), but public package registries work.
-# If the network is missing at spawn time we FAIL CLOSED to network 'none' —
-# never onto an internal Harvis network.
+# How the box reaches the internet (HARVIS_BUILD_RUNNER_EGRESS):
+#   web       (default) Docker network 'none'; HTTP(S) only, through the
+#             box-egress proxy, which refuses every private, LAN, tailnet and
+#             loopback address. The box can't reach Harvis, the host, the LAN
+#             or another box.
+#   packages  the same, but the proxy only lets package registries through
+#             (apt, PyPI, npm…; box-egress/packages.txt). For the lab.
+#   none      no network at all.
+#   open      the old way: plain bridge network HARVIS_BUILD_RUNNER_NETWORK,
+#             full internet and NAT to the LAN. Avoid.
+# The proxy is reached over a unix socket in a named volume (mounted read-only),
+# bridged to 127.0.0.1:3128 inside the box. If the volume is missing the box
+# still starts, with no network — never the open bridge.
+_RUNNER_EGRESS = os.getenv("HARVIS_BUILD_RUNNER_EGRESS", "web").strip().lower()
+if _RUNNER_EGRESS not in ("web", "packages", "none", "open"):
+    logger.warning("HARVIS_BUILD_RUNNER_EGRESS=%r is not web/packages/none/open; using 'none'", _RUNNER_EGRESS)
+    _RUNNER_EGRESS = "none"
+_EGRESS_VOLUME = {
+    "web": os.getenv("HARVIS_BOX_EGRESS_WEB_VOLUME", "harvis-box-egress-web"),
+    "packages": os.getenv("HARVIS_BOX_EGRESS_PKG_VOLUME", "harvis-box-egress-pkg"),
+}
+_EGRESS_DIR = "/run/harvis-egress"
+_PROXY = "http://127.0.0.1:3128"
 _RUNNER_NETWORK = os.getenv(
     "HARVIS_BUILD_RUNNER_NETWORK",
     os.getenv("HARVIS_ADAPTIVE_REPO_SANDBOX_NETWORK", "harvis_repo-sandbox"),
 )
+# Size cap on the box's own writable layer (what apt/pip install). Docker only
+# honours it on overlay2 over xfs with pquota (or devicemapper/zfs/btrfs). Where
+# Docker refuses it, the box starts without it and the log says so once; the
+# containerd snapshotter on ext4 accepts it and silently ignores it (measured
+# 2026-11-06: a 1G-capped box wrote 1.5G). Empty = no cap.
+_RUNNER_DISK = os.getenv("HARVIS_BUILD_RUNNER_DISK", "10G").strip()
 _RUNNER_MEM = os.getenv("HARVIS_BUILD_RUNNER_MEM", "1024m")
 _RUNNER_CPUS = float(os.getenv("HARVIS_BUILD_RUNNER_CPUS", "1.0"))
 _RUNNER_PIDS = int(os.getenv("HARVIS_BUILD_RUNNER_PIDS", "256"))
 # Match the backend/appuser uid so the bind-mounted session workspace (owned by
 # uid 1001) stays writable WITHOUT giving the container root.
 _RUNNER_USER = os.getenv("HARVIS_BUILD_RUNNER_USER", "1001:1001")
+# The chat's box is the agent's own computer, so it may install packages: the image
+# gives uid 1001 passwordless sudo, and this lets sudo work by keeping the few
+# capabilities apt/dpkg need (switch user, own and chmod files) and dropping
+# no-new-privileges. Everything else stays stripped, and there is still no
+# docker.sock, no host mount but the chat's folder, and no network but the proxy.
+# HARVIS_BUILD_RUNNER_SUDO=false restores the fully locked box.
+_RUNNER_SUDO = os.getenv("HARVIS_BUILD_RUNNER_SUDO", "true").strip().lower() not in ("0", "false", "no", "off")
+_SUDO_CAPS = ["CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "SETUID", "SETGID", "KILL", "AUDIT_WRITE"]
+# Stamped on the container so a box made under the other setting is recreated, not reused.
+_RUNNER_PROFILE = f"{'sudo' if _RUNNER_SUDO else 'locked'}-v2-{_RUNNER_EGRESS}"
+_disk_cap_unsupported = False
 
 
 def is_enabled() -> bool:
@@ -306,9 +344,15 @@ class WorkspaceTerminalManager:
 
         name = self._container_name(workspace_id)
 
-        # If an existing container with this name is around, reuse it.
+        # If an existing container with this name is around, reuse it — unless it
+        # predates the hardening (other network, capabilities kept). Its files
+        # live in the named volume, so a recreate keeps them.
         try:
             existing = await asyncio.to_thread(self._client.containers.get, name)
+            host = (existing.attrs or {}).get("HostConfig") or {}
+            if host.get("NetworkMode") != _NETWORK or "ALL" not in (host.get("CapDrop") or []):
+                await asyncio.to_thread(existing.remove, force=True)
+                raise NotFound(name)
             if existing.status != "running":
                 await asyncio.to_thread(existing.start)
             state = _TerminalState(
@@ -351,6 +395,9 @@ class WorkspaceTerminalManager:
                 network=_NETWORK,
                 mem_limit=_MEM_LIMIT,
                 nano_cpus=int(_CPU_QUOTA * 1_000_000_000),
+                pids_limit=_RUNNER_PIDS,
+                cap_drop=["ALL"],
+                security_opt=["no-new-privileges:true"],
                 labels={
                     "harvis.role": "workspace-terminal",
                     "harvis.workspace_id": workspace_id,
@@ -659,7 +706,9 @@ class WorkspaceTerminalManager:
                 for m in mounts
             )
             has_gpu = bool(((existing.attrs or {}).get("HostConfig") or {}).get("DeviceRequests"))
-            if same and has_gpu == want_gpu:
+            profile = (((existing.attrs or {}).get("Config") or {}).get("Labels") or {}).get(
+                "harvis.runner_profile", "locked-v1")
+            if same and has_gpu == want_gpu and profile == _RUNNER_PROFILE:
                 if existing.status != "running":
                     await asyncio.to_thread(existing.start)
                 state = _TerminalState(
@@ -672,22 +721,19 @@ class WorkspaceTerminalManager:
         except NotFound:
             pass
 
-        network = _RUNNER_NETWORK
-        try:
-            await asyncio.to_thread(self._client.networks.get, network)
-        except Exception:  # noqa: BLE001
-            # FAIL CLOSED on networking: sandbox network missing → NO network at
-            # all. Never fall back onto an internal Harvis network.
-            logger.warning(
-                "[vc-runner:%s] network %r missing — spawning with network 'none'",
-                session_id, network,
-            )
-            network = "none"
+        network, egress = await self._runner_network(session_id)
+        command = "tail -f /dev/null"
+        environment = {"HOME": "/tmp"}
+        volumes = {host_src: {"bind": "/workspace", "mode": "rw"}}
+        if egress:
+            command = (f"socat TCP-LISTEN:3128,bind=127.0.0.1,reuseaddr,fork "
+                       f"UNIX-CONNECT:{_EGRESS_DIR}/proxy.sock & exec tail -f /dev/null")
+            environment.update({k: _PROXY for k in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY")})
+            environment.update(no_proxy="localhost,127.0.0.1,::1", NO_PROXY="localhost,127.0.0.1,::1")
+            volumes[egress] = {"bind": _EGRESS_DIR, "mode": "ro"}
 
-        container = await asyncio.to_thread(
-            self._client.containers.run,
-            _RUNNER_IMAGE,
-            command=["sh", "-c", "tail -f /dev/null"],
+        kwargs = dict(
+            command=["sh", "-c", command],
             name=name,
             detach=True,
             network=network,
@@ -697,29 +743,73 @@ class WorkspaceTerminalManager:
             # Untrusted, injection-prone code runs here — mirror the repo-sandbox
             # hardening profile: strip every capability, block privilege
             # escalation. uid 1001 (not root) matches the workspace's owner.
+            # With _RUNNER_SUDO the box keeps only what `sudo apt-get` needs.
             cap_drop=["ALL"],
-            security_opt=["no-new-privileges:true"],
+            **({"cap_add": _SUDO_CAPS} if _RUNNER_SUDO else {"security_opt": ["no-new-privileges:true"]}),
             user=_RUNNER_USER,
-            environment={"HOME": "/tmp"},
+            environment=environment,
             labels={
                 "harvis.role": "vibecode-runner",
                 "harvis.session_id": session_id,
+                "harvis.runner_profile": _RUNNER_PROFILE,
             },
             working_dir="/workspace",
-            # The ONLY mount: the session's own workspace. No docker.sock, no
-            # host trees, no artifact volume.
-            volumes={host_src: {"bind": "/workspace", "mode": "rw"}},
+            # The session's own workspace, plus (egress modes) the proxy socket
+            # read-only. No docker.sock, no other host trees.
+            volumes=volumes,
             auto_remove=False,
             **({"device_requests": [docker.types.DeviceRequest(count=-1, capabilities=[["gpu"]])]}
                if want_gpu else {}),
         )
+        container = await self._run_capped(kwargs)
         state = _TerminalState(workspace_id=key, container_name=name, created_at=time.time())
         self._terminals[key] = state
         logger.info(
-            "[vc-runner:%s] spawned hardened runner %s (image=%s net=%s mem=%s pids=%d gpu=%s src=%s)",
-            session_id, name, _RUNNER_IMAGE, network, _RUNNER_MEM, _RUNNER_PIDS, want_gpu, host_src,
+            "[vc-runner:%s] spawned hardened runner %s (image=%s net=%s egress=%s mem=%s pids=%d gpu=%s src=%s)",
+            session_id, name, _RUNNER_IMAGE, network, _RUNNER_EGRESS if egress or network != "none" else "none",
+            _RUNNER_MEM, _RUNNER_PIDS, want_gpu, host_src,
         )
         return state
+
+    async def _runner_network(self, session_id: str) -> tuple[str, Optional[str]]:
+        """(Docker network, egress volume to mount or None). Every failure ends in
+        network 'none' with no proxy: fail closed, never onto an open bridge."""
+        if _RUNNER_EGRESS == "open":
+            try:
+                await asyncio.to_thread(self._client.networks.get, _RUNNER_NETWORK)
+                return _RUNNER_NETWORK, None
+            except Exception:  # noqa: BLE001
+                logger.warning("[vc-runner:%s] network %r missing — no network", session_id, _RUNNER_NETWORK)
+                return "none", None
+        volume = _EGRESS_VOLUME.get(_RUNNER_EGRESS)
+        if volume is None:
+            return "none", None
+        try:
+            await asyncio.to_thread(self._client.volumes.get, volume)
+            return "none", volume
+        except Exception:  # noqa: BLE001
+            logger.warning("[vc-runner:%s] egress volume %r missing (is box-egress running?) — no network",
+                           session_id, volume)
+            return "none", None
+
+    async def _run_capped(self, kwargs: dict):
+        """containers.run with the disk cap, or without it where Docker can't cap."""
+        global _disk_cap_unsupported
+        if _RUNNER_DISK and not _disk_cap_unsupported:
+            try:
+                return await asyncio.to_thread(
+                    self._client.containers.run, _RUNNER_IMAGE, storage_opt={"size": _RUNNER_DISK}, **kwargs)
+            except APIError as exc:
+                if "storage" not in str(exc).lower() and "quota" not in str(exc).lower():
+                    raise
+                _disk_cap_unsupported = True
+                logger.warning("[vc-runner] Docker here can't cap box disk (%s); boxes run uncapped", exc)
+                try:  # a failed start can leave the created container behind
+                    old = await asyncio.to_thread(self._client.containers.get, kwargs["name"])
+                    await asyncio.to_thread(old.remove, force=True)
+                except Exception:  # noqa: BLE001
+                    pass
+        return await asyncio.to_thread(self._client.containers.run, _RUNNER_IMAGE, **kwargs)
 
     async def exec_isolated(
         self,

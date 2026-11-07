@@ -47,6 +47,7 @@ _FLAG_PATTERNS = [
     (re.compile(r'HTB\{[^\}\n]{1,200}\}'), 'HTB flag'),
     (re.compile(r'picoCTF\{[^\}\n]{1,200}\}'), 'picoCTF flag'),
     (re.compile(r'NCAE\{[^\}\n]{1,200}\}'), 'NCAE flag'),
+    (re.compile(r'\bSKY-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}\b'), 'NCL / Cyber Skyline flag (SKY-)'),
     (re.compile(r'https?://[^\s"\'<>]{6,256}'), 'URL'),
     (re.compile(r'\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b'), 'email'),
     (re.compile(r'\b[A-Za-z0-9+/]{40,}={0,2}\b'), 'long base64-like'),

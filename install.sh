@@ -1083,7 +1083,8 @@ poll_health() {
   # enough that this endpoint is not serving yet. So retry briefly instead of
   # treating the first empty answer as the final one.
   local setup_body="" needs="" attempt
-  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  # 30 tries: on a 6 GB host the backend took longer than 20 s to answer here.
+  for attempt in $(seq 1 30); do
     setup_body="$(curl -s -m 8 "$SETUP_URL" 2>/dev/null || true)"
     needs="$(printf '%s' "$setup_body" | grep -o '"needs_setup" *: *\(true\|false\)' | grep -o 'true\|false' | head -1 || true)"
     [ -n "$needs" ] && break
@@ -1092,12 +1093,13 @@ poll_health() {
   case "$needs" in
     true)  print_first_admin ;;
     false) echo "  Instance already has an admin — sign in as usual." ;;
-    *)     if [ -z "$setup_body" ]; then
-             echo "  Could not reach ${SETUP_URL} — if this is a fresh install, the first"
-             echo "  account you sign up with becomes the admin."
+    *)     # Shared installs gate the first sign-up behind a code, so only a local
+           # install may be told the first account simply becomes the admin.
+           echo "  Harvis did not say yet whether it has an admin (still starting?)."
+           if [ "$(current_exposure)" = local ] && [ "$K8S_ACTION" != "up" ] && [ ! -f "$K8S_MODE_FILE" ]; then
+             echo "  On a fresh install the first account you sign up with becomes the admin."
            else
-             echo "  ${SETUP_URL} answered but its state was unrecognised — if this is a"
-             echo "  fresh install, the first account you sign up with becomes the admin."
+             echo "  On a fresh install the first sign-up needs a 6-digit code:  ./install.sh --admin-code"
            fi ;;
   esac
   # tunnel visitors already arrive over Cloudflare's HTTPS; enable-https.sh also

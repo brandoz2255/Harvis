@@ -250,7 +250,8 @@ services:
       # HARVIS_TERMINAL_ENABLED=false to force-disable as a kill-switch.
       HARVIS_TERMINAL_ENABLED: "${HARVIS_TERMINAL_ENABLED:-true}"
       HARVIS_TERMINAL_IMAGE: "${HARVIS_TERMINAL_IMAGE:-ubuntu:24.04}"
-      HARVIS_TERMINAL_NETWORK: "${HARVIS_TERMINAL_NETWORK:-harvis_openclaw-internal}"
+      # No network by default: openclaw-internal also holds pgsql.
+      HARVIS_TERMINAL_NETWORK: "${HARVIS_TERMINAL_NETWORK:-none}"
       HARVIS_TERMINAL_MEM: "${HARVIS_TERMINAL_MEM:-512m}"
       HARVIS_TERMINAL_CPUS: "${HARVIS_TERMINAL_CPUS:-1.0}"
       HARVIS_TERMINAL_DEFAULT_TIMEOUT_S: "${HARVIS_TERMINAL_DEFAULT_TIMEOUT_S:-30}"
@@ -492,6 +493,17 @@ services:
       # session workspace is bind-mounted instead of cloned; nothing else differs.
       # Flag default OFF for the same reason: it executes code.
       HARVIS_VIBECODE_RUN_ENABLED: "${HARVIS_VIBECODE_RUN_ENABLED:-false}"
+      # Each chat's box (the agent's own computer) has no network. web = public
+      # HTTP(S) through the box-egress proxy, which refuses LAN, tailnet, host and
+      # other private addresses; packages = package registries only; none; open =
+      # the old plain bridge (full internet + LAN). See box-egress/.
+      HARVIS_BUILD_RUNNER_EGRESS: "${HARVIS_BUILD_RUNNER_EGRESS:-web}"
+      HARVIS_BOX_EGRESS_WEB_VOLUME: "${HARVIS_CONTAINER_PREFIX:-}harvis-box-egress-web"
+      HARVIS_BOX_EGRESS_PKG_VOLUME: "${HARVIS_CONTAINER_PREFIX:-}harvis-box-egress-pkg"
+      # Cap on what a box can install into its own layer. Only Docker on xfs with
+      # pquota can enforce it; elsewhere boxes run uncapped (the containerd
+      # snapshotter on ext4 accepts the option and ignores it).
+      HARVIS_BUILD_RUNNER_DISK: "${HARVIS_BUILD_RUNNER_DISK:-10G}"
       HARVIS_VIBECODE_MAX_SANDBOXES: "${HARVIS_VIBECODE_MAX_SANDBOXES:-3}"
       # MCP connector runtime — runs a user's MCP servers as sibling containers
       # (stdio via npx/uvx) on the SAME isolated network and the SAME polyglot
@@ -843,6 +855,35 @@ services:
     restart: "no"
     command: ["true"]
     network_mode: none
+
+  # The only way out for a chat's box (HARVIS_BUILD_RUNNER_EGRESS=web|packages).
+  # Squid on loopback behind two unix sockets in named volumes; boxes mount one
+  # read-only. It refuses every private, LAN, tailnet and loopback address.
+  box-egress:
+    image: harvis-box-egress:local
+    build:
+      context: ./box-egress
+    pull_policy: build
+    container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-box-egress
+    restart: unless-stopped
+    environment:
+      HARVIS_BOX_EGRESS_EXTRA_DOMAINS: "${HARVIS_BOX_EGRESS_EXTRA_DOMAINS:-}"
+      # Both modes also refuse bare IPs and box-egress/blocked.txt (tunnels, file
+      # drops, callback catchers); see box-egress/entrypoint.sh for each switch.
+      HARVIS_BOX_EGRESS_BLOCK_DOMAINS: "${HARVIS_BOX_EGRESS_BLOCK_DOMAINS:-}"
+      HARVIS_BOX_EGRESS_BLOCKLIST: "${HARVIS_BOX_EGRESS_BLOCKLIST:-on}"
+      HARVIS_BOX_EGRESS_MAX_UPLOAD_MB: "${HARVIS_BOX_EGRESS_MAX_UPLOAD_MB:-10}"
+      HARVIS_BOX_EGRESS_MAX_CONNS: "${HARVIS_BOX_EGRESS_MAX_CONNS:-64}"
+    volumes:
+      - box-egress-web:/run/egress-web
+      - box-egress-pkg:/run/egress-pkg
+    networks:
+      - box-egress
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
 
   # Next.js Frontend (New UI)
   # REBUILD TIPS:
@@ -2043,6 +2084,10 @@ networks:
     ipam:
       config:
         - subnet: ${HARVIS_BROWSER_SUBNET:-10.213.83.0/28}
+  # box-egress's own way out. Nothing else joins it; boxes reach the proxy only
+  # through its unix sockets.
+  box-egress:
+    driver: bridge
   # Preview rendering network. internal:true is load-bearing, not decoration:
   # preview-runner opens untrusted HTML, and this is the outer fence behind the
   # browser's own no-JS/no-network profile. Only the backend is attached.
@@ -2071,4 +2116,8 @@ volumes:
   hermes_gateway_home:   # Phase E4B: Hermes Agent gateway (Chat) profile/config/memory
   hermes_homes:          # Phase E4B: per-user Hermes Build profiles (HERMES_HOME per run)
   sentrysearch_videos:   # Optional SentrySearch profile — local user video volume only
+  box-egress-web:
+    name: ${HARVIS_CONTAINER_PREFIX:-}harvis-box-egress-web
+  box-egress-pkg:
+    name: ${HARVIS_CONTAINER_PREFIX:-}harvis-box-egress-pkg
   agent-browser-profiles:  # Agent Teammates: one Firefox profile per teammate (browser-runner only)
