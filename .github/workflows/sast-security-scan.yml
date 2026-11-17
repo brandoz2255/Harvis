@@ -104,6 +104,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Dependency Review
+        # Needs "Dependency graph" switched on in the repo's security settings
+        # (owner only). While it is off this step fails on every pull request
+        # with "not supported on this repository", so it must not fail the run.
+        continue-on-error: true
         uses: actions/dependency-review-action@v4
         with:
           fail-on-severity: moderate

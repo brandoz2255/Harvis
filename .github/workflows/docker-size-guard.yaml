@@ -101,6 +101,14 @@ jobs:
           docker compose pull --ignore-buildable
           docker compose build
 
+      - name: 🧽 Drop the build cache before measuring
+        # On Docker 29.4 with the containerd image store (the Ubuntu 26.04
+        # runner), `docker system df` adds build-only stages to the Images total:
+        # the wheel builder and the UI's node stage, which ship in no image. That
+        # read 15.88 GB for images that are about 9.5 GB. Pruning the cache leaves
+        # exactly the layers the images use.
+        run: docker builder prune -af
+
       - name: 📏 Measure and gate
         run: |
           echo "Per-image table (this is what names a regression's cause):"
