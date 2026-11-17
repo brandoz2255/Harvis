@@ -7,8 +7,8 @@ terminal (or, later, when the chat's agent needs to run something), so a chat
 that never uses its sandbox costs one empty directory.
 
 The container is the Build Space's hardened per-session runner
-(workspace.terminal_container.ensure_isolated): every capability dropped,
-no-new-privileges, uid 1001, memory/CPU/pid limits, the chat's folder as its
+(workspace.terminal_container.ensure_isolated): every capability dropped but the few
+`sudo apt-get` needs (HARVIS_BUILD_RUNNER_SUDO), uid 1001, memory/CPU/pid limits, the chat's folder as its
 only mount at /workspace, and the ``repo-sandbox`` network, which reaches the
 internet (pip, npm, git clone) but no Harvis service: not pgsql, not ollama,
 not OpenClaw. If that network is missing it starts with no network at all.
@@ -22,6 +22,7 @@ person's files. ``HARVIS_SANDBOX_ENABLED=false`` turns the whole thing off.
 from __future__ import annotations
 
 import base64
+import filecmp
 import hashlib
 import hmac
 import json
@@ -47,6 +48,13 @@ _SALT = "proxy-salt"         # per-sandbox secret the app links are signed with;
 APP_PREFIX = "/hermes-api/sandbox-app"
 
 _SID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
+UPLOADS = "uploads"          # where a chat's attachments are copied for the agent to work on
+# Mirrors terminal_container._RUNNER_SUDO, which decides whether the box can really sudo.
+_SUDO_LINE = ("Install whatever you need with `sudo apt-get install -y <pkg>` (or pip/npm);\n"
+              "  common challenge tools are already there: file, strings, xxd, exiftool, binwalk,\n"
+              "  foremost, tshark, tcpdump, john, 7z, scapy, pycryptodome."
+              if os.getenv("HARVIS_BUILD_RUNNER_SUDO", "true").strip().lower() not in ("0", "false", "no", "off")
+              else "There is no root or sudo here; install into a virtualenv or local node_modules.")
 
 
 class SandboxError(ValueError):
@@ -184,6 +192,27 @@ def ensure_dir(user_id: int, session_id: str) -> str:
             os.unlink(tmp)
     _note_prefix(base, app_prefix(user_id, session_id))
     return base
+
+
+def stage_uploads(user_id: int, session_id: str, files: list[tuple[str, str]]) -> list[str]:
+    """Copy a chat's attachments (``(filename, path on disk)``) into its sandbox's
+    uploads folder so the agent works on the real bytes. Returns the paths as the box
+    sees them. Names are reduced to their last segment and made safe; a file already
+    there with the same bytes is left alone, so a follow-up turn does not copy again."""
+    dest = os.path.join(ensure_dir(user_id, session_id), UPLOADS)
+    os.makedirs(dest, mode=0o750, exist_ok=True)
+    staged: list[str] = []
+    for filename, src in files:
+        name = re.sub(r"[^A-Za-z0-9._-]+", "_", os.path.basename(filename or "")).lstrip(".") or "upload"
+        stem, ext = os.path.splitext(name)
+        target, n = os.path.join(dest, name), 1
+        while os.path.exists(target) and not filecmp.cmp(target, src, shallow=False):
+            n += 1
+            target = os.path.join(dest, f"{stem}-{n}{ext}")
+        if not os.path.exists(target):
+            shutil.copyfile(src, target)
+        staged.append(f"{CONTAINER_DIR}/{UPLOADS}/{os.path.basename(target)}")
+    return staged
 
 
 # Without a configured secret, links are signed with a per-process random key:
@@ -674,9 +703,19 @@ def workspace_guide(user_id: int, session_id: str) -> str:
     prefix = app_prefix(user_id, session_id)
     gpu = "The GPU is ON for this sandbox." if gpu_wanted(user_id, session_id) else (
         "There is no GPU in this sandbox; prefer CPU builds.")
+    if os.getenv("HARVIS_K8S_BOXES", "").strip().lower() in ("1", "true", "yes", "on"):
+        net = ("with NO network access on this install (no internet, no Harvis services): a\n"
+               "command that needs the internet will fail, so say that instead of trying around it")
+    else:
+        net = "with internet access but no access to Harvis's services"
     return f"""You are working in this chat's own sandbox: a Linux container (Debian, Node 20,
-Python 3, git) with internet access but no access to Harvis's services. Its folder is
+Python 3, git) {net}. Its folder is
 /workspace; everything you create there persists and the user sees it in the Files pane.
+- It is your own computer. {_SUDO_LINE}
+- Only report command output you actually got from exec in this run. If a command fails
+  or cannot run, show the real error; never invent or re-quote output from earlier chat.
+- Files the user attaches to the chat are copied into /workspace/uploads/. Work on the
+  real file there with real tools; never guess at a binary file's contents.
 - Read your core files first: /workspace/SOUL.md (who you are), /workspace/USER.md (what
   you know about the user) and /workspace/MEMORY.md (your own notes from earlier work
   here). These are yours to use and edit. Before you finish, add what you did and
@@ -688,7 +727,7 @@ Python 3, git) with internet access but no access to Harvis's services. Its fold
   user approved with it), read-only copies:
   follow one when the task matches it.
 - Put each repo/app in its own folder under /workspace (e.g. /workspace/apps/<name>).
-  Use a virtualenv (python3 -m venv) or local node_modules; there is no root/sudo.
+  Use a virtualenv (python3 -m venv) or local node_modules for project dependencies.
 - Start servers in the background so your command returns, bound to 0.0.0.0:
   nohup <command> > /workspace/.harvis/<name>.log 2>&1 &   then check the log.
 - Apps are served to the user at {prefix}/<port>/ . Web UIs that need a base path

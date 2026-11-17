@@ -399,7 +399,40 @@ def render_pptx(filename: str, raw: bytes, max_chars: int = MAX_TEXT_FILE_CHARS)
     return f"{head}, {n} slide(s)\n" + _truncate_note("\n".join(slides), filename, max_chars)
 
 
+def looks_binary(raw: bytes) -> bool:
+    """True for bytes that are not text (a pcap, zip, executable): a NUL in the first
+    8 KB, or UTF-8 that breaks before the sample's last few bytes."""
+    sample = raw[:8192]
+    if b"\0" in sample:
+        return True
+    try:
+        sample.decode("utf-8")
+    except UnicodeDecodeError as e:
+        return e.start < len(sample) - 4
+    return False
+
+
+def needs_box(filename: str, content_type: str, path: str) -> bool:
+    """Whether chat cannot show the model this upload whole, so only an agent working
+    on the real file in the chat's sandbox can answer about it: a binary file, or a
+    text file longer than the paste cap. Documents, images and media have readers."""
+    if classify(filename, content_type) != "text":
+        return False
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(8192)
+        return looks_binary(head) or os.path.getsize(path) > MAX_TEXT_FILE_CHARS
+    except OSError:
+        return False
+
+
 def render_text(filename: str, raw: bytes, max_chars: int = MAX_TEXT_FILE_CHARS) -> str:
+    if looks_binary(raw):
+        # Decoding it would paste replacement characters the model then "reads".
+        return (f"### Attached file: {filename} ({_fmt_int(len(raw))} bytes, binary)\n"
+                "[Harvis: this is a binary file, so its bytes are not shown here. An agent run "
+                "works on it with real tools in the chat's sandbox, at /workspace/uploads/. "
+                "Do not guess at its contents.]")
     text = _decode(raw)
     if not text.strip():
         return ""

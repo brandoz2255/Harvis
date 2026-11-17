@@ -270,6 +270,17 @@ def classifier_model(picked: str) -> str:
     return (os.getenv("HARVIS_REACH_CLASSIFIER_MODEL") or "").strip() or picked
 
 
+async def _no_think(model: str) -> str | None:
+    """"none" for a thinking model: a yes/no classifier that reasons first spends its
+    whole budget thinking and its reply comes back unparsable."""
+    try:
+        from plugins.hermes_ui.models import thinking_models
+
+        return "none" if model in await thinking_models() else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 async def classify(
     message: str,
     previous: str,
@@ -303,6 +314,7 @@ async def classify(
             timeout=timeout,
             pool=pool,
             user_id=user_id,
+            reasoning_effort=await _no_think(model),
         )
     except Exception:
         logger.info("reach_gate: classifier unavailable for %r", message[:60], exc_info=True)
@@ -532,6 +544,7 @@ async def refine_query(
             timeout=timeout,
             pool=pool,
             user_id=user_id,
+            reasoning_effort=await _no_think(model),
         )
     except Exception:
         logger.info("reach_gate: refine unavailable for %r", message[:60], exc_info=True)

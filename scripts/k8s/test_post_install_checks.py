@@ -155,7 +155,7 @@ sync_db_password() { :; }; wait_rollout() { :; }; report_tunnel() { :; }
     def test_checks_run_after_the_rollout_and_before_the_success_line(self):
         out = self.up('wait_rollout() { echo ROLLOUT; }; post_install_checks() { echo CHECKS; }')
         self.assertEqual([l for l in out.splitlines() if l in ("ROLLOUT", "CHECKS") or "Harvis runs on Kubernetes" in l][:3],
-                         ["ROLLOUT", "CHECKS", "✓ Harvis runs on Kubernetes → http://10.0.0.5:9000  (and http://localhost:9000)"])
+                         ["ROLLOUT", "CHECKS", "✓ Harvis runs on Kubernetes → http://10.0.0.5:9000"])
 
     def test_own_model_server_prints_no_ollama_hint(self):
         out, rc = bash(self.STUBS + "post_install_checks() { :; }\ncmd_up", {"HARVIS_K8S_OLLAMA": "0"})

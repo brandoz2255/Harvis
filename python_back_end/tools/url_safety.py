@@ -29,6 +29,10 @@ def _blocked_reason(ip: str) -> Optional[str]:
     mapped = getattr(addr, "ipv4_mapped", None)
     if mapped is not None:
         addr = mapped
+    from tools.blocked_networks import ip_blocked
+
+    if ip_blocked(ip):
+        return "a network this install blocks (HARVIS_BLOCKED_NETWORKS)"
     if addr.is_global and not addr.is_multicast:
         return None
     return "a private or internal address"
@@ -118,6 +122,10 @@ def _validate_url(url: str, *, live_web: bool = False) -> None:
     lowered = hostname.lower()
     if lowered in ("localhost", "localhost.localdomain"):
         raise HTTPException(status_code=400, detail="Requests to localhost are not allowed")
+    from tools.blocked_networks import domain_blocked
+
+    if domain_blocked(lowered):  # always, live web or not
+        raise HTTPException(status_code=400, detail=f"Domain '{lowered}' is blocked on this install")
 
     # Domain allow/deny lists (suffix match) — skipped in live_web mode
     if not live_web:
@@ -146,6 +154,10 @@ def _validate_browser_url(url: str, *, live_web: bool = False) -> None:
         raise HTTPException(status_code=400, detail="URL has no hostname")
     if hostname in ("localhost", "localhost.localdomain"):
         raise HTTPException(status_code=400, detail="Requests to localhost are not allowed")
+    from tools.blocked_networks import domain_blocked
+
+    if domain_blocked(hostname):
+        raise HTTPException(status_code=400, detail=f"Domain '{hostname}' is blocked on this install")
 
     # With X-Live-Web (workspace live_web), skip hostname allowlist — same policy as web-fetch.
     # OPENCLAW_BROWSER_ALLOWLIST=* also skips the allowlist (still enforces https + non-private DNS).

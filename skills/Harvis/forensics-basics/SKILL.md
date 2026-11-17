@@ -1,6 +1,6 @@
 ---
 name: forensics-basics
-description: Wrap common file-analysis CLI tools (file, strings, exiftool, binwalk, xxd) for "what's in this file" / CTF-flag-hunting tasks. Trigger when the user attaches or references a file (image, archive, binary, document) and asks to inspect / find a flag / pull metadata / look for embedded data. Looks for CTF flag patterns (flag{}, CTF{}, HTB{}, picoCTF{}, NCAE{}), URLs, emails, base64-like blobs, and common hash patterns inside the output.
+description: Wrap common file-analysis CLI tools (file, strings, exiftool, binwalk, xxd) for "what's in this file" / CTF-flag-hunting tasks. Trigger when the user attaches or references a file (image, archive, binary, document) and asks to inspect / find a flag / pull metadata / look for embedded data. Looks for CTF flag patterns (flag{}, CTF{}, HTB{}, picoCTF{}, NCAE{}, NCL's SKY-XXXX-XXXX), URLs, emails, base64-like blobs, and common hash patterns inside the output.
 metadata:
   {
     "openclaw":
@@ -76,6 +76,7 @@ into specific `tools` outputs if the user wants more.
 ## Flag patterns hunted
 
 - `flag{...}`, `CTF{...}`, `HTB{...}`, `picoCTF{...}`, `NCAE{...}`
+- `SKY-XXXX-XXXX` (NCL / Cyber Skyline)
 - URLs (http/https)
 - Emails
 - Long base64-like blobs (40+ chars `[A-Za-z0-9+/]={0,2}`)

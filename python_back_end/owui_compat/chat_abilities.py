@@ -104,14 +104,15 @@ def _is_on(entry: Ability) -> bool:
 
 _HEAD = (
     NOTE_HEADING + "\n"
-    "The operator enabled these. They are available even though they are not tool "
-    "calls you can see:\n"
+    "Enabled by the operator and available, though they are not tool calls you can see:\n"
 )
 _TAIL = (
     "Never say you cannot make a file, and never offer only an outline or script "
-    "instead. With no document-format instructions this turn, say you can and ask the "
-    "user to resend as \"make me a <deck|document|spreadsheet|PDF> about ...\". Posters, flyers, logos and video are not supported here. If a "
-    "feature needs a particular phrase, give that exact phrase; never call it impossible."
+    "instead. Without document-format instructions this turn, say you can and ask the "
+    "user to resend as \"make me a <deck|document|spreadsheet|PDF> about ...\". "
+    "Posters, flyers, logos and video are not supported. If a feature needs a phrase, "
+    "give it exactly; never call it impossible. No shell here: never "
+    "invent command output; say you did not run it and give the agent phrase."
 )
 
 

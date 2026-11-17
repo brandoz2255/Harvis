@@ -54,32 +54,48 @@ async def thinking_models() -> frozenset[str]:
         stamp, names = _thinking
         if stamp and time.monotonic() - stamp < _thinking_ttl:
             return names
-        base = os.getenv("OLLAMA_URL", "http://ollama:11434").rstrip("/")
         found: set[str] = set()
         only: set[str] = set()
         sized: list[tuple[int, str]] = []
+        seen: set[str] = set()
+        reached = 0
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=1.5)) as client:
-                tags = (await client.get(f"{base}/api/tags")).json().get("models") or []
                 from owui_compat.ollama_hosts import drop_cloud
 
-                tags = drop_cloud(tags)
-                tag_names = [str(tag.get("name") or "") for tag in tags]
-                shows = await asyncio.gather(
-                    *(client.post(f"{base}/api/show", json={"model": name}) for name in tag_names),
-                    return_exceptions=True)
-                for tag, name, show in zip(tags, tag_names, shows):
-                    if isinstance(show, BaseException):
+                # Every model host, not only OLLAMA_URL: on a K8s install the cluster Ollama
+                # holds just the embedder and the chat models live on PAIR / this computer,
+                # so reading OLLAMA_URL alone found no thinking model and the effort setting
+                # was never sent. A router may report no capabilities; another host's
+                # answer for the same tag counts.
+                for base in _model_hosts():
+                    try:
+                        tags = (await client.get(f"{base}/api/tags")).json().get("models") or []
+                    except Exception:  # noqa: BLE001 — one host down is not all of them
                         continue
-                    info = show.json()
-                    caps = info.get("capabilities") or []
-                    if "thinking" in caps:
-                        found.add(name)
-                        finetune = str((info.get("model_info") or {}).get("general.finetune") or "")
-                        if "thinking" in finetune.lower():
-                            only.add(name)
-                    if "completion" in caps and not is_hidden_model(name):
-                        sized.append((int(tag.get("size") or 0), name))
+                    reached += 1
+                    tags = [t for t in drop_cloud(tags) if str(t.get("name") or "") not in seen]
+                    tag_names = [str(tag.get("name") or "") for tag in tags]
+                    shows = await asyncio.gather(
+                        *(client.post(f"{base}/api/show", json={"model": name}) for name in tag_names),
+                        return_exceptions=True)
+                    for tag, name, show in zip(tags, tag_names, shows):
+                        if isinstance(show, BaseException):
+                            continue
+                        info = show.json()
+                        caps = info.get("capabilities") or []
+                        if not caps:
+                            continue  # unknown here; another host may say
+                        seen.add(name)
+                        if "thinking" in caps:
+                            found.add(name)
+                            finetune = str((info.get("model_info") or {}).get("general.finetune") or "")
+                            if "thinking" in finetune.lower():
+                                only.add(name)
+                        if "completion" in caps and not is_hidden_model(name):
+                            sized.append((int(tag.get("size") or 0), name))
+            if not reached:
+                raise RuntimeError("no model host answered")
         except Exception as exc:  # noqa: BLE001
             log.warning("hermes_ui: could not read Ollama model capabilities: %s", exc)
             _thinking, _thinking_ttl = (time.monotonic(), names), _THINKING_FAIL_TTL
@@ -109,6 +125,18 @@ async def voice_model(model: str) -> str:
         if name not in _thinking_only and not is_embedder(name):
             return name
     return model
+
+
+def _model_hosts() -> list[str]:
+    """OLLAMA_URL plus every configured model host (HARVIS_OLLAMA_HOSTS), once each."""
+    out = [os.getenv("OLLAMA_URL", "http://ollama:11434").rstrip("/")]
+    try:
+        from owui_compat.ollama_hosts import configured_hosts
+
+        out += [h.base_url.rstrip("/") for h in configured_hosts()]
+    except Exception:  # noqa: BLE001
+        pass
+    return list(dict.fromkeys(out))
 
 
 def ollama_effort(effort: str) -> str:

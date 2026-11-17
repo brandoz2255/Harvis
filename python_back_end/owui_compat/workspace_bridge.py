@@ -448,6 +448,7 @@ async def maybe_handle_workspace(
         logger.exception("owui workspace_bridge: import failed; skipping detection")
         return None
 
+    box_files = await _box_attachments(request, owui_body, user)
     if mode in ("agent", "orchestrate"):
         # User forced agent/orchestrate — skip detection, force a workspace.
         suggestion = WorkspaceSuggestion({
@@ -458,9 +459,20 @@ async def maybe_handle_workspace(
             "reason": f"{mode} mode forced by user.",
         })
         logger.info("owui workspace_bridge: %s mode forced for this message", mode)
+    elif box_files:
+        # A pcap, archive, binary or over-long log: plain chat can only paste a cut or
+        # garbled copy, so the answer has to come from tools run on the real file.
+        suggestion = WorkspaceSuggestion({
+            "should_suggest": True,
+            "confidence": 1.0,
+            "task_type": "multi_step",
+            "task_brief": message[:500],
+            "reason": "An attached file needs tools: " + ", ".join(n for n, _ in box_files[:5]),
+        })
+        logger.info("owui workspace_bridge: %d attachment(s) need the sandbox → auto launch", len(box_files))
     else:
         try:
-            suggestion = await detect_workspace_task(history)
+            suggestion = await detect_workspace_task(history, model_hint=_model_id)
         except Exception:
             logger.exception("owui workspace_bridge: detect_workspace_task failed")
             return None
@@ -597,7 +609,7 @@ async def maybe_handle_workspace(
         # "user" (explicit agent/orchestrate pill) vs "auto" (auto-detected).
         # Auto runs carry no Tier-3 token and get heavy tools withheld downstream.
         launch_mode=launch_mode,
-        sandbox=_chat_sandbox(owui_body, user_id),
+        sandbox=await _sandbox_with_uploads(pool, owui_body, user_id),
     )
 
     needs_approval = _approvals_enabled()
@@ -675,6 +687,75 @@ async def resolve_workspace_approval(request: Request, workspace_id: str, approv
         return {"ok": False, "status": "launch_failed"}
     logger.info("owui workspace_bridge: %s approved + launched", workspace_id)
     return {"ok": True, "status": "approved"}
+
+
+async def _attachment_rows(pool, user_id: int, owui_body: dict, ids: Optional[list] = None) -> list[tuple[str, str, str]]:
+    """(filename, path, content type) of the chat's uploads (or just ``ids``) that
+    belong to the user and still exist on disk. Scoped on id AND user_id, like
+    _inject_files: a file id comes from the client and proves nothing about ownership."""
+    if ids is None:
+        ids = [f.get("id") for f in owui_body.get("files") or []
+               if isinstance(f, dict) and f.get("id") and f.get("type", "file") == "file"]
+    if not ids or pool is None:
+        return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT filename, path, content_type FROM owui_files WHERE id = ANY($1::text[]) AND user_id=$2",
+            [str(i) for i in ids], int(user_id),
+        )
+    return [(r["filename"], r["path"], r["content_type"] or "") for r in rows if os.path.exists(r["path"])]
+
+
+async def _box_attachments(request: Request, owui_body: dict, user) -> list[tuple[str, str]]:
+    """Uploads on the newest message that only an agent in the chat's sandbox can
+    work on (see file_content.needs_box). Only the newest: Hermes repeats a chat's
+    files on every turn, and a pcap sent ten turns ago must not turn "thanks" into a
+    run. Empty without a sandbox: there is no box to copy them to."""
+    new_ids = owui_body.get("harvis_turn_file_ids")
+    if not new_ids or not _chat_sandbox_enabled(owui_body):
+        return []
+    try:
+        from owui_compat.authz import user_id_of
+        from owui_compat.file_content import needs_box
+        rows = await _attachment_rows(getattr(request.app.state, "pg_pool", None), user_id_of(user), owui_body,
+                                      [str(i) for i in new_ids if i])
+        return [(name, path) for name, path, ctype in rows
+                if await asyncio.to_thread(needs_box, name, ctype, path)]
+    except Exception:  # noqa: BLE001 — never block a turn on this check
+        logger.warning("owui workspace_bridge: attachment check failed", exc_info=True)
+        return []
+
+
+def _chat_sandbox_enabled(owui_body: dict) -> bool:
+    if not owui_body.get("harvis_sandbox_session"):
+        return False
+    try:
+        from plugins.hermes_ui import sandbox
+        return sandbox.enabled()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def _sandbox_with_uploads(pool, owui_body: dict, user_id: int) -> Optional[dict]:
+    """_chat_sandbox, with the turn's attachments copied into the box and named in the
+    agent's note, so a run works on the real file instead of a pasted copy."""
+    box = _chat_sandbox(owui_body, user_id)
+    if not box or not owui_body.get("files"):
+        return box
+    try:
+        from plugins.hermes_ui import sandbox
+        rows = await _attachment_rows(pool, user_id, owui_body)
+        staged = await asyncio.to_thread(
+            sandbox.stage_uploads, int(user_id), str(owui_body.get("harvis_sandbox_session")),
+            [(name, path) for name, path, _ in rows],
+        )
+    except Exception:  # noqa: BLE001 — the run still starts, just without the copies
+        logger.warning("owui workspace_bridge: staging attachments failed", exc_info=True)
+        return box
+    if staged:
+        box = {**box, "note": (box.get("note") or "") + "\n\nThe user attached these files; they are in your box:\n"
+               + "\n".join(f"- {p}" for p in staged)}
+    return box
 
 
 def _chat_sandbox(owui_body: dict, user_id: int) -> Optional[dict]:

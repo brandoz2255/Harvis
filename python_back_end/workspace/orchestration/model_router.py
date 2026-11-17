@@ -58,6 +58,7 @@ class ModelRouter:
         timeout: float | None = None,
         pool=None,
         user_id: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> dict:
         """One completion step. Returns the assistant message dict
         ``{role, content, tool_calls?}``. Raises on transport/HTTP error so the
@@ -95,6 +96,10 @@ class ModelRouter:
             # Bound the generation so a slow local model can't run all the way to the
             # read-timeout (a critique needs hundreds of tokens, not thousands).
             body["max_tokens"] = max_tokens
+        if reasoning_effort:
+            # "none" is the switch thinking models on Ollama and the PAIR router honour
+            # (think:false is ignored on /v1). Callers send it only for thinking models.
+            body["reasoning_effort"] = reasoning_effort
 
         # An inference node (FreeToken) gets the same thinking policy the chat lane
         # applies. Without it the web-reach classifier — 600 tokens, temperature 0 —

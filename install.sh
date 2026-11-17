@@ -66,11 +66,12 @@ KNOWN_PROVIDERS=(
   "8000|vLLM|/v1/models"
 )
 
-HEALTH_URL="http://localhost:9000/api/health/services"
+BASE_URL="http://localhost:9000"
+HEALTH_URL="${BASE_URL}/api/health/services"
 # The same report read from inside the backend, where it is always the full one
 # (see fetch_health).
 HEALTH_INNER_URL="http://127.0.0.1:8000/api/health/services"
-SETUP_URL="http://localhost:9000/api/setup/status"
+SETUP_URL="${BASE_URL}/api/setup/status"
 # The health report lists the model provider under this key. That server is the
 # user's own (plug-and-play via HARVIS_LLM_BASE_URL), not a container of this
 # stack — it being absent or down is information, never install failure.
@@ -1196,6 +1197,32 @@ fetch_health() {
   return 0
 }
 
+# Kubernetes mode: k3s servicelb publishes :9000 on the node IP only, so
+# localhost:9000 never answers and the poll always ended in a false "✗ No response".
+use_k8s_urls() {
+  local sudo="" node ip=""
+  [ "$(id -u)" -eq 0 ] || sudo="sudo"
+  node="$($sudo k3s kubectl get nodes -l node-role.kubernetes.io/control-plane=true \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  [ -n "$node" ] && ip="$($sudo k3s kubectl get node "$node" \
+    -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null || true)"
+  [ -n "$ip" ] || ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  [ -n "$ip" ] || return 0
+  BASE_URL="http://${ip}:9000"
+  HEALTH_URL="${BASE_URL}/api/health/services"
+  SETUP_URL="${BASE_URL}/api/setup/status"
+}
+
+inspect_hint() {
+  if [ "$K8S_ACTION" = "up" ]; then
+    echo "  Inspect with:  ./install.sh --k8s-status"
+    echo "                 sudo k3s kubectl -n harvis logs deploy/backend --tail=100"
+  else
+    echo "  Inspect with:  docker compose ps"
+    echo "                 docker compose logs --tail=100 backend nginx pgsql"
+  fi
+}
+
 poll_health() {
   echo ""
   echo "Waiting for the stack to come up (asking the backend for ${HEALTH_INNER_URL}) ..."
@@ -1216,8 +1243,7 @@ poll_health() {
   if [ -z "$body" ]; then
     echo ""
     echo "✗ No response from the backend (${HEALTH_INNER_URL}) or from ${HEALTH_URL} after 180s — nginx (or the backend behind it) never came up."
-    echo "  Inspect with:  docker compose ps"
-    echo "                 docker compose logs --tail=100 backend nginx pgsql"
+    inspect_hint
     return 1
   fi
   if [ "$HEALTH_DETAIL" != 1 ] && [ "$overall" != "healthy" ]; then
@@ -1235,12 +1261,11 @@ poll_health() {
     echo ""
     [ -n "${blockers% }" ] && echo "✗ The backend reports trouble with: ${blockers% }"
     [ -n "$STACK_DOWN" ] && echo "✗ Container(s) not running:${STACK_DOWN}"
-    echo "  Inspect with:  docker compose ps"
-    echo "                 docker compose logs --tail=100 backend nginx pgsql"
+    inspect_hint
     return 1
   fi
   echo ""
-  echo "✓ Harvis is up → http://localhost:9000/harvis/"
+  echo "✓ Harvis is up → ${BASE_URL}/harvis/"
   # The endpoint returns {"needs_setup":..,"setup_complete":..} — extract the
   # one field we need without anchoring to the whole body (a second key was
   # added later, and an anchored match silently yields empty → a false
@@ -1259,7 +1284,8 @@ poll_health() {
   # enough that this endpoint is not serving yet. So retry briefly instead of
   # treating the first empty answer as the final one.
   local setup_body="" needs="" attempt
-  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  # 30 tries: on a 6 GB host the backend took longer than 20 s to answer here.
+  for attempt in $(seq 1 30); do
     setup_body="$(curl -s -m 8 "$SETUP_URL" 2>/dev/null || true)"
     needs="$(printf '%s' "$setup_body" | grep -o '"needs_setup" *: *\(true\|false\)' | grep -o 'true\|false' | head -1 || true)"
     [ -n "$needs" ] && break
@@ -1268,12 +1294,13 @@ poll_health() {
   case "$needs" in
     true)  print_first_admin ;;
     false) echo "  Instance already has an admin — sign in as usual." ;;
-    *)     if [ -z "$setup_body" ]; then
-             echo "  Could not reach ${SETUP_URL} — if this is a fresh install, the first"
-             echo "  account you sign up with becomes the admin."
+    *)     # Shared installs gate the first sign-up behind a code, so only a local
+           # install may be told the first account simply becomes the admin.
+           echo "  Harvis did not say yet whether it has an admin (still starting?)."
+           if [ "$(current_exposure)" = local ] && [ "$K8S_ACTION" != "up" ] && [ ! -f "$K8S_MODE_FILE" ]; then
+             echo "  On a fresh install the first account you sign up with becomes the admin."
            else
-             echo "  ${SETUP_URL} answered but its state was unrecognised — if this is a"
-             echo "  fresh install, the first account you sign up with becomes the admin."
+             echo "  On a fresh install the first sign-up needs a 6-digit code:  ./install.sh --admin-code"
            fi ;;
   esac
   # tunnel visitors already arrive over Cloudflare's HTTPS; enable-https.sh also
@@ -1485,6 +1512,7 @@ launch_k8s() {
   echo "Building Harvis images ..."
   docker compose build
   run_k8s up
+  use_k8s_urls
   poll_health
 }
 

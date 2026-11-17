@@ -114,6 +114,34 @@ async def _resolve_detector_model() -> Optional[str]:
         return None
 
 
+async def _detector_target(model_hint: Optional[str] = None) -> tuple[str, Optional[str]]:
+    """``(base_url, model)`` for the classifier call.
+
+    The pin or resolver pick on ``OLLAMA_URL`` first. When that Ollama holds no chat
+    model (a K8s install whose cluster Ollama only carries the embedder, with the chat
+    models on the PAIR router or another machine), the model the user is chatting with
+    right now, routed to the machine that serves it. Without that fallback detection
+    returned "no model" on every turn, so nothing ever launched in the box and the chat
+    model, with no tools, made up command output instead.
+    """
+    base = OLLAMA_URL.rstrip("/")
+    model = await _resolve_detector_model()
+    if model:
+        return base, model
+    hint = (model_hint or "").strip()
+    if not hint or hint.startswith(("anthropic/", "openai/", "moonshot/")):
+        return base, None
+    try:
+        from owui_compat.ollama_hosts import route
+
+        routed, host, reason = await route(hint, base)
+        logger.info("task_detector: no model on %s; using the chat model %r on %s (%s)", base, hint, host, reason)
+        return routed.rstrip("/"), hint
+    except Exception:
+        logger.warning("task_detector: routing the chat model %r failed", hint, exc_info=True)
+        return base, hint
+
+
 class WorkspaceSuggestion:
     def __init__(self, raw: dict):
         self.should_suggest: bool = raw.get("should_suggest", False)
@@ -146,26 +174,15 @@ class WorkspaceSuggestion:
         }
 
 
-async def _detect_workspace_task_ollama(conversation_text: str) -> WorkspaceSuggestion:
+async def _detect_workspace_task_ollama(conversation_text: str, model_hint: Optional[str] = None) -> WorkspaceSuggestion:
     try:
-        base_url = OLLAMA_URL.rstrip("/")
-        model = await _resolve_detector_model()
+        base_url, model = await _detector_target(model_hint)
         if not model:
             logger.warning(
                 "task_detector: no local model resolvable (Ollama empty + no env override); "
                 "skipping workspace detection"
             )
             return WorkspaceSuggestion({"should_suggest": False, "reason": "no model"})
-        payload = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": DETECTOR_SYSTEM_PROMPT},
-                {"role": "user", "content": f"Conversation:\n{conversation_text}"},
-            ],
-            "stream": False,
-            "options": {"num_ctx": 4096, "temperature": 0.1},
-        }
-
         async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
             resp = await client.post(f"{base_url}/api/chat", json={
                 "model": model,
@@ -257,6 +274,52 @@ def _keyword_override(chat_history: list[dict]) -> Optional[WorkspaceSuggestion]
     })
 
 
+# ── Box / command deterministic override ─────────────────────────────────────
+# "go to your box and hit a nmap on an example ip" is a request to run something, and
+# only a run has a shell. Plain chat has no tools, so a miss here means the model
+# invents the command output. The classifier is not trusted with these: a reference
+# to the assistant's own box/sandbox/terminal, or a known CLI tool paired with a run
+# verb (or typed as a command line), always launches.
+_BOX_REF_RE = re.compile(
+    r"\b(?:(?:your|ur)\s+(?:own\s+)?(?:box|sandbox|terminal|shell|vm|container)|the\s+sandbox)\b",
+    re.IGNORECASE,
+)
+_CLI_TOOL = (
+    r"nmap|masscan|traceroute|tracert|nslookup|whois|netcat|ncat|tshark|tcpdump|binwalk|"
+    r"exiftool|hashcat|gobuster|ffuf|nikto|sqlmap|xxd|hexdump|ripgrep|steghide|zsteg|"
+    r"openssl|ping|curl|wget"
+)
+_CLI_RUN_RE = re.compile(
+    r"\b(?:run|running|execute|exec|hit|fire|launch|perform)\b(?:\W+\w+){0,3}?\W+(?:" + _CLI_TOOL + r")\b",
+    re.IGNORECASE,
+)
+# A typed command line: the tool first, then a flag or a host/IP/URL-looking argument
+# ("nmap -F 10.0.0.1", "$ curl https://..."), not prose like "ping me later".
+_CLI_LINE_RE = re.compile(
+    r"^\s*[`$>]*\s*(?:" + _CLI_TOOL + r")\s+(?:-{1,2}\w|\S*[\d./:]\S*)", re.IGNORECASE,
+)
+
+
+def _box_override(chat_history: list[dict]) -> Optional[WorkspaceSuggestion]:
+    """Force a run when the latest user message asks for the box or a shell command."""
+    last_user = next((m for m in reversed(chat_history) if m.get("role") == "user"), None)
+    if not last_user:
+        return None
+    content = str(last_user.get("content", "")).strip()
+    if not content:
+        return None
+    if not (_BOX_REF_RE.search(content) or _CLI_RUN_RE.search(content) or _CLI_LINE_RE.search(content)):
+        return None
+    logger.info("Box/command override triggered: %r", content[:80])
+    return WorkspaceSuggestion({
+        "should_suggest": True,
+        "confidence": 1.0,
+        "task_type": "shell",
+        "task_brief": content[:500],
+        "reason": "Asks for a command or the box — only a run has a shell (deterministic override).",
+    })
+
+
 # ── CTF / crypto deterministic override ──────────────────────────────────────
 # Hash-cracking, decoding, and cipher tasks OBJECTIVELY need tools — you can't
 # crack an MD5 or decode base64 by chatting. The LLM classifier is unreliable on
@@ -311,13 +374,15 @@ def _ctf_override(chat_history: list[dict]) -> Optional[WorkspaceSuggestion]:
     })
 
 
-async def detect_workspace_task(chat_history: list[dict]) -> WorkspaceSuggestion:
+async def detect_workspace_task(chat_history: list[dict], model_hint: Optional[str] = None) -> WorkspaceSuggestion:
     """
     Analyze the chat history and return a WorkspaceSuggestion.
 
     Args:
         chat_history: List of {role, content} dicts from the Harvis chat session.
                       Should include the latest user message as the last entry.
+        model_hint: The model the user is chatting with. The local classifier falls
+                    back to it when OLLAMA_URL holds no chat model.
 
     Returns:
         WorkspaceSuggestion with should_suggest, task_type, task_brief, etc.
@@ -337,6 +402,10 @@ async def detect_workspace_task(chat_history: list[dict]) -> WorkspaceSuggestion
     if ctf:
         return ctf
 
+    box = _box_override(chat_history)
+    if box:
+        return box
+
     # Build a compact representation of recent conversation for the classifier.
     # Cap at last 10 messages to keep the classifier call cheap and fast.
     recent = chat_history[-10:]
@@ -348,7 +417,7 @@ async def detect_workspace_task(chat_history: list[dict]) -> WorkspaceSuggestion
 
     if not MOONSHOT_API_KEY:
         logger.info("MOONSHOT_API_KEY not set — falling back to local Ollama for workspace detection")
-        return await _detect_workspace_task_ollama(conversation_text)
+        return await _detect_workspace_task_ollama(conversation_text, model_hint)
 
     client = MoonshotClient(api_key=MOONSHOT_API_KEY, base_url=MOONSHOT_BASE_URL)
 

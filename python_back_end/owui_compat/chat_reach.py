@@ -647,6 +647,10 @@ def _compose(st: _State) -> dict:
     return {"context": context, "sources": sources[:_MAX_SOURCES + _MAX_SEARCH_RESULTS]}
 
 
+def _looks_pasted(message: str) -> bool:
+    return len(message) > 400 or message.count("\n") >= 4
+
+
 async def maybe_inject_reach(request, owui_body: dict, user_id: int | None = None) -> None:
     """Ground this turn in live web results, in place. Never raises."""
     try:
@@ -684,6 +688,11 @@ async def maybe_inject_reach(request, owui_body: dict, user_id: int | None = Non
         # given a chance to overrule them.
         forced = _forced_search(owui_body)
         decision = "yes" if forced else reach_gate.verdict(message)
+        # A pasted challenge, log or document is full of capitalised names, which the
+        # regex reads as "look this up", and the paste itself then became the search
+        # query. Let the classifier decide; when it can't, the turn answers ungrounded.
+        if decision == "yes" and not forced and _looks_pasted(message):
+            decision = "maybe"
         query = ""
 
         # The Toolsets tab's "Agent Reach" switch. Automatic lookups are the
@@ -1075,6 +1084,14 @@ def _sse_chunk(text: str) -> bytes:
     return f"data: {json.dumps(payload)}\n\n".encode()
 
 
+def _answered(text: str) -> bool:
+    """A real answer to put Sources under: not empty, not the no-answer sentence."""
+    from .answer_guard import NO_ANSWER
+
+    text = (text or "").strip()
+    return bool(text) and not text.startswith(NO_ANSWER)
+
+
 async def _stream_with_sources(body_iterator, block: str, *, request=None, retry=None):
     """Pass the model's SSE through, then slip the trailer in before [DONE].
 
@@ -1085,22 +1102,23 @@ async def _stream_with_sources(body_iterator, block: str, *, request=None, retry
     that already failed.
     """
     sent = False
-    seen = _SseText() if retry is not None else None
+    # Always read the answer: a Sources list under an empty reply looked like the whole
+    # answer was a list of links.
+    seen = _SseText()
     try:
         async for chunk in body_iterator:
             if isinstance(chunk, str):
                 chunk = chunk.encode()
-            if seen is not None:
-                seen.feed(chunk)
+            seen.feed(chunk)
             if not sent and b"data: [DONE]" in chunk:
                 head, _, tail = chunk.partition(b"data: [DONE]")
                 if head:
                     yield head
-                trailer = block
-                if seen is not None:
+                trailer = block if _answered(seen.text()) else ""
+                if retry is not None:
                     # Only reachable on an ungrounded turn, so `block` is empty
                     # here and there is nothing to order against.
-                    trailer = await _hedge_trailer(request, retry, seen.text()) or block
+                    trailer = await _hedge_trailer(request, retry, seen.text()) or trailer
                 sent = True
                 if trailer:
                     yield _sse_chunk(trailer)
@@ -1111,7 +1129,7 @@ async def _stream_with_sources(body_iterator, block: str, *, request=None, retry
         # No await in here: a client that disconnected mid-stream closes the
         # generator, and awaiting during that teardown raises instead of
         # cleaning up. The hedge rescue is worth losing; the connection is not.
-        if not sent and block:
+        if not sent and block and _answered(seen.text()):
             yield _sse_chunk(block)
 
 
@@ -1143,6 +1161,8 @@ async def _append_to_json_response(response, block: str, *, request=None, retry=
 
 async def _json_trailer(data: dict, block: str, request, retry) -> str:
     """What to append to a non-streamed reply: the Sources list or a rescue."""
+    if not _answered(_answer_text(data)):
+        return ""
     if retry is None or request is None:
         return block
     return await _hedge_trailer(request, retry, _answer_text(data)) or block

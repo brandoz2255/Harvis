@@ -150,6 +150,12 @@ except ValueError:
 # host and kept for the life of the process. The probe TTL is 10s and re-pulling a tag
 # under the same name is rare enough that a restart is an acceptable way to notice it.
 _ctx_cache: dict[str, int] = {}
+# A window an operator saved on the model itself (PARAMETER num_ctx, e.g. Nemotron at
+# 131072 on 2026-11-07). That is what Ollama really loads it with, so it beats the cap.
+# Keyed by tag, not host: a router (PAIR) reports no parameters for a tag it forwards
+# to the machine that has them.
+_param_ctx: dict[str, int] = {}
+_NUM_CTX_RE = re.compile(r"^num_ctx\s+(\d+)\s*$", re.M)
 SHOW_TIMEOUT_S = float(os.getenv("HARVIS_OLLAMA_SHOW_TIMEOUT_S", "8"))
 
 
@@ -310,15 +316,21 @@ async def _show_context(hc: httpx.AsyncClient, base_url: str, tag: str) -> None:
         r = await hc.post(f"{base_url}/api/show", json={"model": tag})
         if r.status_code != 200:
             return
-        info = r.json().get("model_info") or {}
+        shown = r.json()
+        info = shown.get("model_info") or {}
     except Exception:
         return
     # Ollama keys this by architecture — "llama.context_length", "gemma3.context_length",
     # and so on — so there is no fixed key to read, only a fixed suffix.
-    for k, v in info.items():
-        if k.endswith(".context_length") and isinstance(v, int) and v > 0:
-            _ctx_cache[key] = min(v, SERVED_CONTEXT_CAP)
-            return
+    trained = next((v for k, v in info.items()
+                    if k.endswith(".context_length") and isinstance(v, int) and v > 0), 0)
+    saved = _NUM_CTX_RE.search(str(shown.get("parameters") or ""))
+    if saved and int(saved.group(1)) > 0:
+        win = min(int(saved.group(1)), trained) if trained else int(saved.group(1))
+        _param_ctx[_tag(tag)] = win
+        _ctx_cache[key] = win
+    elif trained:
+        _ctx_cache[key] = min(trained, SERVED_CONTEXT_CAP)
 
 
 async def _probe(spec: HostSpec, timeout: float) -> HostState:
@@ -373,7 +385,7 @@ async def _probe(spec: HostSpec, timeout: float) -> HostState:
         except Exception:
             logger.debug("ollama_hosts: context probe failed for %s", name, exc_info=True)
     for tg in st.tags:
-        win = _ctx_cache.get(f"{base_url}|{tg}")
+        win = _param_ctx.get(_tag(tg)) or _ctx_cache.get(f"{base_url}|{tg}")
         if win:
             st.ctx[tg] = win
     return st

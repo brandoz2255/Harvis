@@ -111,12 +111,12 @@ def _reloaded(monkeypatch, **env):
         importlib.reload(tc)
 
 
-def test_default_network_is_the_one_compose_creates(monkeypatch):
-    assert _reloaded(monkeypatch) == "harvis_ws-term-net"
+def test_default_is_no_network(monkeypatch):
+    assert _reloaded(monkeypatch) == "none"
 
 
-def test_default_network_follows_the_stack_name(monkeypatch):
-    assert _reloaded(monkeypatch, HARVIS_STACK_NAME="lab") == "lab_ws-term-net"
+def test_the_stack_name_does_not_pick_a_network(monkeypatch):
+    assert _reloaded(monkeypatch, HARVIS_STACK_NAME="lab") == "none"
 
 
 def test_explicit_network_wins_over_the_default(monkeypatch):
@@ -124,7 +124,7 @@ def test_explicit_network_wins_over_the_default(monkeypatch):
 
 
 def test_a_blank_network_variable_falls_back_to_the_default(monkeypatch):
-    assert _reloaded(monkeypatch, HARVIS_TERMINAL_NETWORK="  ") == "harvis_ws-term-net"
+    assert _reloaded(monkeypatch, HARVIS_TERMINAL_NETWORK="  ") == "none"
 
 
 def test_the_terminal_joins_the_configured_network_when_it_exists(term):
@@ -143,6 +143,15 @@ def test_a_missing_network_means_no_network_and_a_clear_log_line(term, caplog):
 
 def test_a_missing_network_never_lands_on_a_shared_harvis_network(term):
     m = _manager(networks=("harvis_openclaw-internal",))
+    asyncio.run(m._spawn("ws-1"))
+    assert _runs(m)[1]["network"] == "none"
+
+
+def test_no_network_needs_no_lookup(term, monkeypatch):
+    import workspace.terminal_container as tc
+
+    monkeypatch.setattr(tc, "_NETWORK", "none")
+    m = _manager(networks=())
     asyncio.run(m._spawn("ws-1"))
     assert _runs(m)[1]["network"] == "none"
 

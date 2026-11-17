@@ -861,9 +861,19 @@ async def run_chat_completion(request, owui_body: dict, user_id: int | None = No
             request, await proxy_hermes_chat(owui_body, pool, user_id),
             retry=_grounded_retry(owui_body, lane),
         )), owui_body, lane, user_text=user_text)
+    # A text-only local model can't take image parts (Nemotron answers 500): a local
+    # vision model describes them first. No-op when the model can see or nobody knows.
+    from .vision_bridge import bridge as _vision_bridge
+    await _vision_bridge(owui_body)
     proxy_body = owui_body_to_proxy(owui_body)
     lane = lambda b: execute_chat_completion(request, owui_body_to_proxy(b))  # noqa: E731
+    # A thinking model can end a reply with no answer at all; ask once more with thinking off.
+    from .answer_guard import ensure_answer
+    answered = await ensure_answer(
+        await execute_chat_completion(request, proxy_body),
+        lambda extra: execute_chat_completion(request, {**owui_body_to_proxy(owui_body), **extra}),
+    )
     return await append_doc_guard(request, await append_connector_trailer(request, await append_reach_sources(
-        request, await execute_chat_completion(request, proxy_body),
+        request, answered,
         retry=_grounded_retry(owui_body, lane),
     )), owui_body, lane, user_text=user_text)

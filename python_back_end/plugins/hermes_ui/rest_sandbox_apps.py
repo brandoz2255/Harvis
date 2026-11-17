@@ -2,8 +2,9 @@
 
 When Harvis installs something in a chat's sandbox (a repo, ComfyUI, Pinokio's
 server…) and starts it on a port, this proxies that port to the browser over
-HTTP and WebSocket. The backend reaches the runner by name on the
-``repo-sandbox`` network; nothing is published on the host.
+HTTP and WebSocket. The box has no network, so the backend reaches the port
+through a ``docker exec`` tunnel (workspace/box_tunnel); nothing is published on
+the host and no other box can reach it either.
 
 The app is untrusted code, so it must never act as the signed-in user:
 
@@ -32,6 +33,8 @@ from fastapi import APIRouter, HTTPException, Request, WebSocket
 from fastapi.responses import RedirectResponse, StreamingResponse
 from starlette.background import BackgroundTask
 from starlette.websockets import WebSocketDisconnect
+
+from workspace import box_tunnel
 
 from . import sandbox
 
@@ -65,7 +68,8 @@ def _http() -> httpx.AsyncClient:
     if _client is None:
         # No redirects followed: the app's own redirects go back to the browser, which
         # stays inside the proxy prefix for relative Locations.
-        _client = httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=5.0), follow_redirects=False)
+        _client = httpx.AsyncClient(transport=box_tunnel.transport(),
+                                    timeout=httpx.Timeout(60.0, connect=10.0), follow_redirects=False)
     return _client
 
 
@@ -111,10 +115,15 @@ async def app_ws(ws: WebSocket, cap: str, port: int, path: str):
 
     url = f"ws://{host}/{path}" + (f"?{ws.url.query}" if ws.url.query else "")
     protocols = [p.strip() for p in (ws.headers.get("sec-websocket-protocol") or "").split(",") if p.strip()]
+    name, port_s = host.rsplit(":", 1)
+    pump = None
     try:
-        upstream = await websockets.connect(url, subprotocols=protocols or None, max_size=None,
-                                            open_timeout=10)
+        sock, pump = await box_tunnel.open_socket(name, int(port_s))
+        upstream = await websockets.connect(url, sock=sock, subprotocols=protocols or None,
+                                            max_size=None, open_timeout=10)
     except Exception:  # noqa: BLE001
+        if pump is not None:
+            pump.cancel()
         await ws.close(code=1011)
         return
     await ws.accept(subprotocol=upstream.subprotocol)
@@ -143,6 +152,7 @@ async def app_ws(ws: WebSocket, cap: str, port: int, path: str):
         for t in tasks:
             t.cancel()
         await upstream.close()
+        pump.cancel()
         try:
             await ws.close()
         except (RuntimeError, WebSocketDisconnect):

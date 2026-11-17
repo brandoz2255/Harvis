@@ -466,6 +466,8 @@ def parse_args(argv):
     p.add_argument("--lan-models-url", default="")
     p.add_argument("--tunnel-replicas", type=int, default=2,
                    help="cloudflared copies; 0 under the network lock, which scales it itself")
+    p.add_argument("--blocked-cidr", action="append", default=[],
+                   help="a public range the agent browser may never reach (HARVIS_BLOCKED_NETWORKS)")
     p.add_argument("--browser-allow-cidr", action="append", default=[],
                    help="a private range the agent browser may still open (repeatable)")
     p.add_argument("--build-space", action="store_true",
