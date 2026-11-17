@@ -1,11 +1,29 @@
-# Test fixtures and storage keys that gitleaks reads as secrets. Each line is one
-# finding (commit:file:rule:line), checked by hand on 2026-11-17: none is a real credential.
-18fc9857fad39f763ed56ab175edbe6b54ae5eb7:front_end/owui/src/lib/agents/computer.test.ts:generic-api-key:5
-18fc9857fad39f763ed56ab175edbe6b54ae5eb7:python_back_end/agent_reach/provenance.py:generic-api-key:25
-18fc9857fad39f763ed56ab175edbe6b54ae5eb7:python_back_end/tests/test_agent_computer.py:generic-api-key:18
-2ca4e01c74b149bc8469339b522d5bed65d1d401:front_end/hermes-desktop-ui/electron/native-token-store.test.ts:generic-api-key:29
-2ca4e01c74b149bc8469339b522d5bed65d1d401:front_end/hermes-desktop-ui/electron/native-token-store.test.ts:generic-api-key:30
-7603cf38ab263e40a10d8c667cc462a021e470e8:front_end/hermes-desktop-ui/src/store/ascii-places.ts:generic-api-key:3
-7782f892bab5995ef10c47cd722ee50951bc2d15:python_back_end/tests/test_hermes_ui_ops.py:generic-api-key:168
-7782f892bab5995ef10c47cd722ee50951bc2d15:python_back_end/tests/test_inference_node_pairing.py:generic-api-key:30
-e4d4dcb200c0e32189f6265201eca9c66e7696f1:python_back_end/tests/test_agent_computer_guard.py:generic-api-key:18
+# Test fixtures, storage keys and documentation placeholders that gitleaks reads as
+# secrets. Each line is one finding (commit:file:rule:line) across the whole history,
+# checked by hand on 2026-11-17: none is a real credential.
+cb30e828155df20045bde2110827be0566a68aac:BACKEND_IMPORT_FIX.md:curl-auth-header:79
+cb30e828155df20045bde2110827be0566a68aac:BACKEND_IMPORT_FIX.md:curl-auth-header:93
+cb30e828155df20045bde2110827be0566a68aac:BACKEND_IMPORT_FIX.md:curl-auth-header:106
+cb30e828155df20045bde2110827be0566a68aac:BACKEND_IMPORT_FIX.md:curl-auth-header:119
+7fa90a6f4540ab1f04bbbfcfa77963a045a5ab95:CI_CD_SETUP_AND_REVIEW_GUIDE.md:generic-api-key:290
+a956314e3e44045ee64369f40a6e21309bb35d9c:FILE_TREE_FIX.md:curl-auth-header:236
+a956314e3e44045ee64369f40a6e21309bb35d9c:FINAL_FIX_SUMMARY.md:curl-auth-header:229
+d579c70e057366183908c7d143b51aa100f345a6:TERMINAL_FIX_PLAN.md:generic-api-key:87
+d579c70e057366183908c7d143b51aa100f345a6:TERMINAL_FIX_PLAN.md:generic-api-key:102
+610b3c2f4677985c37f6dd0a0e0c4e44cd331297:fixes/n8n-api-key-auth-fix.md:generic-api-key:53
+8a0408c015038a840901cf54b30ebde965015bf8:fixes/n8n-api-key-auth-fix.md:generic-api-key:53
+65b1e29b1a236761a4ac1c09fa83c22713462026:front_end/hermes-desktop-ui/electron/native-token-store.test.ts:generic-api-key:29
+65b1e29b1a236761a4ac1c09fa83c22713462026:front_end/hermes-desktop-ui/electron/native-token-store.test.ts:generic-api-key:30
+f715a44ad46091392f0795a2bffda83ab4006c53:front_end/hermes-desktop-ui/src/store/ascii-places.ts:generic-api-key:3
+a956314e3e44045ee64369f40a6e21309bb35d9c:front_end/jfrontend/TASK_23_11_QUICK_TEST.md:curl-auth-header:99
+a956314e3e44045ee64369f40a6e21309bb35d9c:front_end/jfrontend/TASK_23_11_VERIFICATION.md:curl-auth-header:232
+a956314e3e44045ee64369f40a6e21309bb35d9c:front_end/jfrontend/TASK_23_11_VERIFICATION.md:curl-auth-header:253
+91fcaeeecde0ba8682a90758daa4f9f96fd5d983:front_end/owui/src/lib/agents/computer.test.ts:generic-api-key:5
+5cc83651d54192f9067b08db145da6e6f8d1a728:k8s-manifests/base/harvis-ai-backend-secret.yaml.template:generic-api-key:24
+5cc83651d54192f9067b08db145da6e6f8d1a728:k8s-manifests/base/harvis-ai-backend-secret.yaml.template:generic-api-key:28
+5cc83651d54192f9067b08db145da6e6f8d1a728:k8s-manifests/base/harvis-ai-backend-secret.yaml.template:generic-api-key:31
+91fcaeeecde0ba8682a90758daa4f9f96fd5d983:python_back_end/agent_reach/provenance.py:generic-api-key:25
+91fcaeeecde0ba8682a90758daa4f9f96fd5d983:python_back_end/tests/test_agent_computer.py:generic-api-key:18
+caa22c2b6fe86d9fa40f54eaca716165fdeb930f:python_back_end/tests/test_agent_computer_guard.py:generic-api-key:18
+0fc5a0fb615aea4dcb202f8bece1d788165f00d1:python_back_end/tests/test_hermes_ui_ops.py:generic-api-key:168
+0fc5a0fb615aea4dcb202f8bece1d788165f00d1:python_back_end/tests/test_inference_node_pairing.py:generic-api-key:30
