@@ -49,7 +49,7 @@ from owui_compat.doc_bridge import detect_doc_kind, doc_system_prompt, maybe_pre
     ("Write a report on the lab network", "doc"),
     ("draft a memo to the team about the outage", "doc"),
     ("write me a cover letter for a SOC analyst role", "doc"),
-    ("Can you create a one-pager for the CISO lab", "doc"),
+    ("Can you create a one-pager for the robotics lab", "doc"),
     ("I need a resume", "doc"),
     ("please produce a whitepaper on passkeys", "doc"),
     ("make a word doc about incident response", "doc"),

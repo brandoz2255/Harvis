@@ -14,7 +14,7 @@ Sources: README.md L1–48 ("Semantic search over video footage"), pyproject des
 - **License: Apache-2.0.** Full standard text in `LICENSE`; confirmed by GitHub's license detection (`spdx_id: Apache-2.0`). No AGPL, no non-commercial rider. Clean for Harvis.
 - **Stars/forks:** 4,396 stars, 420 forks, 18 watchers (GitHub API, 2026-07-30).
 - **History:** 174 commits, first commit 2026-03-17, last commit 2026-07-22 (8 days ago). Actively maintained.
-- **Contributors:** effectively a one-person project — Soham Rajadhyaksha (ssrajadh@ucsc.edu) authored 158/174 commits; ~8 drive-by contributors with 1–2 commits each (git shortlog).
+- **Contributors:** effectively a one-person project — Soham Rajadhyaksha authored 158/174 commits; ~8 drive-by contributors with 1–2 commits each (git shortlog).
 - **Releases:** one tag only (`benchmark-clip-v1`); **no versioned releases, version pinned at 0.1.0** in pyproject. Distributed by `git clone` + `uv tool install`, not PyPI.
 - **Tests & CI:** genuinely good for its size — 17 test files (~4,000 LOC of tests vs ~5,171 LOC package, biggest module `cli.py` at 1,495 LOC), GitHub Actions CI on ubuntu/macos/windows × Python 3.11/3.12 with coverage, plus a separate job that smoke-installs the torch `local` extra (`.github/workflows/ci.yml`).
 - **Structure:** single Python package, Click CLI (`sentrysearch` entry point). Modules: chunker, store (ChromaDB), three embedder backends (Gemini cloud / DashScope qwen-cloud / local Qwen3-VL via transformers), two rerankers (Gemini 2.5 Flash / local Qwen3-VL-Instruct), highlights (kNN/centroid/LOF anomaly ranking), trimmer, Tesla-telemetry overlay (protobuf SEI parsing + Nominatim reverse geocoding), dead-letter queue for failed chunks.

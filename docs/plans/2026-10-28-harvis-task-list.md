@@ -81,7 +81,7 @@ or other LAN PCs (hand David one paste instead).
       user's own WhatsApp needs `WHATSAPP_APP_SECRET`.
     - Tests: backend 149 passed, 16 skipped (DB), 1 baseline failure; gateway 37 passed. Real pgvector run of 011+026 x3.
     - Deploy: restart `harvis-messaging-gateway` with the backend. 026 is one-way once two users share an identity.
-14. **Vault note and report.** Status: done. `Homelab/code/harvis/2026-10-28-october-integration.md` on the notes host, linked from index, log and `_map.md`.
+14. **Vault note and report.** Status: done. Written up in the project notes.
     - Write the session note for this integration in the vault.
     - Link it from the vault index, log and the Harvis repo map.
 
