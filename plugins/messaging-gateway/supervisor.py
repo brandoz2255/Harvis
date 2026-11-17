@@ -58,6 +58,17 @@ SUPPORTED_PLATFORMS: tuple[str, ...] = (
     "telegram", "slack", "discord", "matrix", "email", "whatsapp_cloud", "signal", "stub",
 )
 
+# The secret that is one bot's identity. Two adapters on the same one would
+# both receive every message and answer it twice, once as each account.
+BOT_CREDENTIAL_KEYS: dict[str, str] = {
+    "discord": "DISCORD_BOT_TOKEN",
+    "telegram": "TELEGRAM_BOT_TOKEN",
+    "slack": "SLACK_BOT_TOKEN",
+}
+SHARED_CREDENTIAL_ERROR = (
+    "Another Harvis account already runs this bot. Create your own bot and save its token here."
+)
+
 
 class _Running:
     __slots__ = ("adapter", "task", "spec")
@@ -96,6 +107,10 @@ class AdapterSupervisor:
                     continue
                 wanted[spec.key] = spec
 
+            blocked = self._shared_credentials(wanted)
+            for key in blocked:
+                wanted.pop(key)
+
             changed = {"started": [], "restarted": [], "stopped": []}
 
             for key in list(self._running):
@@ -122,11 +137,36 @@ class AdapterSupervisor:
             for key in list(self._failed):
                 if key not in wanted:
                     self._failed.pop(key, None)
+            self._failed.update(dict.fromkeys(blocked, SHARED_CREDENTIAL_ERROR))
 
             self.last_sync_at = time.time()
             if any(changed.values()):
                 logger.info("supervisor sync: %s", {k: v for k, v in changed.items() if v})
             return changed
+
+    def _shared_credentials(self, wanted: dict[str, AdapterSpec]) -> list[str]:
+        """Keys that must not start because another account holds the same bot.
+
+        The adapter already running on it keeps it, so a later save cannot take
+        over someone's bot; before anything runs, the earliest save wins.
+        """
+        holders: dict[tuple[str, str], list[AdapterSpec]] = {}
+        for spec in wanted.values():
+            secret = spec.get(BOT_CREDENTIAL_KEYS.get(spec.platform, ""))
+            if secret:
+                holders.setdefault((spec.platform, secret), []).append(spec)
+
+        def claim(spec: AdapterSpec) -> tuple:
+            run = self._running.get(spec.key)
+            cred = BOT_CREDENTIAL_KEYS[spec.platform]
+            holds = run is not None and run.spec.get(cred) == spec.get(cred)
+            owner = spec.owner_user_id if spec.owner_user_id is not None else -1
+            return (not holds, spec.updated_at or "", owner)
+
+        blocked: list[str] = []
+        for specs in holders.values():
+            blocked += [spec.key for spec in sorted(specs, key=claim)[1:]]
+        return blocked
 
     def _retry_due(self, key: str) -> bool:
         since = self._running[key].adapter.status().get("since") or 0

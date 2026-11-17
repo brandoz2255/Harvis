@@ -177,3 +177,49 @@ async def test_control_webhook_verify_and_relay():
         assert c.post("/webhook/whatsapp_cloud", json={"body_b64": body}, headers=h).status_code == 403
         assert c.post("/webhook/telegram", json={"body_b64": body}, headers=h).status_code == 403
     await sup.stop_all()
+
+
+@pytest.mark.asyncio
+async def test_each_account_runs_its_own_bot():
+    sup = AdapterSupervisor(_noop, factory=FakeAdapter)
+    changed = await sup.sync([
+        AdapterSpec("discord", 7, {"DISCORD_BOT_TOKEN": "tok-a"}),
+        AdapterSpec("discord", 9, {"DISCORD_BOT_TOKEN": "tok-b"}),
+    ])
+    assert sorted(changed["started"]) == ["discord:7", "discord:9"]
+    assert sup.get("discord:7").owner_user_id == 7 and sup.get("discord:9").owner_user_id == 9
+    await sup.stop_all()
+
+
+@pytest.mark.asyncio
+async def test_a_bot_token_another_account_runs_is_refused_not_shared():
+    sup = AdapterSupervisor(_noop, factory=FakeAdapter)
+    first = AdapterSpec("discord", 7, {"DISCORD_BOT_TOKEN": "tok"}, updated_at="2026-11-01T00:00:00Z")
+    await sup.sync([first])
+
+    # A later save of the same token, even with an older timestamp, cannot take the running bot.
+    late = AdapterSpec("discord", 3, {"DISCORD_BOT_TOKEN": "tok"}, updated_at="2026-10-01T00:00:00Z")
+    changed = await sup.sync([first, late])
+    assert changed == {"started": [], "restarted": [], "stopped": []}
+    assert sup.get("discord:3") is None and sup.get("discord:7") is not None
+    status = sup.status()["adapters"]["discord:3"]
+    assert status["state"] == "error" and "own bot" in status["error"] and status["owner_user_id"] == 3
+
+    # Once they save their own token it starts and the error clears.
+    own = AdapterSpec("discord", 3, {"DISCORD_BOT_TOKEN": "tok-3"})
+    changed = await sup.sync([first, own])
+    assert changed["started"] == ["discord:3"]
+    assert sup.status()["adapters"]["discord:3"]["state"] != "error"
+    await sup.stop_all()
+
+
+@pytest.mark.asyncio
+async def test_before_anything_runs_the_earliest_save_keeps_a_shared_token():
+    sup = AdapterSupervisor(_noop, factory=FakeAdapter)
+    changed = await sup.sync([
+        AdapterSpec("telegram", 9, {"TELEGRAM_BOT_TOKEN": "t"}, updated_at="2026-11-02T00:00:00Z"),
+        AdapterSpec("telegram", 4, {"TELEGRAM_BOT_TOKEN": "t"}, updated_at="2026-11-05T00:00:00Z"),
+        AdapterSpec("discord", 4, {"DISCORD_BOT_TOKEN": "t"}),
+    ])
+    assert sorted(changed["started"]) == ["discord:4", "telegram:9"]
+    await sup.stop_all()
