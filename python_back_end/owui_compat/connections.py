@@ -173,6 +173,9 @@ def register_connection_routes(router: APIRouter, get_current_user: Callable) ->
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
         pool = _pool(request)
         async with pool.acquire() as conn:
+            # A name already in the list (any capitalisation) is that server: update it.
+            from plugins.mcp.server_registry import stored_server_name
+            name = await stored_server_name(conn, int(user.id), name)
             # Read the stored env first: a re-save that omits a credential must
             # keep it, otherwise editing the command silently wipes the token.
             prior = await conn.fetchval(

@@ -622,8 +622,13 @@ def register_mcp_wizard_routes(router: APIRouter, get_current_user: Callable) ->
                     servers = cfg.get("mcpServers")
                     if not isinstance(servers, dict):
                         servers = {}
+                    # A server the config already lists under another capitalisation
+                    # is the same server: write over that key, never beside it.
+                    listed = {str(k).strip().lower(): k for k in servers}
                     for c in conns:
-                        servers[c["server_name"]] = _mcp_entry(c, mask=False)
+                        key = listed.get(c["server_name"].strip().lower(), c["server_name"])
+                        servers[key] = _mcp_entry(c, mask=False)
+                        listed[key.strip().lower()] = key
                     cfg["mcpServers"] = servers
                     _atomic_write(cfg_path, json.dumps(cfg, indent=2) + "\n")
                     mcp_result = {"status": "written", "path": str(cfg_path), "count": len(conns)}

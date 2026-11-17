@@ -18,6 +18,25 @@ from .types import AuthMethod, McpServerConfig, Transport
 logger = logging.getLogger(__name__)
 
 
+async def stored_server_name(conn, user_id: int, name: str) -> str:
+    """The spelling this user already saved for a server of this name, else the name tidied.
+
+    "GitHub", "github" and " github " are one server. Every add path resolves the
+    name through here first, so a second add updates the row that is listed
+    instead of putting the same server in the list twice.
+    """
+    wanted = " ".join(str(name or "").split())
+    if not wanted:
+        return wanted
+    found = await conn.fetchval(
+        "SELECT server_name FROM mcp_servers "
+        "WHERE user_id=$1 AND lower(btrim(server_name)) = lower($2) "
+        "ORDER BY (server_name = $2) DESC, updated_at DESC LIMIT 1",
+        int(user_id), wanted,
+    )
+    return found or wanted
+
+
 class McpServerRegistry:
     def __init__(self, pool: asyncpg.Pool) -> None:
         self._pool = pool

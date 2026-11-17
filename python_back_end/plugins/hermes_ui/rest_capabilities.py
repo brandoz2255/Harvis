@@ -188,7 +188,7 @@ async def mcp_servers_replace(request: Request, user=Depends(get_current_user_op
         if transport not in ("stdio", "sse", "streamable-http"):
             raise HTTPException(400, f"Unsupported transport for {name}: {transport}")
         cleaned.append((name, {**cfg, "transport": transport}))
-    keep = {name for name, _ in cleaned}
+    keep: set[str] = set()
 
     # Upsert first, delete second: no single transaction spans _upsert_server's
     # own connection, so if an upsert raised mid-loop a delete-first order could
@@ -202,13 +202,16 @@ async def mcp_servers_replace(request: Request, user=Depends(get_current_user_op
         # downgrade a server the user authorized to auth_method none.
         from .mcp_inputs import normalize_auth
         auth = normalize_auth(cfg)
-        await _upsert_server(
+        saved = await _upsert_server(
             request, user, name=name, transport=cfg["transport"],
             url=str(cfg.get("url") or "").strip() or None,
             command=str(cfg.get("command") or "").strip() or None,
             args=list(cfg.get("args") or []),
             auth_method="oauth" if auth == "oauth" else "none",
             env={}, credentials={str(k): str(v) for k, v in (cfg.get("env") or {}).items()})
+        # The row may be stored under an earlier spelling of the same name.
+        name = (saved or {}).get("name") or name
+        keep.add(name)
         async with _pool(request).acquire() as conn:
             await conn.execute(
                 "UPDATE mcp_servers SET enabled=$3, updated_at=NOW() "
@@ -331,7 +334,10 @@ async def _upsert_server(request: Request, user, *, name: str, transport: str,
             await guard_url_async(url or "", strict_for(_uid(user)))
         except _McpError as exc:
             raise HTTPException(400, str(exc)) from exc
+    from plugins.mcp.server_registry import stored_server_name
     async with _pool(request).acquire() as conn:
+        # A name already in the list (any capitalisation) is that server: update it.
+        name = await stored_server_name(conn, _uid(user), name)
         prior = await conn.fetchval(
             "SELECT env FROM mcp_servers WHERE user_id=$1 AND server_name=$2",
             _uid(user), name)
@@ -424,10 +430,11 @@ async def mcp_server_add(request: Request, user=Depends(get_current_user_optimiz
     if transport != "stdio" and not url:
         raise HTTPException(400, "Remote servers need a URL.")
     auth_method = normalize_auth(body)
-    await _upsert_server(
+    saved = await _upsert_server(
         request, user, name=name, transport=transport, url=url, command=command,
         args=list(body.get("args") or []), auth_method=auth_method,
         env={}, credentials={str(k): str(v) for k, v in (body.get("env") or {}).items()})
+    name = (saved or {}).get("name") or name
     return {"name": name, "transport": transport, "command": command,
             "args": list(body.get("args") or []), "url": url, "enabled": True, "tools": None,
             "auth": auth_method}
