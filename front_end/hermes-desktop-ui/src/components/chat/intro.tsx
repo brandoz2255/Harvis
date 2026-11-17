@@ -1,5 +1,6 @@
 import { useState } from 'react'
 
+import { HarvisFace } from '@/components/harvis-face'
 import { capitalize, normalize } from '@/lib/text'
 
 import introCopyJsonl from './intro-copy.jsonl?raw'
@@ -173,7 +174,12 @@ export function Intro({ personality, seed, pixelWordmark = false }: IntroProps) 
               <span className="harvis-letter">HARVIS</span>
             </span>
           </p>
-        ) : <HarvisWordmark className="mx-auto mb-5 w-[min(100%,44rem)]" />}
+        ) : (
+          <>
+            <HarvisFace className="mx-auto mb-3 size-14" interactive live />
+            <HarvisWordmark className="mx-auto mb-5 w-[min(100%,44rem)]" />
+          </>
+        )}
 
         <p className="m-0 text-center leading-normal tracking-tight">{copy.body}</p>
       </div>

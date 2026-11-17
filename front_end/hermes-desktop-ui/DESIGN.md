@@ -252,10 +252,19 @@ Sizes: `default`, `xs`, `overlay` (titlebar glyph counts).
 - Pick the vocabulary by semantic context and reuse the existing icon for an
   action. Do not introduce a third icon set or mix styles within one control
   group.
-- **`BrandMark`** (`src/components/brand-mark.tsx`) is the brand glyph — the
-  `nous-girl` mark on a white tile, softly rounded, identical in light/dark.
+- **`BrandMark`** (`src/components/brand-mark.tsx`) is the brand glyph — a
+  screen with two eyes (`public/harvis-logo.svg`, rendered to `harvis-logo.png`
+  and `apple-touch-icon.png`), identical in light/dark. Adopters rebrand by
+  replacing those two PNGs.
   It replaced scattered Sparkles glyphs in updates / onboarding / about. Use it
   for hero/brand moments; don't reintroduce decorative star/sparkle icons.
+- **`HarvisFace`** (`src/components/harvis-face.tsx`) is the same mark drawn
+  live for the empty chat: it looks around and waves while idle, follows the
+  chat (`live`: thinking, working, waiting, done, error, asleep when the gateway
+  is gone) and reacts to clicks (`interactive`). Every pose is a CSS transform
+  on the eyes (`.hv-face` in `styles.css`), so moods glide and reduced motion
+  stills it. Adopters rebrand by swapping the inline SVG in that file; keep the
+  `hv-body` / `hv-look` / `hv-blink` / `hv-eyes` groups so the poses still apply.
 
 ## Motion
 
