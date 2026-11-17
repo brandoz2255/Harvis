@@ -1,0 +1,11 @@
+{
+  "tools": [
+    {
+      "name": "read_image",
+      "description": "Read an image file and return base64-encoded data for multimodal model analysis",
+      "command": "node",
+      "args": ["-e", "\"const fs=require('fs');const path=require('path');const file=path.resolve(process.argv[2]);const data=fs.readFileSync(file);const ext=path.extname(file).toLowerCase().replace('.','');console.log(JSON.stringify({base64:data.toString('base64'),format:ext,size:data.length}))\""],
+      "allowlist": ["/home/node/.openclaw/", "/tmp/"]
+    }
+  ]
+}

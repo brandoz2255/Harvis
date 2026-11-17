@@ -1,0 +1,235 @@
+---
+# Dev backend — harvis-backend ONLY.
+# No llama-cpp sidecar, no GGUF download init container, no GPU request.
+# Purpose: verify that the backend image boots (uvicorn starts, imports succeed)
+#          before promoting the image tag to prod.
+#
+# Cross-namespace wiring (points at prod services in ai-agents):
+#   DB:         harvis-ai-pgsql.ai-agents.svc.cluster.local:5432
+#   Embedding:  harvis-ai-llama-embed.ai-agents.svc.cluster.local:8081/8082
+#   LLM:        harvis-ai-merged-backend.ai-agents.svc.cluster.local:8080
+#
+# One-time secret setup (run once after creating namespace):
+#   for s in harvis-ai-backend-secret harvis-ai-openclaw-secret harvis-ai-backend-config; do
+#     kubectl get secret $s -n ai-agents -o json \
+#       | jq 'del(.metadata.resourceVersion,.metadata.uid,.metadata.creationTimestamp,.metadata.annotations,.metadata.ownerReferences) | .metadata.namespace="ai-agents-dev"' \
+#       | kubectl apply -f -
+#   done
+#   # For the configmap:
+#   kubectl get configmap harvis-ai-backend-config -n ai-agents -o json \
+#     | jq 'del(.metadata.resourceVersion,.metadata.uid,.metadata.creationTimestamp,.metadata.annotations,.metadata.ownerReferences) | .metadata.namespace="ai-agents-dev"' \
+#     | kubectl apply -f -
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: harvis-dev-backend
+  namespace: ai-agents-dev
+  labels:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: dev-backend
+    environment: dev
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: harvis-ai
+      app.kubernetes.io/component: dev-backend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: harvis-ai
+        app.kubernetes.io/component: dev-backend
+        environment: dev
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: dulc3-os
+      # No runtimeClassName: nvidia — dev boot test doesn't need GPU
+      initContainers:
+        - name: wait-for-db
+          image: busybox:1.36
+          command: ['sh', '-c']
+          args:
+            - |
+              echo "Waiting for PostgreSQL at harvis-ai-pgsql.ai-agents.svc.cluster.local:5432..."
+              until nc -z harvis-ai-pgsql.ai-agents.svc.cluster.local 5432; do
+                echo "DB not ready, retrying in 2s..."
+                sleep 2
+              done
+              echo "PostgreSQL is ready."
+          resources:
+            requests:
+              memory: 16Mi
+              cpu: 10m
+            limits:
+              memory: 32Mi
+              cpu: 50m
+
+      containers:
+        - name: harvis-backend
+          # Tag is updated by ci_pipeline.sh dev step — do not edit manually.
+          # dev-latest tag: imagePullPolicy Always ensures fresh pull on each rollout.
+          image: "dulc3/jarvis-backend:dev-latest"
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          env:
+            # ── Database (cross-namespace) ─────────────────────────────────────────
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-backend-secret
+                  key: database-url
+            - name: OLLAMA_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-backend-secret
+                  key: ollama-api-key
+            # ── Embedding (cross-namespace, prod services) ─────────────────────────
+            - name: OLLAMA_URL
+              value: "http://harvis-ai-llama-embed.ai-agents.svc.cluster.local:8081"
+            - name: EMBED_NOMIC_URL
+              value: "http://harvis-ai-llama-embed.ai-agents.svc.cluster.local:8081"
+            - name: EMBED_QW3_URL
+              value: "http://harvis-ai-llama-embed.ai-agents.svc.cluster.local:8082"
+            # ── LLM sidecar (cross-namespace, prod llama.cpp) ─────────────────────
+            - name: VLLM_URL
+              value: "http://harvis-ai-merged-backend.ai-agents.svc.cluster.local:8080/v1"
+            - name: LLAMA_URL
+              value: "http://harvis-ai-merged-backend.ai-agents.svc.cluster.local:8080/v1"
+            - name: EXTERNAL_OLLAMA_URL
+              value: "https://ollama.example.com/ollama"
+            - name: BACKEND_URL
+              value: "http://harvis-dev-backend.ai-agents-dev.svc.cluster.local:8000"
+            # ── OpenClaw (cross-namespace, prod openclaw) ──────────────────────────
+            - name: OPENCLAW_URL
+              value: "ws://harvis-ai-openclaw.ai-agents.svc.cluster.local:18789"
+            - name: OPENCLAW_GATEWAY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-openclaw-secret
+                  key: openclaw-gateway-token
+            - name: MOONSHOT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-openclaw-secret
+                  key: moonshot-api-key
+            - name: MOONSHOT_BASE_URL
+              value: "https://api.moonshot.ai/v1"
+            - name: NVIDIA_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: harvis-ai-openclaw-secret
+                  key: nvidia-api-key
+                  optional: true
+            # ── Dev-specific overrides ─────────────────────────────────────────────
+            - name: ENVIRONMENT
+              value: "dev"
+            - name: LOG_LEVEL
+              value: "debug"
+            - name: UVICORN_WORKERS
+              value: "1"
+            - name: UVICORN_TIMEOUT_KEEP_ALIVE
+              value: "120"
+            - name: DISABLE_LOCAL_TTS_WORKERS
+              value: "true"   # skip TTS model load — faster boot, not needed for boot test
+            - name: TTS_DEVICE
+              value: "cpu"
+            - name: WHISPER_DEVICE
+              value: "cpu"
+            # Point cache paths to emptyDir mounts below
+            - name: HF_HOME
+              value: "/models-cache/huggingface"
+            - name: TRANSFORMERS_CACHE
+              value: "/models-cache/huggingface"
+            - name: WHISPER_CACHE
+              value: "/models-cache/whisper"
+            - name: TMPDIR
+              value: "/tmp"
+          envFrom:
+            - configMapRef:
+                name: harvis-ai-backend-config
+          resources:
+            requests:
+              memory: 1Gi
+              cpu: 500m
+            limits:
+              memory: 4Gi
+              cpu: 4000m
+          volumeMounts:
+            - name: embedding
+              mountPath: /app/embedding
+            - name: tmp
+              mountPath: /tmp
+            - name: ml-models-cache
+              mountPath: /models-cache
+            - name: images
+              mountPath: /app/images
+            - name: artifacts
+              mountPath: /data/artifacts
+          command: ["uvicorn"]
+          args:
+            - "main:app"
+            - "--host"
+            - "0.0.0.0"
+            - "--port"
+            - "8000"
+            - "--timeout-keep-alive"
+            - "120"
+            - "--log-level"
+            - "debug"
+          # Generous initial delay — some Python imports are slow on cold start.
+          # Drop to 20s once you confirm boot time.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 45
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+      # All emptyDir — no PVC dependencies in dev.
+      # Data does not survive pod restarts, which is fine for boot testing.
+      volumes:
+        - name: embedding
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        - name: ml-models-cache
+          emptyDir:
+            sizeLimit: 2Gi
+        - name: images
+          emptyDir: {}
+        - name: artifacts
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: harvis-dev-backend
+  namespace: ai-agents-dev
+  labels:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: dev-backend
+    environment: dev
+spec:
+  type: ClusterIP
+  ports:
+    - name: backend
+      port: 8000
+      targetPort: http
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: harvis-ai
+    app.kubernetes.io/component: dev-backend

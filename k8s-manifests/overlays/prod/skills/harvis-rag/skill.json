@@ -1,0 +1,24 @@
+{
+  "tools": [
+    {
+      "name": "search_rag",
+      "description": "Search the Harvis RAG vector database for relevant documents. Use 'code' for code docs, 'docs' for general documentation, or 'all' for both.",
+      "command": "node",
+      "args": [
+        "-e",
+        "const http=require('http');const q=process.argv[2].replace(/\\n/g,' ');const coll=process.argv[3]||'all';const k=process.argv[4]||'5';const data=JSON.stringify({query:q,context_type:coll,top_k:k});const opts={hostname:'harvis-ai-merged-backend.ai-agents.svc.cluster.local',port:8000,path:'/rag/search',method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+process.env.OPENCLAW_GATEWAY_TOKEN,'Content-Length':data.length}};const req=http.request(opts,res=>{let d='';res.on('data',c=>d+=c);res.on('end',()=>console.log(d))});req.on('error',e=>console.error('Error:',e.message));req.write(data);req.end();"
+      ],
+      "allowlist": []
+    },
+    {
+      "name": "list_rag_sources",
+      "description": "List all available document sources in the RAG database with document counts",
+      "command": "node",
+      "args": [
+        "-e",
+        "const http=require('http');const opts={hostname:'harvis-ai-merged-backend.ai-agents.svc.cluster.local',port:8000,path:'/rag/stats',headers:{'Authorization':'Bearer '+process.env.OPENCLAW_GATEWAY_TOKEN}};http.request(opts,res=>{let d='';res.on('data',c=>d+=c);res.on('end',()=>console.log(d))}).on('error',e=>console.error('Error:',e.message)).end();"
+      ],
+      "allowlist": []
+    }
+  ]
+}
