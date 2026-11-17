@@ -65,7 +65,7 @@ export async function POST(req: NextRequest) {
       ? sessionId
       : null;
 
-    console.log(`[AI-Chat] Calling backend at ${BACKEND_URL} - model: ${model || 'mistral'}, session: ${validSessionId || 'new'}, ttsEngine: ${ttsEngine}, message: ${messageContent.slice(0, 50)}...`);
+    // Backend call initiated
 
     // Helper to return a stream with an error message
     const createErrorStreamResponse = (errorMessage: string, status: number = 500) => {
@@ -107,7 +107,7 @@ export async function POST(req: NextRequest) {
 
       for (let attempt = 1; attempt <= retries; attempt++) {
         try {
-          console.log(`[AI-Chat] Fetch attempt ${attempt}/${retries} to ${BACKEND_URL}/api/chat`);
+          // Fetch attempt
 
           const controller = new AbortController();
           const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
@@ -143,10 +143,10 @@ export async function POST(req: NextRequest) {
 
         } catch (error) {
           lastError = error as Error;
-          console.warn(`[AI-Chat] Fetch attempt ${attempt} failed:`, error);
+          // Fetch attempt failed
 
           if (attempt < retries) {
-            console.log(`[AI-Chat] Retrying in ${RETRY_DELAY}ms...`);
+            // Retrying
             await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
           }
         }
@@ -223,7 +223,7 @@ export async function POST(req: NextRequest) {
             return true;
           } catch (e) {
             isClosed = true;
-            console.debug('[AI-Chat] Client disconnected, stopping stream');
+            // Client disconnected
             return false;
           }
         };
@@ -257,7 +257,7 @@ export async function POST(req: NextRequest) {
             }
             try {
               controller.close();
-              console.log(`[AI-Chat] Stream closed. Processed ${chunkCount} chunks. Full text length: ${fullText.length}`);
+              // Stream closed
             } catch (e) {
               // Already closed, ignore
             }
@@ -312,9 +312,7 @@ export async function POST(req: NextRequest) {
               // Only process valid SSE data lines
               if (!trimmedLine.startsWith('data: ')) {
                 // Log any non-data lines that aren't keepalive comments for debugging
-                if (!trimmedLine.startsWith(':')) {
-                  console.warn('[AI-Chat] Skipping unexpected line:', trimmedLine.slice(0, 100));
-                }
+                // Skip unexpected lines
                 continue;
               }
 
@@ -326,7 +324,7 @@ export async function POST(req: NextRequest) {
                 try {
                   data = JSON.parse(jsonStr);
                 } catch (jsonError) {
-                  console.warn('[AI-Chat] Skipping malformed JSON:', jsonStr.slice(0, 100));
+                  // Skip malformed JSON
                   continue;
                 }
 
@@ -352,11 +350,11 @@ export async function POST(req: NextRequest) {
                   // CRITICAL FIX: For auto-research mode, just log research progress
                   // Don't send through AI SDK stream to avoid parsing errors
                   // The research chain UI will be updated separately via the complete event
-                  console.log('[AI-Chat] Auto-research progress (buffered):', data.detail || data.type);
+                  // Auto-research progress buffered
 
                   // Create assistant message on first research event if needed
                   if (!assistantMessageCreated) {
-                    console.log('[AI-Chat] Creating assistant message placeholder for auto-research');
+                    // Creating assistant message placeholder
                     if (!safeEnqueue(encoder.encode(`0:" "\n`))) break;
                     assistantMessageCreated = true;
                   }
@@ -369,18 +367,15 @@ export async function POST(req: NextRequest) {
                   reasoning = data.reasoning || '';
                   finalAnswer = data.final_answer || fullText;
 
-                  console.log(`[AI-Chat] Complete event. fullText len: ${fullText.length}, finalAnswer len: ${finalAnswer?.length}`);
+                  // Complete event received
 
                   // CRITICAL FIX: If we haven't streamed any meaningful text yet
                   const contentToSend = finalAnswer || data.response;
 
                   if ((!fullText || fullText.trim().length === 0) && contentToSend) {
-                    console.log(`[AI-Chat] Streaming full content from COMPLETE event (${contentToSend.length} chars)`);
                     const encodedContent = JSON.stringify(contentToSend);
-                    console.log(`[AI-Chat] Sending content with 0: prefix, length: ${encodedContent.length}`);
                     if (!safeEnqueue(encoder.encode(`0:${encodedContent}\n`))) break;
                     fullText = contentToSend;
-                    console.log(`[AI-Chat] Content sent successfully`);
                   }
 
                   // ── Workspace XML signal detection ──────────────────────────
@@ -389,7 +384,7 @@ export async function POST(req: NextRequest) {
                   if (wsMatch) {
                     const wsModel = (wsMatch[1] || 'local').trim();
                     const wsBrief = (wsMatch[2] || '').trim().slice(0, 200);
-                    console.log(`[AI-Chat] Workspace signal detected: model=${wsModel} brief=${wsBrief.slice(0, 60)}...`);
+                    // Workspace signal detected
 
                     // Emit workspace signal via data stream
                     const wsSignal = {
@@ -421,7 +416,6 @@ export async function POST(req: NextRequest) {
                       results: data.sources || data.search_results,
                       isAutoResearch: data.auto_researched || false
                     };
-                    console.log(`[AI-Chat] Sending ${searchData.results?.length || 0} sources from complete event`);
                     if (!safeEnqueue(encoder.encode(`2:${JSON.stringify([searchData])}\n`))) break;
                   }
 
