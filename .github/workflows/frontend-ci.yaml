@@ -1,12 +1,10 @@
 name: Frontend CI
 
+# Manual only. This checks front_end/jfrontend, which was removed when the
+# Hermes desktop UI replaced the Next.js frontend, so it failed on every pull
+# request. Kept until a check for front_end/hermes-desktop-ui replaces it.
 on:
-  push:
-    paths:
-      - "front_end/jfrontend/**"
-    branches: [main]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
 
 jobs:
   frontend-checks:

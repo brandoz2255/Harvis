@@ -154,19 +154,20 @@ jobs:
         with:
           node-version: '20'
 
+      # Reads the lockfile only: the desktop UI's install pulls Electron, which
+      # an audit does not need.
       - name: Run npm audit
-        working-directory: front_end/jfrontend
+        working-directory: front_end/hermes-desktop-ui
         run: |
-          npm ci
-          npm audit --audit-level=moderate --json > npm-audit-results.json || true
-          npm audit --audit-level=moderate || exit 0
+          npm audit --package-lock-only --audit-level=moderate --json > npm-audit-results.json || true
+          npm audit --package-lock-only --audit-level=moderate || exit 0
 
       - name: Upload npm audit results
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: npm-audit-results
-          path: front_end/jfrontend/npm-audit-results.json
+          path: front_end/hermes-desktop-ui/npm-audit-results.json
 
   # Dockerfile security scanning with Hadolint
   dockerfile-lint:
@@ -180,7 +181,7 @@ jobs:
       - name: Run Hadolint on Backend Dockerfile
         uses: hadolint/hadolint-action@v3.1.0
         with:
-          dockerfile: python_back_end/Dockerfile
+          dockerfile: python_back_end/Dockerfile.core
           format: sarif
           output-file: hadolint-backend.sarif
           no-fail: true

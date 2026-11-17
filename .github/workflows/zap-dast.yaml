@@ -1,11 +1,10 @@
 name: 🕷 ZAP DAST Scan
+# Manual only. The steps below start the old stack (Next.js frontend and its
+# schema file), which no longer exists, so the weekly and pull-request runs
+# failed at the database step. Needs rewriting against docker-compose.yaml
+# before it goes back on a schedule.
 on:
   workflow_dispatch:
-  schedule:
-    # Run weekly on Sundays at 2 AM UTC
-    - cron: '0 2 * * 0'
-  pull_request:
-    branches: [ main, develop ]
     
 jobs:
   zap_scan:

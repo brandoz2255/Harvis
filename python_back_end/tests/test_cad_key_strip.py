@@ -14,9 +14,25 @@ import asyncio
 
 import pytest
 
+from owui_compat import fab_cad
 from owui_compat.cad_generate import (
     GenerateError, strip_forbidden_keys, validate_document, validate_with_key_repair,
 )
+
+
+def _engine_up() -> bool:
+    if not fab_cad.cad_enabled():
+        return False
+    try:
+        asyncio.run(fab_cad.schema())
+        return True
+    except Exception:
+        return False
+
+
+# Same rule as tests/test_cad_dry_compile.py: with the sidecar down these skip rather than pass.
+engine = pytest.mark.skipif(
+    not _engine_up(), reason="no CAD engine — the verdict under test comes from it")
 
 
 @pytest.fixture(scope="module")
@@ -95,6 +111,7 @@ def test_a_key_that_is_not_there_is_not_reported_as_removed():
         doc, "operations.1.box.select: Extra inputs are not permitted") == []
 
 
+@engine
 def test_the_live_engine_accepts_the_stripped_document(loop):
     """The whole point, end to end against the real sidecar: a document the engine
     rejects for `select` on a box validates once the key is gone, with no model call."""
@@ -109,6 +126,7 @@ def test_the_live_engine_accepts_the_stripped_document(loop):
     assert isinstance(report, dict)
 
 
+@engine
 def test_a_rejection_it_cannot_mend_is_re_raised(loop):
     """A document broken in a way no key removal fixes must reach the repair loop
     unchanged — silently returning a report here would be the failure this guards."""

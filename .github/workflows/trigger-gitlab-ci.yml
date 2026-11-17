@@ -97,6 +97,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: trigger-gitlab-build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # createDeployment is refused under the workflow-level contents: read.
+    permissions:
+      contents: read
+      deployments: write
 
     steps:
       - name: Create deployment event

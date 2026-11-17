@@ -1,16 +1,87 @@
 name: Python Backend CI/CD 🚀
 
+# Builds the backend image the product actually ships (Dockerfile.core, the one
+# docker-compose.yaml builds) and runs the test suite inside it, with the network
+# off. That is the same command a developer runs locally, so a green tick here
+# means the same thing a green run on a laptop does.
+#
+# The suite needs no database: the database-backed tests skip themselves when
+# DATABASE_URL is unset, and the CAD tests skip when no CAD engine answers.
+#
+# Publishing to Docker Hub is a separate, manual job at the bottom. It used to
+# run on every push to main, from the old torch-based Dockerfile.
+
 on:
   push:
+    branches: [main]
     paths:
       - "python_back_end/**"
+      - "scripts/k8s/**"
+      - "scripts/versions/**"
+      - "nginx-harvis.conf"
       - "VERSION"
-    branches: [main]
+      - ".github/workflows/backend-ci.yaml"
   pull_request:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Also build and push the image to Docker Hub"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
 
 jobs:
   backend-build-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: ⏬ Checkout code
+        uses: actions/checkout@v4
+
+      - name: 💾 Free up disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          sudo apt-get clean
+          df -h /
+
+      - name: 🔢 Versions match the root VERSION
+        run: python3 scripts/versions/sync_versions.py --check
+
+      - name: 🐳 Build the backend image
+        run: |
+          docker build \
+            -f python_back_end/Dockerfile.core \
+            --build-arg VCS_REF="${{ github.sha }}" \
+            -t harvis-backend:ci \
+            python_back_end
+
+      - name: 🧪 Backend tests (network off)
+        # The repo is mounted read-only over the image's copy so the tests see
+        # this commit's files, including the repo-root nginx config one of them
+        # reads. `-o addopts=""` drops the coverage gate in pytest.ini, which
+        # measures two packages and would fail a run that is otherwise green.
+        run: |
+          docker run --rm --network none \
+            -e HARVIS_ALLOW_EPHEMERAL_JWT_SECRET=1 \
+            -v "$PWD:/repo:ro" -w /repo/python_back_end \
+            --entrypoint python harvis-backend:ci \
+            -m pytest -q -p no:cacheprovider -o addopts="" tests
+
+      - name: 🧪 Kubernetes script tests (network off)
+        run: |
+          docker run --rm --network none \
+            -v "$PWD:/repo:ro" -w /repo \
+            --entrypoint python harvis-backend:ci \
+            -m pytest -q -p no:cacheprovider scripts/k8s
+
+  # Manual only: Actions tab → this workflow → "Run workflow" with publish ticked.
+  publish-image:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    needs: backend-build-test
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -18,103 +89,33 @@ jobs:
 
     steps:
       - name: ⏬ Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: 💾 Free up disk space
         run: |
-          echo "Disk usage before cleanup:"
-          df -h
-
-          # Remove unnecessary packages and caches
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
           sudo apt-get clean
-          sudo apt-get autoremove -y
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/share/boost
-          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
-
-          echo "Disk usage after cleanup:"
-          df -h
-
-      - name: 🐳 Install Podman
-        run: |
-          # Install Podman
-          sudo apt-get update
-          sudo apt-get install -y podman
-
-          # Configure Podman for rootless operation
-          echo "unqualified-search-registries = [\"docker.io\"]" | sudo tee /etc/containers/registries.conf
-
-          # Verify Podman installation
-          podman --version
-          podman info
-
-      - name: 🐍 Set up Python 3.11
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.11"
-
-      - name: 📦 Install Python dependencies + Bandit
-        run: |
-          # Install build dependencies first to handle pkuseg/chatterbox-tts
-          pip install numpy setuptools wheel Cython
-
-          # Install PyTorch to avoid conflicts
-          pip install torch==2.6.0 torchaudio==2.6.0
-
-          # Install pkuseg with pre-installed numpy (needed by chatterbox-tts)
-          pip install pkuseg==0.0.25 --no-build-isolation
-
-          # Install remaining requirements
-          pip install -r requirements.txt
-
-          # Install security scanning tool
-          pip install bandit
-
-      - name: 🔐 Run Bandit Security Scan
-        run: bandit -r . -ll
-
-      - name: 🔢 Versions match the root VERSION
-        run: python3 ../scripts/versions/sync_versions.py --check
+          df -h /
 
       - name: 📖 Read semantic version
-        id: get_version
+        run: echo "VERSION=v$(cat VERSION)" >> "$GITHUB_ENV"
+
+      - name: 🐳 Build with semantic version
         run: |
-          VERSION="v$(cat VERSION)"
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
-          echo "Using VERSION: $VERSION"
+          docker build -t dulc3/jarvis-backend:$VERSION .
+          docker tag dulc3/jarvis-backend:$VERSION dulc3/jarvis-backend:latest
+          # tts-worker uses the same image with a different entrypoint — tagged
+          # separately so kustomization can track it independently
+          docker tag dulc3/jarvis-backend:$VERSION dulc3/harvis-tts-worker:$VERSION
+          docker tag dulc3/jarvis-backend:$VERSION dulc3/harvis-tts-worker:latest
 
-      - name: 🐳 Podman build with semantic version
+      - name: 🔐 Login to Docker Hub
+        run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+
+      - name: 📤 Push image to Docker Hub
         run: |
-          echo "Disk usage before Podman build:"
-          df -h
-
-          # Build images with Podman
-          podman build -t dulc3/jarvis-backend:$VERSION .
-          podman tag dulc3/jarvis-backend:$VERSION dulc3/jarvis-backend:latest
-
-          # tts-worker uses the same image with a different entrypoint — tag it separately
-          # so kustomization can track it independently
-          podman tag dulc3/jarvis-backend:$VERSION dulc3/harvis-tts-worker:$VERSION
-          podman tag dulc3/jarvis-backend:$VERSION dulc3/harvis-tts-worker:latest
-
-          echo "Disk usage after Podman build:"
-          df -h
-
-      - name: 🔐 Login to registry with Podman
-        run: |
-          echo "${{ secrets.DOCKER_PASSWORD }}" | podman login docker.io -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
-
-      - name: 📤 Push image to DockerHub
-        run: |
-          podman push dulc3/jarvis-backend:$VERSION
-          podman push dulc3/jarvis-backend:latest
-
-          # Push tts-worker image (same layers, separate tag for kustomization tracking)
-          podman push dulc3/harvis-tts-worker:$VERSION
-          podman push dulc3/harvis-tts-worker:latest
-
-          # Clean up images after successful push
-          podman system prune -a -f
-
+          docker push dulc3/jarvis-backend:$VERSION
+          docker push dulc3/jarvis-backend:latest
+          docker push dulc3/harvis-tts-worker:$VERSION
+          docker push dulc3/harvis-tts-worker:latest

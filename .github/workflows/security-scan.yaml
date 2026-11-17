@@ -1,8 +1,11 @@
 name: Security Scan 🛡️
 
+# Manual only. The daily schedule was removed: both images below are the old
+# stack (the Next.js frontend no longer exists, and the backend image is not the
+# one docker-compose.yaml builds), so the run failed every day without saying
+# anything about the current code. The repo itself is scanned on every push by
+# sast-security-scan.yml.
 on:
-  schedule:
-    - cron: '0 6 * * *'   # Daily at 6 AM UTC
   workflow_dispatch:
 
 jobs:

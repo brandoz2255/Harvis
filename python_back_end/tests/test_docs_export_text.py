@@ -350,7 +350,9 @@ def test_bold_italic_reaches_every_exporter():
     assert hit.font.bold and hit.font.italic and not any("*" in r.text for r in runs)
     html = docs_pdf.build_html(parse_harvis_doc(src), "T")
     para = html.split("<p>")[-1]
-    assert "<em>" in para and "<strong>loud</strong>" in para and "<strong>slant</strong>" in para
+    # One run when the font has a real italic face, one skewed span per word when it does not (docs_pdf._italic).
+    assert "<em>" in para and ("<strong>loud slant</strong>" in para
+                               or ("<strong>loud</strong>" in para and "<strong>slant</strong>" in para))
     assert "*" not in html.split("<body")[-1]
 
 

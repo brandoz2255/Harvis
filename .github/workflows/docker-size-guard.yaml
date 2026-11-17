@@ -1,6 +1,6 @@
 name: Docker size guard 📦
 
-# Keeps "fresh clone → working Harvis in one command, under 7 GB" a property of
+# Keeps "fresh clone → working Harvis in one command, under 10 GB" a property of
 # the project rather than a cleanup that decays. It builds the DEFAULT service
 # set — no profile flags, exactly what `docker compose up -d` starts — and fails
 # if the images total more than the budget.
@@ -45,10 +45,11 @@ jobs:
     env:
       # Images only. The voice-models volume (~1.1 GB, downloaded at first run,
       # not at build) and the repo checkout (~0.18 GB) are NOT in this number —
-      # measured on 2026-07-28 the images were 5.35 GB, so this leaves ~2.1 GB
-      # of headroom while the on-disk total sits at ~6.6 GB against the 7 GB
-      # product goal.
-      LIMIT_GB: "7.5"
+      # measured on 2026-11-17 the images were about 9.5 GB (5.35 GB on
+      # 2026-07-28, before the 2.0 work), so the budget was raised from 7.5 to
+      # 10 on purpose. It leaves ~0.5 GB of headroom: anything that grows the
+      # default set further should fail here and be looked at.
+      LIMIT_GB: "10"
 
     steps:
       - name: ⏬ Checkout code
@@ -73,18 +74,23 @@ jobs:
           docker system df
 
       - name: 🔑 Throwaway .env
-        # docker-compose.yaml hard-requires JWT_SECRET (${JWT_SECRET:?...}).
-        # Nothing here ever runs the stack, so a random value is enough — and it
-        # must NOT be a fixed string that could look like a real secret.
+        # docker-compose.yaml hard-requires JWT_SECRET and POSTGRES_PASSWORD
+        # (${VAR:?...}). Nothing here ever runs the stack, so random values are
+        # enough — and they must NOT be fixed strings that could look like real
+        # secrets.
         run: |
           printf 'JWT_SECRET=%s\n' "$(openssl rand -hex 32)" > .env
+          printf 'POSTGRES_PASSWORD=%s\n' "$(openssl rand -hex 16)" >> .env
           echo "COMPOSE_PROJECT_NAME=harvis" >> .env
 
       - name: 📋 The default service set
         # Compose only emits services whose profiles are active, so this list IS
         # the `up -d` set. Printed on every run: if the set itself changes, that
         # shows up here before the size does.
+        # pipefail: without it a compose file that does not even parse still
+        # "passes" here, because sed's exit status is the one the step reports.
         run: |
+          set -o pipefail
           echo "Services a plain 'docker compose up -d' starts:"
           docker compose config --services | sort | sed 's/^/  /'
 

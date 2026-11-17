@@ -17,7 +17,9 @@ import numpy as np
 import pytest
 
 # Fail-closed-fast infrastructure before main.py reads its environment.
-os.environ.setdefault("DATABASE_URL", "postgresql://u:p@127.0.0.1:1/db")
+_DEAD_DATABASE_URL = "postgresql://u:p@127.0.0.1:1/db"
+_HAD_DATABASE_URL = "DATABASE_URL" in os.environ
+os.environ.setdefault("DATABASE_URL", _DEAD_DATABASE_URL)
 os.environ.setdefault("DISABLE_LOCAL_TTS_WORKERS", "true")
 os.environ.setdefault("IMAGES_DIR", "/tmp/harvis-test-images")
 os.environ.setdefault("OWUI_FILES_DIR", "/tmp/harvis-test-owui-files")
@@ -30,6 +32,12 @@ import uvicorn
 import main
 import job_queue
 import private_audio
+
+# Hand the variable back once main has read it. The database suites skip themselves when
+# DATABASE_URL is unset, and this module is collected before them: leaving the dead address
+# in place un-skips every one of them into a refused connection.
+if not _HAD_DATABASE_URL:
+    os.environ.pop("DATABASE_URL", None)
 
 
 class _Server:
@@ -56,6 +64,8 @@ class _Server:
 
 @pytest.fixture
 def http(tmp_path, monkeypatch):
+    if not _HAD_DATABASE_URL:
+        monkeypatch.setenv("DATABASE_URL", _DEAD_DATABASE_URL)
     monkeypatch.setattr(main.tempfile, "gettempdir", lambda: str(tmp_path))
     monkeypatch.setattr(
         main,

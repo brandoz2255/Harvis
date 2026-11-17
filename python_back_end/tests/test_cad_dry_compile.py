@@ -114,15 +114,17 @@ def test_the_verdict_is_the_same_one_the_build_would_reach():
     assert ok and payload == direct
 
 
-def test_a_recipe_is_not_a_document_and_is_not_quietly_accepted():
+def test_a_recipe_is_not_a_document_and_is_not_quietly_accepted(monkeypatch):
     """Recipes are vetted Python whose validity is not in question, so there is
     nothing here to check for them. Answering `ok` to a call that checked nothing
     would be the one lie this tool cannot afford."""
+    monkeypatch.setenv("HARVIS_ADAPTIVE_CAD_ENABLED", "1")   # the refusal under test sits behind the lane switch
     payload, ok = _call({"recipe": "brick"})
     assert ok is False and payload["error_code"] == "invalid_document"
 
 
-def test_the_argument_fence_still_applies():
+def test_the_argument_fence_still_applies(monkeypatch):
+    monkeypatch.setenv("HARVIS_ADAPTIVE_CAD_ENABLED", "1")
     payload, ok = _call({"document": "{}", "path": "/etc/passwd"})
     assert ok is False and payload["error_code"] == "forbidden_argument"
 
