@@ -261,7 +261,7 @@ complete new one. The INPUT hook is still added once, and only after the chain w
 single transaction and for a failed restore never hooking the chain).
 
 **Verified.** `test_harvis_k8s_sh.py` 24 passed. On VM 204 with the fixed file: `apply_kubelet_firewall` gives all five
-rules and one INPUT hook, `kubectl exec` and `kubectl logs` exit 0, and a connection to 10250 from the pve host is
+rules and one INPUT hook, `kubectl exec` and `kubectl logs` exit 0, and a connection to 10250 from the VM host is
 dropped. A 10-second watch of the chain from 23:02 showed no further changes, so it was a one-time race during
 install, not a recurring remover.
 
@@ -450,7 +450,7 @@ does not.
 
 ## Date: 2026-10-17 — k8s DB backup waits for pgsql after a boot (branch `harvis1.5`)
 
-**Problem.** On VM 204 the nightly `pgsql-backup` job failed after pve rebooted. A k3s CronJob that missed
+**Problem.** On VM 204 the nightly `pgsql-backup` job failed after the VM host rebooted. A k3s CronJob that missed
 its hour runs as soon as the node is back, and that was before pgsql was answering, so `pg_dump` failed.
 **Fix.** The generated job now runs `pg_isready` every 10 s, for up to 10 minutes (`DB_BACKUP_WAIT`),
 before `pg_dump`. If the database is still down after that, the job fails with a plain message.
@@ -498,7 +498,7 @@ from old clones were deleted, which cleared the pods stuck on them.
 
 **Not yet verified.**
 - No live end-to-end run in a browser yet.
-- No VM test yet: pve does not have the memory free for VM 204.
+- No VM test yet: the VM host does not have the memory free for VM 204.
 - The files-changed list empties when a chat is reopened, because Harvis stores only the text of each turn.
 - A stop sent from a different device can still leave a step row spinning.
 
@@ -1677,7 +1677,7 @@ Hermes UI, browser tools in plain chat, GPU passthrough (David).
   - Laptop: ui vitest for sign-in, session and i18n 19+46 passed; backend 778 passed across the
     owui_compat/hermes_ui suites (plus the new socket tests); compose→k8s converter 17 passed; `nginx -t` OK.
     The 20 thread-test failures and 3 tsc errors are identical on a clean HEAD worktree.
-  - pve VM 901, patch applied to HEAD 9fa3eaa and rebuilt:
+  - test VM 901, patch applied to HEAD 9fa3eaa and rebuilt:
     - the verifier passes everything except the old disk budget;
     - sign-in and session bodies carry no `token`;
     - `/hermes/emojibase/en/data.json` returns 200, and the bundle has no `./emojibase` left;
@@ -1712,7 +1712,7 @@ Hermes UI, browser tools in plain chat, GPU passthrough (David).
   nothing to talk to" while chat worked. **Fix:** `detect_provider` honours a non-auto-detected
   `HARVIS_LLM_BASE_URL` already saved in `.env` (as `--llm-url` does), probes it and reports PASS or WARN.
 - **Verified:** laptop backend 22 passed (`test_research_from_chat`, `test_sandbox_path_to_rel`), 84 passed across
-  tool/orchestration/sandbox/runner suites; `nginx -t` passes. On pve VM 901 (Docker mode, model server
+  tool/orchestration/sandbox/runner suites; `nginx -t` passes. On test VM 901 (Docker mode, model server
   192.168.10.244): `./install.sh --yes` exit 0 three times, "model server ... (saved in .env), 14 model(s)";
   signed out `/` → 302 `/auth?redirect=/`, `/hermes/` → 301 `/`; signed in, `/hermes/#/<chat>` reloads to
   `/#/<chat>` with the chat open, WebSocket opens, no failed asset loads.
@@ -1816,11 +1816,11 @@ Ask: *"ok get that done and test it on the proxmox server for me"* (the Kubernet
   syntax error that crash-looped CoreDNS (now waits, retries, uses a valid block, and rolls back if the fallback does not
   help). Every update re-copied all images into k3s because Docker's containerd store gives each rebuild a new image Id;
   the skip-stamp now hashes layers + config, and an unchanged update takes 15 s.
-- **Verified** on a fresh Ubuntu VM on pve: Docker → Kubernetes → Docker → Kubernetes, with a database row written in
+- **Verified** on a fresh Ubuntu VM: Docker → Kubernetes → Docker → Kubernetes, with a database row written in
   each mode surviving every switch; gemma4:e2b chat and model listing from another machine, blocked routes 403.
   Tests: `scripts/k8s/test_compose_to_k8s.py` 16, `tests/test_hosting_mode.py` 17, hosting page 5.
 
-Not tested: the NVIDIA GPU path (no NVIDIA on pve) and the Hosting page signed in. Found, not fixed: the update check
+Not tested: the NVIDIA GPU path (no NVIDIA on the VM host) and the Hosting page signed in. Found, not fixed: the update check
 calls a nonexistent `/api/hermes/update`; `docker-compose.prebuilt.yml:96,286` commits a default gateway token.
 
 ## Date: 2026-09-28 — First-run polish: install Notebooks from Verify, messaging step-by-step, Harvis mic toggle

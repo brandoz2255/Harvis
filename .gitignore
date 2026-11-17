@@ -208,7 +208,7 @@ k8s-manifests/overlays/prod/openclaw-secret.yaml
 #  It protected nothing: no other mascot/ dir exists, and tracked mascot files live
 #  under mascots/ or common/.)
 
-# graphify code map — local, regenerable; do NOT commit (per notes-vault setup)
+# graphify code map — local, regenerable; do NOT commit (local notes setup)
 graphify-out/
 
 # --- Harvis local/tooling hygiene (added 2026-06-12 checkpoint) ---

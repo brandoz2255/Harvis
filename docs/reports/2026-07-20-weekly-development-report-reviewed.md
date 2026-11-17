@@ -247,7 +247,7 @@ No blanket claim that Harvis is “secure.” The first-signup path was specific
 | Authz | `authz.py`, RAG routes, `test_require_admin.py` | T1 |
 | Mascot | `assets/mascot/`, animated player | Brand / pipeline |
 | Build Space v1 | workspace orchestration, Discord bot, vibecode, routers | Omnibus 07-15 |
-| Docs | handoffs, plans, `changes.md`, Obsidian notes-vault | Status truth |
+| Docs | handoffs, plans, `changes.md`, Obsidian notes | Status truth |
 
 Approximate week churn from first in-window commit’s parent to HEAD: **246 files, +27,294 / −6,355** (includes the 07-15 omnibus).
 

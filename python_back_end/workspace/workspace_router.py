@@ -617,7 +617,7 @@ def _browse_display_label() -> str:
 
 def _browse_display_path(container_path: str) -> str:
     """Map a container path under the browse mount to a host-relative display string
-    (e.g. '/data/host-fs/projects/Harvis' → 'Projects/Harvis')."""
+    (e.g. '/data/host-fs/Harvis' → 'Projects/Harvis')."""
     if not container_path:
         return ""
     root = _browse_root()

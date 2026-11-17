@@ -236,7 +236,7 @@ completed event or marked `interrupted` with a card — never silently lost.
   usable by another.
 - **Editable**: memory and skills are plain files in the agent's workspace,
   shown in its room. The user can correct, delete, pin. **An agent never
-  rewrites text the user wrote.** (Same rule as the notes-vault vault.)
+  rewrites text the user wrote.** (Same rule as the notes vault.)
 - **Templates** bundle chosen memories and skills (§4).
 - **Prior art to read before building this (M10).** Hermes' self-improving loop — write the missing tool, then reuse it — is the closest working example of an agent that grows its own skills, it is MIT-licensed, and it is already a Harvis sidecar. Grok Bot's routines-by-demonstration is the same idea with a better teaching gesture: the user performs the task once and the agent saves the procedure instead of inferring it from a transcript. Ship the Hermes shape first, where a skill is drafted from a successful run and never auto-applied. Keep demonstration capture as a later upgrade, because the governed browser already records every action by element ref, and that trace is exactly what a demonstration needs.
 

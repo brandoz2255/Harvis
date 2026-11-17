@@ -12,7 +12,7 @@ Branch is **ahead 25 of origin, working tree CLEAN, NOTHING PUSHED**. The review
 Discord `/harvis-code` + run/review UI were **E2E-verified 2026-07-16** on gemma4:12b (build ran, filename
 lineup rendered, pirate thread-review settled APPROVED in 1 round, app stayed responsive, the removed
 "Open Run" button confirmed gone). Then David handed over an Instagram clip batch which I ingested into the
-**notes-vault** vault and researched **GBrain**. No Harvis code was touched after the commit.
+notes vault and researched **GBrain**. No Harvis code was touched after the commit.
 
 ## THE decision waiting for David (ask, don't act)
 **Push or keep holding?** The standing rule has been *"no push until the user verifies E2E"*
@@ -83,7 +83,7 @@ fix any before pushing. Note also: JWT_SECRET's old value still lingers in git h
 - **OmniRouter** — free rotating OSS API keys behind Harvis `model_proxy`. Vault spark `notes-vault/projects/OmniRouter.md`.
 - **Nexus** ("nexus os") as the productization/hosting home for the above.
 
-## Where the research lives (notes-vault vault, `/home/user/notes-vault`)
+## Where the research lives (notes vault, `notes-vault`)
 - Raw (immutable): `raw/clips/2026-07-15-instagram-jarvis-ui-agent-clips.md` (**batch 1 of N — more clips
   coming**; new batches append here + extend the digest).
 - Digest: `wiki/sources/instagram-agent-ui-clips-2026-07-15.md`. Topic synthesis: `wiki/topics/Chatbot vs
