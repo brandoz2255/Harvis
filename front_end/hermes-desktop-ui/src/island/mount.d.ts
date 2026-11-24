@@ -1,5 +1,5 @@
 // Types for mount.js — the scoped in-page island used by the Harvis React host.
-import type { IslandAgent, IslandArtFiles, IslandArtStatus, IslandTheme } from '../mods/island-bridge'
+import type { IslandAgent, IslandArtFiles, IslandArtStatus, IslandPresence, IslandTheme } from '../mods/island-bridge'
 
 export interface MountOptions {
   agents?: IslandAgent[]
@@ -38,6 +38,8 @@ export interface IslandApp {
   setInteractive(on: boolean): void
   setLowFx(on: boolean): void
   setSession(agents: IslandAgent[]): void
+  /** busy = at the cafe, idle = on the benches, away = home in bed; ids missing from the map keep the plain island day. */
+  setPresence(presence: Record<string, IslandPresence>): void
   setTheme(theme: IslandTheme): void
   /** Switch to the user's own game files; resolves to what the island shows now. */
   useArt(files: IslandArtFiles): Promise<IslandArtStatus>

@@ -4,10 +4,11 @@
 // left a visibly clickable button that silently did nothing. The fix makes
 // AssistantMessage's action bar hide the button entirely when no handler is
 // supplied, matching how onDismissError/onRestoreToMessage already behave.
-import { AssistantRuntimeProvider, type ThreadMessage, useExternalStoreRuntime } from '@assistant-ui/react'
+import { AssistantRuntimeProvider, type ThreadMessage } from '@assistant-ui/react'
 import { cleanup, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
 
+import { useIncrementalExternalStoreRuntime } from '@/lib/incremental-external-store-runtime'
 import { $displayTimestamps } from '@/store/display-timestamps'
 
 import { stubThreadEnvironment } from '../test-utils'
@@ -75,7 +76,7 @@ function Harness({
   assistant?: ThreadMessage
   onBranchInNewChat?: (messageId: string) => void
 }) {
-  const runtime = useExternalStoreRuntime<ThreadMessage>({
+  const runtime = useIncrementalExternalStoreRuntime<ThreadMessage>({
     messages: [userMessage(), assistant],
     isRunning: false,
     onNew: async () => {}

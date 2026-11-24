@@ -1,5 +1,5 @@
 """The onb_compat session chat turn: history, chat settings, per-source levels, located citations,
-the persisted default instruction, the transformation language, and the OpenClaw model entry.
+the persisted default instruction, the transformation language, and the linked Hermes model entry.
 
 The fake connection answers only the SQL these routes send; a route that reads another user's
 row or a query nobody expected fails the test instead of passing quietly.
@@ -498,15 +498,12 @@ def test_execute_transformation_uses_the_notebooks_language(env, monkeypatch):
 
 # ── model list ────────────────────────────────────────────────────────────────
 
-def _models(monkeypatch, entry, hermes=None):
-    async def entry_fn(pool=None, user_id=None):
-        return entry
-
+def _models(monkeypatch, hermes, cloud=()):
     async def hermes_fn(pool=None, user_id=None):
         return hermes
 
-    async def no_cloud(pool=None, user_id=None):
-        return []
+    async def cloud_fn(pool=None, user_id=None):
+        return list(cloud)
 
     async def no_ollama():
         return []
@@ -516,24 +513,23 @@ def _models(monkeypatch, entry, hermes=None):
     import owui_compat.cloud_chat as cc
     import owui_compat.hermes_chat as hc
 
-    monkeypatch.setattr(hc, "openclaw_chat_model_entry", entry_fn)
     monkeypatch.setattr(hc, "hermes_chat_model_entry", hermes_fn)
-    monkeypatch.setattr(cc, "cloud_chat_model_entries", no_cloud)
+    monkeypatch.setattr(cc, "cloud_chat_model_entries", cloud_fn)
     monkeypatch.setattr(onb, "_list_ollama_models", no_ollama)
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(pg_pool=object())))
     return asyncio.run(onb._all_models(request, ME))
 
 
-def test_openclaw_is_listed_only_while_the_link_is_verified(monkeypatch):
-    entry = {"id": "openclaw:chat", "name": "OpenClaw (your gateway)", "owned_by": "openclaw"}
+def test_hermes_is_listed_only_while_its_entry_is_available(monkeypatch):
+    entry = {"id": "hermes:chat", "name": "Hermes (your agent)", "owned_by": "hermes-agent"}
     models = _models(monkeypatch, entry)
     assert [(m["id"], m["provider"], m["name"]) for m in models] == [
-        ("openclaw:chat", "openclaw", "OpenClaw (your gateway)")]
+        ("hermes:chat", "hermes-agent", "Hermes (your agent)")]
     assert _models(monkeypatch, None) == []
 
 
 def test_a_model_id_two_sources_share_is_listed_once(monkeypatch):
-    entry = {"id": "openclaw:chat", "name": "OpenClaw", "owned_by": "openclaw"}
-    dup = {"id": "openclaw:chat", "name": "dup", "owned_by": "hermes-agent"}
-    models = _models(monkeypatch, entry, hermes=dup)
-    assert len(models) == 1 and models[0]["provider"] == "hermes-agent"  # the earlier source wins
+    entry = {"id": "shared:chat", "name": "Hermes", "owned_by": "hermes-agent"}
+    dup = {"id": "shared:chat", "name": "dup", "owned_by": "anthropic"}
+    models = _models(monkeypatch, entry, cloud=[dup])
+    assert len(models) == 1 and models[0]["provider"] == "anthropic"  # the earlier source wins

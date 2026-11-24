@@ -5,8 +5,8 @@ import { PANE_TOGGLE_REVEAL_EVENT } from '@/components/pane-shell'
 import { registry } from '@/contrib/registry'
 import { stubResizeObserver } from '@/test/jsdom'
 
-import { group, split } from '../model'
-import { $hiddenTreePanes, $layoutTree, $narrowViewport, declareDefaultTree } from '../store'
+import { findGroupOfPane, group, split } from '../model'
+import { $hiddenTreePanes, $layoutTree, $narrowViewport, declareDefaultTree, isPaneVisible } from '../store'
 
 import { NarrowOverlays } from './narrow-overlays'
 
@@ -77,6 +77,21 @@ describe('narrow overlay of a stacked zone', () => {
     fireEvent.pointerDown(overlayTab('bots')!, { button: 0 })
     expect(getByTestId('bots-body')).toBeTruthy()
     expect(queryByTestId('sessions-body')).toBeNull()
+  })
+
+  it('moves the zone active slot with the tab, so the workspace sees BOTS as open', () => {
+    render(<NarrowOverlays />)
+
+    revealPane('sessions')
+    expect(isPaneVisible('bots')).toBe(false)
+
+    fireEvent.pointerDown(overlayTab('bots')!, { button: 0 })
+    expect(findGroupOfPane($layoutTree.get()!, 'bots')?.active).toBe('bots')
+    expect(isPaneVisible('bots')).toBe(true)
+
+    fireEvent.pointerDown(overlayTab('sessions')!, { button: 0 })
+    expect(isPaneVisible('sessions')).toBe(true)
+    expect(isPaneVisible('bots')).toBe(false)
   })
 
   it('keeps the stripless form for a zone with a single collapsible', () => {

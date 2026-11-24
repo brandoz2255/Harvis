@@ -1,11 +1,8 @@
 """
-Capability gating — reject requests from the bundled OpenClaw to
-sensitive backend endpoints.
+Capability gating for the gateway-token routes.
 
-Token-based approach:
-  - If the request carries the BUNDLED token → check against bundled allowlist.
-  - If it carries any other token → BYO → all capabilities granted.
-  - If no token → reject (unless dev mode with empty env var).
+The install's gateway token is shared by every user's runs, so it only grants the
+capabilities in the allowlist below. Anything else is refused.
 """
 
 from typing import Optional
@@ -14,7 +11,7 @@ from fastapi import HTTPException, Request
 
 from .gateway_auth import resolve_gateway_caller
 
-# Capabilities that bundled users are allowed to use
+# Capabilities the install's gateway token may use
 BUNDLED_ALLOWED_CAPABILITIES = frozenset({
     "web_fetch",
     "document_save",
@@ -28,24 +25,11 @@ async def verify_capability(
     request: Request,
     authorization: Optional[str],
 ) -> None:
-    """
-    Raise HTTPException(403) if the caller's token doesn't grant this capability.
-
-    Bundled tokens grant: web_fetch, document_save, rag_search, discord_post_public.
-    BYO tokens (any other valid token) grant everything.
-
-    In dev mode (no tokens configured), all capabilities are allowed.
-    """
-    mode, _ = await resolve_gateway_caller(request, authorization)
-    if mode == "byo":
-        return
-
-    # Bundled token — check against allowlist
+    """Raise HTTPException(403) if the gateway token does not grant this capability."""
+    await resolve_gateway_caller(request, authorization)
     if capability in BUNDLED_ALLOWED_CAPABILITIES:
         return
-
     raise HTTPException(
         status_code=403,
-        detail=f"Capability '{capability}' requires BYO OpenClaw mode. "
-               "See Settings → OpenClaw Mode to install and configure your own OpenClaw.",
+        detail=f"Capability '{capability}' is not available to the gateway token.",
     )

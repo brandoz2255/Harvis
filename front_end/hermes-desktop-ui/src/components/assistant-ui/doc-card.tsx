@@ -59,7 +59,7 @@ export function DocCard({ code, cutOff = false, streaming = false }: DocCardProp
 
   if (title && (!keyRef.current || !code.startsWith(keyRef.current.prefix))) {
     keyRef.current = {
-      key: liveDocKey(sessionId, title),
+      key: liveDocKey(sessionId, doc.kind, title),
       prefix: code.slice(0, 64)
     }
   }

@@ -53,37 +53,7 @@ async def probe_services(request: Request, user) -> tuple[dict, list]:
     except Exception:
         services["ollama"] = {"status": "error"}
 
-    # ── OpenClaw: OPTIONAL, and only ever the user's OWN gateway. Harvis no longer bundles one,
-    # so there is nothing to health-check here — the status is this user's link state
-    # (owui_compat/openclaw_connect.py): not linked / saved / linked / error. Hermes is the
-    # recommended agent; an unlinked OpenClaw is "available", never a failure.
     pool = getattr(request.app.state, "pg_pool", None)
-    services["openclaw"] = {
-        "status": "available",
-        "detail": "Optional — link your own OpenClaw (Hermes is recommended)",
-        "reason": "not_linked",
-    }
-    if pool is not None:
-        try:
-            from .openclaw_connect import external_status
-
-            link = await external_status(pool, int(user.id))
-            if link["state"] == "linked":
-                services["openclaw"] = {"status": "ready", "detail": "Linked (optional)", "reason": "linked"}
-            elif link["state"] == "error":
-                services["openclaw"] = {
-                    "status": "error",
-                    "detail": (link.get("last_error") or "Verification failed")[:200],
-                    "reason": "link_error",
-                }
-            elif link["state"] == "saved":
-                services["openclaw"] = {
-                    "status": "needs_setup",
-                    "detail": "Saved, not verified yet (optional)",
-                    "reason": "unverified",
-                }
-        except Exception:
-            pass  # fail-closed: stays "available / not linked"
 
     # ── Hermes: a model/router integration, not a separate daemon. Ready ONLY
     # when an installed Ollama model looks like Hermes (NOT just because Ollama

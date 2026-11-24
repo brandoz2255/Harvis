@@ -15,7 +15,7 @@ import {
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { routeApi } from "./notebook-test-utils";
+import { dismissAddSources, routeApi } from "./notebook-test-utils";
 
 const { harvisApi } = vi.hoisted(() => ({ harvisApi: vi.fn() }));
 
@@ -117,6 +117,7 @@ describe("NotebooksPage", () => {
         name: "Open Mars Rover Exploration Texts",
       }),
     );
+    await dismissAddSources();
     expect(
       await screen.findByRole("heading", { level: 1, name: /Mars Rover/ }),
     ).toBeTruthy();
@@ -132,6 +133,7 @@ describe("NotebooksPage", () => {
   it("opens the notebook a link names", async () => {
     renderAt("/notebooks?nb=nb-1");
 
+    await dismissAddSources();
     expect(
       await screen.findByRole("heading", { level: 1, name: /Mars Rover/ }),
     ).toBeTruthy();
@@ -159,6 +161,11 @@ describe("NotebooksPage", () => {
         }),
       ),
     );
+    // A new notebook has no sources, so it asks for some straight away.
+    expect(
+      await screen.findByRole("dialog", { name: "Add sources" }),
+    ).toBeTruthy();
+    await dismissAddSources();
     expect(
       await screen.findByRole("heading", {
         level: 1,

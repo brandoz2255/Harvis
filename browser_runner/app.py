@@ -102,6 +102,7 @@ def health() -> Dict[str, Any]:
         # the image can, because forced safe mode refuses headed sessions — a
         # caller that trusts this flag must not be told a screen is on offer.
         "headedAvailable": display.available() and not _SAFE_MODE_FORCED,
+        "desktopAvailable": display.desktop_available() and not _SAFE_MODE_FORCED,
         "vncPort": display.WEBSOCKIFY_PORT,
         "vncUp": display.websockify_up(),
         "sessionIdleS": _registry.idle_s,
@@ -136,6 +137,9 @@ class CreateSessionRequest(BaseModel):
     # existing caller behaves exactly as before.
     headed: bool = False
     profile: Optional[str] = Field(default=None, max_length=64)
+    # A full Xfce desktop on the headed screen instead of a bare display. Only
+    # meaningful with headed; falls back to a bare display when unavailable.
+    desktop: bool = False
 
 
 class NavigateRequest(BaseModel):
@@ -333,7 +337,8 @@ def create_session(req: CreateSessionRequest) -> Dict[str, Any]:
             status_code=403,
             detail="this runner renders untrusted content: no watchable screen, no profile",
         )
-    screen = display.start(session_id, width=width, height=height) if req.headed else None
+    screen = (display.start(session_id, width=width, height=height, desktop=req.desktop)
+              if req.headed else None)
     headless = req.headless and screen is None
 
     opts = FirefoxOptions()
@@ -359,7 +364,12 @@ def create_session(req: CreateSessionRequest) -> Dict[str, Any]:
             display.stop(session_id)
         raise
     try:
-        driver.set_window_size(width, height)
+        if screen is not None and screen.desktop is not None:
+            # The window manager knows where the taskbar is; a fixed size the
+            # same as the screen puts the bottom of the page under it.
+            driver.maximize_window()
+        else:
+            driver.set_window_size(width, height)
     except Exception:
         pass
 
@@ -377,6 +387,7 @@ def create_session(req: CreateSessionRequest) -> Dict[str, Any]:
         out["vncPort"] = display.WEBSOCKIFY_PORT
         out["vncToken"] = screen.token
         out["display"] = screen.display_name
+        out["desktop"] = screen.desktop is not None
     return out
 
 

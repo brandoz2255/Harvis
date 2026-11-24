@@ -1,7 +1,8 @@
-import { AssistantRuntimeProvider, type ThreadMessage, useExternalStoreRuntime } from '@assistant-ui/react'
+import { AssistantRuntimeProvider, type ThreadMessage } from '@assistant-ui/react'
 import { act, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 
+import { useIncrementalExternalStoreRuntime } from '@/lib/incremental-external-store-runtime'
 import { createdAt, stubThreadEnvironment, stubThreadViewportSize } from './test-utils'
 import { Thread } from './thread'
 
@@ -40,7 +41,7 @@ function Harness({
   onBranchInNewChat: (messageId: string) => void
   onCancel: () => void
 }) {
-  const runtime = useExternalStoreRuntime<ThreadMessage>({
+  const runtime = useIncrementalExternalStoreRuntime<ThreadMessage>({
     messages: MESSAGES,
     isRunning: false,
     onNew: async () => {}

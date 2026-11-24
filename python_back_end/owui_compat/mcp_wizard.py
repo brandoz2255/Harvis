@@ -1,4 +1,4 @@
-"""Harvis MCP connection wizard + OpenClaw review-and-sync (Phases 4+5).
+"""Harvis MCP connection wizard + engine skill review-and-sync (Phases 4+5).
 
 Three additive route groups, all owner-scoped via ``get_current_user``:
 
@@ -10,25 +10,20 @@ Three additive route groups, all owner-scoped via ``get_current_user``:
    SSRF-guarded: the hostname is resolved and RFC1918 / loopback / link-local
    / reserved addresses are rejected, UNLESS the host is one of the
    compose-internal service names Harvis already talks to (ollama, pgsql,
-   openclaw, …). stdio servers are reported as not network-testable — we never
+   backend, …). stdio servers are reported as not network-testable — we never
    execute a user-supplied command from this endpoint.
 
-3. Engine review & sync (closes the "created skills/MCP aren't loaded into the
+3. Engine review & sync (closes the "created skills aren't loaded into the
    live engines" gap WITHOUT silent auto-load):
    - ``GET  /api/owui/engine/sync/preview`` — DRY RUN. Returns the exact
-     SKILL.md files + openclaw.json fragment that WOULD be written for this
-     user's enabled skills/connections. Never writes; masks env values.
+     SKILL.md files that WOULD be written for this user's enabled skills.
+     Never writes.
    - ``POST /api/owui/engine/sync/apply`` — the explicit write. HARD-GATED
      by env ``HARVIS_ENGINE_SYNC`` (absent/0 → 403 with a clear message).
      Skills go to ``$HARVIS_ENGINE_SKILLS_DIR`` — ONE tree mounted into every
      engine sidecar at /skills, so a verified skill is available to whichever
-     engine runs the task. MCP config still merges into the OpenClaw config
-     only, because openclaw.json is OpenClaw's own format: config follows the
-     mode-dependent mount (OPENCLAW_CONFIG_SET, default "bundled") at
-     ``$HARVIS_OPENCLAW_CONFIG_DIR/<set>/openclaw.json``.
-   The ``/api/owui/openclaw/sync/*`` paths and ``HARVIS_OPENCLAW_SYNC`` /
-   ``HARVIS_OPENCLAW_SKILLS_DIR`` remain as aliases so existing installs and
-   shipped frontends keep working.
+     engine runs the task. MCP connections are not published: each CLI engine
+     reads its own MCP config and Harvis has no writer for it.
 
 Credential policy: template entries flagged ``secret: true`` are collected by
 the wizard and posted to ``/api/owui/mcp/connections`` under ``credentials``,
@@ -60,11 +55,6 @@ from . import skill_pending
 logger = logging.getLogger(__name__)
 
 SYNC_FLAG_ENV = "HARVIS_ENGINE_SYNC"
-# Skills used to publish to OpenClaw and nowhere else, so the flag was named after it.
-# Every engine can consume the same SKILL.md tree now, so the flag is engine-scoped —
-# but installs that already set HARVIS_OPENCLAW_SYNC must keep working, hence the alias.
-SYNC_FLAG_ENV_LEGACY = "HARVIS_OPENCLAW_SYNC"
-_MASK = "•••"
 
 # ── official MCP registry proxy (browse tier) ──────────────────────────────
 # Metadata-only: the backend fetches the public registry listing so the shop
@@ -98,7 +88,7 @@ def _registry_item(entry: dict) -> Optional[dict]:
 
 # Compose-internal service hosts Harvis already talks to — allowed even though
 # they resolve to private addresses (see docker-compose.yaml service names).
-_INTERNAL_HOSTS = {"ollama", "pgsql", "pgsql-db", "backend", "frontend", "openclaw", "harvis-openclaw"}
+_INTERNAL_HOSTS = {"ollama", "pgsql", "pgsql-db", "backend"}
 
 # ── wizard templates — single source of truth is the marketplace catalog
 #    (mcp_catalog.py). Same dict shape as before, extended with shop metadata
@@ -172,34 +162,24 @@ async def _assert_url_allowed(url: str, guarded: bool = False) -> str:
 
 # ── Engine sync helpers ─────────────────────────────────────────────────────
 def _sync_enabled() -> bool:
-    raw = (os.getenv(SYNC_FLAG_ENV) or os.getenv(SYNC_FLAG_ENV_LEGACY) or "0").strip().lower()
+    raw = (os.getenv(SYNC_FLAG_ENV) or "0").strip().lower()
     return raw in ("1", "true", "yes", "on")
 
 
 def _config_set() -> str:
-    raw = (os.getenv("OPENCLAW_CONFIG_SET") or os.getenv("OPENCLAW_MODE") or "bundled").strip()
+    # The env name is historical: it picks which engine-skills/<set>/ tree compose mounts.
+    raw = (os.getenv("OPENCLAW_CONFIG_SET") or "bundled").strip()
     return re.sub(r"[^a-zA-Z0-9_-]", "", raw) or "bundled"
-
-
-def _config_file_candidates() -> list[Path]:
-    base = Path(os.getenv("HARVIS_OPENCLAW_CONFIG_DIR") or "/app/engine_config")
-    return [base / _config_set() / "openclaw.json", base / "openclaw.json"]
 
 
 def _skills_dir() -> Optional[Path]:
     """Where published SKILL.md files land.
 
-    One shared tree, mounted into every engine sidecar (OpenClaw, Claude Code,
-    Codex, Hermes) rather than into OpenClaw alone — a skill the user authored
-    and verified should be available to whichever engine runs the task, not just
-    to the one that happened to own the mount first. HARVIS_OPENCLAW_SKILLS_DIR
-    stays honoured so an existing install keeps publishing where it always did.
+    One shared tree, mounted into every engine sidecar (Claude Code, Codex,
+    Hermes) — a skill the user authored and verified should be available to
+    whichever engine runs the task.
     """
-    raw = (
-        os.getenv("HARVIS_ENGINE_SKILLS_DIR")
-        or os.getenv("HARVIS_OPENCLAW_SKILLS_DIR")
-        or ""
-    ).strip()
+    raw = (os.getenv("HARVIS_ENGINE_SKILLS_DIR") or "").strip()
     return Path(raw) if raw else None
 
 
@@ -246,57 +226,25 @@ def _skill_verdict(raw) -> str:
     return str(audit.get("verdict") or "") if isinstance(audit, dict) else ""
 
 
-def _json_field(v, default):
-    if isinstance(v, str):
-        try:
-            v = json.loads(v)
-        except Exception:
-            return default
-    return v if isinstance(v, type(default)) else default
-
-
-def _mcp_entry(row, mask: bool) -> dict:
-    entry: dict = {"transport": row["transport"]}
-    if row["command"]:
-        entry["command"] = row["command"]
-        args = _json_field(row["args"], [])
-        if args:
-            entry["args"] = args
-    if row["url"]:
-        entry["url"] = row["url"]
-    env = _json_field(row["env"], {})
-    if env:
-        entry["env"] = {k: (_MASK if mask else v) for k, v in env.items()}
-    return entry
-
-
 def _atomic_write(path: Path, text: str) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(text, encoding="utf-8")
     os.replace(tmp, path)
 
 
-async def _sync_sources(pool, uid: int) -> tuple[list, list]:
+async def _sync_sources(pool, uid: int) -> list:
     async with pool.acquire() as conn:
         skills = await conn.fetch(
             "SELECT id, name, description, content, meta FROM owui_skills "
             "WHERE user_id=$1 AND enabled ORDER BY name",
             uid,
         )
-        conns = await conn.fetch(
-            "SELECT server_name, transport, url, command, args, env FROM mcp_servers "
-            "WHERE user_id=$1 AND enabled ORDER BY server_name",
-            uid,
-        )
-    return list(skills), list(conns)
+    return list(skills)
 
 
-# Engines that could consume the connectors/skills a user saves in Harvis.
-# ONLY OpenClaw has a write target today: the sync merges `mcpServers` into
-# openclaw.json (and SKILL.md files into the skills mount). The sidecar CLI
-# engines read their OWN MCP config and nothing in Harvis writes it, so a UI
-# claiming "synced to every engine" would be making a false claim. Each engine
-# reports what is actually true for it instead.
+# The engines that read the shared /skills mount. MCP connections are not listed:
+# each CLI engine reads its OWN MCP config and nothing in Harvis writes it, so a
+# UI claiming "connectors synced to every engine" would be making a false claim.
 _CLI_ENGINE_LABELS = {
     "claude-code": "Claude Code",
     "kimi-code": "Kimi Code",
@@ -304,59 +252,42 @@ _CLI_ENGINE_LABELS = {
 }
 
 
-def _engine_targets(target_file: Path, sdir: Optional[Path]) -> list[dict]:
-    """Per-engine publish state — status is ``ready`` / ``blocked`` / ``unsupported``."""
-    enabled = _sync_enabled()
-    if enabled:
-        note = (
-            "Connections are merged into openclaw.json. Restart harvis-openclaw "
-            "after an apply for them to take effect."
-        )
-        if sdir is None:
-            note += " Skill files are skipped — HARVIS_OPENCLAW_SKILLS_DIR is not set."
-    else:
+def _engine_targets(sdir: Optional[Path]) -> list[dict]:
+    """Per-engine publish state — status is ``ready`` / ``blocked``."""
+    if not _sync_enabled():
+        status = "blocked"
         note = (
             f"Applying is turned off on this server. Set {SYNC_FLAG_ENV}=1 in the "
-            "backend environment to allow writing to the OpenClaw mounts."
+            "backend environment to allow writing to the shared skills mount."
         )
-    engines = [
-        {
-            "id": "openclaw",
-            "label": "OpenClaw",
-            "status": "ready" if enabled else "blocked",
-            "target": str(target_file),
-            "writes": ["mcpServers"] + (["skills"] if sdir else []),
-            "note": note,
-        }
-    ]
-    engines.extend(
+    elif sdir is None:
+        status = "blocked"
+        note = "Skill files are skipped — HARVIS_ENGINE_SKILLS_DIR is not set."
+    else:
+        status = "ready"
+        note = "Skills are written to the shared mount. Restart the engine sidecar to load them."
+    return [
         {
             "id": eid,
             "label": label,
-            "status": "unsupported",
-            "target": None,
-            "writes": [],
-            "note": (
-                f"{label} reads its own MCP config. Harvis has no writer for it yet, "
-                "so saved connectors do not reach this engine."
-            ),
+            "status": status,
+            "target": str(sdir) if sdir else None,
+            "writes": ["skills"] if sdir else [],
+            "note": note,
         }
         for eid, label in _CLI_ENGINE_LABELS.items()
-    )
-    return engines
+    ]
 
 
-def _build_preview(skills, conns, mask: bool = True, require_verdict: bool = True) -> dict:
+def _build_preview(skills, require_verdict: bool = True) -> dict:
     cs = _config_set()
-    candidates = _config_file_candidates()
-    target_file = next((c for c in candidates if c.exists()), candidates[0])
     sdir = _skills_dir()
     skill_items = []
     skipped_unverified: list[str] = []
     skipped_changed: list[str] = []
     for s in skills:
         meta = _skill_meta_dict(s["meta"])
-        # Human-gated publish: a skill reaches the live OpenClaw mount ONLY after a
+        # Human-gated publish: a skill reaches the live engine mount ONLY after a
         # human audit verdict of 'supported'. Skills NEVER self-publish. An explicit
         # override (require_verdict=False) can include un-audited skills deliberately.
         if require_verdict and _skill_verdict(s["meta"]) != "supported":
@@ -376,13 +307,12 @@ def _build_preview(skills, conns, mask: bool = True, require_verdict: bool = Tru
                 "skill_md": _skill_md(s["name"], s["description"], s["content"], meta),
             }
         )
-    fragment = {"mcpServers": {c["server_name"]: _mcp_entry(c, mask) for c in conns}}
     notes = [
         "Dry run — nothing has been written. Apply is a separate, explicit step.",
         f"Apply is gated by env {SYNC_FLAG_ENV} (currently "
         f"{'ON' if _sync_enabled() else 'OFF'}).",
         "Engines read these mounts at container start — restart the engine sidecars "
-        "(openclaw / claude-code / codex / hermes-agent) after an apply.",
+        "(claude-code / codex / hermes-agent) after an apply.",
     ]
     if sdir is None:
         notes.append(
@@ -401,25 +331,16 @@ def _build_preview(skills, conns, mask: bool = True, require_verdict: bool = Tru
             + ", ".join(skipped_changed[:8]) + ("…" if len(skipped_changed) > 8 else "")
             + ". Review and approve each again to publish."
         )
-    if mask:
-        notes.append("env values are masked in this preview; apply writes the stored values.")
     return {
         "flag": SYNC_FLAG_ENV,
         "enabled": _sync_enabled(),
         "config_set": cs,
-        "engines": _engine_targets(target_file, sdir),
+        "engines": _engine_targets(sdir),
         "skipped_unverified": skipped_unverified,
         "skills": {
             "target_dir": str(sdir) if sdir else None,
             "target_dir_note": f"host: engine-skills/{cs}/ (mounted into every engine sidecar at /skills)",
             "items": skill_items,
-        },
-        "mcp": {
-            "target_file": str(target_file),
-            "target_exists": target_file.exists(),
-            "merge_key": "mcpServers",
-            "fragment": fragment,
-            "count": len(conns),
         },
         "notes": notes,
     }
@@ -557,32 +478,27 @@ def register_mcp_wizard_routes(router: APIRouter, get_current_user: Callable) ->
         latency_ms = int((time.monotonic() - started) * 1000)
         return {"ok": ok, "testable": True, "status": status, "latency_ms": latency_ms, "detail": detail}
 
-    # ── OpenClaw review & sync ────────────────────────────────────────────
-    # Engine sync. The /openclaw/ paths are kept as aliases: they are the ones every
-    # shipped frontend build and every existing script calls, and breaking them to
-    # rename a route would be a gratuitous outage.
+    # ── Engine skill review & sync ────────────────────────────────────────
     @router.get("/api/owui/engine/sync/preview")
-    @router.get("/api/owui/openclaw/sync/preview")
     async def engine_sync_preview(request: Request, override: bool = False, user=Depends(get_current_user)):
-        skills, conns = await _sync_sources(_pool(request), int(user.id))
-        return _build_preview(skills, conns, mask=True, require_verdict=not override)
+        skills = await _sync_sources(_pool(request), int(user.id))
+        return _build_preview(skills, require_verdict=not override)
 
     @router.post("/api/owui/engine/sync/apply")
-    @router.post("/api/owui/openclaw/sync/apply")
     async def engine_sync_apply(request: Request, override: bool = False, user=Depends(get_current_user)):
         if not _sync_enabled():
             raise HTTPException(
                 status_code=403,
                 detail=f"Engine sync is disabled on this server. Set {SYNC_FLAG_ENV}=1 "
                        "in the backend environment (and review the dry-run preview first) "
-                       "to allow publishing skills/MCP config to the engine mounts.",
+                       "to allow publishing skills to the engine mounts.",
             )
-        skills, conns = await _sync_sources(_pool(request), int(user.id))
+        skills = await _sync_sources(_pool(request), int(user.id))
         # Human-gated publish: only skills with a 'supported' audit verdict sync unless
         # override=true is explicitly passed (Execution Core Phase 5).
-        preview = _build_preview(skills, conns, mask=True, require_verdict=not override)
+        preview = _build_preview(skills, require_verdict=not override)
 
-        # 1) skills → SKILL.md files
+        # skills → SKILL.md files
         skill_results = []
         sdir = _skills_dir()
         for item in preview["skills"]["items"]:
@@ -605,40 +521,9 @@ def register_mcp_wizard_routes(router: APIRouter, get_current_user: Callable) ->
                 skill_results.append({"id": item["id"], "slug": item["slug"], "status": "error",
                                       "reason": str(e)})
 
-        # 2) MCP servers → merge fragment under `mcpServers` in the active openclaw.json
-        mcp_result: dict = {"status": "skipped", "reason": "no enabled connections"}
-        if conns:
-            candidates = _config_file_candidates()
-            cfg_path = next((c for c in candidates if c.exists()), None)
-            if cfg_path is None:
-                mcp_result = {"status": "skipped",
-                              "reason": f"no openclaw.json found (looked at: "
-                                        f"{', '.join(str(c) for c in candidates)})"}
-            else:
-                try:
-                    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-                    if not isinstance(cfg, dict):
-                        raise ValueError("openclaw.json is not a JSON object")
-                    servers = cfg.get("mcpServers")
-                    if not isinstance(servers, dict):
-                        servers = {}
-                    # A server the config already lists under another capitalisation
-                    # is the same server: write over that key, never beside it.
-                    listed = {str(k).strip().lower(): k for k in servers}
-                    for c in conns:
-                        key = listed.get(c["server_name"].strip().lower(), c["server_name"])
-                        servers[key] = _mcp_entry(c, mask=False)
-                        listed[key.strip().lower()] = key
-                    cfg["mcpServers"] = servers
-                    _atomic_write(cfg_path, json.dumps(cfg, indent=2) + "\n")
-                    mcp_result = {"status": "written", "path": str(cfg_path), "count": len(conns)}
-                except Exception as e:
-                    logger.warning("engine sync: config merge failed", exc_info=True)
-                    mcp_result = {"status": "error", "reason": str(e)}
-
         return {
-            "applied": {"skills": skill_results, "mcp": mcp_result},
+            "applied": {"skills": skill_results},
             "config_set": preview["config_set"],
-            "note": "Restart the engine sidecars (harvis-openclaw / harvis-claude-code / "
-                    "harvis-codex / harvis-hermes-agent) to load the new config/skills.",
+            "note": "Restart the engine sidecars (harvis-claude-code / harvis-codex / "
+                    "harvis-hermes-agent) to load the new skills.",
         }

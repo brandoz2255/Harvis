@@ -27,7 +27,7 @@ import time
 import uuid
 from typing import AsyncGenerator
 
-from ..events import OpenClawEvent
+from ..events import WorkspaceEvent
 from .conversation import conversation_prefix
 from .isolation import WorkspaceIsolationManager
 from .profiles import get_profile
@@ -99,7 +99,7 @@ async def run_orchestrated(
     # runner container (the one the right sidebar's terminal shows) instead of a scratch
     # dir and the backend process. The folder is the user's, so nothing is diffed or wiped.
     sandbox: dict | None = None,
-) -> AsyncGenerator[OpenClawEvent, None]:
+) -> AsyncGenerator[WorkspaceEvent, None]:
     # Lazy import (avoid circular import at module load). Import the FUNCTIONS
     # from the submodule path — `from .. import workspace_router` would resolve to
     # the re-exported APIRouter instance in workspace/__init__.py, not the module.
@@ -132,8 +132,8 @@ async def run_orchestrated(
     # coordinated anything. Same stream, honest label.
     root_label = "Harvis Agent" if single_agent else "Orchestrator Agent"
 
-    def root_ev(etype: str, data: dict) -> OpenClawEvent:
-        e = OpenClawEvent(etype, {**data, "agent_label": root_label, "model": model_name})
+    def root_ev(etype: str, data: dict) -> WorkspaceEvent:
+        e = WorkspaceEvent(etype, {**data, "agent_label": root_label, "model": model_name})
         e.run_id = orch_run_id
         e.agent_label = root_label
         return e
@@ -236,7 +236,7 @@ async def run_orchestrated(
                 logger.warning(
                     "orchestrator: sub-agent %s failed: %s", child["label"], exc, exc_info=True
                 )
-                err = OpenClawEvent(
+                err = WorkspaceEvent(
                     "agent_end",
                     {
                         "label": child["label"],

@@ -42,6 +42,7 @@ import {
   parseRosterKey,
   saveSelectedRosterBot
 } from './bot-state'
+import { goBotsHome } from './bots-home'
 import { CreateAgentDialog, CreateGroupChatDialog, GroupDialog } from './create-dialog'
 import {
   $botMeta,
@@ -607,6 +608,17 @@ export function BotsPane() {
           Bots
         </span>
         <div className="flex items-center gap-0.5">
+          <Tip label="Bots home: the office, with every bot at its desk">
+            <Button
+              className="h-6 gap-1 rounded-md px-1.5 text-[0.6875rem] text-(--ui-text-tertiary) hover:text-foreground"
+              onClick={goBotsHome}
+              size="xs"
+              variant="ghost"
+            >
+              <Codicon name="home" />
+              Office
+            </Button>
+          </Tip>
           <Tip
             label={activityToasts ? 'Activity toasts on — click to silence' : 'Activity toasts off — click to enable'}
           >

@@ -77,7 +77,7 @@ def _marker_content(
     needs_approval: bool = False,
     *,
     mode: str = "auto",
-    engine: str = "OpenClaw",
+    engine: str = "Harvis",
     brief: str = "",
 ) -> str:
     """Newline-fenced ``<details type="workspace_run">`` block so OWUI's marked
@@ -88,7 +88,7 @@ def _marker_content(
     parsed as ``type`` and clobber the ``workspace_run`` discriminator).
 
     ``engine`` + ``launchmode`` surface on the card chip immediately (before the
-    stream confirms the executor), so the user sees e.g. "OpenClaw · Auto"."""
+    stream confirms the executor), so the user sees e.g. "Harvis · Auto"."""
     label = html.escape(suggestion.task_type_label or "Workspace task", quote=True)
     ttype = html.escape(suggestion.task_type or "", quote=True)
     # What the run ACTUALLY executes (`resolved_brief`), not the detector's paraphrase.
@@ -101,7 +101,7 @@ def _marker_content(
     mode_label = {"auto": "Auto", "agent": "Agent", "orchestrate": "Orchestrate"}.get(
         (mode or "auto").lower(), "Auto"
     )
-    eng = html.escape(engine or "OpenClaw", quote=True)
+    eng = html.escape(engine or "Harvis", quote=True)
     return (
         f'<details type="workspace_run" workspaceid="{workspace_id}" '
         f'tasktype="{ttype}" tasklabel="{label}" taskbrief="{brief}" '
@@ -323,7 +323,7 @@ async def _cannot_call_tools(model_id: str) -> bool:
 
 
 async def _sync_workspace_model(pool, model_name: str, user_id: int) -> None:
-    """Make the OpenClaw workspace follow the model picked in the OWUI dropdown.
+    """Make the workspace follow the model picked in the model dropdown.
 
     Points the active ``openclaw_llm_config`` row at ``model_name`` so model_proxy's
     ``auto`` resolution serves it; ``_resolve_route`` then auto-discovers the node

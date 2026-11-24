@@ -274,31 +274,11 @@ def test_f3_websocket_proxy_refuses_a_container_with_no_owner_label(monkeypatch)
     assert ws.closed_with == 1008 and ws.accepted is False
 
 
-# ── F4: the OpenClaw tool routes act only for the user the token names ───────
-
-def test_f4_byo_gateway_token_cannot_act_for_another_user(monkeypatch):
-    from tools import openclaw_proxy as op
-
-    async def caller(_request, _authorization):
-        return ("byo", A)
-
-    monkeypatch.setattr(op, "resolve_gateway_caller", caller)
-    request = request_with(headers={"Authorization": "Bearer x"})
-
-    assert run(op._gateway_acts_for(request, A)) == A
-    with pytest.raises(HTTPException) as err:
-        run(op._gateway_acts_for(request, B))
-    assert err.value.status_code == 403
-
-    req = op.DocumentSaveRequest(title="t", content="c", user_id=B)
-    with pytest.raises(HTTPException) as err:
-        run(op.document_save(req, request))
-    assert err.value.status_code == 403
-
+# ── F4: the agent tool routes only read uploads the claimed user owns ────────
 
 @pytest.fixture
 def uploads(tmp_path, monkeypatch):
-    from tools import openclaw_proxy as op
+    from tools import agent_tools_proxy as op
 
     async def bundled(_request, _authorization):
         return ("bundled", None)

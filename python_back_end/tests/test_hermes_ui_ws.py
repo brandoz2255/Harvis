@@ -63,6 +63,41 @@ async def test_config_set_reasoning_sets_the_session_effort(monkeypatch):
     assert emitted == [("session.info", "high")]
 
 
+@pytest.mark.asyncio
+async def test_config_set_global_model_with_a_session_switches_that_chat(monkeypatch):
+    """The composer sends the open chat's pick as --global plus its session_id; the chat's next turn must use it."""
+    from plugins.hermes_ui import sessions, ws_settings
+
+    live = sessions.Live(id="s1", user_id=1, model="old-model")
+    emitted = []
+    saved = []
+
+    class Conn:
+        pool = None
+        user_id = 1
+
+        async def _open(self, rid, params):
+            return live, [], None
+
+        async def emit(self, kind, sid, payload):
+            emitted.append((kind, payload["model"]))
+
+    async def apply(pool, uid, provider, model):
+        saved.append((provider, model))
+        return {"ok": True}
+
+    monkeypatch.setattr(ws_settings, "apply_model_choice", apply)
+
+    result = await Connection.m_config_set(
+        Conn(), 6, {"key": "model", "session_id": "s1", "value": "new-model --provider ollama --global"}
+    )
+
+    assert result["result"]["ok"] is True
+    assert saved == [("ollama", "new-model")]
+    assert live.model == "new-model"
+    assert emitted == [("session.info", "new-model")]
+
+
 class _Handshake:
     def __init__(self, **headers):
         self.headers = headers

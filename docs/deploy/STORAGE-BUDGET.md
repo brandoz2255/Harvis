@@ -78,7 +78,7 @@ Opt-in profiles, each added alone on top of the default set:
 | `legacy` | 1.24 | |
 | `sentrysearch` | 0.00 | |
 | `agent-reach` | 0.00 | `curlimages/curl:8.5.0` |
-| `tunnel` | 0.00 | `cloudflare/cloudflared:2026.9.3` |
+| `tunnel` | 0.00 | `cloudflare/cloudflared:2026.11.1` |
 | `voice-fallback` | 0.00 | `ghcr.io/speaches-ai/speaches:latest-cpu` |
 
 All profiles on: **64.09 GB** of images with six images uncounted (shared layers save 35.9 GB of

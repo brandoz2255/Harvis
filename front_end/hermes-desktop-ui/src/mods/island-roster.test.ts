@@ -14,4 +14,21 @@ describe('island roster identity', () => {
     roster.update([b])
     expect(roster.resolve(rows[0].id)).toBeUndefined()
   })
+
+  it('maps each row to away, busy or idle', () => {
+    const now = 1_000_000_000
+    const roster = new IslandRoster()
+    const ids = roster.update([
+      { name: 'gone', sourceReachable: false },
+      { name: 'ghost', ghost: true },
+      { name: 'worker', last_session: { last_active: now / 1000 - 30 } },
+      { name: 'resting' }
+    ] as never[]).map(row => row.id)
+    const p = roster.presence(now)
+    expect(p[ids[0]]).toBe('away')
+    expect(p[ids[1]]).toBe('away')
+    expect(p[ids[2]]).toBe('busy')
+    expect(p[ids[3]]).toBe('idle')
+    expect(Object.keys(p)).toHaveLength(4)
+  })
 })

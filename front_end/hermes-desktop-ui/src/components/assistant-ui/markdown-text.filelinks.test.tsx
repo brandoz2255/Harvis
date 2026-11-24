@@ -1,5 +1,7 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
-import { afterEach, describe, expect, it } from 'vitest'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+
+import { $previewTabs } from '@/store/preview'
 
 import { MarkdownTextContent } from './markdown-text'
 
@@ -55,5 +57,40 @@ describe('MarkdownLink filesystem hrefs', () => {
     // preview affordance.
     expect(screen.queryByRole('button', { name: 'Open preview' })).toBeNull()
     expect(document.querySelector('a[href="#section-2"]')).not.toBeNull()
+  })
+})
+
+describe('paths the model names', () => {
+  beforeEach(() => $previewTabs.set([]))
+  afterEach(cleanup)
+
+  it('opens a path written as inline code in the side panel', async () => {
+    render(<MarkdownTextContent isRunning={false} text="The fix is in `/srv/app/src/main.ts:42`." />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Open preview: /srv/app/src/main.ts' }))
+
+    await waitFor(() => expect($previewTabs.get().map(tab => tab.target.path)).toEqual(['/srv/app/src/main.ts']))
+  })
+
+  it('leaves commands, words and server routes as plain code', async () => {
+    render(<MarkdownTextContent isRunning={false} text="Run `npm test`, call `useState`, or hit `/api/chat`." />)
+
+    await screen.findByText('npm test')
+    expect(screen.queryAllByRole('button')).toHaveLength(0)
+  })
+
+  it('keeps a server route link a plain link instead of a broken file card', async () => {
+    render(<MarkdownTextContent isRunning={false} text="Send it to [the chat route](/api/chat)." />)
+
+    await screen.findByText('the chat route')
+    expect(screen.queryByRole('button', { name: 'Open preview' })).toBeNull()
+  })
+
+  it('names a made file after its link text, not the route', async () => {
+    render(<MarkdownTextContent isRunning={false} text="Here it is: [House Cats.pdf](/api/v1/files/f1/content)" />)
+
+    await screen.findByText('House Cats.pdf')
+    expect(screen.queryByText('content')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Open preview' })).toBeTruthy()
   })
 })

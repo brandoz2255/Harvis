@@ -134,7 +134,15 @@ function AccountIslandHost({ accountId }: { accountId: string }) {
     }
   }, [accountId, exploring])
 
+  // Busy fades 90 s after the last activity with no new roster data, so presence is re-read on a clock too.
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 30_000)
+    return () => window.clearInterval(timer)
+  }, [])
+
   useEffect(() => bridgeRef.current?.setSession(agents), [data, exploring])
+  useEffect(() => bridgeRef.current?.setPresence(rosterRef.current.presence(now)), [data, exploring, now])
   useEffect(() => bridgeRef.current?.setLowFx(busy), [busy, exploring])
   useEffect(
     () =>
@@ -231,7 +239,7 @@ function AccountIslandHost({ accountId }: { accountId: string }) {
         onClick={() => $islandExplore.set(!exploring)}
         type="button"
       >
-        {exploring ? 'Back to bots' : 'Explore'}
+        {exploring ? 'Close map' : 'Explore'}
       </button>
     </div>
   )

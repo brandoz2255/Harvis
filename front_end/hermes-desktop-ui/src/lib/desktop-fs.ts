@@ -7,6 +7,8 @@ import type {
 } from '@/global'
 import { $connection } from '@/store/session'
 
+import { canFetchHarvisFiles, isHarvisFileRoute, readHarvisFileDataUrl, readHarvisFileText } from './harvis-files'
+
 export interface DesktopFsRemotePicker {
   selectPaths: (options?: HermesSelectPathsOptions) => Promise<string[]>
 }
@@ -80,6 +82,10 @@ export async function readDesktopDir(path: string): Promise<HermesReadDirResult>
 }
 
 export async function readDesktopFileText(path: string): Promise<HermesReadFileTextResult> {
+  if (isHarvisFileRoute(path) && canFetchHarvisFiles()) {
+    return readHarvisFileText(path)
+  }
+
   if (!isDesktopFsRemoteMode()) {
     return bridge().readFileText(path)
   }
@@ -108,6 +114,10 @@ export async function writeDesktopFileText(path: string, content: string): Promi
 }
 
 export async function readDesktopFileDataUrl(path: string): Promise<string> {
+  if (isHarvisFileRoute(path) && canFetchHarvisFiles()) {
+    return readHarvisFileDataUrl(path)
+  }
+
   if (!isDesktopFsRemoteMode()) {
     return bridge().readFileDataUrl(path)
   }

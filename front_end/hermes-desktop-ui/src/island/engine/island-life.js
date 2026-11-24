@@ -65,12 +65,12 @@ export function tickHappenings(sim, happenings, fired) {
     if (!place) continue;
     let builder = null;
     if (h.build && !(sim.world.objects?.size)) {
-      const free = sim.agents.filter((x) => !x.inside && !x.chat);
+      const free = sim.agents.filter((x) => !x.inside && !x.chat && !x.presence);
       builder = free[0];
       if (builder) startBuild(sim, builder.id, { x: place.x + 1, y: place.y + 1 }, h.build);
     }
     for (const a of sim.agents) {
-      if (a.inside || a.id === builder?.id || a.pet) continue;
+      if (a.inside || a.id === builder?.id || a.pet || a.presence) continue;
       sim.orderMove(a.id, { x: place.x + (Math.random() * 4 - 2 | 0), y: place.y + (Math.random() * 4 - 2 | 0) });
     }
     if (h.chatBoost) for (const a of sim.agents) a.chatty = Math.min(1, (a.chatty ?? 0.3) + h.chatBoost);

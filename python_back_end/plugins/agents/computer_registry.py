@@ -67,6 +67,7 @@ def public_view(rec: Dict[str, Any]) -> Dict[str, Any]:
         "width": rec.get("width"),
         "height": rec.get("height"),
         "takenOver": bool(rec.get("taken_over")),
+        "desktop": bool(rec.get("desktop")),
         "createdAt": rec["created_at"],
     }
 
@@ -139,6 +140,7 @@ def adopt(items: List[Dict[str, Any]]) -> int:
                 "width": screen.get("width"),
                 "height": screen.get("height"),
                 "taken_over": bool(screen.get("takenOver")),
+                "desktop": bool(screen.get("desktop")),
                 "created_at": int(item.get("createdAt") or time.time()),
                 "adopted": True,
             }

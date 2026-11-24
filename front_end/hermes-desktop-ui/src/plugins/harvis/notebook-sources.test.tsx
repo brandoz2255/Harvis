@@ -66,7 +66,7 @@ const clicked = (path: string) => harvisApi.mock.calls.some(c => c[0] === path &
 describe('NotebookSources', () => {
   it('lets the file picker take pptx, xlsx, epub and PDFs and says scans are read', async () => {
     const { container } = renderWithQuery(<NotebookSources notebookId={NB} sources={[]} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Upload a file' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Upload files' }))
 
     const accept = container.querySelector('input[type="file"]')?.getAttribute('accept') ?? ''
     expect(accept.split(',')).toEqual(expect.arrayContaining(['.pdf', '.pptx', '.xlsx', '.epub']))

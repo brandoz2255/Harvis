@@ -3,10 +3,11 @@
 // including assistants followed only by a user or system row. The optimistic
 // placeholder flow renders exactly one status row. These contracts pin the
 // duplicate-indicator regression tracked in #68634.
-import { AssistantRuntimeProvider, type ThreadMessage, useExternalStoreRuntime } from '@assistant-ui/react'
+import { AssistantRuntimeProvider, type ThreadMessage } from '@assistant-ui/react'
 import { act, cleanup, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { useIncrementalExternalStoreRuntime } from '@/lib/incremental-external-store-runtime'
 import { __resetElapsedTimerRegistryForTests } from '@/components/chat/activity-timer'
 import { setSessionCompacting } from '@/store/compaction'
 import { $activeSessionId, $turnStartedAt } from '@/store/session'
@@ -63,7 +64,7 @@ function Harness({ messages, isRunning = false }: { messages: ThreadMessage[]; i
   // cases below. That is the real production flow. The isRunning:true tests
   // prove that the placeholder is treated as the tail and renders its own
   // loading row while the real bubble's activity row stays silent.
-  const runtime = useExternalStoreRuntime<ThreadMessage>({
+  const runtime = useIncrementalExternalStoreRuntime<ThreadMessage>({
     messages,
     isRunning,
     onNew: async () => {}

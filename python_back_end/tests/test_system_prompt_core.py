@@ -101,3 +101,11 @@ def test_kill_switch_disables_the_whole_preamble():
     finally:
         os.environ.pop("HARVIS_PROMPT_CORE", None)
         os.environ.pop("HARVIS_PRODUCT_FACTS", None)
+
+
+def test_product_facts_tell_the_model_how_to_point_at_files():
+    # The chat opens a backticked path or a markdown link in the side panel; a server
+    # route or container path is a dead end for the user.
+    assert "backticks or as a markdown link" in PRODUCT_FACTS
+    assert "[file name](download_url)" in PRODUCT_FACTS
+    assert "server route" in PRODUCT_FACTS

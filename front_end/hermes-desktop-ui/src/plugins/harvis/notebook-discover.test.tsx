@@ -178,13 +178,13 @@ describe('Sources panel gating', () => {
       }
     })
     const { container } = renderWithQuery(<NotebookSources notebookId={NB} sources={[]} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Upload a file' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Upload files' }))
     expect(await screen.findByText(/Audio: This server has no speech-to-text/)).toBeTruthy()
 
     const input = container.querySelector('input[type="file"]') as HTMLInputElement
     fireEvent.change(input, { target: { files: [new File(['x'], 'talk.mp3', { type: 'audio/mpeg' })] } })
 
-    expect(await screen.findAllByText(/no speech-to-text turned on/)).toHaveLength(2)
+    await waitFor(() => expect(screen.getAllByText(/no speech-to-text turned on/)).toHaveLength(2))
     expect(harvisApi.mock.calls.some(c => c[0].includes('/sources/upload'))).toBe(false)
   })
 

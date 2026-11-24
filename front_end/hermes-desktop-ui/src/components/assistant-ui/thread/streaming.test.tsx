@@ -1,8 +1,9 @@
-import { AssistantRuntimeProvider, type ThreadMessage, useExternalStoreRuntime } from '@assistant-ui/react'
+import { AssistantRuntimeProvider, type ThreadMessage } from '@assistant-ui/react'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { useEffect, useState } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { useIncrementalExternalStoreRuntime } from '@/lib/incremental-external-store-runtime'
 import { $reasoningCollapsedByDefault } from '@/store/reasoning-disclosure'
 
 import { stubThreadEnvironment, stubThreadViewportSize, ThreadRuntime } from '../test-utils'
@@ -290,7 +291,7 @@ function StreamingHarness({ onControls }: { onControls?: (controls: StreamingCon
     }
   }, [onControls])
 
-  const runtime = useExternalStoreRuntime<ThreadMessage>({
+  const runtime = useIncrementalExternalStoreRuntime<ThreadMessage>({
     messages,
     isRunning,
     onNew: async () => {}
@@ -310,7 +311,7 @@ const TodoHarness = ({ message }: { message: ThreadMessage }) => (
 )
 
 function MessageHarness({ message }: { message: ThreadMessage }) {
-  const runtime = useExternalStoreRuntime<ThreadMessage>({
+  const runtime = useIncrementalExternalStoreRuntime<ThreadMessage>({
     messages: [message],
     isRunning: false,
     onNew: async () => {}
@@ -324,7 +325,7 @@ function MessageHarness({ message }: { message: ThreadMessage }) {
 }
 
 function TranscriptHarness({ messages }: { messages: ThreadMessage[] }) {
-  const runtime = useExternalStoreRuntime<ThreadMessage>({
+  const runtime = useIncrementalExternalStoreRuntime<ThreadMessage>({
     messages,
     isRunning: false,
     onNew: async () => {}
@@ -355,7 +356,7 @@ function assistantInterimMessage(text: string, id = 'assistant-interim-1'): Thre
 }
 
 function RunningMessageHarness({ message }: { message: ThreadMessage }) {
-  const runtime = useExternalStoreRuntime<ThreadMessage>({
+  const runtime = useIncrementalExternalStoreRuntime<ThreadMessage>({
     messages: [message],
     isRunning: true,
     onNew: async () => {}
@@ -369,7 +370,7 @@ function RunningMessageHarness({ message }: { message: ThreadMessage }) {
 }
 
 function ReasoningHarness() {
-  const runtime = useExternalStoreRuntime<ThreadMessage>({
+  const runtime = useIncrementalExternalStoreRuntime<ThreadMessage>({
     messages: [assistantReasoningMessage(' The user is asking what this file is.')],
     isRunning: false,
     onNew: async () => {}
@@ -383,7 +384,7 @@ function ReasoningHarness() {
 }
 
 function RunningReasoningHarness() {
-  const runtime = useExternalStoreRuntime<ThreadMessage>({
+  const runtime = useIncrementalExternalStoreRuntime<ThreadMessage>({
     messages: [assistantReasoningMessage('```ts\nconst answer = 42\n', true)],
     isRunning: true,
     onNew: async () => {}
@@ -406,7 +407,7 @@ function renderSettlingReasoning() {
 
     setRunning = setRunningState
 
-    const runtime = useExternalStoreRuntime<ThreadMessage>({
+    const runtime = useIncrementalExternalStoreRuntime<ThreadMessage>({
       messages: [assistantReasoningMessage('The user asked a question.', running)],
       isRunning: running,
       onNew: async () => {}
@@ -425,7 +426,7 @@ function renderSettlingReasoning() {
 }
 
 function GroupedReasoningHarness() {
-  const runtime = useExternalStoreRuntime<ThreadMessage>({
+  const runtime = useIncrementalExternalStoreRuntime<ThreadMessage>({
     messages: [assistantMultiReasoningMessage([' First thought.', ' Second thought.'])],
     isRunning: false,
     onNew: async () => {}
@@ -439,7 +440,7 @@ function GroupedReasoningHarness() {
 }
 
 function IntroHarness() {
-  const runtime = useExternalStoreRuntime<ThreadMessage>({
+  const runtime = useIncrementalExternalStoreRuntime<ThreadMessage>({
     messages: [],
     isRunning: false,
     onNew: async () => {}
@@ -453,7 +454,7 @@ function IntroHarness() {
 }
 
 function DismissibleErrorHarness({ onDismissError }: { onDismissError: (messageId: string) => void }) {
-  const runtime = useExternalStoreRuntime<ThreadMessage>({
+  const runtime = useIncrementalExternalStoreRuntime<ThreadMessage>({
     messages: [assistantErrorMessage('OpenRouter rejected the request (403).')],
     isRunning: false,
     onNew: async () => {}
@@ -753,6 +754,9 @@ describe('assistant-ui streaming renderer', () => {
 
   it('renders completed image generation results in the tool slot', async () => {
     const { container } = render(<MessageHarness message={assistantImageMessage()} />)
+
+    // A remote image waits for a click before anything is fetched.
+    fireEvent.click(await screen.findByRole('button', { name: /Load image from cdn\.example/ }))
 
     await waitFor(() => {
       expect(screen.getByRole('img', { name: 'Generated image' }).getAttribute('src')).toBe(

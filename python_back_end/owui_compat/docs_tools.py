@@ -251,8 +251,9 @@ async def _t_guide(args: dict, ctx: DocsToolContext) -> tuple[dict, bool]:
     from .doc_bridge import _skill_body
     body = await _blocking(_skill_body, kind, timeout=LIGHT_TIMEOUT_S)
     return ({"ok": True, "kind": kind, "formats": list(FORMATS[kind]),
-             "guide": ("Write ONE harvis-doc: the header then the body. Pass the whole text as `source` to "
-                       "docs_validate, docs_preview and docs_export.\n\n" + body)}, True)
+             "guide": ("Write ONE harvis-doc per file: the header then the body. Pass the whole text as `source` "
+                       "to docs_validate, docs_preview and docs_export. Asked for several files (slides and a "
+                       "PDF), write and export each one separately, each with its own kind and title.\n\n" + body)}, True)
 
 
 async def _t_validate(args: dict, ctx: DocsToolContext) -> tuple[dict, bool]:

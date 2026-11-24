@@ -24,3 +24,21 @@ NousResearch / hermes-agent
   Adaptation scope: Hermes-internal coupling (AIAgent.interrupt, auto-TTS state,
   voice modes, gateway.session.SessionStore, gateway.run.GatewayRunner) is
   removed. Platform-specific transport and protocol logic is preserved.
+
+----------------------------------------------------------------------
+
+office-3d
+  By oslook and the office-3d contributors
+  License: MIT (Copyright (c) 2026 office-3d contributors)
+  Version at adoption: v1.4.4, commit 127c28a (desktop/plugin.js)
+
+  The Bots tab's office view is drawn with a port of the office-3d renderer.
+
+  - front_end/hermes-desktop-ui/src/office/render/   (isometric projection, scene
+                                                      layout, desks and figures)
+  - front_end/hermes-desktop-ui/src/office/LICENSE   (the upstream license text)
+
+  Adaptation scope: the single upstream file is split into modules, and Harvis
+  adds a standing or walking figure, speech bubbles and a TV for a bigger
+  lounge. The office shows the signed-in account's own bots and makes no
+  network calls of its own.

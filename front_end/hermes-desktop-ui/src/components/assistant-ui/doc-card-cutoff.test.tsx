@@ -22,7 +22,7 @@ import { OpenDocFenceContext, TranscriptDocCard } from './doc-card'
 import { MarkdownTextContent } from './markdown-text'
 
 const BODY = '---\nkind: deck\ntitle: Q3 Review\n---\n# Q3 Review\n---\n## Threats\n- Phishing\n'
-const KEY = 'session-card:q3-review'
+const KEY = 'session-card:deck:q3-review'
 
 const liveDoc = () => $liveDocs.get()[KEY]
 

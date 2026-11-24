@@ -14,6 +14,7 @@ import { Backdrop } from '@/components/Backdrop'
 import { AsciiField } from '@/components/chat/ascii-field'
 import { Intro } from '@/components/chat/intro'
 import { IslandHost } from '@/mods/island-host'
+import { BotsOffice } from '@/office/bots-office'
 import { $islandExplore, $islandVisible } from '@/mods/store'
 import { $openBotChat } from '@/plugins/hermes-bots/bot-state'
 import { $groupChatWorkspace } from '@/plugins/hermes-bots/group-chat'
@@ -73,7 +74,7 @@ import { ComposerSurfaceProvider, useComposerScope, useComposerSurfaceId } from 
 import type { ChatBarState } from './composer/types'
 import { type DroppedFile, partitionDroppedFiles } from './hooks/use-composer-actions'
 import { type DragKind, useFileDropZone } from './hooks/use-file-drop-zone'
-import { shouldShowIntro } from './intro-visibility'
+import { shouldShowIntro, shouldShowIsland } from './intro-visibility'
 import { ProfileTag } from './profile-tag'
 import { isRouteSessionMismatch } from './route-session-state'
 import { useRuntimeMessageRepository } from './runtime-repository'
@@ -494,16 +495,6 @@ const ChatViewContent = memo(function ChatViewContent({
   // A tile IS its session — no route involved, never "mismatched".
   const routedSessionId = isPrimary ? routeSessionId(location.pathname) : selectedSessionId
   const isRoutedSessionView = Boolean(routedSessionId)
-  const showBotIsland = showBotsIsland(
-    isPrimary,
-    botsPaneVisible,
-    Boolean(openBotChat),
-    Boolean(groupChat),
-    islandEnabled,
-    isRoutedSessionView
-  )
-  // The titlebar's map opens the island full screen over any chat, not just the idle Bots tab.
-  const showIslandMap = !showBotIsland && isPrimary && islandEnabled && islandExplore
 
   // The URL points at a session the store hasn't loaded yet (sidebar / cmd-K /
   // direct nav). Derived in render so the swap reads instantly: the same frame
@@ -525,6 +516,18 @@ const ChatViewContent = memo(function ChatViewContent({
     selectedSessionId
   }
   const showIntro = shouldShowIntro(introState)
+  // The island is the home screen's faded backdrop behind the wordmark, whether or not the
+  // Bots pane is open, and the idle Bots tab keeps it too.
+  const showBotIsland = showBotsIsland(
+    isPrimary,
+    botsPaneVisible || shouldShowIsland(introState, true),
+    Boolean(openBotChat),
+    Boolean(groupChat),
+    islandEnabled,
+    isRoutedSessionView
+  )
+  // The titlebar's map opens the island full screen over any chat, not just the idle Bots tab.
+  const showIslandMap = !showBotIsland && isPrimary && islandEnabled && islandExplore
 
   // Session is still loading if the route references a session we haven't
   // resumed yet. Brand-new routed drafts are empty on purpose once a runtime
@@ -696,7 +699,12 @@ const ChatViewContent = memo(function ChatViewContent({
             sessionId={activeSessionId}
             sessionKey={threadKey}
           />
-          {showBotIsland && (
+          {showBotIsland && botsPaneVisible && (
+            <div className="absolute inset-0 z-20 overflow-hidden" data-slot="bots-office-view">
+              <BotsOffice />
+            </div>
+          )}
+          {showBotIsland && !botsPaneVisible && (
             <div className="absolute inset-0 z-20 overflow-hidden bg-(--ui-chat-surface-background)" data-slot="bots-island-view">
               <IslandHost />
               <AsciiField className="pointer-events-none absolute inset-0" clear={0.18} />

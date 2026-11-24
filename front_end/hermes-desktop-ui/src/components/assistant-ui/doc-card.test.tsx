@@ -21,7 +21,7 @@ outline:
 const ONE_SLIDE = `${HEADER}# Q3 Security Review\n`
 const TWO_SLIDES = `${ONE_SLIDE}---\n## Threat landscape\n- Phishing is up\n`
 
-const KEY = 'session-card:q3-security-review'
+const KEY = 'session-card:deck:q3-security-review'
 
 const cardButton = () => document.querySelector('[data-slot="aui_doc-card"]') as HTMLButtonElement
 
@@ -136,6 +136,17 @@ describe('DocCard', () => {
       expect(cardButton().textContent).toContain(line)
       unmount()
     }
+  })
+
+  it('keeps slides and a handout with the same title in their own panels', () => {
+    render(
+      <>
+        <DocCard code={block('deck', 'House Cats', '# House Cats\n---\n## Sleep\n- 12 to 16 hours')} />
+        <DocCard code={block('pdf', 'House Cats', '# House Cats\n## Summary\nFood, water and play.')} />
+      </>
+    )
+
+    expect(Object.keys($liveDocs.get()).sort()).toEqual(['session-card:deck:house-cats', 'session-card:pdf:house-cats'])
   })
 
   it('shows progress instead of a file type while the document is being written', () => {

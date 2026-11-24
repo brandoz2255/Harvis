@@ -45,6 +45,8 @@ DOCKER_GID=""
 # means plain runc — the portable default. Set to "nvidia" only when this host
 # actually has that runtime registered with dockerd.
 GPU_RUNTIME=""
+# --bot-desktop: per-bot, all or off. Empty = an existing install keeps what it had.
+BOT_DESKTOP=""
 # Kubernetes hosting mode (scripts/k8s/harvis-k8s.sh). Empty = plain Docker.
 K8S_ACTION=""
 ADMIN_CODE=0
@@ -131,6 +133,15 @@ parse_args() {
         [ -n "$EXPOSE_MODE" ] || { echo "✗ --expose needs local, lan, tunnel or lan+tunnel"; exit 1; } ;;
       --expose=*) EXPOSE_MODE="${1#*=}"; shift
         [ -n "$EXPOSE_MODE" ] || { echo "✗ --expose needs local, lan, tunnel or lan+tunnel"; exit 1; } ;;
+      # The mode is optional: a bare --bot-desktop means per-bot.
+      --bot-desktop) case "${2:-}" in
+          per-bot|all|off) BOT_DESKTOP="$2"; shift 2 ;;
+          *) BOT_DESKTOP=per-bot; shift ;;
+        esac ;;
+      --bot-desktop=*) BOT_DESKTOP="${1#*=}"; shift
+        case "$BOT_DESKTOP" in per-bot|all|off) : ;;
+          *) echo "✗ --bot-desktop takes per-bot, all or off (got '$BOT_DESKTOP')"; exit 1 ;;
+        esac ;;
       --tunnel-networks) TUNNEL_NETWORKS_ARG="${2:-}"; shift $(( $# >= 2 ? 2 : 1 )) ;;
       --tunnel-networks=*) TUNNEL_NETWORKS_ARG="${1#*=}"; shift ;;
       --allow-emails) ALLOW_EMAILS_ARG="${2:-}"; shift $(( $# >= 2 ? 2 : 1 )) ;;
@@ -202,6 +213,13 @@ parse_args() {
         echo "  --k8s-off           Back to plain Docker. Nothing is deleted."
         echo "  --k8s-status        Nodes, pods and addresses."
         echo "  --k8s-join-command  Print the command another machine runs to join."
+        echo ""
+        echo "  --bot-desktop [MODE]  Add a full desktop (Xfce, about 270 MB more) to the"
+        echo "                  screens agent teammates browse on, for anyone watching or"
+        echo "                  taking over. On a shared server every user gets it."
+        echo "                  per-bot  each teammate turns it on (the default)"
+        echo "                  all      every teammate screen opens with it"
+        echo "                  off      remove it again"
         echo ""
         echo "  --stop          Stop Harvis (Docker or Kubernetes) and keep it off after"
         echo "                  a reboot. Nothing is deleted."
@@ -809,6 +827,24 @@ drop_env_key() { # $1 = key — remove every assignment of it from .env
   fi
 }
 
+# HARVIS_BOT_DESKTOP is a build argument of the browser runner image, so the
+# `compose up --build` / `compose build` that follows rebuilds it with or without
+# the desktop. The runner serves every user of this machine, which is what makes
+# it available to all of them when Harvis is hosted here (Docker or --k8s).
+write_bot_desktop_env() {
+  case "$BOT_DESKTOP" in
+    per-bot|all)
+      set_env_value HARVIS_BOT_DESKTOP 1
+      if [ "$BOT_DESKTOP" = all ]; then set_env_value HARVIS_BOT_DESKTOP_DEFAULT 1
+      else drop_env_key HARVIS_BOT_DESKTOP_DEFAULT; fi
+      echo "✓ Bot desktop on ($BOT_DESKTOP); the browser runner image is rebuilt with it" ;;
+    off)
+      drop_env_key HARVIS_BOT_DESKTOP
+      drop_env_key HARVIS_BOT_DESKTOP_DEFAULT
+      echo "✓ Bot desktop off; the browser runner image is rebuilt without it" ;;
+  esac
+}
+
 write_env() {
   touch .env
   # It holds the JWT secret, the database password and the tunnel token; with a
@@ -882,6 +918,7 @@ write_env() {
     drop_env_key HARVIS_GPU_RUNTIME
     echo "✓ Removed a stale HARVIS_GPU_RUNTIME pin (this host has no nvidia runtime)"
   fi
+  write_bot_desktop_env
   ensure_env_secret JWT_SECRET "$(rand_hex 32)" "a JWT_SECRET"
   # FERNET_KEY — encrypts stored GitHub OAuth tokens. Compose defaults it to empty
   # and the backend only logs a warning, so without this GitHub sign-in fails in a

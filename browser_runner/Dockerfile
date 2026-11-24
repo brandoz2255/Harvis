@@ -9,7 +9,7 @@ FROM python:3.11-slim
 #
 #   Profile-gate the service out of the default set. Saves the whole 864 MB
 #   and breaks two shipped features on a fresh install: the browser tool
-#   surface in tools/openclaw_proxy.py (session/navigate/act/screenshot) and
+#   surface in tools/agent_tools_proxy.py (session/navigate/act/screenshot) and
 #   the Discord artifact preview renderer at
 #   integrations/discord_workspace_bot.py:1275, which drives this service to
 #   turn HTML/SVG artifacts into PNGs.
@@ -20,6 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   firefox-esr \
   ca-certificates \
   curl \
+  tini \
   && rm -rf /var/lib/apt/lists/*
 
 # A watchable screen for Agent Teammates: Xvfb gives a headed session its own
@@ -48,6 +49,33 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   x11vnc \
   && rm -rf /var/lib/apt/lists/* \
   && mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
+
+# An optional full desktop for a headed session (display.py desktop=True runs
+# desktop.sh): TigerVNC's Xvnc plus a minimal Xfce, started component by
+# component without xfce4-session. Measured 2026-11-02 at +270 MB on this image
+# (1.19 GB to 1.46 GB), and about 160 MB of RAM per running desktop.
+# Built only when the installer is run with --bot-desktop (HARVIS_BOT_DESKTOP=1
+# in .env), so the default install stays inside its size budget. Without these
+# packages display.desktop_available() is false and a desktop request gets the
+# bare Xvfb screen.
+# No terminal on purpose: anyone who takes over a screen would get a shell as
+# `runner`, which can read every teammate's Firefox profile under /profiles.
+ARG HARVIS_BOT_DESKTOP=0
+RUN if [ "$HARVIS_BOT_DESKTOP" = 1 ]; then \
+  apt-get update && apt-get install -y --no-install-recommends \
+  tigervnc-standalone-server \
+  xfce4-panel \
+  xfwm4 \
+  xfdesktop4 \
+  xfce4-settings \
+  dbus-x11 \
+  x11-xserver-utils \
+  x11-utils \
+  x11-xkb-utils \
+  xauth \
+  fonts-dejavu-core \
+  && rm -rf /var/lib/apt/lists/*; \
+  fi
 
 # noVNC is the browser-side VNC client. Pinned and fetched at build time for the
 # same reason geckodriver is: a DNS-blocked cluster must not need egress to show
@@ -101,7 +129,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # requirements.txt.
 RUN pip install --no-cache-dir --no-deps websockify
 
-COPY app.py display.py camofox_api.py sessions.py ./
+COPY app.py display.py desktop.sh camofox_api.py sessions.py ./
 
 # Non-root. This image had no USER at all, so it ran as root — and of every
 # service in the default set this is the one that renders hostile input by
@@ -133,5 +161,10 @@ LABEL org.opencontainers.image.source="https://github.com/brandoz2255/Harvis" \
   org.opencontainers.image.title="harvis-browser-runner" \
   org.opencontainers.image.description="Firefox session service for browser automation, artifact rendering, and watchable agent sessions"
 
+# tini as PID 1 reaps orphans. uvicorn never waits on processes it did not
+# start, so every Firefox helper and every desktop process left behind when its
+# parent exits stayed a zombie for the life of the container (measured
+# 2026-11-02: one desktop session left 13).
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8765"]
 

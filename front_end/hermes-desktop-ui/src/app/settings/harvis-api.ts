@@ -147,8 +147,8 @@ export const connectCredential = (engine: string, credential: string, authMode =
 export const disconnectCredential = (engine: string) =>
   post<{ ok: boolean }>(`/api/owui/engine-auth/${encodeURIComponent(engine)}/disconnect`, {})
 
-/** Agents the user runs themselves and links by address + token (Hermes recommended, OpenClaw optional). */
-export type LinkedAgentId = 'hermes' | 'openclaw'
+/** Agents the user runs themselves and links by address + token. */
+export type LinkedAgentId = 'hermes'
 
 export type LinkedAgentState = 'error' | 'linked' | 'not_linked' | 'saved'
 

@@ -12,7 +12,7 @@ let verifyReply: Record<string, unknown> = {}
 
 beforeEach(() => {
   calls.length = 0
-  statuses = { hermes: { ...empty }, openclaw: { ...empty } }
+  statuses = { hermes: { ...empty } }
   verifyReply = { error: null, ok: true }
 
   vi.stubGlobal(
@@ -20,7 +20,7 @@ beforeEach(() => {
     vi.fn(async (path: string, init?: RequestInit) => {
       const method = init?.method ?? 'GET'
       const body = init?.body ? JSON.parse(String(init.body)) : undefined
-      const id = path.includes('openclaw') ? 'openclaw' : 'hermes'
+      const id = 'hermes'
       calls.push({ body, method, path })
 
       if (method === 'POST' && path.endsWith('/verify')) {
@@ -62,102 +62,99 @@ function renderSection() {
 }
 
 describe('LinkedAgentsSection', () => {
-  it('shows Hermes as recommended and OpenClaw as optional, with plain copy', async () => {
+  it('shows the Hermes link with plain copy and nothing else', async () => {
     renderSection()
 
     expect(await screen.findByText('Hermes (external)')).toBeTruthy()
-    expect(screen.getByText('OpenClaw (external)')).toBeTruthy()
     expect(screen.getByText('Recommended')).toBeTruthy()
-    expect(screen.getByText('Optional, legacy')).toBeTruthy()
-    expect(
-      screen.getByText(/Hermes is the recommended agent\. Link your own OpenClaw only if you already run one/)
-    ).toBeTruthy()
-    await waitFor(() => expect(screen.getAllByText('Not linked')).toHaveLength(2))
+    expect(screen.getByText(/Link a Hermes Agent you already run/)).toBeTruthy()
+    expect(document.body.textContent).not.toMatch(/openclaw/i)
+    await waitFor(() => expect(screen.getAllByText('Not linked')).toHaveLength(1))
   })
 
-  it('saves what was typed, then verifies, for the OpenClaw row only', async () => {
+  it('saves what was typed, then verifies, for the Hermes row', async () => {
     renderSection()
-    await screen.findByText('OpenClaw (external)')
+    await screen.findByText('Hermes (external)')
 
-    fireEvent.change(screen.getByLabelText('OpenClaw (external) address'), {
-      target: { value: 'http://claw.lan:18789' }
+    fireEvent.change(screen.getByLabelText('Hermes (external) address'), {
+      target: { value: 'http://hermes.lan:8642' }
     })
-    fireEvent.change(screen.getByLabelText('OpenClaw gateway token'), { target: { value: 'secret-token' } })
-    fireEvent.click(screen.getAllByRole('button', { name: 'Verify' })[1]!)
+    fireEvent.change(screen.getByLabelText('Hermes API key'), { target: { value: 'secret-token' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Verify' }))
 
     await waitFor(() => expect(screen.getByText('Linked')).toBeTruthy())
 
     const writes = calls.filter(c => c.method === 'POST')
 
     expect(writes.map(c => c.path)).toEqual([
-      '/api/owui/integrations/openclaw-external',
-      '/api/owui/integrations/openclaw-external/verify'
+      '/api/owui/integrations/hermes-external',
+      '/api/owui/integrations/hermes-external/verify'
     ])
-    expect(writes[0]!.body).toEqual({ token: 'secret-token', url: 'http://claw.lan:18789' })
+    expect(writes[0]!.body).toEqual({ token: 'secret-token', url: 'http://hermes.lan:8642' })
   })
 
   it('never shows a saved token back, and clears the typed one after saving', async () => {
-    statuses.openclaw = { ...empty, token_saved: true, url: 'http://claw.lan:18789' }
+    statuses.hermes = { ...empty, token_saved: true, url: 'http://hermes.lan:8642' }
     renderSection()
 
-    const token = (await screen.findByLabelText('OpenClaw gateway token')) as HTMLInputElement
+    const token = (await screen.findByLabelText('Hermes API key')) as HTMLInputElement
 
     expect(token.value).toBe('')
     expect(token.type).toBe('password')
     await waitFor(() => expect(token.placeholder).toMatch(/Token saved/))
     await waitFor(() =>
-      expect((screen.getByLabelText('OpenClaw (external) address') as HTMLInputElement).value).toBe(
-        'http://claw.lan:18789'
+      expect((screen.getByLabelText('Hermes (external) address') as HTMLInputElement).value).toBe(
+        'http://hermes.lan:8642'
       )
     )
 
     fireEvent.change(token, { target: { value: 'new-token' } })
-    fireEvent.click(screen.getAllByRole('button', { name: 'Verify' })[1]!)
+    fireEvent.click(screen.getByRole('button', { name: 'Verify' }))
     await waitFor(() => expect(token.value).toBe(''))
     expect(document.body.textContent).not.toContain('new-token')
   })
 
   it('does not re-save an unchanged address on Verify, so a saved token is kept', async () => {
-    statuses.openclaw = { ...empty, token_saved: true, url: 'http://claw.lan:18789' }
+    statuses.hermes = { ...empty, token_saved: true, url: 'http://hermes.lan:8642' }
     renderSection()
     await waitFor(() =>
-      expect((screen.getByLabelText('OpenClaw (external) address') as HTMLInputElement).value).toBe(
-        'http://claw.lan:18789'
+      expect((screen.getByLabelText('Hermes (external) address') as HTMLInputElement).value).toBe(
+        'http://hermes.lan:8642'
       )
     )
 
-    fireEvent.click(screen.getAllByRole('button', { name: 'Verify' })[1]!)
+    fireEvent.click(screen.getByRole('button', { name: 'Verify' }))
     await waitFor(() => expect(calls.some(c => c.path.endsWith('/verify'))).toBe(true))
 
     expect(calls.filter(c => c.method === 'POST').map(c => c.path)).toEqual([
-      '/api/owui/integrations/openclaw-external/verify'
+      '/api/owui/integrations/hermes-external/verify'
     ])
   })
 
   it('shows the gateway error when verification fails', async () => {
-    verifyReply = { error: 'Authentication failed — check the gateway token.', ok: false }
+    verifyReply = { error: 'Authentication failed — check the API key.', ok: false }
     renderSection()
-    await screen.findByText('OpenClaw (external)')
+    await screen.findByText('Hermes (external)')
 
-    fireEvent.change(screen.getByLabelText('OpenClaw (external) address'), {
-      target: { value: 'http://claw.lan:18789' }
+    fireEvent.change(screen.getByLabelText('Hermes (external) address'), {
+      target: { value: 'http://hermes.lan:8642' }
     })
-    fireEvent.click(screen.getAllByRole('button', { name: 'Verify' })[1]!)
+    fireEvent.click(screen.getByRole('button', { name: 'Verify' }))
 
-    expect(await screen.findByText('Authentication failed — check the gateway token.')).toBeTruthy()
+    expect(await screen.findByText('Authentication failed — check the API key.')).toBeTruthy()
     await waitFor(() => expect(screen.getByText('Verification failed')).toBeTruthy())
   })
 
   it('disconnects a saved link', async () => {
-    statuses.openclaw = { ...empty, connected: true, token_saved: true, url: 'http://claw.lan:18789', verified_at: 1 }
+    statuses.hermes = { ...empty, connected: true, token_saved: true, url: 'http://hermes.lan:8642', verified_at: 1 }
     renderSection()
 
     fireEvent.click(await screen.findByRole('button', { name: 'Disconnect' }))
 
     await waitFor(() =>
-      expect(calls.some(c => c.path === '/api/owui/integrations/openclaw-external/disconnect')).toBe(true)
+      expect(calls.some(c => c.path === '/api/owui/integrations/hermes-external/disconnect')).toBe(true)
     )
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Disconnect' })).toBeNull())
-    expect(screen.getAllByText('Not linked')).toHaveLength(2)
+    expect(screen.getAllByText('Not linked')).toHaveLength(1)
   })
 })

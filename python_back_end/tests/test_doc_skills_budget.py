@@ -155,3 +155,13 @@ def test_a_long_titled_deck_revision_through_the_real_entry_point_stays_under_th
     assert maybe_prepare_doc_turn(body)
     system = [m["content"] for m in body["messages"] if m["role"] == "system"]
     assert system and len(system[0]) <= PROMPT_CAP
+
+
+@pytest.mark.parametrize("kinds", [["deck", "pdf"], ["pdf", "deck", "doc"], list(KINDS)])
+def test_a_several_files_prompt_stays_under_the_small_model_cap(kinds):
+    prompt = doc_bridge.docs_system_prompt(kinds)
+    assert DOC_PROMPT_MARKER in prompt and len(prompt) <= PROMPT_CAP
+
+
+def test_the_several_files_skill_is_under_100_lines():
+    assert len(_skill_text("multi").splitlines()) < MAX_SKILL_LINES

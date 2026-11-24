@@ -31,6 +31,7 @@ const setup = () => {
     pause: vi.fn(() => calls.push(['pause', undefined])),
     resume: vi.fn(() => calls.push(['resume', undefined])),
     setLowFx: vi.fn((on: boolean) => calls.push(['lowfx', on])),
+    setPresence: vi.fn((presence: unknown) => calls.push(['presence', presence])),
     setSession: vi.fn((agents: IslandAgent[]) => calls.push(['session', agents])),
     setTheme: vi.fn((theme: unknown) => calls.push(['theme', theme]))
   }
@@ -175,5 +176,17 @@ describe('theme', () => {
 
     bridge.setTheme({ ...theme, mode: 'light' })
     expect(app.setTheme).toHaveBeenCalledTimes(2)
+  })
+
+  it('sends presence only when it changes, whatever the key order', () => {
+    const { app, bridge } = setup()
+    bridge.setPresence({ 'resident-1': 'busy', 'resident-2': 'away' })
+    bridge.setPresence({ 'resident-2': 'away', 'resident-1': 'busy' })
+    expect(app.setPresence).toHaveBeenCalledTimes(1)
+    bridge.setPresence({ 'resident-1': 'idle', 'resident-2': 'away' })
+    expect(app.setPresence).toHaveBeenCalledTimes(2)
+    bridge.dispose()
+    bridge.setPresence({})
+    expect(app.setPresence).toHaveBeenCalledTimes(2)
   })
 })

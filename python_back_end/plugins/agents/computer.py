@@ -49,6 +49,16 @@ logger = logging.getLogger(__name__)
 
 RUNNER_URL = os.getenv("HARVIS_AGENT_BROWSER_URL", "http://browser-runner:8765").rstrip("/")
 
+# Whether a new screen is a full Xfce desktop or a bare display, when neither
+# the caller nor the teammate's own setting (autonomy.desktop) says. Off by
+# default: a desktop costs about 200 MB of RAM per screen on top of Firefox.
+# "on" gives every session one; a teammate's own true/false always wins.
+DESKTOP_DEFAULT_ENV = "HARVIS_BOT_DESKTOP_DEFAULT"
+
+
+def desktop_default() -> bool:
+    return os.getenv(DESKTOP_DEFAULT_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
 from .computer_registry import (  # noqa: F401 — re-exported for callers and tests
     TOKEN_RE as _TOKEN_RE,
     VNC_WS_PATH,
@@ -191,6 +201,8 @@ def _uid(current_user) -> int:
 class StartForm(BaseModel):
     agent_id: Optional[str] = None
     url: Optional[str] = None
+    # None = this install's default (HARVIS_BOT_DESKTOP_DEFAULT).
+    desktop: Optional[bool] = None
     width: int = Field(default=1280, ge=640, le=1920)
     height: int = Field(default=800, ge=480, le=1200)
 
@@ -209,10 +221,12 @@ async def computer_health(current_user=Depends(get_current_user_optimized)):
     try:
         h = await _runner("GET", "/health", timeout=8.0)
     except HTTPException as exc:
-        return {"ok": False, "headedAvailable": False, "reason": exc.detail}
+        return {"ok": False, "headedAvailable": False, "desktopAvailable": False, "reason": exc.detail}
     return {
         "ok": bool(h.get("ok")),
         "headedAvailable": bool(h.get("headedAvailable")),
+        "desktopAvailable": bool(h.get("desktopAvailable")),
+        "desktopDefault": desktop_default(),
         "sessions": h.get("sessions"),
         "maxSessions": h.get("max_sessions"),
     }
@@ -238,9 +252,12 @@ def find_session(user_id: int, agent_id: Optional[str]) -> Optional[Dict[str, An
 
 async def ensure_session(
     user_id: int, agent_id: Optional[str], *, url: Optional[str] = None,
-    width: int = 1280, height: int = 800,
+    width: int = 1280, height: int = 800, desktop: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """The screen for this (user, teammate) — the one already up, or a new one.
+
+    ``desktop`` picks a full Xfce desktop over a bare display for a NEW screen
+    (None = the install default). A screen already up is handed back as it is.
 
     One live screen per profile. Firefox refuses a second process on the same
     profile anyway; better to hand back the one that is already up. Shared by
@@ -265,7 +282,8 @@ async def ensure_session(
         data = await _runner(
             "POST", "/session",
             json={"headed": True, "headless": False, "profile": profile,
-                  "width": width, "height": height},
+                  "width": width, "height": height,
+                  "desktop": desktop_default() if desktop is None else bool(desktop)},
             timeout=120.0,
         )
     except HTTPException as exc:
@@ -299,6 +317,7 @@ async def ensure_session(
         "width": data.get("width"),
         "height": data.get("height"),
         "taken_over": False,
+        "desktop": bool(data.get("desktop")),
         "created_at": int(time.time()),
     }
     _remember(rec)
@@ -316,7 +335,8 @@ async def ensure_session(
 @router.post("/sessions")
 async def computer_start(form: StartForm, current_user=Depends(get_current_user_optimized)):
     rec = await ensure_session(
-        _uid(current_user), form.agent_id, url=form.url, width=form.width, height=form.height
+        _uid(current_user), form.agent_id, url=form.url, width=form.width, height=form.height,
+        desktop=form.desktop,
     )
     return public_view(rec)
 
@@ -574,7 +594,8 @@ async def act(ctx: Dict[str, Any], tool_name: str, args: Dict[str, Any]) -> tupl
                 "https://duckduckgo.com/?q=your+words", False)
 
     try:
-        rec = await ensure_session(int(ctx.get("user_id") or 0), ctx.get("agent_id"))
+        rec = await ensure_session(int(ctx.get("user_id") or 0), ctx.get("agent_id"),
+                                   desktop=ctx.get("desktop"))
     except HTTPException as exc:
         return (f"The computer is not available right now: {exc.detail}", False)
     sid = rec["session_id"]

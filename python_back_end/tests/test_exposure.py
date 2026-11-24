@@ -109,12 +109,10 @@ def test_exposure_card_is_admin_only():
     ("/hermes-api/api/sandbox", True),  # bare form of a gated prefix
     ("/api/workspace", True),
     ("/api/workspaces", False),
-    ("/kubectl/exec", False),  # OpenClaw pods; has its own gateway token
+    ("/kubectl/exec", False),  # has its own gateway token
     ("/api/chat", False),
     ("/api/tunnel/verify", False),
     ("/api/remote/ssh/hosts/3/exec", True),
-    ("/api/openclaw/tasks", True),
-    ("/api/owui/openclaw/sync/apply", True),
     ("/api/artifacts/0b6c/build", True),
     ("/api/artifacts/0b6c/build/stop", True),
     ("/api/artifacts/0b6c/download", False),

@@ -12,10 +12,11 @@
 //    subtracting `[data-message-streaming="true"]` markers from message roots.
 //    Nothing in the app itself reads it, so without this test a delete would
 //    look free and would silently regress that repro's response gate.
-import { AssistantRuntimeProvider, type ThreadMessage, useExternalStoreRuntime } from '@assistant-ui/react'
+import { AssistantRuntimeProvider, type ThreadMessage } from '@assistant-ui/react'
 import { cleanup, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { useIncrementalExternalStoreRuntime } from '@/lib/incremental-external-store-runtime'
 import { Thread } from '.'
 
 const createdAt = new Date('2026-05-01T00:00:00.000Z')
@@ -67,7 +68,7 @@ function assistant(id: string, text: string, running: boolean): ThreadMessage {
 }
 
 function Harness({ messages }: { messages: ThreadMessage[] }) {
-  const runtime = useExternalStoreRuntime<ThreadMessage>({
+  const runtime = useIncrementalExternalStoreRuntime<ThreadMessage>({
     messages,
     isRunning: messages.at(-1)?.status?.type === 'running',
     onNew: async () => {}

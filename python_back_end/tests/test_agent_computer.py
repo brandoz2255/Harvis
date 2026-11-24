@@ -254,4 +254,61 @@ def test_computer_context_carries_what_the_gate_and_audit_need():
     agent = {"id": "a1", "autonomy": {"cleared_limits": ["send", None]}}
     ctx = computer_context(agent, user_id="7", run_id="r1", pool=None)
     assert ctx == {"user_id": 7, "agent_id": "a1", "run_id": "r1",
-                   "cleared_limits": ["send"], "pool": None}
+                   "cleared_limits": ["send"], "desktop": None, "pool": None}
+
+
+def test_computer_context_carries_the_teammates_own_desktop_choice():
+    from workspace.orchestration.coordinator import computer_context
+    on = computer_context({"id": "a1", "autonomy": {"desktop": True}}, user_id=7, run_id="r1")
+    off = computer_context({"id": "a1", "autonomy": {"desktop": False}}, user_id=7, run_id="r1")
+    junk = computer_context({"id": "a1", "autonomy": {"desktop": "yes"}}, user_id=7, run_id="r1")
+    assert (on["desktop"], off["desktop"], junk["desktop"]) == (True, False, None)
+
+
+# ── the optional desktop ─────────────────────────────────────────────────────
+
+@pytest.fixture
+def fake_runner(monkeypatch):
+    """Answers the two calls ensure_session makes; records what /session got."""
+    posted = []
+
+    async def runner(method, path, *, json=None, timeout=30.0):
+        if (method, path) == ("GET", "/sessions"):
+            return {"items": []}
+        if (method, path) == ("POST", "/session"):
+            posted.append(json)
+            return {"sessionId": f"s{len(posted)}", "vncToken": TOKEN, "display": ":100",
+                    "width": 1280, "height": 800, "desktop": bool(json.get("desktop"))}
+        raise AssertionError(f"unexpected runner call {method} {path}")
+
+    monkeypatch.setattr(c, "_runner", runner)
+    monkeypatch.setattr(c, "_barred", lambda _uid: False)
+    monkeypatch.delenv(c.DESKTOP_DEFAULT_ENV, raising=False)
+    return posted
+
+
+def test_a_new_screen_is_a_bare_display_unless_something_asks_for_a_desktop(fake_runner):
+    rec = asyncio.run(c.ensure_session(7, "a1"))
+    assert fake_runner[-1]["desktop"] is False
+    assert rec["desktop"] is False and c.public_view(rec)["desktop"] is False
+
+
+def test_the_install_default_turns_the_desktop_on_for_every_new_screen(fake_runner, monkeypatch):
+    monkeypatch.setenv(c.DESKTOP_DEFAULT_ENV, "on")
+    rec = asyncio.run(c.ensure_session(7, "a1"))
+    assert fake_runner[-1]["desktop"] is True and c.public_view(rec)["desktop"] is True
+
+
+def test_a_teammates_own_choice_beats_the_install_default(fake_runner, monkeypatch):
+    monkeypatch.setenv(c.DESKTOP_DEFAULT_ENV, "on")
+    asyncio.run(c.ensure_session(7, "a1", desktop=False))
+    assert fake_runner[-1]["desktop"] is False
+    monkeypatch.delenv(c.DESKTOP_DEFAULT_ENV)
+    asyncio.run(c.ensure_session(7, "b2", desktop=True))
+    assert fake_runner[-1]["desktop"] is True
+
+
+def test_a_screen_already_up_is_handed_back_as_it_is(fake_runner):
+    first = asyncio.run(c.ensure_session(7, "a1", desktop=False))
+    again = asyncio.run(c.ensure_session(7, "a1", desktop=True))
+    assert again is first and len(fake_runner) == 1

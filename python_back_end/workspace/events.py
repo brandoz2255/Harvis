@@ -1,7 +1,4 @@
-"""The event every workspace lane streams: token, tool_call, tool_result, log, done, error.
-
-It started life as the OpenClaw gateway's event, which is why the old name is still exported.
-"""
+"""The event every workspace lane streams: token, tool_call, tool_result, log, done, error."""
 
 import json
 from typing import Optional
@@ -28,5 +25,3 @@ class WorkspaceEvent:
             payload["agent_label"] = self.agent_label
         return f"data: {json.dumps(payload)}\n\n"
 
-
-OpenClawEvent = WorkspaceEvent

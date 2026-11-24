@@ -47,7 +47,8 @@ from jwt_secret import MCP_TOKEN_MINUTES as SIDECAR_TOKEN_MINUTES  # noqa: E402
 SIDECAR_NOTE = (
     "Documents: to make a deck, doc or sheet file, write one harvis-doc (call "
     "`mcp__{server}__docs_guide` for the format), then `docs_validate`, `docs_check` and "
-    "`docs_export` from the same server. Give the user the `download_url` it returns."
+    "`docs_export` from the same server. Several files means one harvis-doc and one export each. "
+    "Give the user every `download_url` it returns as a markdown link, `[file name](download_url)`."
 )
 
 

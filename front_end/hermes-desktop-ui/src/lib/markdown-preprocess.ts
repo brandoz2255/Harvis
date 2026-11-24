@@ -1,6 +1,7 @@
 import { normalizeMathDelimiters } from '@assistant-ui/react-streamdown'
 
 import { isLikelyProseFence, sanitizeLanguageTag } from '@/lib/markdown-code'
+import { isServerRoute } from '@/lib/harvis-files'
 import { clampHtmlNestingDepth } from '@/lib/markdown-html-depth'
 import { mediaKind, mediaMarkdownHref } from '@/lib/media'
 import { previewMarkdownHref } from '@/lib/preview-targets'
@@ -186,6 +187,11 @@ function routeFileLinksToPreview(text: string): string {
   return text.replace(FILE_LINK_RE, (match: string, ...args: unknown[]) => {
     const groups = args.at(-1) as { label: string; target: string }
     const target = groups.target.replace(/^<|>$/g, '')
+
+    // `/api/chat` is a backend route, not a file: keep it a plain link.
+    if (isServerRoute(target)) {
+      return match
+    }
 
     const href = mediaKind(target) === 'file' ? previewMarkdownHref(target) : mediaMarkdownHref(target)
 

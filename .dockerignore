@@ -1,6 +1,6 @@
 # Build-context exclusions.
 #
-# Two services build with `context: .` (openclaw, tts-service), so without this
+# tts-service builds with `context: .`, so without this
 # file the ENTIRE 24 GB repository is sent to the Docker daemon — twice. On
 # Docker Desktop (Windows/macOS) that transfer crosses a VM boundary and was
 # measured dominating an ~8m50s cold start.

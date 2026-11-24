@@ -3,7 +3,7 @@
 One step = ModelRouter completion (with tool schema) → parse tool_calls →
 dispatch via tools.py inside the isolated workspace → feed results back → repeat
 until the agent calls finish() / stops emitting tool calls / hits a limit.
-Emits OpenClawEvents tagged run_id/parent_run_id/agent_label/model, so the
+Emits WorkspaceEvents tagged run_id/parent_run_id/agent_label/model, so the
 existing persistence + RunView / Neural Map render it with no changes.
 
 Tool results are fed back as a plain user turn (not the strict OpenAI tool-role
@@ -25,7 +25,7 @@ from typing import AsyncGenerator
 from owui_compat.system_prompt import with_core
 from owui_compat.workspace_method import DEFAULT_SAFE_LANE
 
-from ..events import OpenClawEvent
+from ..events import WorkspaceEvent
 from .authz import authorize_action
 
 try:
@@ -709,10 +709,10 @@ class SubAgentRunner:
         # The screen this run may act on (plugins.agents.computer context). None
         # withholds the computer_* verbs entirely; see the coordinator.
         computer: dict | None = None,
-    ) -> AsyncGenerator[OpenClawEvent, None]:
+    ) -> AsyncGenerator[WorkspaceEvent, None]:
         mod_rules = None  # loaded below; ev() reads it for the mods' PostToolUse log rules
 
-        def ev(etype: str, data: dict) -> OpenClawEvent:
+        def ev(etype: str, data: dict) -> WorkspaceEvent:
             if etype == "tool_result":
                 if mod_rules:
                     mod_rules.log_tool("PostToolUse", str(data.get("tool") or ""), ok=bool(data.get("success")))
@@ -723,7 +723,7 @@ class SubAgentRunner:
                 # model's own devising. One site on purpose — every tool result in
                 # this method goes through ev(), including the MCP branch.
                 _prov_note(run_id, str(data.get("output") or ""))
-            e = OpenClawEvent(
+            e = WorkspaceEvent(
                 etype,
                 {**data, "agent_label": label, "parent_run_id": parent_run_id, "model": model_name},
             )

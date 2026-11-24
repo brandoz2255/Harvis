@@ -284,16 +284,6 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
                 data.append(_hm)
         except Exception:
             pass
-        # The user's OPTIONAL linked OpenClaw: listed only while their link is verified.
-        try:
-            from .hermes_chat import openclaw_chat_model_entry
-            _om = await openclaw_chat_model_entry(
-                getattr(request.app.state, "pg_pool", None), getattr(user, "id", None)
-            )
-            if _om and not any((m or {}).get("id") == _om["id"] for m in data):
-                data.append(_om)
-        except Exception:
-            pass
         # Phase F: per-user cloud chat models (Claude now, GPT later). Appear only when this user
         # has a VERIFIED cloud credential in Integrations. Fail-closed; never decrypts the secret.
         try:
@@ -1056,8 +1046,6 @@ def create_owui_router(deps: OwuiDeps) -> APIRouter:
     register_engine_auth_routes(router, get_current_user)
     from .hermes_connect import register_hermes_connect_routes
     register_hermes_connect_routes(router, get_current_user)
-    from .openclaw_connect import register_openclaw_connect_routes
-    register_openclaw_connect_routes(router, get_current_user)
     from .hermes_import import register_hermes_import_routes
     register_hermes_import_routes(router, get_current_user)
     from .hermes_skills import register_hermes_skill_routes

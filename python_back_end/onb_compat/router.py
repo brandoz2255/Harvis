@@ -2212,7 +2212,6 @@ async def _all_models(request: Request, user_id: Any) -> List[Dict[str, Any]]:
       1. native  — Ollama, llama-server, vLLM, desktop and external hosts
       2. cloud   — per-user, and only when the credential is VERIFIED in Integrations
       3. Hermes  — when the engine flag is on and a Hermes is reachable
-      3b. OpenClaw — only while the person's own link is verified
 
     Every source is additive and fail-open: one being unreachable narrows the list,
     it never empties it. The bare Ollama tag list runs last as the floor, so the
@@ -2261,17 +2260,6 @@ async def _all_models(request: Request, user_id: Any) -> List[Dict[str, Any]]:
             _add(hm.get("id"), hm.get("owned_by") or "hermes-agent", hm.get("name"))
     except Exception:
         logger.warning("onb_compat: hermes model entry unavailable", exc_info=True)
-
-    # 3b. The user's OPTIONAL linked OpenClaw: listed only while their link is verified, so a
-    #     person who never linked one never sees it (mirrors owui_compat's _owui_models).
-    try:
-        from owui_compat.hermes_chat import openclaw_chat_model_entry
-
-        om = await openclaw_chat_model_entry(pool, user_id)
-        if om:
-            _add(om.get("id"), om.get("owned_by") or "openclaw", om.get("name"))
-    except Exception:
-        logger.warning("onb_compat: openclaw model entry unavailable", exc_info=True)
 
     # 4. Floor: the raw tag list, in case (1) failed outright.
     for m in await _list_ollama_models():

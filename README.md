@@ -1,75 +1,83 @@
-# The Harvis AI Project
-### Quick Start (Local Development)
+# Harvis
 
-Harvis runs the same Docker Compose stack on Ubuntu and Windows. The host bootstrap is different: Ubuntu uses Bash; native Windows uses PowerShell with Docker Desktop's Linux containers. Kubernetes/k3s deployment remains Linux-only.
+An open-source, self-hosted AI workspace: an alternative to Open WebUI and Claude Desktop that you
+run on your own machine or host for your own network. You bring the model server (Ollama, LM
+Studio, llama.cpp, vLLM or anything OpenAI-compatible); Harvis brings the chat, the agent, the
+notebooks, the voice and the accounts.
 
-**Ubuntu 22.04/24.04**
+**Version 0.2.0** · MIT license · Ubuntu, Windows 11 and macOS through Docker
 
-Install Docker Engine and Docker Compose from [Docker's Ubuntu instructions](https://docs.docker.com/engine/install/ubuntu/), then use the Bash installer below.
+![The Bots tab: four bots in the office, one working at its desk](docs/images/office.png)
 
-**Windows 11 (native host)**
+## What it does
 
-Install Docker Desktop, enable its WSL 2 integration, install the current NVIDIA Windows driver for a GPU machine, and install/start Ollama or another OpenAI-compatible local model server. From PowerShell in this repository, run:
+- **Chat** with any model you run, with the model's thinking shown as it works.
+- **Agent runs** on Harvis's own runner, with tools, approvals before risky steps and a sandbox
+  per chat. The agent can drive a real browser and preview what it builds. For a full desktop on
+  the agent's screen, add `./install.sh --bot-desktop` (about 270 MB more, off by default).
+- **Documents**: ask for slides, a Word document, a PDF or a spreadsheet, or several in one
+  request, and the files come back in the chat.
+- **Notebooks**: add your own sources, ask across them, get answers with citations.
+- **Voice** on the CPU: Whisper speech-to-text and Kokoro text-to-speech on ONNX, no PyTorch.
+- **MCP servers**, **bots** and a **messaging gateway** for reaching Harvis from other apps.
+- **Per-user mods**: each account can change its own look and rules. A mod only turns on after its
+  owner approves it, and it cannot touch another account.
+- **The office**: the Bots tab draws your bots in a small office. A bot that is working sits at
+  its desk, an idle one is in the lounge, and a click on either opens its chat. A pixel town
+  (the island) sits behind the new-chat page.
+- **Model hosting on your LAN**: a k3s mode, and inference nodes so another GPU box can register
+  as a model source. See [Kubernetes hosting](#kubernetes-hosting).
+- **No GPU needed for Harvis itself.** The GPU work happens in your model server.
+
+| Deep research | Messaging |
+|---|---|
+| ![Deep research: quick, standard and deep runs](docs/images/deep-research.png) | ![Messaging: Telegram, Discord, Slack, Matrix, Signal, email and more](docs/images/messaging.png) |
+
+## Requirements
+
+| | |
+|---|---|
+| OS | Ubuntu 22.04 or 24.04 · Windows 11 with Docker Desktop (WSL 2) · macOS with Docker Desktop |
+| Docker | Docker Engine with the `docker compose` plugin (v2) |
+| Memory | 8 GB or more. The installer warns below that. |
+| Disk | Plan for 15 GB free. The default images measure 9.1 GB, the voice models add about 1.1 GB on first run, and a build keeps some cache. |
+| Models | A model server you already run. Without one Harvis still starts and you attach one later in Settings. |
+
+Kubernetes (k3s) mode is Linux only.
+
+## Install
+
+```bash
+git clone https://github.com/brandoz2255/Harvis.git
+cd Harvis
+```
+
+**Ubuntu**
+
+```bash
+./install.sh --check-only   # preflight only, changes nothing
+./install.sh                # detect a model server, write .env, build and start
+./install.sh --yes          # the same, without questions
+```
+
+**Windows 11** (PowerShell, in the repository folder)
 
 ```powershell
 .\install.ps1 -CheckOnly
-.\install.ps1 -VerifyGpu
+.\install.ps1 -VerifyGpu    # optional, skip on a CPU-only machine
 .\install.ps1 -Yes
 ```
 
-`-VerifyGpu` is optional for a CPU-only host. The PowerShell installer automatically maps a model server listening on Windows `localhost` to Docker Desktop's `host.docker.internal`; do not pass `http://localhost:11434` as the LLM URL. To supply one explicitly, use:
+**macOS:** Docker cannot reach the Mac GPU, so run Ollama natively and then `./install.sh`.
 
-```powershell
-.\install.ps1 -Yes -LlmUrl http://host.docker.internal:11434
-```
+The installer generates every secret, writes `.env` with owner-only permissions, creates the
+Docker network and starts the stack. There is nothing to choose and no GPU question. When it
+finishes, open **`http://localhost:9000/harvis/`**. The first account made on a fresh install is
+the admin.
 
-For a dedicated 4090 host, the practical order is: Windows NVIDIA driver → Docker Desktop/WSL 2 → `install.ps1 -VerifyGpu` → Ollama and models → `install.ps1 -Yes`.
+### Model server
 
-### Installation & Usage
-
-## 1.  **Clone the repository:**
-```bash
-    git clone <repository_url>
-    cd Harvis
-```
-<img width="760" height="163" alt="clone" src="https://github.com/user-attachments/assets/f0ddf838-296e-4ecd-bb91-e34414f0b930" />
-    
-## 2.  **Environment variables (only for a manual setup):**
-Both installers create the top-level `.env` and generate missing secrets. To configure it yourself before starting the stack, copy the backend example file with your OS's normal file command, then create the top-level `.env` values `docker-compose.yaml` reads:
-
-```bash
-    # Ubuntu
-    cp python_back_end/.env.example python_back_end/.env
-    # top-level .env (docker-compose reads these):
-    JWT_SECRET=<a-long-random-secret>       # REQUIRED — compose fails to start without it
-    MOONSHOT_API_KEY=<kimi-key>             # optional — cloud planner/writer (Kimi K2.5)
-    HARVIS_GATEWAY_TOKEN=<token>            # shared internal bearer (the installer generates it)
-```
-
-```powershell
-# Windows equivalent
-Copy-Item python_back_end/.env.example python_back_end/.env
-```
-See `docker-compose.yaml` for the full list of variables.
-
-The bundled OpenClaw service was retired on 2026-10-30. Hermes is the recommended agent; OpenClaw is only an optional external link to a gateway you run yourself (`docs/byo-openclaw-setup.md`).
-
-## 3.  **Run the installer:**
-On **Ubuntu**, use `./install.sh`:
-
-There is nothing to choose. Harvis ships the workspace — UI, API, routing, auth, ONNX speech,
-embeddings — and needs **no GPU of its own**, so the old nvidia/amd/cpu question is gone. The
-installer looks for a model server you already run, generates the secrets `.env` needs, creates the
-docker network, and launches the stack:
-
-```bash
-    ./install.sh          # detects a local model server, then installs
-    ./install.sh --yes    # same, non-interactive
-```
-
-On **native Windows**, use `./install.ps1 -Yes` after the Docker Desktop and GPU preflight shown above. It performs the same `.env`, network, database-password, build, and health checks, while using Docker Desktop's `host.docker.internal` bridge for a Windows-hosted model server.
-
-It probes this machine for an OpenAI-compatible server and uses the first one it finds:
+The installer probes this machine and uses the first server it finds:
 
 | Port | Server |
 |---|---|
@@ -78,409 +86,190 @@ It probes this machine for an OpenAI-compatible server and uses the first one it
 | 8080 | llama.cpp |
 | 8000 | vLLM |
 
-Point it somewhere else with `./install.sh --llm-url http://host.docker.internal:11434` — note that
-`localhost` inside a container means *the container*, so use `host.docker.internal` or a LAN IP for a
-server on your own machine. Found or not, the stack starts either way: with no server running, Harvis
-comes up and reports that no model provider is connected, and you can attach one from Settings later.
-
-**Apple Silicon (M-series):** Docker on macOS can't reach the Mac GPU, so run **Ollama natively** for
-Metal acceleration — the installer will find it on 11434 like any other host server.
-
-<details><summary>Manual / advanced (skip the installer)</summary>
+To point somewhere else:
 
 ```bash
-    docker network create ollama-n8n-network    # once (external network)
-    docker compose up --build -d
-```
-`JWT_SECRET` must be set in `.env` for this to start. Set `HARVIS_LLM_BASE_URL` to your model
-server; every service resolves against it, falling back to `OLLAMA_URL` and then to
-`http://host.docker.internal:11434`.
-</details>
-
-## 4.  **Access the application:**
-Open **`http://localhost:9000/harvis/`** — Nginx serves the web UI and proxies all `/api/*` calls to the
-backend. Do **not** call the backend on `:8000` directly from the browser (CORS). The UI is the
-Hermes desktop app built from `front_end/hermes-desktop-ui/`; the first visit shows its sign-in
-screen, and the first account made on a fresh install is the admin.
-
-
-
-The Harvis AI Project is a sophisticated, voice-activated AI assistant designed to be a proactive and interactive partner on your computer. It combines the power of large language models, voice synthesis, and system automation to provide a seamless interface for controlling your digital environment, retrieving information, and assisting with various tasks.
-
-## Core Features
-
-- **Voice-First Interaction:** Control Harvis AI and receive responses primarily through natural voice commands.
-- **Vibe Coding (AI-Powered Development):** A dedicated, voice-first, AI-powered development environment. It allows users to write, execute, and debug code through conversational voice and text commands. It operates in two modes:
-    - **Assistant Mode:** Turn-by-turn interaction for collaborative, step-by-step coding.
-    - **Vibe Mode:** Continuous execution for automating larger tasks with verbal updates and explicit user confirmation for critical actions.
-- **n8n Workflow Automation:** AI-powered natural language to n8n workflow creation system that interprets user requests and automatically generates sophisticated automation workflows.
-- **Desktop Automation:** Harvis AI can interact with your operating system, open applications, and manage files.
-- **Browser Automation:** Perform web searches, navigate to websites, and interact with web pages using simple voice commands.
-- **Real-time Screen Analysis:** Harvis AI can "see" your screen, understand the context of your current task, and provide relevant assistance, powered by Qwen2-VL AI for visual understanding.
-- **AI-Powered Chat:** Engage in contextual conversations, ask questions, and get intelligent responses from a powerful language model such as Mistral.
-- **Reasoning Model Support:** Full integration with reasoning models (DeepSeek R1, QwQ, O1) with automatic separation of thinking process from final answers.
-- **Extensible and Modular:** Built with a modern tech stack that allows for easy expansion and customization.
-
-## Tech Stack
-
-<img width="1653" height="1392" alt="image" src="https://github.com/user-attachments/assets/36dd9d2d-9313-41bb-9491-313838ed5e97" />
-
-### Frontend
-- **Live UI:** `front_end/hermes-desktop-ui/` — the **Hermes** desktop UI (React + Vite), built to a
-  static bundle and served by Nginx at `/`. Sign-in, sign-up and first-admin setup live inside it.
-- **Language / Styling:** TypeScript · Tailwind CSS
-- *Retired 2026-10-01:* `front_end/owui/` (a forked OpenWebUI) is no longer built or served. Its
-  source stays in the repo for reference.
-- *Legacy:* `front_end/newjfrontend/` (Next.js) is vestigial (see Deployment notes); the old
-  `front_end/jfrontend/` was removed.
-
-### Backend
-- **API:** Python (FastAPI) & Node.js (Next.js API Routes)
-- **Database:** PostgreSQL with connection pooling
-- **Authentication:** JWT-based with bcrypt password hashing
-- **AI/LLM:** 
-  - Ollama for local language model hosting
-  - **External Model Support:** Ability to route specific large models (e.g., `qwen3:235b`) to external Ollama endpoints, with automatic API key authentication.
-  - Qwen2-VL for visual understanding
-  - **VibeAgent:** Located in `python_back_end/ollama_cli/vibe_agent.py`, this module orchestrates the AI-powered coding experience.
-  - **Web Search:** LangChain-based with DuckDuckGo integration
-  - **Research API:** Comprehensive web search and analysis capabilities
-  - **n8n Automation:** AI-powered workflow automation with natural language processing
-- **Speech-to-Text (STT):** Whisper
-- **Text-to-Speech (TTS):** Chatterbox TTS
-- **Browser Automation:** Selenium WebDriver
-- **Workflow Automation:** n8n integration with AI-powered workflow generation
-
-### Infrastructure & Deployment
-- **Containerization:** Docker & Docker Compose
-- **Web Server:** Nginx
-- **CI/CD:** GitHub Actions
-
-## Getting Started
-
-### Prerequisites
-
-- Docker and Docker Compose (v2 / the `docker compose` plugin).
-- A GPU is **optional** — `./install.sh` supports **nvidia**, **amd** (ROCm), or **cpu**. Only the
-  `nvidia` backend needs an NVIDIA GPU + nvidia-container-toolkit; `cpu` runs anywhere. See the
-  "Choose your backend" section above.
-- `ffmpeg` for audio (voice) features.
-
-
-## n8n Workflow Automation API
-
-Harvis AI includes a sophisticated AI-powered n8n workflow automation system that interprets natural language requests and automatically generates corresponding n8n workflows.
-
-### Architecture Overview
-
-The n8n automation system consists of several interconnected components:
-
-1. **AI Analysis Engine** - Uses Ollama/Mistral to parse natural language requests
-2. **Workflow Builder** - Constructs n8n-compatible workflow configurations
-3. **n8n Client** - Manages communication with n8n REST API
-4. **Database Storage** - Tracks created workflows and automation history
-5. **Template System** - Provides pre-built workflow templates for common tasks
-
-### API Endpoints
-
-#### Core Automation Endpoints
-
-- **`POST /api/n8n/automate`** - Create workflow from natural language prompt
-- **`POST /api/n8n/workflow`** - Create workflow from predefined template
-- **`GET /api/n8n/workflows`** - List user's created workflows
-- **`GET /api/n8n/templates`** - List available workflow templates
-- **`POST /api/n8n/workflow/{id}/execute`** - Execute workflow manually
-- **`GET /api/n8n/workflow/{id}/executions`** - Get workflow execution history
-- **`GET /api/n8n/history`** - Get user's automation request history
-- **`GET /api/n8n/health`** - Check system health and connectivity
-
-#### Frontend Proxy Endpoints
-
-- **`POST /api/n8n-automation`** - Next.js proxy route for browser access
-
-### Key Libraries and Dependencies
-
-#### Backend (Python)
-- **`requests`** - HTTP client for n8n API communication
-- **`pydantic`** - Data validation and serialization
-- **`asyncpg`** - PostgreSQL async database driver
-- **`fastapi`** - API framework
-- **`ollama`** - AI model integration
-
-#### Frontend (TypeScript)
-- **`next.js`** - React framework for API routes
-- **`react`** - UI components and state management
-
-### How It Works
-
-#### 1. Natural Language Processing
-```python
-# User input: "Every 5 minutes, check if google.com is up. If not, send Discord message"
-async def _analyze_user_prompt(prompt: str, model: str = "mistral"):
-    # AI analyzes request and returns structured workflow requirements
-    return {
-        "feasible": True,
-        "workflow_type": "schedule",
-        "nodes_required": ["scheduleTrigger", "httpRequest", "if", "discord"],
-        "schedule": {"interval": "5 minutes"},
-        "parameters": {"url": "https://google.com", "discord_webhook": "..."}
-    }
+./install.sh --llm-url http://host.docker.internal:11434
 ```
 
-#### 2. Workflow Generation
-```python
-# Converts AI analysis into n8n workflow configuration
-def build_ai_workflow(name: str, description: str, requirements: Dict):
-    config = WorkflowConfig(name=name, nodes=[], connections={})
-    
-    # Add trigger node
-    if requirements["trigger"] == "schedule":
-        config.nodes.append(create_schedule_trigger(requirements["schedule"]))
-    
-    # Add action nodes based on requirements
-    for action in requirements["actions"]:
-        config.nodes.append(create_action_node(action))
-    
-    return config
+Inside a container `localhost` means the container, so use `host.docker.internal` or a LAN
+address for a server on your own machine. The Windows installer does this mapping for you.
+
+### Who can reach it
+
+A new install answers on this computer only. Change that with `--expose`:
+
+| Mode | Reach | Notes |
+|---|---|---|
+| `local` | this computer | the default |
+| `lan` | your network | the first sign-up becomes admin, then sign-up closes until you open it in Settings |
+| `tunnel`, `lan+tunnel` | the internet | **experimental**: a Cloudflare Tunnel behind Cloudflare Access |
+
+```bash
+./install.sh --expose lan
+./install.sh --k8s          # run on k3s and host models for your LAN (Linux)
+./install.sh --k8s-off      # back to plain Docker, all data kept
+./install.sh --stop         # stop the stack; --start brings it back
+./install.sh --admin-code   # a new 6-digit first-admin code for a shared server
 ```
 
-#### 3. n8n Integration
-```python
-# Creates workflow in n8n via REST API
-def create_workflow(workflow_config: Dict) -> Dict:
-    response = requests.post(
-        f"{self.base_url}/api/v1/workflows",
-        json=workflow_config,
-        auth=HTTPBasicAuth(self.username, self.password)
-    )
-    return response.json()
+Browsers only hand out the microphone over HTTPS or at `localhost`. For voice from another
+machine on your network, run `./scripts/enable-https.sh`.
+
+## Kubernetes hosting
+
+Docker is the default. On Linux, one flag moves the same install onto k3s so one machine can
+serve Harvis and its models to your whole network:
+
+```bash
+./install.sh --k8s
 ```
 
-### Workflow Templates
+It needs `sudo` and Docker. It installs k3s with the official k3s installer, starts Harvis in a
+`harvis` namespace and prints the address, `http://<this machine's address>:9000`. Reach defaults
+to `lan` in this mode.
 
-The system includes predefined templates for common automation scenarios:
+- **Same data, either way.** Both modes read the same Docker volumes, so switching moves nothing
+  and loses nothing. The Kubernetes objects are generated from `docker-compose.yaml` on every
+  start, so the two modes cannot drift apart.
+- **Models run in the cluster.** Ollama starts as a pod, on the NVIDIA GPU when the machine has
+  one and on the CPU when it does not. Pass `--llm-url` to use your own model server instead.
+- **Models are shared on your network** on port 11434 (11435 when that is taken), for chat and
+  model listing only. Set `HARVIS_LAN_MODELS_PORT=0` in `.env` to keep them private. Only do this
+  on a network you trust; it is not meant for the open internet.
+- **Build Space is off** in this mode, because it would hand the backend the Docker socket. Set
+  `HARVIS_K8S_BUILD_SPACE=1` in `.env` only if you accept that a taken-over backend controls the
+  machine.
 
-- **`weather_monitor`** - Scheduled weather data fetching with notifications
-- **`web_scraper`** - Periodic website data extraction
-- **`slack_notification`** - Slack message automation
-- **`email_automation`** - Email sending workflows  
-- **`http_api`** - HTTP API integration workflows
-- **`webhook_receiver`** - Webhook handling workflows
+Add a model:
 
-### Design Decisions
-
-#### Why We Built It This Way
-
-1. **Microservices Architecture**: Separates concerns between AI processing, workflow building, and n8n communication
-2. **Template-Based Approach**: Provides reliable, tested workflow patterns while allowing custom generation
-3. **AI-Powered Analysis**: Enables natural language input without rigid syntax requirements
-4. **Database Tracking**: Maintains audit trail and allows workflow management
-5. **Docker Network Integration**: Seamless communication between services in containerized environment
-
-#### Browser-to-Docker Network Pattern
-Since browsers cannot access Docker internal networks, we use a proxy pattern:
-```
-Browser → Next.js Route → Python Backend → n8n Service
+```bash
+sudo k3s kubectl -n harvis exec deploy/ollama -- ollama pull gemma4:e2b
 ```
 
-### Database Schema
+Add more machines. Run the first command on the server; it prints the second one, with the
+server address and a token filled in, for you to run on each machine that should join:
 
-The system uses PostgreSQL to track workflows and automation history:
-
-```sql
--- Workflow records
-CREATE TABLE n8n_workflows (
-    id SERIAL PRIMARY KEY,
-    workflow_id VARCHAR(255) UNIQUE NOT NULL,
-    user_id INTEGER REFERENCES users(id),
-    name VARCHAR(255) NOT NULL,
-    description TEXT,
-    prompt TEXT,
-    template_id VARCHAR(100),
-    config JSONB NOT NULL,
-    status VARCHAR(50) DEFAULT 'created',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- Automation history
-CREATE TABLE n8n_automation_history (
-    id SERIAL PRIMARY KEY,
-    user_id INTEGER REFERENCES users(id),
-    prompt TEXT NOT NULL,
-    response TEXT NOT NULL,
-    workflow_id VARCHAR(255),
-    success BOOLEAN NOT NULL,
-    error_message TEXT,
-    execution_time FLOAT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+```bash
+./install.sh --k8s-join-command
+./install.sh --k8s-join https://<server address>:6443 <token>
 ```
 
-### Future Possibilities
+Treat that token like a password: anyone holding it can add machines to the cluster.
 
-#### Short-term Enhancements
-- **Visual Workflow Preview**: Generate workflow diagrams before creation
-- **Advanced Templates**: More sophisticated workflow templates for complex scenarios
-- **Workflow Versioning**: Track changes and allow rollbacks
-- **Real-time Monitoring**: Live workflow execution monitoring dashboard
+| Command | What it does |
+|---|---|
+| `./install.sh --k8s-status` | nodes, pods and addresses |
+| `./install.sh --stop` / `--start` | stop Harvis and bring it back |
+| `./install.sh --k8s-off` | back to plain Docker; nothing is deleted |
+| `./install.sh --k8s-uninstall` | the same, then remove k3s from the machine |
 
-#### Long-term Vision
-- **Multi-Platform Support**: Integration with Zapier, Microsoft Power Automate, etc.
-- **AI Workflow Optimization**: Suggest improvements based on execution patterns
-- **Natural Language Debugging**: "My workflow isn't working" → AI diagnosis and fixes
-- **Collaborative Workflows**: Team-based workflow creation and sharing
-- **Integration Marketplace**: Community-contributed workflow templates
+## What gets installed
 
-#### Technical Improvements
-- **Caching Layer**: Redis for workflow templates and AI analysis results
-- **Rate Limiting**: Prevent abuse of AI analysis endpoints
-- **Webhook Management**: Dynamic webhook URL generation and routing
-- **Error Recovery**: Automatic workflow repair and retry mechanisms
+A plain install starts 13 services and nothing else:
 
-## Web Search & Research API
+| Service | Job |
+|---|---|
+| `nginx` | the front door on port 9000; serves the UI and proxies `/api` |
+| `backend` | FastAPI: chat, agent runner, auth, routing |
+| `pgsql` | Postgres 15 with pgvector |
+| `hermes-ui-builder` | builds the desktop UI once and hands it to nginx |
+| `voice-onnx` | Whisper and Kokoro speech |
+| `sandbox`, `repo-sandbox-image`, `box-egress` | where agent code runs, and what it may reach |
+| `browser-runner`, `preview-runner` | the agent's browser and live previews |
+| `harvis-mcp` | MCP server |
+| `harvis-messaging-gateway` | messaging and bots |
+| `llmfit` | checks which models fit your hardware |
+| `artifact-init` | one-shot volume setup |
 
-Harvis AI includes comprehensive web search and research capabilities powered by LangChain and DuckDuckGo:
+Every published port binds to `127.0.0.1` unless you choose `lan`.
 
-### API Endpoints
+More is opt-in through compose profiles, so the default stays small:
 
-- **`/api/web-search`** - Basic web search with configurable result limits and content extraction
-- **`/api/research-chat`** - Enhanced research chat with comprehensive web search and analysis
-- **`/api/fact-check`** - Fact-checking claims using web search verification
-- **`/api/comparative-research`** - Compare multiple topics using web research
+| Profile | Adds | Size |
+|---|---|---:|
+| `engines` | Hermes Agent, Claude Code and Codex as coding engines | 9.8 GB |
+| `notebooks` | the notebook UI and document worker | 1.5 GB |
+| `cad` | the CAD engine | 1.7 GB |
+| `advanced-voice` | GPU voice models | 37.6 GB |
+| `tunnel` | the Cloudflare tunnel connector (experimental) | small |
 
-### Features
+Per-profile numbers and how they are measured: [`docs/deploy/STORAGE-BUDGET.md`](docs/deploy/STORAGE-BUDGET.md).
+A check on every change fails the build if the default images grow past 10 GB.
 
-- **Multi-source Search:** Primary DuckDuckGo search with Tavily API fallback
-- **Content Extraction:** Full article content using newspaper3k
-- **Research Analysis:** AI-powered analysis and synthesis of search results
-- **Rate Limiting Protection:** Built-in handling for search engine rate limits
+## Stack
 
-## Authentication & Database
+- **Backend:** Python 3.12, FastAPI, Postgres 15 with pgvector. Features live as plugins under
+  `python_back_end/plugins/`.
+- **Frontend:** the Hermes desktop UI (React, Vite, TypeScript, Tailwind), built to a static
+  bundle and served by nginx.
+- **Speech:** ONNX Runtime with Whisper and Kokoro.
+- **Deploy:** Docker Compose, or k3s through `scripts/k8s/`.
+- **CI:** GitHub Actions for backend tests, UI tests, the installers, the image size guard and
+  security scans (CodeQL, Semgrep, Trivy, Gitleaks).
 
-### Database Schema
-- **PostgreSQL** with connection pooling
-- **Users table** with JWT authentication
-- **Environment-based configuration** for secure connections
+## Repository layout
 
-### Authentication Options
-- **Current:** Frontend API routes (`/app/api/auth/`)
-- **Recommended:** Backend-centric authentication for enhanced security
-- **JWT tokens** with configurable expiration (default: 1 hour)
-- **bcrypt password hashing** for secure credential storage
+| Path | What is there |
+|---|---|
+| `install.sh`, `install.ps1` | the installers |
+| `docker-compose.yaml` | every service, network and volume |
+| `python_back_end/` | the backend and its tests |
+| `front_end/hermes-desktop-ui/` | the live UI; Harvis code is under `src/plugins/harvis/` and `src/mods/` |
+| `services/voice-onnx/` | the speech sidecar |
+| `browser_runner/`, `repo-sandbox-engine/`, `box-egress/` | agent browser, sandbox and egress control |
+| `scripts/k8s/` | the k3s mode |
+| `docs/` | deploy notes, designs and handoffs |
 
-## Project Structure
+Earlier versions of Harvis (a Next.js frontend, Open WebUI, OpenClaw, n8n) are not in this tree.
+Their code and guides are in the repository history.
 
-- `front_end/hermes-desktop-ui/`: **The live frontend** — the Hermes desktop UI (React + Vite). Built
-  to a static bundle and served by Nginx at `/`. Harvis-specific code is under `src/plugins/harvis/`,
-  `src/app/sign-in/` and `src/lib/harvis-session.ts`.
-- `front_end/owui/`: Retired OpenWebUI fork, kept for reference only. Not built or served.
-- `front_end/newjfrontend/`: Legacy Next.js frontend — vestigial (Nginx only proxies `/api/ai-chat`
-  to it, and the live UI never calls that route). Slated for removal.
-- `front_end/open-notebook/`: Vendored NotebookLM-style Next.js UI, served at `/onb`.
-- `python_back_end/`: The main Python backend — FastAPI server, AI logic, orchestration, automation.
-  - `research/`: Web search and research functionality
-  - `ollama_cli/vibe_agent.py`: AI-powered development environment
-- `rest_api/`: A separate FastAPI service.
-- `docker-compose.yaml`: Defines the services, networks, and volumes for the entire application.
-- `nginx.conf`: Nginx configuration for routing traffic to the frontend and backend services.
-- `.github/workflows/`: CI/CD pipeline definitions for automated testing and deployment.
+## Development
 
-## Development Workflow
+```bash
+docker compose up --build -d      # build and run the whole stack
+docker compose logs -f backend    # follow one service
+docker restart harvis-backend     # the backend is bind-mounted; restart to pick up Python changes
+docker compose down               # stop everything
+```
 
-### Frontend Development (Hermes — the live UI)
-> First-time deploy needs none of this — `docker compose up --build` builds the Hermes
-> bundle inside Docker (the `hermes-ui-builder` service) and Nginx waits for it. To publish a
-> UI change on a running install:
+Publish a UI change on a running install:
+
 ```bash
 HARVIS_HERMES_UI_NODE_HEAP_MB=6144 docker compose build hermes-ui-builder
 docker compose up hermes-ui-builder
 docker restart nginx-proxy
 ```
-For a fast edit loop: `cd front_end/hermes-desktop-ui && npm install`, then
+
+For a fast UI loop: `cd front_end/hermes-desktop-ui && npm install`, then
 `npx vitest run --project ui <paths>` and `npx tsc --noEmit -p .`.
 
-### Docker Operations
+Backend tests, offline, from the repository root:
+
 ```bash
-docker compose up --build -d     # Build and run the entire stack (Nginx at :9000)
-docker compose down              # Stop all services
-docker compose logs -f [service] # View service logs
-docker restart harvis-backend    # Backend is bind-mounted — restart to pick up Python changes
+docker run --rm --network none -e HARVIS_ALLOW_EPHEMERAL_JWT_SECRET=1 \
+  -v "$PWD:/repo:ro" -w /repo/python_back_end --entrypoint python \
+  harvis-backend:latest -m pytest -q -p no:cacheprovider -o addopts="" tests
 ```
 
-### Key Development Commands
-- **Type checking:** `npx tsc --noEmit -p .` in `front_end/hermes-desktop-ui` before committing UI changes.
-- **Backend tests:** `docker exec harvis-backend python -m pytest tests/ -q`.
-- **Git strategy:** Feature branches from `main` with conventional commits.
+## Security
 
-## Recent Improvements & Changes
+- The stack refuses to start without `JWT_SECRET` and `POSTGRES_PASSWORD`. The installers
+  generate both; nothing ships with a default password.
+- Ports are loopback-only by default. Reaching Harvis from the network is a choice you make
+  with `--expose`.
+- On a shared server the first admin needs a 6-digit code shown on the host.
+- Accounts are isolated from each other, and agent code runs in a sandbox with controlled egress.
+- The tunnel mode is experimental. Do not put Harvis on the public internet without it and
+  without Cloudflare Access in front.
 
+Report a vulnerability through [`SECURITY.md`](SECURITY.md).
 
-### Latest Updates (2026-01-26)
+## License and credits
 
-#### Core Improvements
-- ✅ **Research Agent**: Significantly improved output quality for deep research tasks, utilizing the new "Cards" UI.
-- ✅ **UI Redesign**: Complete visual overhaul with a new "Cards" layout for better information density and aesthetics.
-- ✅ **Streaming Responses**: Implemented true Server-Sent Events (SSE) streaming for chat and voice, resolving Nginx 499 timeouts.
-- ✅ **User Experience**: Fixed independent scrolling issues for the sidebar and main chat area.
+MIT, see [`LICENSE`](LICENSE). The project also asks that you use it responsibly:
+[`docs/ETHICAL_USE.md`](docs/ETHICAL_USE.md) is a request, not a license condition.
 
-### Latest Updates (2025-01-17)
-
-#### Security Enhancements
-- ✅ **XSS Vulnerability Fix**: Resolved unescaped entities in React components
-- ✅ **React Hook Dependencies**: Fixed useEffect dependency warnings
-- ✅ **Performance Optimization**: Added useCallback to prevent unnecessary re-renders
-- ✅ **Code Quality**: All ESLint warnings and errors resolved
-
-#### Reasoning Model Integration
-- ✅ **Full Reasoning Support**: Automatic detection of reasoning models (DeepSeek R1, QwQ, O1)
-- ✅ **Content Separation**: Thinking process separated from final answers server-side
-- ✅ **Clean UI**: Main chat shows only final answers, AI insights shows reasoning
-- ✅ **TTS Optimization**: Chatterbox reads only final answers (not thinking process)
-
-#### Chat Interface Improvements
-- ✅ **Infinite Loop Fixes**: Resolved infinite render loops in chat components
-- ✅ **Model Selection**: Ollama models properly populate in dropdown
-- ✅ **Session Management**: Fixed chat history infinite fetching issues
-- ✅ **Database Integration**: Proper UUID handling for chat sessions
-
-### Development Notes
-
-#### Change Tracking
-Design/architecture decisions and session handoffs are tracked in `docs/handoffs/` and the
-project's Obsidian vault; per-fix notes live alongside the code. (The former
-`front_end/jfrontend/changes.md` was removed with that directory.)
-
-#### Quality Assurance
-- All changes pass `npm run lint` and `npm run type-check`
-- Security vulnerabilities proactively identified and resolved
-- Performance optimizations implemented for better user experience
-
-## Security Considerations
-
-### Current Security Features
-- **Password Security:** bcrypt hashing with salt
-- **Token Management:** JWT with 1-hour expiration
-- **Database Security:** Connection pooling and parameterized queries
-- **Environment Variables:** Secure configuration management
-
-### Recent Security Improvements (2025-01-17)
-- **XSS Protection:** Fixed unescaped entities in React components
-- **React Hook Security:** Resolved useEffect dependency warnings preventing stale closures
-- **Performance Optimization:** Wrapped functions in useCallback to prevent unnecessary re-renders
-- **Code Quality:** All ESLint security warnings resolved
-- **Memory Leak Prevention:** Proper cleanup of event listeners and timeouts
-
-### Recommended Enhancements
-- **Backend Authentication:** Migrate auth logic to Python backend for enhanced security
-- **Rate Limiting:** Implement on auth and API endpoints
-- **CORS Configuration:** Proper frontend-backend communication
-- **Audit Logging:** Track authentication attempts and API access
-- **Input Validation:** Server-side validation for all endpoints
-
-## Troubleshooting
-
-### Common Issues
-- **Database Connection:** Ensure PostgreSQL service health before frontend starts
-- **Authentication:** Check JWT_SECRET consistency across services
-- **Web Search 0 Results:** May indicate rate limiting or network issues in Docker
-- **Type Errors:** Run `npm run type-check` regularly during development
+Harvis adapts code from [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)
+and other open-source projects, and the office view is drawn with the MIT-licensed Office 3D
+renderer; [`NOTICE`](NOTICE) lists them.

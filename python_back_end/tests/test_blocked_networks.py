@@ -45,7 +45,7 @@ def test_agent_fetch_refuses_the_campus():
 
 def test_openclaw_web_proxy_refuses_the_campus():
     from fastapi import HTTPException
-    from tools import openclaw_proxy as op
+    from tools import agent_tools_proxy as op
 
     assert "blocks" in (op._blocked_reason("203.0.113.11") or "")
     assert op._blocked_reason("8.8.8.8") is None

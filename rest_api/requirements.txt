@@ -1,5 +1,0 @@
-fastapi
-uvicorn
-requests
-passlib
-google-generativeai

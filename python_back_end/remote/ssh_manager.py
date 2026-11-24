@@ -443,7 +443,7 @@ async def _audit_ssh(
     pool, *, session_key: str, tool: str, input_obj: dict,
     status_code: int, output_meta: Optional[dict] = None, error: Optional[str] = None,
 ) -> None:
-    """Mirror tools.openclaw_proxy._audit — write one openclaw_tool_audit row.
+    """Mirror tools.agent_tools_proxy._audit — write one openclaw_tool_audit row.
     Never breaks the call on logging failure."""
     if pool is None:
         return

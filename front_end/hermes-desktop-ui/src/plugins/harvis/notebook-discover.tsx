@@ -15,7 +15,7 @@ import { DeepResearch } from './notebook-discover-deep'
 import { PagePicker } from './notebook-page-picker'
 import { errorText } from './notebook-shared'
 
-function FastResearch({ notebookId, onAdded }: { notebookId: string; onAdded: () => void }) {
+export function FastResearch({ notebookId, onAdded }: { notebookId: string; onAdded: () => void }) {
   const [query, setQuery] = useState('')
   const [busy, setBusy] = useState(false)
   const [results, setResults] = useState<FoundPage[] | null>(null)

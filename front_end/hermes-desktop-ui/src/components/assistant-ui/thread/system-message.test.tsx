@@ -1,7 +1,8 @@
-import { AssistantRuntimeProvider, type ThreadMessage, useExternalStoreRuntime } from '@assistant-ui/react'
+import { AssistantRuntimeProvider, type ThreadMessage } from '@assistant-ui/react'
 import { cleanup, render } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
 
+import { useIncrementalExternalStoreRuntime } from '@/lib/incremental-external-store-runtime'
 import { $displayTimestamps } from '@/store/display-timestamps'
 
 import { stubThreadEnvironment } from '../test-utils'
@@ -23,7 +24,7 @@ function Harness({ text }: { text: string }) {
     metadata: { custom: { timelineTimestamp: timestamp.getTime() / 1000 } }
   } as unknown as ThreadMessage
 
-  const runtime = useExternalStoreRuntime<ThreadMessage>({
+  const runtime = useIncrementalExternalStoreRuntime<ThreadMessage>({
     messages: [message],
     isRunning: false,
     onNew: async () => {}

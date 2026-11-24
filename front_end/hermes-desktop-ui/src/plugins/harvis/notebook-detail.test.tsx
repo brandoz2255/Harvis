@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { NotebookDetail } from './notebook-detail'
 import { requestQuestion, takePendingQuestion } from './notebook-selection'
-import { renderWithQuery, routeApi } from './notebook-test-utils'
+import { dismissAddSources, renderWithQuery, routeApi } from './notebook-test-utils'
 
 const { harvisApi } = vi.hoisted(() => ({ harvisApi: vi.fn() }))
 
@@ -200,6 +200,7 @@ describe('NotebookDetail', () => {
   it('renames and describes through PATCH', async () => {
     mockRoutes([])
     renderWithQuery(<NotebookDetail layout="columns" notebookId={NB} onDeleted={() => undefined} />)
+    await dismissAddSources()
     await screen.findByRole('heading', { level: 2, name: 'Mars Rover Exploration Texts' })
 
     const edit = screen.getByRole('button', { name: /edit/i })
@@ -231,6 +232,7 @@ describe('NotebookDetail', () => {
     const { container } = renderWithQuery(
       <NotebookDetail layout="columns" notebookId={NB} onDeleted={() => undefined} />
     )
+    await dismissAddSources()
 
     await screen.findByRole('heading', { level: 2, name: 'Mars Rover Exploration Texts' })
     expect(container.querySelector('[data-layout="columns"]')).toBeTruthy()
@@ -244,6 +246,7 @@ describe('NotebookDetail', () => {
   it('collapses either side panel to a strip and back', async () => {
     mockRoutes([])
     renderWithQuery(<NotebookDetail layout="columns" notebookId={NB} onDeleted={() => undefined} />)
+    await dismissAddSources()
 
     await screen.findByText(/No sources yet/)
     fireEvent.click(screen.getByRole('button', { name: 'Hide Sources' }))

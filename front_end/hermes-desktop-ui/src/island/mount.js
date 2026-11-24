@@ -11,6 +11,7 @@ import { ISLAND_MAP, parseMap } from "./engine/world.js";
 import { Sim, TICK_MS } from "./engine/sim.js";
 import { normalizeSession } from "./engine/agents.js";
 import { applyEvent } from "./engine/events.js";
+import { setPresence } from "./engine/presence.js";
 import { Renderer } from "./engine/render.js";
 import { startIsland } from "./engine/stardew/stardew-app.js";
 import { worldFromTbin } from "./engine/stardew/stardew-world.js";
@@ -96,8 +97,9 @@ export function mountIsland(root, opts = {}) {
   root.prepend(style);
   const el = (name) => root.querySelector(`[data-el="${name}"]`);
 
-  const world = parseMap(ISLAND_MAP);
+  const world = parseMap(ISLAND_MAP)
   let session = { agents: opts.agents ?? [] };
+  let presence = {}; // agent id -> busy | idle | away, re-applied whenever the residents are rebuilt
   const onBadAgent = (err) => console.warn("island: bad agent", err.message);
   const sim = new Sim({ world, wander: true, agents: normalizeSession(session, world, { onError: onBadAgent }), weather: opts.weather ?? "sun" });
   const canvas = el("canvas");
@@ -129,11 +131,16 @@ export function mountIsland(root, opts = {}) {
   function replaceAgents(s, w) {
     for (const a of [...s.agents]) s.removeAgent(a.id);
     for (const a of normalizeSession(session, w, { onError: onBadAgent })) s.addAgent(a);
+    applyPresence(s);
+  }
+
+  function applyPresence(s) {
+    for (const a of s.agents) setPresence(s, a.id, presence[a.id]);
   }
 
   function renderAgents() {
     el("agents").innerHTML = sim.agents.map((a) => {
-      const st = a.sleeping ? "asleep" : a.chat ? `chatting w/ ${a.chat.with}` : a.status;
+      const st = a.presence === "away" ? "out of office" : a.sleeping ? "asleep" : a.chat ? `chatting w/ ${a.chat.with}` : a.status;
       return `<div class="hi-agent ${r.selected === a.id ? "hi-sel" : ""}" data-id="${a.id}">
         <span class="hi-dot" style="background:${a.color}"></span><span>${esc(a.name)}</span>
         <span class="hi-st">${esc(a.activity ? a.activity.label : st)}${a.meta?.model ? " · " + esc(a.meta.model) : ""}</span></div>`;
@@ -206,6 +213,7 @@ export function mountIsland(root, opts = {}) {
         opts: { interactive: false, lowPower: lowFx || undefined, time: sim.timeString(), weather: sim.weather },
         onSelect: (id) => opts.onSelect?.(id),
       });
+      applyPresence(app.sim);
       app.r.setTheme(theme);
       app.setInteractive(interactive);
       if (paused) app.pause();
@@ -292,6 +300,14 @@ export function mountIsland(root, opts = {}) {
       if (disposed) return;
       if (custom) { replaceAgents(custom.app.sim, custom.app.sim.world); custom.app.r.lastSig = ""; }
       else { replaceAgents(sim, world); r.buildStatic(); renderAgents(); }
+    },
+    /** What each resident is really doing: busy (cafe), idle (benches), away (home). In place, no rebuild. */
+    setPresence(next) {
+      presence = { ...(next ?? {}) };
+      if (disposed) return;
+      applyPresence(custom ? custom.app.sim : sim);
+      if (custom) custom.app.r.lastSig = "";
+      else renderAgents();
     },
     /** The app's look; only #rrggbb colours get through (hudTheme). */
     setTheme(next) {

@@ -25,6 +25,11 @@ param(
     # Cloudflare is wider: emails or @domain, comma-separated; off removes the
     # list. Same as install.sh --allow-emails.
     [string]$AllowEmails,
+    # A full desktop (Xfce, about 270 MB more) on the screens agent teammates
+    # browse on; every user of this Harvis gets it. per-bot: each teammate turns
+    # it on. all: every teammate screen opens with it. off: remove it. Left out,
+    # an existing install keeps what it had. Same as install.sh --bot-desktop.
+    [ValidateSet('per-bot', 'all', 'off')][string]$BotDesktop,
     # A new 6-digit first-admin code for a shared server with no admin yet.
     # Same as install.sh --admin-code.
     [switch]$AdminCode,
@@ -36,6 +41,7 @@ param(
 $ErrorActionPreference = 'Stop'
 # ValidateSet ignores case; .env and every comparison below use lower case.
 if ($Expose) { $Expose = $Expose.ToLowerInvariant() }
+if ($BotDesktop) { $BotDesktop = $BotDesktop.ToLowerInvariant() }
 Set-StrictMode -Version Latest
 
 $repoRoot = Split-Path -Parent $PSCommandPath
@@ -421,6 +427,17 @@ function Initialize-HarvisEnvironment {
     }
     if (-not (Get-DotEnvValue 'MESSAGING_GATEWAY_TOKEN')) { Set-DotEnvValue 'MESSAGING_GATEWAY_TOKEN' (New-RandomHex 24) }
     if ($ResolvedLlmUrl) { Set-DotEnvValue 'HARVIS_LLM_BASE_URL' $ResolvedLlmUrl }
+    # A build argument of the browser runner image: the compose up --build below
+    # rebuilds it with or without the desktop.
+    if ($BotDesktop -eq 'off') {
+        Remove-DotEnvValue 'HARVIS_BOT_DESKTOP'
+        Remove-DotEnvValue 'HARVIS_BOT_DESKTOP_DEFAULT'
+    }
+    elseif ($BotDesktop) {
+        Set-DotEnvValue 'HARVIS_BOT_DESKTOP' '1'
+        if ($BotDesktop -eq 'all') { Set-DotEnvValue 'HARVIS_BOT_DESKTOP_DEFAULT' '1' }
+        else { Remove-DotEnvValue 'HARVIS_BOT_DESKTOP_DEFAULT' }
+    }
 
     $runtimes = (& docker info --format '{{json .Runtimes}}')
     if ($runtimes -match '"nvidia"') { Set-DotEnvValue 'HARVIS_GPU_RUNTIME' 'nvidia' }

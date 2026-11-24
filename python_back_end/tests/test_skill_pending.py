@@ -742,11 +742,11 @@ def test_publish_skips_a_skill_whose_text_changed_after_approval():
     legacy = row("legacy", "Old.", {"verdict": "supported"})  # an older approval has no hash and keeps working
     unaudited = row("unaudited", "Body.", {})
 
-    preview = mcp_wizard._build_preview([ok, edited, legacy, unaudited], [])
+    preview = mcp_wizard._build_preview([ok, edited, legacy, unaudited])
     assert [i["name"] for i in preview["skills"]["items"]] == ["ok", "legacy"]
     assert any("changed after it was approved: edited" in n for n in preview["notes"])
     # the deliberate override still lists everything, as before
-    override = mcp_wizard._build_preview([ok, edited, legacy, unaudited], [], require_verdict=False)
+    override = mcp_wizard._build_preview([ok, edited, legacy, unaudited], require_verdict=False)
     assert len(override["skills"]["items"]) == 4
 
 

@@ -1,7 +1,8 @@
-import { AssistantRuntimeProvider, type ThreadMessage, useExternalStoreRuntime } from '@assistant-ui/react'
+import { AssistantRuntimeProvider, type ThreadMessage } from '@assistant-ui/react'
 import type { ReactNode } from 'react'
 import { vi } from 'vitest'
 
+import { useIncrementalExternalStoreRuntime } from '@/lib/incremental-external-store-runtime'
 import { stubResizeObserver } from '@/test/jsdom'
 
 /** Fixed clock for message fixtures, so nothing sorts by "now". */
@@ -54,7 +55,7 @@ export function stubThreadViewportSize() {
  *  way the app's external store drives it: the thread is running while the tail
  *  message is. */
 export function ThreadRuntime({ children, messages }: { children: ReactNode; messages: ThreadMessage[] }) {
-  const runtime = useExternalStoreRuntime<ThreadMessage>({
+  const runtime = useIncrementalExternalStoreRuntime<ThreadMessage>({
     messages,
     isRunning: messages.at(-1)?.status?.type === 'running',
     onNew: async () => {}

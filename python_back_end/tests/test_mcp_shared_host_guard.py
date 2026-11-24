@@ -246,7 +246,7 @@ def mcp_test():
 
 
 @pytest.mark.parametrize("url", [
-    "http://ollama:11434/", "http://pgsql:5432/", "http://backend:8000/api/users", "http://openclaw:18789/",
+    "http://ollama:11434/", "http://pgsql:5432/", "http://backend:8000/api/users",
     "http://127.0.0.1:8000/", "http://10.0.0.5/", "http://192.168.1.1/", "http://169.254.169.254/latest/meta-data/",
     "http://100.64.0.9/", "http://100.100.1.1:8080/mcp", "http://[::ffff:10.0.0.1]/", "http://[::1]/", "http://localhost:8000/",
     "http://printer/", "http://nas.local/", "http://unresolvable.example/",

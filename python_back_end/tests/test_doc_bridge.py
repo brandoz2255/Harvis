@@ -627,3 +627,58 @@ def test_the_accepted_format_wins_over_the_one_turned_down():
     assert conversion_target("make it a pdf instead of a deck") == "pdf"
     assert conversion_target("turn it into a deck") == "deck"
     assert detect_doc_kind("make a pdf not a deck") == "pdf"
+
+
+# ---- several files in one message ----------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text,kinds", [
+    ("make a pdf, slides and a doc about cats", ["pdf", "deck", "doc"]),
+    ("make me a pdf, slides, and docs of a cat", ["pdf", "deck", "doc"]),
+    ("can you make slides and a pdf about house cats", ["deck", "pdf"]),
+    ("make a deck about cats and a spreadsheet of cat food costs", ["deck", "sheet"]),
+    ("write a word doc and a powerpoint on cats", ["doc", "deck"]),
+    ("create a pdf and a deck and a docx about cats please", ["pdf", "deck", "doc"]),
+    ("make a deck about cats and a pdf", ["deck", "pdf"]),
+    ("slides and a pdf about cats", ["deck", "pdf"]),
+    ("make me slides, a handout and a budget sheet for the bake sale", ["deck", "doc", "sheet"]),
+])
+def test_a_message_that_lists_several_files_asks_for_each(text, kinds):
+    assert doc_bridge.detect_doc_kinds(text) == kinds
+    assert detect_doc_kind(text) == kinds[0]
+
+
+@pytest.mark.parametrize("text,kind", [
+    ("make slides about cats", "deck"),
+    ("make slides about pdfs and docs", "deck"),
+    ("make a deck about cats and dogs", "deck"),
+    ("make a pdf about salt and pepper", "pdf"),
+    ("make a deck and email it to sam", "deck"),
+    ("make a pdf, not a deck", "pdf"),
+    ("make a deck. the slides look bad", "deck"),
+    ("write the outline, then make the slides", "deck"),
+])
+def test_a_topic_or_a_remark_after_the_file_is_not_a_second_file(text, kind):
+    assert doc_bridge.detect_doc_kinds(text) == [kind]
+
+
+@pytest.mark.parametrize("text", ["slides and notes are attached", "slides and a pdf are attached",
+                                  "what is the difference between slides and a pdf?"])
+def test_a_list_of_formats_that_is_not_a_request_stays_unclaimed(text):
+    assert doc_bridge.detect_doc_kinds(text) == []
+
+
+def test_a_several_files_turn_gets_one_prompt_naming_each_kind_in_order():
+    body = {"messages": [{"role": "user", "content": "make a pdf, slides and a doc about cats"}]}
+    assert maybe_prepare_doc_turn(body) == "pdf"
+    systems = [m["content"] for m in body["messages"] if m["role"] == "system"]
+    assert len(systems) == 1
+    prompt = systems[0]
+    assert doc_bridge.DOC_PROMPT_MARKER in prompt and "3 blocks" in prompt
+    assert prompt.index("kind: pdf)") < prompt.index("kind: deck)") < prompt.index("kind: doc)")
+    assert "No second block" not in prompt
+    # Only the asked kinds get their one-line rules.
+    assert "- deck:" in prompt and "- pdf:" in prompt and "- doc:" in prompt and "- sheet:" not in prompt
+
+
+def test_a_single_kind_list_falls_back_to_that_kinds_own_prompt():
+    assert doc_bridge.docs_system_prompt(["deck", "deck"]) == doc_system_prompt("deck")

@@ -172,24 +172,13 @@ python_back_end/whisper_models/
 **/*.safetensors
 **/*.ckpt
 
-# openclaw/ (legacy) — the bundled gateway is retired. Config and skills now live in
-# engine-config/ and engine-skills/, which docker-compose bind-mounts and which MUST ship:
-# a missing mount source becomes an empty dir and the mount breaks. Only the plugin and
-# script SOURCE still under openclaw/ is kept; everything else there stays ignored.
+# Local leftovers from the retired OpenClaw gateway. Neither folder is part of
+# the tree any more; they stay ignored so an old checkout cannot commit them
+# (engine-config/bundled/exec-approvals.json carried a default token).
 openclaw/
-# Un-ignore each dir, then its whole subtree with /** (a nested `!parent/child/`
-# alone cannot re-open a subtree the broad `openclaw/` rule already pruned).
-!openclaw/scripts/
-!openclaw/scripts/**
-!openclaw/plugins/
-!openclaw/plugins/**
-# ...then re-ignore what must NOT ship, AFTER the broad re-includes above:
-openclaw/**/node_modules/
-# engine-config/ and engine-skills/ are tracked in full except the below.
-engine-config/**/node_modules/
+engine-config/
+# engine-skills/ is tracked in full except the below.
 engine-skills/**/node_modules/
-# bundled/exec-approvals.json carries a default token and is no longer mounted.
-engine-config/bundled/exec-approvals.json
 
 # OpenCode engine sidecar: the config dir (Dockerfile / opencode.json / entrypoint.sh)
 # IS tracked — only a nested vendored OpenCode source clone is ignored.
@@ -199,7 +188,7 @@ opencode/opencode/
 vendor/sglang-H/
 
 # ==========================================
-# OpenClaw secrets — apply manually via kubectl, never commit
+# Old gateway secrets — apply manually via kubectl, never commit
 # ==========================================
 k8s-manifests/overlays/prod/openclaw-secret.yaml
 # (removed a bare `mascot/` pattern here 2026-07-19 — added 2026-03 alongside an

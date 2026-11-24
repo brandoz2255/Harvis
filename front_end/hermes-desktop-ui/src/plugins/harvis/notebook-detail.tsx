@@ -11,6 +11,7 @@ import { Button, Codicon, EmptyState, SegmentedControl, useQuery } from '@hermes
 import { type ReactNode, useEffect, useRef, useState } from 'react'
 
 import { harvisApi } from './api'
+import { AddSourcesDialog } from './notebook-add-sources-dialog'
 import { AskAllButton } from './notebook-ask-all'
 import { NotebookChat } from './notebook-chat'
 import { NotebookOverview } from './notebook-overview'
@@ -136,6 +137,7 @@ export function NotebookDetail({
   const role = notebook.data?.role
   const canReadSources = role !== 'chat_only'
   const canChat = role !== 'viewer'
+  const canAdd = role === undefined || role === 'owner' || role === 'editor'
 
   const sources = useQuery({
     enabled: canReadSources,
@@ -153,6 +155,18 @@ export function NotebookDetail({
   })
 
   useSourceWatchers(notebookId, sources.data ?? [])
+
+  // An empty notebook asks for sources straight away, once per visit (NotebookLM does the same).
+  const [adding, setAdding] = useState(false)
+  const prompted = useRef(false)
+  const empty = notebook.isSuccess && sources.isSuccess && sources.data.length === 0
+
+  useEffect(() => {
+    if (empty && canAdd && !expecting && !prompted.current) {
+      prompted.current = true
+      setAdding(true)
+    }
+  }, [canAdd, empty, expecting])
 
   // A suggested question on a source lands in the chat, so show the chat.
   const asked = usePendingQuestion(notebookId)
@@ -226,6 +240,11 @@ export function NotebookDetail({
       <h1 className="min-w-0 flex-1 truncate text-sm font-semibold" title={nb?.title}>
         {nb?.title ?? 'Loading…'}
       </h1>
+      {canAdd && canReadSources && (
+        <Button onClick={() => setAdding(true)} size="xs" variant="outline">
+          <Codicon name="add" size="0.75rem" /> Add sources
+        </Button>
+      )}
       <AskAllButton />
       <NotebookShareButton isOwner={nb ? nb.is_owner !== false : true} notebookId={notebookId} />
     </header>
@@ -238,6 +257,9 @@ export function NotebookDetail({
   return (
     <div className="flex h-full min-h-0 flex-col" data-layout={layout} ref={rootRef}>
       {header}
+      {canAdd && canReadSources && (
+        <AddSourcesDialog notebookId={notebookId} onOpenChange={setAdding} open={adding} sources={list} />
+      )}
       {layout === 'columns' ? (
         status ? (
           <div className="p-6">{status}</div>

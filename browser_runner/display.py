@@ -21,6 +21,14 @@ Design notes worth keeping:
 Everything here degrades: if Xvfb is not installed, ``start`` returns None and
 the caller falls back to a headless session with no screen. That keeps a build
 that skipped the extra packages working.
+
+**Optional desktop.** ``start(..., desktop=True)`` runs desktop.sh instead of
+the Xvfb + x11vnc pair: TigerVNC's Xvnc plus a minimal Xfce (window manager,
+taskbar, clock), so the browser has real windows the user can move, resize and
+switch between. It is the same token, the same websockify and the same RFB on a
+localhost port, so nothing downstream can tell the two apart. A desktop costs
+about 200 MB of RAM more than a bare display, which is why it is opt-in; when
+the image lacks the packages it falls back to the bare display.
 """
 
 from __future__ import annotations
@@ -47,6 +55,13 @@ _DISPLAY_BASE = int(os.getenv("HARVIS_VNC_DISPLAY_BASE", "100"))
 _VNC_PORT_BASE = int(os.getenv("HARVIS_VNC_PORT_BASE", "5900"))
 _MAX_DISPLAYS = max(1, int(os.getenv("HARVIS_VNC_MAX_DISPLAYS", "8")))
 
+DESKTOP_SCRIPT = os.getenv(
+    "HARVIS_DESKTOP_SCRIPT", os.path.join(os.path.dirname(os.path.abspath(__file__)), "desktop.sh")
+)
+_DESKTOP_HOME_ROOT = os.getenv("HARVIS_DESKTOP_HOME_ROOT", "/tmp/harvis-desktops")
+_DESKTOP_BINARIES = ("Xvnc", "xfwm4", "xfce4-panel", "xfdesktop", "xfsettingsd",
+                     "dbus-run-session", "xdpyinfo", "xprop")
+
 _lock = threading.Lock()
 _screens: Dict[str, "Screen"] = {}
 _websockify: Optional[subprocess.Popen] = None
@@ -64,6 +79,9 @@ class Screen:
         self.token = secrets.token_hex(16)
         self.xvfb: Optional[subprocess.Popen] = None
         self.x11vnc: Optional[subprocess.Popen] = None
+        # desktop.sh, when this screen is a full desktop. It leads its own
+        # process group (Xvnc and every Xfce component), stopped as one.
+        self.desktop: Optional[subprocess.Popen] = None
         # True while the user is driving. Every agent action is refused with a
         # 423 until they hand it back, so the agent cannot fight them for the
         # mouse or act on a page they navigated to.
@@ -84,6 +102,7 @@ class Screen:
             "width": self.width,
             "height": self.height,
             "takenOver": self.taken_over,
+            "desktop": self.desktop is not None,
         }
 
 
@@ -94,6 +113,11 @@ def _have(binary: str) -> bool:
 def available() -> bool:
     """True when this image can actually show a screen."""
     return _have("Xvfb") and _have("x11vnc")
+
+
+def desktop_available() -> bool:
+    """True when this image can show a full Xfce desktop, not just a bare display."""
+    return os.path.isfile(DESKTOP_SCRIPT) and all(_have(b) for b in _DESKTOP_BINARIES)
 
 
 def _port_free(port: int) -> bool:
@@ -235,8 +259,53 @@ def clean_profile_locks(profile_dir: str) -> None:
             logger.warning("could not clear %s in %s: %s", name, profile_dir, exc)
 
 
-def start(session_id: str, *, width: int = 1280, height: int = 800) -> Optional[Screen]:
-    """Bring up a screen for ``session_id``. None when this image cannot."""
+def _wait_for_x(screen: Screen, proc: subprocess.Popen) -> bool:
+    """Wait for the X socket rather than sleeping a fixed amount: a slow first
+    start would otherwise hand Firefox a display that is not there."""
+    sock = f"/tmp/.X11-unix/X{screen.display}"
+    deadline = time.time() + 10
+    while time.time() < deadline and not os.path.exists(sock):
+        if proc.poll() is not None:
+            logger.warning("browser-runner: X server exited immediately on %s", screen.display_name)
+            return False
+        time.sleep(0.05)
+    if not os.path.exists(sock):
+        logger.warning("browser-runner: X server never came up on %s", screen.display_name)
+        return False
+    return True
+
+
+def _start_desktop_locked(screen: Screen) -> bool:
+    home = os.path.join(_DESKTOP_HOME_ROOT, screen.session_id)
+    os.makedirs(home, mode=0o700, exist_ok=True)
+    env = {
+        **os.environ,
+        "HARVIS_DT_DISPLAY_NUM": str(screen.display),
+        "HARVIS_DT_RFB_PORT": str(screen.vnc_port),
+        "HARVIS_DT_HOME": home,
+        "HARVIS_DT_GEOMETRY": f"{screen.width}x{screen.height}",
+    }
+    try:
+        screen.desktop = subprocess.Popen(
+            ["bash", DESKTOP_SCRIPT], env=env, start_new_session=True,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        return False
+    if not _wait_for_x(screen, screen.desktop):
+        _terminate_group(screen.desktop)
+        screen.desktop = None
+        return False
+    return True
+
+
+def start(session_id: str, *, width: int = 1280, height: int = 800,
+          desktop: bool = False) -> Optional[Screen]:
+    """Bring up a screen for ``session_id``. None when this image cannot.
+
+    ``desktop`` asks for a full Xfce desktop; without the packages for one it
+    quietly becomes a bare display, and ``Screen.to_dict()['desktop']`` says
+    which the caller got."""
     if not available():
         logger.info("browser-runner: Xvfb/x11vnc missing — headed session denied")
         return None
@@ -250,6 +319,10 @@ def start(session_id: str, *, width: int = 1280, height: int = 800) -> Optional[
         screen = Screen(
             session_id, _DISPLAY_BASE + slot, _VNC_PORT_BASE + slot, int(width), int(height)
         )
+        if desktop and desktop_available() and _start_desktop_locked(screen):
+            return _register_locked(screen)
+        if desktop:
+            logger.info("browser-runner: no desktop for %s, using a bare display", session_id)
         try:
             screen.xvfb = subprocess.Popen(
                 [
@@ -262,17 +335,7 @@ def start(session_id: str, *, width: int = 1280, height: int = 800) -> Optional[
         except FileNotFoundError:
             return None
 
-        # Wait for the X socket rather than sleeping a fixed amount: a slow
-        # first start would otherwise hand Firefox a display that is not there.
-        sock = f"/tmp/.X11-unix/X{screen.display}"
-        deadline = time.time() + 10
-        while time.time() < deadline and not os.path.exists(sock):
-            if screen.xvfb.poll() is not None:
-                logger.warning("browser-runner: Xvfb exited immediately on %s", screen.display_name)
-                return None
-            time.sleep(0.05)
-        if not os.path.exists(sock):
-            logger.warning("browser-runner: Xvfb never came up on %s", screen.display_name)
+        if not _wait_for_x(screen, screen.xvfb):
             _terminate(screen.xvfb)
             return None
 
@@ -291,14 +354,19 @@ def start(session_id: str, *, width: int = 1280, height: int = 800) -> Optional[
             _terminate(screen.xvfb)
             return None
 
-        _screens[session_id] = screen
-        _write_tokens_locked()
-        _ensure_websockify_locked()
-        logger.info(
-            "browser-runner: screen %s up for session %s (vnc %s)",
-            screen.display_name, session_id, screen.vnc_port,
-        )
-        return screen
+        return _register_locked(screen)
+
+
+def _register_locked(screen: Screen) -> Screen:
+    _screens[screen.session_id] = screen
+    _write_tokens_locked()
+    _ensure_websockify_locked()
+    logger.info(
+        "browser-runner: %s %s up for session %s (vnc %s)",
+        "desktop" if screen.desktop else "screen",
+        screen.display_name, screen.session_id, screen.vnc_port,
+    )
+    return screen
 
 
 def get(session_id: str) -> Optional[Screen]:
@@ -335,6 +403,22 @@ def _terminate(proc: Optional[subprocess.Popen]) -> None:
             pass
 
 
+def _terminate_group(proc: Optional[subprocess.Popen]) -> None:
+    """Stop desktop.sh and everything it started (Xvnc, dbus, Xfce)."""
+    if proc is None:
+        return
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(proc.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            break
+        try:
+            proc.wait(timeout=5)
+            break
+        except Exception:
+            continue
+
+
 def stop(session_id: str) -> None:
     with _lock:
         screen = _screens.pop(session_id, None)
@@ -343,6 +427,9 @@ def stop(session_id: str) -> None:
         _write_tokens_locked()
     _terminate(screen.x11vnc)
     _terminate(screen.xvfb)
+    _terminate_group(screen.desktop)
+    if screen.desktop is not None:
+        shutil.rmtree(os.path.join(_DESKTOP_HOME_ROOT, screen.session_id), ignore_errors=True)
     logger.info("browser-runner: screen %s down", screen.display_name)
 
 

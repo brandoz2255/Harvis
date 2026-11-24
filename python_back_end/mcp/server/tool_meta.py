@@ -33,19 +33,10 @@ _META: Dict[str, Tuple[str, Tuple[bool, bool, bool, bool]]] = {
     "xml_parse": ("Parse an XML file from the workspace jail, optionally selecting by xpath.", _RO),
     "pdf_extract_text": ("Extract the text of a PDF in the workspace jail.", _RO),
     "word_extract": ("Extract the text of a .docx in the workspace jail.", _RO),
-    # openclaw_read and openclaw_write splice the path into a shell command line,
-    # so they are not advertised as read-only or contained.
-    "openclaw_exec": ("Run a shell command in the OpenClaw workspace.", (False, True, False, True)),
-    "openclaw_read": (
-        "Read a file from the OpenClaw workspace (runs cat through the workspace shell).",
-        (False, True, True, True)),
-    "openclaw_write": ("Write a file in the OpenClaw workspace, replacing any existing one.",
-                       (False, True, True, True)),
-    "openclaw_edit": ("Replace text in an OpenClaw workspace file.", (False, True, False, True)),
-    "openclaw_chat": ("Hand a natural-language task to the OpenClaw agent, which can change files "
-                      "and run commands.", (False, True, False, True)),
-    "openclaw_search": ("Search the web through the Harvis backend.", _RO_NET),
-    "openclaw_web_fetch": ("Fetch a URL through the Harvis backend.", _RO_NET),
+    "workspace_task": ("Hand a natural-language task to the Harvis workspace agent, which can "
+                       "change files and run commands.", (False, True, False, True)),
+    "web_search": ("Search the web through the Harvis backend.", _RO_NET),
+    "web_fetch": ("Fetch a URL through the Harvis backend.", _RO_NET),
     "list_repos": ("List the GitHub repositories cloned into the workspace.", (True, False, True, False)),
     "clone_repo": ("Clone a GitHub repository into the workspace.", (False, False, False, True)),
 }
@@ -54,13 +45,7 @@ _META: Dict[str, Tuple[str, Tuple[bool, bool, bool, bool]]] = {
 # Tools whose only backend is a route that does not exist yet. They stay in the
 # registry (so /mcp/invoke is unchanged) but /mcp neither lists nor runs them.
 # Delete an entry the day the backend grows the route.
-_NO_EXEC_ROUTE = "the Harvis backend has no /api/tools/openclaw/exec route to run it through"
-UNAVAILABLE: Dict[str, str] = {
-    "openclaw_exec": _NO_EXEC_ROUTE,
-    "openclaw_read": _NO_EXEC_ROUTE,
-    "openclaw_write": _NO_EXEC_ROUTE,
-    "openclaw_edit": _NO_EXEC_ROUTE,
-}
+UNAVAILABLE: Dict[str, str] = {}
 
 
 def unavailable_reason(name: str) -> Optional[str]:

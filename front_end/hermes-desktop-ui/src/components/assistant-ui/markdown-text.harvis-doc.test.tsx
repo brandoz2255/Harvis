@@ -55,8 +55,8 @@ describe('MarkdownTextContent harvis-doc fences', () => {
     expect(card.closest('button')?.dataset.slot).toBe('aui_doc-card')
     expect(card.closest('button')?.dataset.streaming).toBe('true')
     expect(container.textContent).toContain('Writing slide 2 of 3')
-    expect(Object.keys($liveDocs.get())).toEqual(['session-docs:q3-security-review'])
-    expect($previewTabs.get().map(tab => tab.target.url)).toEqual(['doc:session-docs:q3-security-review'])
+    expect(Object.keys($liveDocs.get())).toEqual(['session-docs:deck:q3-security-review'])
+    expect($previewTabs.get().map(tab => tab.target.url)).toEqual(['doc:session-docs:deck:q3-security-review'])
   })
 
   it('treats a closed fence as finished even while the message keeps streaming', async () => {

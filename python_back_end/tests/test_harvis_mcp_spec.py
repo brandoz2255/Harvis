@@ -14,7 +14,7 @@ from mcp.server import auth, sandbox  # noqa: E402
 from mcp.server.app import app  # noqa: E402
 from mcp.server.registry import registry  # noqa: E402
 from mcp.server.tool_meta import UNAVAILABLE, annotations, failure_reason, has_meta  # noqa: E402
-from mcp.server.tools import openclaw_workspace  # noqa: E402
+from mcp.server.tools import harvis_workspace  # noqa: E402
 
 TOKEN = "unit-test-token"
 BEARER = {"Authorization": f"Bearer {TOKEN}"}
@@ -78,7 +78,7 @@ def test_tools_list_covers_the_registry_with_honest_annotations(client):
         assert a["readOnlyHint"] is False and a["destructiveHint"] is True
     # Overwrites PATH-like variables that execute_command subprocesses inherit.
     assert annotations("environment_set")["destructiveHint"] is True
-    assert annotations("openclaw_exec")["destructiveHint"] is True
+    assert annotations("workspace_task")["destructiveHint"] is True
     assert "path" in tools["json_parse"]["inputSchema"]["properties"]
 
 
@@ -86,7 +86,7 @@ def test_tools_list_is_filtered_by_scope(client, monkeypatch):
     monkeypatch.setenv(auth.SCOPES_ENV, "scope:system.read, scope:file.read")
     names = {t["name"] for t in rpc(client, "tools/list").json()["result"]["tools"]}
     assert "environment_get" in names and "json_parse" in names
-    assert not names & {"zip_create", "execute_command", "environment_set", "openclaw_exec"}
+    assert not names & {"zip_create", "execute_command", "environment_set", "workspace_task"}
     assert names == {n for n, t in registry.items() if t.scope in
                      {"scope:system.read", "scope:file.read"}}
 
@@ -210,25 +210,12 @@ def _fake_backend(monkeypatch, status_code, body=None):
 
         post = get
 
-    monkeypatch.setattr(openclaw_workspace.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(harvis_workspace.httpx, "AsyncClient", FakeClient)
     return calls
 
 
 def call_tool(client, name, arguments=None):
     return rpc(client, "tools/call", {"name": name, "arguments": arguments or {}}).json()["result"]
-
-
-def test_exec_family_is_not_listed_and_not_run(client, monkeypatch):
-    calls = _fake_backend(monkeypatch, 200, {"stdout": "hi", "stderr": "", "exit_code": 0})
-    names = {t["name"] for t in rpc(client, "tools/list").json()["result"]["tools"]}
-    assert not names & set(UNAVAILABLE)
-    assert set(UNAVAILABLE) == {"openclaw_exec", "openclaw_read", "openclaw_write", "openclaw_edit"}
-    for name, args in (("openclaw_exec", {"command": "echo hi"}), ("openclaw_read", {"path": "x"}),
-                       ("openclaw_write", {"path": "x", "content": "y"}),
-                       ("openclaw_edit", {"path": "x", "old_text": "a", "new_text": "b"})):
-        res = call_tool(client, name, args)
-        assert res["isError"] is True and "unavailable" in res["content"][0]["text"]
-    assert calls == []
 
 
 def test_list_repos_401_is_an_error_not_an_empty_list(client, monkeypatch):
@@ -246,22 +233,22 @@ def test_genuinely_empty_repo_list_is_still_success(client, monkeypatch):
 
 def test_search_backend_failure_is_an_error(client, monkeypatch):
     _fake_backend(monkeypatch, 500)
-    assert call_tool(client, "openclaw_search", {"query": "x"})["isError"] is True
+    assert call_tool(client, "web_search", {"query": "x"})["isError"] is True
     _fake_backend(monkeypatch, 200, {"results": []})
-    assert call_tool(client, "openclaw_search", {"query": "x"})["isError"] is False
+    assert call_tool(client, "web_search", {"query": "x"})["isError"] is False
 
 
-def test_other_openclaw_failures_are_errors(client, monkeypatch):
+def test_other_workspace_tool_failures_are_errors(client, monkeypatch):
     _fake_backend(monkeypatch, 401)
-    assert call_tool(client, "openclaw_chat", {"message": "hi"})["isError"] is True
+    assert call_tool(client, "workspace_task", {"message": "hi"})["isError"] is True
     assert call_tool(client, "clone_repo", {"owner": "o", "repo": "r"})["isError"] is True
-    assert call_tool(client, "openclaw_web_fetch", {"url": "https://example.com"})["isError"] is True
+    assert call_tool(client, "web_fetch", {"url": "https://example.com"})["isError"] is True
 
 
 def test_unreachable_backend_is_an_error(client, monkeypatch):
-    monkeypatch.setattr(openclaw_workspace, "BACKEND_URL", "http://127.0.0.1:1")
-    for name, args in (("list_repos", {}), ("openclaw_search", {"query": "x"}),
-                       ("openclaw_chat", {"message": "hi"}), ("openclaw_web_fetch", {"url": "https://e.com"}),
+    monkeypatch.setattr(harvis_workspace, "BACKEND_URL", "http://127.0.0.1:1")
+    for name, args in (("list_repos", {}), ("web_search", {"query": "x"}),
+                       ("workspace_task", {"message": "hi"}), ("web_fetch", {"url": "https://e.com"}),
                        ("clone_repo", {"owner": "o", "repo": "r"})):
         assert call_tool(client, name, args)["isError"] is True, name
 
@@ -282,17 +269,6 @@ def test_unreachable_backend_is_an_error(client, monkeypatch):
 ])
 def test_failure_reason_reads_failed_payloads(payload, failed):
     assert (failure_reason(payload) is not None) is failed
-
-
-def test_openclaw_read_surfaces_a_failed_cat(monkeypatch):
-    import asyncio
-
-    async def failing_exec(inp):
-        return {"stdout": "", "stderr": "HTTP 404: Not Found", "exit_code": 1}
-
-    monkeypatch.setattr(openclaw_workspace, "_openclaw_exec", failing_exec)
-    with pytest.raises(RuntimeError, match="404"):
-        asyncio.run(openclaw_workspace._openclaw_read(openclaw_workspace.ReadInput(path="missing")))
 
 
 @pytest.mark.parametrize("path", ["/mcp", "/mcp/invoke"])

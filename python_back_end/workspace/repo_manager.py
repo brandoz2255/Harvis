@@ -1,5 +1,5 @@
 """
-Workspace Repo Manager — GitHub repo clone/sync/push for OpenClaw workspace.
+Workspace Repo Manager — GitHub repo clone/sync/push for the agent workspace.
 
 Security: GitHub tokens NEVER enter the OpenClaw container. All authenticated
 git operations happen in this backend module. OpenClaw only reads/writes files

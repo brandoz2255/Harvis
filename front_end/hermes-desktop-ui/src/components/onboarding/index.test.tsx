@@ -50,7 +50,7 @@ describe('onboarding Picker', () => {
     setProviders([makeOAuthProvider('anthropic', 'Anthropic Claude'), makeOAuthProvider('nous', 'Nous Portal')])
     render(<Picker ctx={ctx} />)
 
-    expect(screen.getByText('Nous Portal')).toBeTruthy()
+    expect(screen.getByText('Harvis Portal')).toBeTruthy()
     expect(screen.getByText('Recommended')).toBeTruthy()
     // Fireworks stays behind the disclosure with the other alternatives; only
     // Nous Portal is visible before the user expands the list.
@@ -76,11 +76,11 @@ describe('onboarding Picker', () => {
     const labels = screen
       .getAllByRole('button')
       .map(el => el.textContent ?? '')
-      .filter(text => /Nous Portal|Fireworks AI|ChatGPT or Codex|MiniMax|OpenRouter/.test(text))
+      .filter(text => /Harvis Portal|Fireworks AI|ChatGPT or Codex|MiniMax|OpenRouter/.test(text))
 
     const indexOf = (needle: string) => labels.findIndex(text => text.includes(needle))
-    expect(indexOf('Nous Portal')).toBeGreaterThanOrEqual(0)
-    expect(indexOf('Fireworks AI')).toBeGreaterThan(indexOf('Nous Portal'))
+    expect(indexOf('Harvis Portal')).toBeGreaterThanOrEqual(0)
+    expect(indexOf('Fireworks AI')).toBeGreaterThan(indexOf('Harvis Portal'))
     expect(indexOf('ChatGPT or Codex')).toBeGreaterThan(indexOf('Fireworks AI'))
     expect(indexOf('MiniMax')).toBeGreaterThan(indexOf('ChatGPT or Codex'))
   })

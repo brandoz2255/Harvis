@@ -1,0 +1,65 @@
+name: Installer CI
+
+# The two installers are what a new user runs first, so a syntax error in
+# either one is a failed install. Linux: shell syntax plus the installer's own
+# tests. Windows: install.ps1 is parsed by both PowerShell versions a Windows
+# 11 machine can have, because nothing else in CI reads that file.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "install.sh"
+      - "install.ps1"
+      - "scripts/test_install_edge.py"
+      - ".github/workflows/installer-ci.yaml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "install.sh"
+      - "install.ps1"
+      - "scripts/test_install_edge.py"
+      - ".github/workflows/installer-ci.yaml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shell syntax
+        run: bash -n install.sh
+      - name: Installer tests
+        run: python3 -m unittest scripts/test_install_edge.py
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse install.ps1 (Windows PowerShell 5.1)
+        shell: powershell
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile("$PWD\install.ps1", [ref]$null, [ref]$errors) | Out-Null
+          if ($errors) { $errors | ForEach-Object { Write-Host $_ }; exit 1 }
+          Write-Host 'install.ps1 parses.'
+
+      - name: Parse install.ps1 (PowerShell 7)
+        shell: pwsh
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile("$PWD\install.ps1", [ref]$null, [ref]$errors) | Out-Null
+          if ($errors) { $errors | ForEach-Object { Write-Host $_ }; exit 1 }
+          Write-Host 'install.ps1 parses.'
+
+      # The runner's Docker is the Windows engine, not Docker Desktop with Linux
+      # containers, so the preflight may stop at its Docker check. It still has
+      # to get that far without a script error, which the output shows.
+      - name: Preflight (-CheckOnly)
+        shell: powershell
+        continue-on-error: true
+        run: .\install.ps1 -CheckOnly

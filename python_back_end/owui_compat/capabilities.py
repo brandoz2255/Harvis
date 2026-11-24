@@ -4,7 +4,7 @@ GET  /api/owui/capabilities             — per-user `capability → [providers]
 POST /api/owui/capabilities/preference  — persist one capability preference (server-side)
 
 Aggregates the SAME readiness probes as integrations_status (`probe_services`) +
-per-user OpenClaw BYO state + the user's persisted preferences, inverted through a
+the user's persisted preferences, inverted through a
 small provider mirror. Fail-closed: a provider is `ready` ONLY when a live probe /
 per-user SQL confirms it. NEVER returns secrets (no byo_url, tokens, mcp command/env).
 
@@ -55,7 +55,6 @@ _PROVIDER_MIRROR: dict[str, dict] = {
     # code_engine_candidate mirrors catalog.ts: Hermes is a real Build engine, so it must be
     # selectable as the Build default, not just runnable.
     "hermes-agent": {"capabilities": ["model_provider", "agent_runtime", "code_engine_candidate"], "service_key": "hermes"},
-    "openclaw":     {"capabilities": ["agent_runtime", "tool_runtime", "code_engine_candidate"],  "service_key": "openclaw"},
     "github":       {"capabilities": ["repo_provider", "pr_provider"],                            "service_key": "github"},
     "mcp":          {"capabilities": ["tool_provider"],                                           "service_key": "mcp"},
     "discord":      {"capabilities": ["notification_provider"],                                   "service_key": "discord"},
@@ -72,16 +71,11 @@ _STATIC_STATUS: dict[str, str] = {
 }
 
 
-def _derive_source(provider_id: str, service_key: Optional[str], status: str, connection: Optional[str]) -> str:
-    """1:1 port of capabilities.ts::deriveSource, with the BYO honesty fix:
-    a user-supplied (verified-BYO) OpenClaw connection is `configured`, not `detected`."""
+def _derive_source(provider_id: str, service_key: Optional[str], status: str) -> str:
+    """1:1 port of capabilities.ts::deriveSource."""
     if not service_key:
         return "static"
     live = status in ("ready", "running")
-    if provider_id == "openclaw":
-        if connection == "byo_verified":
-            return "configured"  # user-supplied connection
-        return "detected" if live else "static"
     if service_key == "github":
         return "configured" if live else "static"
     if service_key == "mcp":
@@ -91,10 +85,9 @@ def _derive_source(provider_id: str, service_key: Optional[str], status: str, co
     return "static"
 
 
-def _compute_provider(provider_id: str, services: dict, openclaw_connection: str) -> dict:
+def _compute_provider(provider_id: str, services: dict) -> dict:
     meta = _PROVIDER_MIRROR[provider_id]
     sk = meta["service_key"]
-    connection = openclaw_connection if provider_id == "openclaw" else None
     if sk:
         svc = services.get(sk) or {}
         status = svc.get("status") or "available"
@@ -108,14 +101,13 @@ def _compute_provider(provider_id: str, services: dict, openclaw_connection: str
         "id": provider_id,
         "status": status,
         "ready": ready,
-        "source": _derive_source(provider_id, sk, status, connection),
+        "source": _derive_source(provider_id, sk, status),
         "detail": detail,
-        "connection": connection,
     }
 
 
-def _build_registry(services: dict, prefs: dict, openclaw_connection: str) -> dict:
-    computed = {pid: _compute_provider(pid, services, openclaw_connection) for pid in _PROVIDER_MIRROR}
+def _build_registry(services: dict, prefs: dict) -> dict:
+    computed = {pid: _compute_provider(pid, services) for pid in _PROVIDER_MIRROR}
 
     # invert: capability -> [provider_id] in mirror order
     by_cap: dict[str, list[str]] = {}
@@ -137,32 +129,6 @@ def _build_registry(services: dict, prefs: dict, openclaw_connection: str) -> di
         providers.sort(key=lambda p: (not p["preferred"], not p["ready"]))
         out[cap] = {"preferred": preferred, "providers": providers}
     return out
-
-
-async def _openclaw_connection(pool, user_id: int) -> str:
-    """Honest BYO-vs-bundled for the user: 'byo_verified' iff the user has a verified OpenClaw of
-    their own — the linked external one (openclaw_connect) or a verified BYO workspace row — else
-    'bundled'. Reuses the read shape of GET /api/workspace/config/openclaw. NEVER returns the url/token."""
-    if pool is None:
-        return "bundled"
-    try:
-        from owui_compat.openclaw_connect import is_openclaw_linked
-
-        if await is_openclaw_linked(pool, user_id):
-            return "byo_verified"
-    except Exception:
-        pass
-    try:
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT mode, byo_url, byo_verified_at FROM user_openclaw_config WHERE user_id=$1",
-                user_id,
-            )
-    except Exception:
-        return "bundled"
-    if row and row["mode"] == "byo" and row["byo_verified_at"] is not None and row["byo_url"]:
-        return "byo_verified"
-    return "bundled"
 
 
 async def _read_integrations(pool, user_id: int) -> tuple[dict, Optional[str]]:
@@ -199,8 +165,7 @@ async def ready_capability_keys(request, user_id: int) -> set:
         services, _models = await probe_services(request, _user)
         pool = getattr(request.app.state, "pg_pool", None)
         prefs, _dm = await _read_integrations(pool, int(user_id))
-        connection = await _openclaw_connection(pool, int(user_id))
-        caps = _build_registry(services, prefs, connection)
+        caps = _build_registry(services, prefs)
         return {
             cap for cap, rec in caps.items()
             if any(p.get("ready") for p in rec.get("providers", []))
@@ -216,8 +181,7 @@ def register_capabilities_routes(router: APIRouter, get_current_user: Callable) 
         pool = getattr(request.app.state, "pg_pool", None)
         uid = int(user.id)
         prefs, default_model = await _read_integrations(pool, uid)
-        connection = await _openclaw_connection(pool, uid)
-        caps = _build_registry(services, prefs, connection)
+        caps = _build_registry(services, prefs)
         # Phase E2: structured per-ENGINE readiness so the Build selector knows each engine
         # mode independently (NOT inferred from a single provider boolean). `reason` is set
         # (e.g. "missing_auth") when the sidecar is up but the user hasn't connected a key.

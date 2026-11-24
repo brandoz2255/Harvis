@@ -34,16 +34,6 @@ const AGENTS: readonly {
     label: 'Hermes (external)',
     placeholder: 'http://host:8642',
     tokenLabel: 'Hermes API key'
-  },
-  {
-    badge: 'Optional, legacy',
-    badgeTone: 'muted',
-    description:
-      'Your own OpenClaw gateway, the address you use for it (port 18789 by default). Turn on its OpenAI-compatible HTTP API first.',
-    id: 'openclaw',
-    label: 'OpenClaw (external)',
-    placeholder: 'http://host:18789',
-    tokenLabel: 'OpenClaw gateway token'
   }
 ]
 
@@ -177,13 +167,13 @@ function LinkedAgentForm({ agent }: { agent: (typeof AGENTS)[number] }) {
   )
 }
 
-/** Hermes and OpenClaw instances the person already runs, linked by address and token. */
+/** A Hermes Agent the person already runs, linked by address and token. */
 export function LinkedAgentsSection() {
   return (
     <SettingsSection icon={Link} title="Linked agents">
       <p className="mb-1 text-[length:var(--conversation-caption-font-size)] text-(--ui-text-tertiary)">
-        Hermes is the recommended agent. Link your own OpenClaw only if you already run one. Tokens are stored encrypted
-        on the Harvis server and are never shown again.
+        Link a Hermes Agent you already run. The key is stored encrypted on the Harvis server and is never shown
+        again.
       </p>
       <div className="divide-y">
         {AGENTS.map(agent => (

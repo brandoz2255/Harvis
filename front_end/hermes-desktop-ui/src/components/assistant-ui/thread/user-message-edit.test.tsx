@@ -7,7 +7,7 @@ import { type AppendMessage, ExportedMessageRepository } from '@assistant-ui/rea
 // mode (titlebar -webkit-app-region:drag swallowing clicks on *stuck* sticky
 // bubbles) is not reproducible in jsdom — see USER_BUBBLE_BASE_CLASS's no-drag
 // carve-out in thread.tsx.
-import { AssistantRuntimeProvider, type ThreadMessage, useExternalStoreRuntime } from '@assistant-ui/react'
+import { AssistantRuntimeProvider, type ThreadMessage } from '@assistant-ui/react'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -49,22 +49,6 @@ function IncrementalHarness({ onEdit }: { onEdit: (message: AppendMessage) => Pr
     onEdit,
     onCancel: async () => {},
     onReload: async () => {}
-  })
-
-  return (
-    <AssistantRuntimeProvider runtime={runtime}>
-      <Thread />
-    </AssistantRuntimeProvider>
-  )
-}
-
-// Control: stock external store runtime.
-function StockHarness({ onEdit }: { onEdit: () => Promise<void> }) {
-  const runtime = useExternalStoreRuntime<ThreadMessage>({
-    messages: [userMessage(), assistantMessage()],
-    isRunning: false,
-    onNew: async () => {},
-    onEdit
   })
 
   return (
@@ -143,18 +127,6 @@ describe('click-to-edit user message', () => {
     await moveFocusOutside(editor)
 
     expect(container.querySelector('[data-slot="aui_edit-composer-root"]')).toBeFalsy()
-  })
-
-  it('opens the edit composer with the stock runtime', async () => {
-    const { container } = render(<StockHarness onEdit={async () => {}} />)
-
-    const bubble = await screen.findByRole('button', { name: 'Edit message' })
-
-    fireEvent.click(bubble)
-
-    await waitFor(() => {
-      expect(container.querySelector('[data-slot="aui_edit-composer-root"]')).toBeTruthy()
-    })
   })
 
   // A long previous prompt is capped at max-h-48 in the edit composer. Without

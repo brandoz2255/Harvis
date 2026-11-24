@@ -89,7 +89,7 @@ def test_vibe_debug_database_is_admin_only():
 
 @pytest.fixture
 def vision_client(monkeypatch):
-    from tools import openclaw_proxy
+    from tools import agent_tools_proxy
     from workspace import gateway_auth
 
     monkeypatch.setattr(gateway_auth, "_BUNDLED_TOKEN", "bundled-test-token")
@@ -111,7 +111,7 @@ def vision_client(monkeypatch):
     sys.modules["main"].decrypt_api_key = lambda value: value
     app = FastAPI()
     app.state.pg_pool = NoByoTokens()
-    app.include_router(openclaw_proxy.openclaw_proxy_router)
+    app.include_router(agent_tools_proxy.agent_tools_router)
     return TestClient(app, raise_server_exceptions=False)
 
 

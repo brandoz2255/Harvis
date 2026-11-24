@@ -8,7 +8,7 @@ turns' edits — they're already sitting in the working tree the agent reads —
 the diff accumulates against the session's fixed ``base_sha``. This is the natural
 Claude-Code model: sequential, iterative, one evolving working copy.
 
-Emitted events use the same ``OpenClawEvent`` shape selected by
+Emitted events use the same ``WorkspaceEvent`` shape selected by
 ``agent_id="vibecode-turn"`` in workspace_router._run_workspace_bg, so persistence
 (workspace_runs/workspace_events), SSE streaming, and the RunView UI render it
 unchanged. The bg loop owns ``_db_complete_run`` (its ``finally``), so this turn
@@ -29,7 +29,7 @@ import re
 import time
 from typing import AsyncGenerator
 
-from ..events import OpenClawEvent
+from ..events import WorkspaceEvent
 from .conversation import conversation_prefix
 from .isolation import SESSION_WORKSPACE_ROOT, WorkspaceIsolationManager
 from .syntax_gate import SYNTAX_REPAIR_ROUNDS, gate_check, repair_task
@@ -226,7 +226,7 @@ async def run_vibecode_turn(
     persona_engine: str = "",          # Phase E4: "hermes" → SOUL persona + Hermes model; "" → plain native
     launch_mode: str = "user",         # "auto" (auto-detected launch) → heavy tools withheld from the offered schema
     attachments: list[dict] | None = None,  # user's raw attachment refs; images become multimodal parts
-) -> AsyncGenerator[OpenClawEvent, None]:
+) -> AsyncGenerator[WorkspaceEvent, None]:
     # Lazy import (avoid circular import at module load) — the FUNCTIONS, not the
     # re-exported APIRouter in workspace/__init__.py.
     from ..workspace_router import (
@@ -282,8 +282,8 @@ async def run_vibecode_turn(
     )
     runner = SubAgentRunner()
 
-    def root_ev(etype: str, data: dict) -> OpenClawEvent:
-        e = OpenClawEvent(etype, {**data, "agent_label": label, "model": model_name})
+    def root_ev(etype: str, data: dict) -> WorkspaceEvent:
+        e = WorkspaceEvent(etype, {**data, "agent_label": label, "model": model_name})
         e.run_id = run_id
         e.agent_label = label
         return e

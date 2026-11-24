@@ -7,6 +7,7 @@ import { normalizeSession } from "./engine/agents.js";
 import { applyEvent } from "./engine/events.js";
 import { DEMO_SESSION } from "./examples/demo-session.js";
 import { Renderer } from "./engine/render.js";
+import { setPresence } from "./engine/presence.js";
 import { startIsland } from "./engine/stardew/stardew-app.js";
 import { worldFromTbin } from "./engine/stardew/stardew-world.js";
 import { ArtError, loadArtScene } from "./engine/stardew/byo.js";
@@ -23,7 +24,7 @@ const r = new Renderer(canvas, sim, { zoom });
 const art = { state: "builtin", message: "" }; // what the host last heard about the user's own game art
 let custom = null; // {app, canvas, source} while the island is drawn with the user's own game art
 let artSeq = 0; // bumped by every pick and clear, so a slow load that was superseded can tell
-window.__island = { sim, r, art, get custom() { return custom; } }; // debug / test hook
+window.__island = { sim, r, art, setPresence: (id, p) => setPresence(sim, id, p), get custom() { return custom; } }; // debug / test hook
 
 const $ = (id) => document.getElementById(id);
 const esc = (t) => String(t ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);

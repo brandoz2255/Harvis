@@ -43,16 +43,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from auth_optimized import get_current_user_optimized
-from .events import OpenClawEvent
-from .openclaw_client import (
-    OpenClawClient,
-    PROTOCOL_VERSION,
-    _CLIENT_ID,
-    _CLIENT_MODE,
-    _CLIENT_SCOPES,
-    _build_device_params,
-)
-from .openclaw_resolver import resolve_openclaw_config
+from .events import WorkspaceEvent
 from .orchestration import artifact_mcp as _artifact_mcp
 from .secret_redaction import redact_payload
 from .kimi_workspace import (
@@ -890,7 +881,7 @@ async def _db_set_run_attachments(pool, workspace_id: str, attachments: list) ->
         logger.error("DB: failed to set attachments for %s: %s", workspace_id, exc)
 
 
-async def _db_save_event(pool, workspace_id: str, seq: int, event: OpenClawEvent) -> None:
+async def _db_save_event(pool, workspace_id: str, seq: int, event: WorkspaceEvent) -> None:
     if pool is None:
         return
     try:
@@ -1244,7 +1235,7 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
             # length of the FULL content (not the possibly-truncated snapshot).
             if _aid:
                 try:
-                    _art = OpenClawEvent("artifact", {
+                    _art = WorkspaceEvent("artifact", {
                         "run_id": workspace_id,
                         "artifact_id": _aid,
                         "path": _ap,
@@ -1284,7 +1275,7 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
         model_name = model_name or (_allowed[0] if _allowed else "")
         if agent_id == "nvidia-kimi":
             agent_id = "local"
-            _people_note = OpenClawEvent("log", {
+            _people_note = WorkspaceEvent("log", {
                 "message": f"Running on {model_name}: the Harvis admin limits which models your account uses.",
             })
             seq = await allocate_event_seq(pool, workspace_id)
@@ -1308,7 +1299,7 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
     _attachments = ws.get("attachments") or []
 
     async def _refused():
-        yield OpenClawEvent("error", {
+        yield WorkspaceEvent("error", {
             "message": _people_refusal,
             "fix_hint": "Pick one of your allowed models, or ask the Harvis admin (Settings ▸ People).",
         })
@@ -1342,7 +1333,7 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
                 )
         else:
             logger.warning("No Kimi API key for user %s — falling back to local Ollama", ws["user_id"])
-            fallback_event = OpenClawEvent("log", {
+            fallback_event = WorkspaceEvent("log", {
                 "message": "Kimi (Moonshot) API key not found. Falling back to local Ollama.",
             })
             seq = await allocate_event_seq(pool, workspace_id)
@@ -1409,7 +1400,7 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
                 )
         else:
             logger.warning("No NVIDIA API key — falling back to local Ollama")
-            fallback_event = OpenClawEvent("log", {
+            fallback_event = WorkspaceEvent("log", {
                 "message": "NVIDIA NIM key not found. Falling back to local Ollama.",
             })
             seq = await allocate_event_seq(pool, workspace_id)
@@ -1433,7 +1424,7 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
 
     elif agent_id == "orchestrated":
         # P5: Harvis-native multi-agent orchestrator — parent → isolated sub-agent(s)
-        # in git-tracked scratch dirs → diff artifact. Emits the same OpenClawEvent
+        # in git-tracked scratch dirs → diff artifact. Emits the same WorkspaceEvent
         # stream, so the persist/broadcast loop + RunView/Neural Map render it
         # unchanged. See workspace/orchestration/.
         from .orchestration.orchestrator import run_orchestrated
@@ -1473,7 +1464,7 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
         # already 28 wide and a teammate run needs nothing else from it.
         #
         # Everything below the coordinator is the machinery this file already
-        # drives: the same OpenClawEvent stream, the same persist/broadcast loop,
+        # drives: the same WorkspaceEvent stream, the same persist/broadcast loop,
         # the same run tree. See orchestration/coordinator.py.
         from plugins.agents.intake import parse_lane
         from plugins.agents.store import get_agent_any_user
@@ -1491,7 +1482,7 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
             )
 
             async def _agent_gone():
-                ev = OpenClawEvent("done", {
+                ev = WorkspaceEvent("done", {
                     "summary": "That teammate no longer exists, so this run was stopped.",
                     "success": False,
                 })
@@ -1535,7 +1526,7 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
         # VibeCode cumulative-session turn: ONE agent on the session's PERSISTENT
         # working clone (clone-mode). Each follow-up builds on prior turns' edits;
         # the diff accumulates vs the session's fixed base_sha. See orchestration/
-        # session_turn.py. Same OpenClawEvent stream → unchanged persist/broadcast.
+        # session_turn.py. Same WorkspaceEvent stream → unchanged persist/broadcast.
         from .orchestration.session_turn import run_vibecode_turn
         event_stream = run_vibecode_turn(
             task_brief, chat_history,
@@ -1562,7 +1553,7 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
         # session's ACCUMULATED diff, in the session's OWN workspace. Emits
         # 'agent_message' conversation events + the usual tool/approval stream;
         # sets vibecode_sessions.review_status ('agreed' | 'needs_human'). See
-        # orchestration/review.py. Same OpenClawEvent stream → unchanged
+        # orchestration/review.py. Same WorkspaceEvent stream → unchanged
         # persist/broadcast.
         from .orchestration.review import run_review_conversation
         event_stream = run_review_conversation(
@@ -1584,7 +1575,7 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
 
     elif agent_id == "engine-adapter":
         # External code engine (Phase E1, e.g. Hermes Agent): run an external CLI against the
-        # session's clone via the sidecar; same OpenClawEvent stream → unchanged persist/
+        # session's clone via the sidecar; same WorkspaceEvent stream → unchanged persist/
         # broadcast/RunView. CLONE (session) isolation only — enforced at turn dispatch.
         from .orchestration.engine_adapter import run_external_engine_adapter
         event_stream = run_external_engine_adapter(
@@ -1608,7 +1599,7 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
         # _native_lane_for already mapped every unclaimed id; reaching here is a lane added
         # to _MODEL_LANES without a branch above.
         async def _no_lane():
-            yield OpenClawEvent("error", {"message": f"No lane runs agent '{agent_id}'."})
+            yield WorkspaceEvent("error", {"message": f"No lane runs agent '{agent_id}'."})
         event_stream = _no_lane()
 
     try:
@@ -1631,7 +1622,7 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
                 if _is_search_tool(_tname):
                     try:
                         _sargs = (event.data or {}).get("args") or {}
-                        _st = OpenClawEvent("search_trace", {
+                        _st = WorkspaceEvent("search_trace", {
                             "run_id": workspace_id,
                             "query": _sargs.get("query") or _sargs.get("q") or "",
                             "provider": "web",
@@ -1814,7 +1805,7 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
                     try:
                         _final_content = event.data.get("summary") or ""
                         if _final_content:
-                            _fm = OpenClawEvent("final_message", {
+                            _fm = WorkspaceEvent("final_message", {
                                 "run_id": workspace_id, "content": _final_content,
                             })
                             _fm_seq = await allocate_event_seq(pool, workspace_id)
@@ -1849,7 +1840,7 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
         # /cancel was called — save a terminal event so SSE sees it
         terminal_status = "cancelled"
         ws["status"] = "cancelled"
-        cancelled_event = OpenClawEvent("cancelled", {"message": "Workspace cancelled."})
+        cancelled_event = WorkspaceEvent("cancelled", {"message": "Workspace cancelled."})
         seq = await allocate_event_seq(pool, workspace_id)
         await _db_save_event(pool, workspace_id, seq, cancelled_event)
         await broadcaster.put((seq, cancelled_event))
@@ -1860,7 +1851,7 @@ async def _run_workspace_bg(workspace_id: str, pool, started_epoch: float) -> No
         terminal_status = "error"
         final_error = str(exc)
         ws["status"] = "error"
-        err_event = OpenClawEvent("error", {
+        err_event = WorkspaceEvent("error", {
             "message": str(exc),
             "fix_hint": "An unexpected error occurred in the workspace background task. Check backend logs.",
         })
@@ -2710,32 +2701,12 @@ async def _start_workspace(
     launch_mode: str = "user",
     attachments: Optional[list[dict]] = None,
     sandbox: Optional[dict] = None,
-) -> OpenClawClient:
+) -> None:
     """
     Register a workspace in memory, create its queue, and start the background task.
-    Returns the OpenClawClient for the /cancel endpoint.
+    Every lane runs natively inside the backend.
     """
-    # All current Build lanes run natively; the retired gateway is optional.
-    # Do not resolve credentials or construct a gateway client when disabled.
-    from openclaw_availability import openclaw_disabled
-    config = None if openclaw_disabled() else await resolve_openclaw_config(pool, user_id)
-    client = None
-    if config is not None:
-        logger.info(
-            "workspace launch: user=%s mode=%s url=%s prefix=%r",
-            user_id, config.mode, config.url, config.workspace_prefix,
-        )
-        client = OpenClawClient(
-            workspace_id=workspace_id,
-            session_id=session_id,
-            agent_id=agent_id,
-            gateway_url=config.url,
-            gateway_token=config.token,
-            workspace_prefix=config.workspace_prefix,
-        )
-
     _workspaces[workspace_id] = {
-        "client": client,
         "status": "running",
         "task_brief": task_brief,
         "session_id": session_id,
@@ -2785,9 +2756,7 @@ async def _start_workspace(
         # them in the brief; this keeps the refs themselves so image attachments
         # can be sent to the model as real multimodal parts rather than a filename.
         "attachments": attachments or [],
-        # Two-mode tracking
-        "mode": config.mode if config is not None else "native",
-        "allowed_capabilities": config.allowed_capabilities if config is not None else set(),
+        "mode": "native",
     }
 
     broadcaster = WorkspaceLiveBroadcaster()
@@ -2812,8 +2781,6 @@ async def _start_workspace(
         name=f"workspace-{workspace_id}",
     )
     _workspace_tasks[workspace_id] = task
-
-    return client
 
 
 def _require_build_space(user_id) -> None:
@@ -3276,10 +3243,9 @@ async def cancel_workspace_internal(
 ) -> dict:
     """Cancel a running workspace from non-HTTP contexts (Discord bot, etc.).
 
-    Same effect as POST /cancel/{workspace_id}: marks status, signals the
-    OpenClaw client cancel flag (which schedules ws.close() so the blocked
-    async-for unblocks), cancels the background asyncio.Task, and waits up
-    to 6s for cleanup so callers can report a truly-idle workspace.
+    Same effect as POST /cancel/{workspace_id}: marks status, cancels the
+    background asyncio.Task, and waits up to 6s for cleanup so callers can
+    report a truly-idle workspace.
 
     Returns one of:
       {"status": "cancelled", "workspace_id": ..., "wait_outcome": ...}
@@ -3300,14 +3266,6 @@ async def cancel_workspace_internal(
 
     # Mark state first so any concurrent handler sees the intent immediately.
     _workspaces[workspace_id]["status"] = "cancelled"
-
-    client_cancel_err: Optional[str] = None
-    try:
-        if ws.get("client") is not None:
-            ws["client"].cancel()
-    except Exception as exc:
-        client_cancel_err = str(exc)
-        logger.warning("cancel_workspace_internal: client.cancel failed: %s", exc)
 
     task = _workspace_tasks.get(workspace_id)
     task_existed = task is not None
@@ -3339,7 +3297,6 @@ async def cancel_workspace_internal(
         "wait_outcome": wait_outcome,
         "task_existed": task_existed,
         "task_was_done": task_was_done,
-        "client_cancel_err": client_cancel_err,
     }
 
 
@@ -3348,8 +3305,7 @@ async def cancel_workspace(
     workspace_id: str,
     current_user: dict = Depends(get_current_user_optimized),
 ):
-    """Cancel a running workspace. Force-closes the OpenClaw websocket and
-    cancels the background task, then waits briefly for cleanup so the
+    """Cancel a running workspace. Cancels the background task, then waits briefly for cleanup so the
     response only returns once the workspace is truly idle."""
     # Ownership gate: only the launching user may cancel (idiom from
     # /interactive/enable). A missing in-memory ws falls through to the
@@ -3364,12 +3320,6 @@ async def cancel_workspace(
     )
     if result["status"] == "not_found":
         raise HTTPException(status_code=404, detail=f"Workspace {workspace_id} not found")
-
-    _client_cancel_err = result.get("client_cancel_err")
-    _task_existed = result.get("task_existed", False)
-    _task_was_done = result.get("task_was_done", True)
-    _wait_outcome = result.get("wait_outcome", "n/a")
-
 
     return {"workspace_id": workspace_id, "status": result["status"]}
 
@@ -6477,344 +6427,3 @@ async def set_workspace_model_endpoint(
     except Exception as exc:
         logger.error("DB: failed to set shared workspace model: %s", exc)
         return {"ok": False, "updated_at": 0}
-
-
-# ── BYO OpenClaw config endpoints ────────────────────────────────────────────
-
-class BYOConfigSaveRequest(BaseModel):
-    mode: str = "bundled"         # "bundled" or "byo"
-    byo_url: Optional[str] = None
-    byo_token: Optional[str] = None
-
-
-class BYOConfigVerifyRequest(BaseModel):
-    url: str
-    token: Optional[str] = None
-
-
-@workspace_router.get("/config/openclaw")
-async def get_openclaw_mode_config(
-    request: Request,
-    current_user: dict = Depends(get_current_user_optimized),
-):
-    """Get the current user's OpenClaw mode configuration."""
-    pool = getattr(request.app.state, "pg_pool", None)
-    if not pool:
-        return {
-            "mode": "bundled",
-            "byo_url": None,
-            "byo_verified_at": None,
-            "byo_last_error": None,
-            "byo_token_saved": False,
-        }
-
-    try:
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                SELECT mode, byo_url, byo_verified_at, byo_last_error,
-                       (byo_token_encrypted IS NOT NULL AND length(byo_token_encrypted) > 0) AS byo_token_saved
-                FROM user_openclaw_config
-                WHERE user_id = $1
-                """,
-                current_user["id"],
-            )
-    except Exception as exc:
-        logger.error("get_openclaw_mode_config: DB error for user %s: %s", current_user["id"], exc)
-        return {
-            "mode": "bundled",
-            "byo_url": None,
-            "byo_verified_at": None,
-            "byo_last_error": None,
-            "byo_token_saved": False,
-        }
-
-    if not row:
-        return {
-            "mode": "bundled",
-            "byo_url": None,
-            "byo_verified_at": None,
-            "byo_last_error": None,
-            "byo_token_saved": False,
-        }
-
-    return {
-        "mode": row["mode"],
-        "byo_url": row["byo_url"],
-        "byo_verified_at": row["byo_verified_at"].isoformat() if row["byo_verified_at"] else None,
-        "byo_last_error": row["byo_last_error"],
-        "byo_token_saved": bool(row["byo_token_saved"]),
-    }
-
-
-@workspace_router.post("/config/openclaw")
-async def save_openclaw_mode_config(
-    req: BYOConfigSaveRequest,
-    request: Request,
-    current_user: dict = Depends(get_current_user_optimized),
-):
-    """Save the user's OpenClaw mode configuration."""
-    pool = getattr(request.app.state, "pg_pool", None)
-    if not pool:
-        raise HTTPException(status_code=503, detail="Database not available")
-
-    if req.mode not in ("bundled", "byo"):
-        raise HTTPException(status_code=400, detail="mode must be 'bundled' or 'byo'")
-
-    byo_url = (req.byo_url or "").strip() or None
-    byo_token = (req.byo_token or "").strip()
-
-    if req.mode == "byo" and not byo_url:
-        raise HTTPException(status_code=400, detail="BYO mode requires a gateway URL")
-
-    # Encrypt the BYO token if provided
-    encrypted_token = None
-    if byo_token:
-        from main import encrypt_api_key
-        encrypted_token = encrypt_api_key(byo_token)
-
-    try:
-        async with pool.acquire() as conn:
-            existing_has_token = bool(
-                await conn.fetchval(
-                    """
-                    SELECT (byo_token_encrypted IS NOT NULL AND length(byo_token_encrypted) > 0)
-                    FROM user_openclaw_config
-                    WHERE user_id = $1
-                    """,
-                    current_user["id"],
-                )
-            )
-            if req.mode == "byo" and not encrypted_token and not existing_has_token:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Gateway token is required the first time you configure BYO mode",
-                )
-
-            await conn.execute(
-                """
-                INSERT INTO user_openclaw_config (user_id, mode, byo_url, byo_token_encrypted)
-                VALUES ($1, $2, $3, $4)
-                ON CONFLICT (user_id) DO UPDATE SET
-                    mode = EXCLUDED.mode,
-                    byo_url = COALESCE(EXCLUDED.byo_url, user_openclaw_config.byo_url),
-                    byo_token_encrypted = COALESCE(EXCLUDED.byo_token_encrypted, user_openclaw_config.byo_token_encrypted),
-                    updated_at = NOW()
-                """,
-                current_user["id"],
-                req.mode,
-                byo_url,
-                encrypted_token,
-            )
-            row = await conn.fetchrow(
-                """
-                SELECT mode, byo_url, byo_verified_at, byo_last_error,
-                       (byo_token_encrypted IS NOT NULL AND length(byo_token_encrypted) > 0) AS byo_token_saved
-                FROM user_openclaw_config
-                WHERE user_id = $1
-                """,
-                current_user["id"],
-            )
-        return {
-            "ok": True,
-            "mode": row["mode"] if row else req.mode,
-            "byo_url": row["byo_url"] if row else byo_url,
-            "byo_verified_at": row["byo_verified_at"].isoformat() if row and row["byo_verified_at"] else None,
-            "byo_last_error": row["byo_last_error"] if row else None,
-            "byo_token_saved": bool(row["byo_token_saved"]) if row else bool(encrypted_token),
-        }
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.error("save_openclaw_mode_config: DB error for user %s: %s", current_user["id"], exc)
-        raise HTTPException(status_code=500, detail="Failed to save configuration")
-
-
-@workspace_router.post("/config/byo/verify")
-async def verify_byo_config(
-    req: BYOConfigVerifyRequest,
-    request: Request,
-    current_user: dict = Depends(get_current_user_optimized),
-):
-    """
-    Attempt to connect to the user's OpenClaw and verify auth + protocol.
-    Returns ok=true on success, ok=false with error/hint on failure.
-    On success, stores verified timestamp (and token if provided).
-    """
-    from openclaw_availability import openclaw_disabled
-    if openclaw_disabled():
-        return {"ok": False, "error": "OpenClaw gateway is disabled by deployment configuration"}
-
-    import websockets as _ws
-
-    if not req.url.startswith(("ws://", "wss://")):
-        return {"ok": False, "error": "URL must start with ws:// or wss://", "hint": "Use ws://localhost:18789 or similar."}
-
-    token = (req.token or "").strip()
-    if not token:
-        pool = getattr(request.app.state, "pg_pool", None)
-        if pool:
-            try:
-                async with pool.acquire() as conn:
-                    enc = await conn.fetchval(
-                        """
-                        SELECT byo_token_encrypted
-                        FROM user_openclaw_config
-                        WHERE user_id = $1
-                        """,
-                        current_user["id"],
-                    )
-                if enc:
-                    from main import decrypt_api_key
-                    token = decrypt_api_key(enc) or ""
-            except Exception as exc:
-                logger.error("verify_byo_config: failed loading saved token for user %s: %s", current_user["id"], exc)
-        if not token:
-            return {
-                "ok": False,
-                "error": "No gateway token provided",
-                "hint": "Enter your OpenClaw gateway token or save one first.",
-            }
-
-    try:
-        ws = await _ws.connect(
-            req.url,
-            ping_interval=10,
-            ping_timeout=5,
-            open_timeout=10,
-        )
-
-        # Read the challenge
-        import json as _json
-        raw = await asyncio.wait_for(ws.recv(), timeout=10)
-        challenge = _json.loads(raw)
-        if not (challenge.get("type") == "event" and challenge.get("event") == "connect.challenge"):
-            await ws.close()
-            return {"ok": False, "error": "Unexpected response from server", "hint": "This endpoint does not appear to be an OpenClaw gateway."}
-
-        nonce = challenge.get("payload", {}).get("nonce", "")
-        if not nonce:
-            await ws.close()
-            return {"ok": False, "error": "Missing challenge nonce", "hint": "Gateway challenge payload was invalid."}
-
-        req_id = "verify-connect"
-        await ws.send(_json.dumps({
-            "type": "req",
-            "id": req_id,
-            "method": "connect",
-            "params": {
-                "minProtocol": PROTOCOL_VERSION,
-                "maxProtocol": PROTOCOL_VERSION,
-                "client": {
-                    "id": _CLIENT_ID,
-                    "version": "1.0.0",
-                    "platform": "linux",
-                    "mode": _CLIENT_MODE,
-                },
-                "caps": ["tool-events"],
-                "role": "operator",
-                "scopes": _CLIENT_SCOPES,
-                "auth": {"token": token},
-                "device": _build_device_params(nonce, token),
-            },
-        }))
-        ack_raw = await asyncio.wait_for(ws.recv(), timeout=10)
-        ack = _json.loads(ack_raw)
-        if ack.get("type") != "res" or not ack.get("ok"):
-            await ws.close()
-            err_msg = (
-                (ack.get("error") or {}).get("message")
-                or "Gateway rejected connect/auth handshake"
-            )
-            await _set_byo_error(request, current_user["id"], str(err_msg)[:500])
-            return {
-                "ok": False,
-                "error": f"Authentication failed: {err_msg}",
-                "hint": "Check your gateway token and ensure OpenClaw allows operator access.",
-            }
-
-        # Gateway auth + protocol handshake succeeded.
-        await ws.close()
-
-        # Update verification timestamp in DB
-        pool = getattr(request.app.state, "pg_pool", None)
-        if pool:
-            from main import encrypt_api_key
-            encrypted_token = encrypt_api_key(token)
-            try:
-                async with pool.acquire() as conn:
-                    await conn.execute(
-                        """
-                        INSERT INTO user_openclaw_config (user_id, mode, byo_url, byo_token_encrypted, byo_verified_at, byo_last_error)
-                        VALUES ($1, 'byo', $2, $3, NOW(), NULL)
-                        ON CONFLICT (user_id) DO UPDATE SET
-                            byo_url = EXCLUDED.byo_url,
-                            byo_token_encrypted = EXCLUDED.byo_token_encrypted,
-                            byo_verified_at = NOW(),
-                            byo_last_error = NULL,
-                            updated_at = NOW()
-                        """,
-                        current_user["id"],
-                        req.url,
-                        encrypted_token,
-                    )
-            except Exception as exc:
-                logger.error("verify_byo_config: DB update failed for user %s: %s", current_user["id"], exc)
-
-        return {"ok": True, "message": "OpenClaw reachable, auth handshake verified", "byo_token_saved": True}
-
-    except asyncio.TimeoutError:
-        await _set_byo_error(request, current_user["id"], "Connection timed out")
-        return {
-            "ok": False,
-            "error": "Connection timed out",
-            "hint": "Check firewall and port forwarding. WSL users may need to bind to 0.0.0.0.",
-        }
-    except ConnectionRefusedError:
-        await _set_byo_error(request, current_user["id"], "Connection refused")
-        return {
-            "ok": False,
-            "error": "Connection refused",
-            "hint": "OpenClaw is not running at that URL. Check `openclaw gateway status`.",
-        }
-    except Exception as exc:
-        error_msg = str(exc)[:500]
-        await _set_byo_error(request, current_user["id"], error_msg)
-        return {
-            "ok": False,
-            "error": error_msg,
-            "hint": _verification_hint(exc),
-        }
-
-
-def _verification_hint(exc: Exception) -> str:
-    msg = str(exc).lower()
-    if "connection refused" in msg or "econnrefused" in msg:
-        return "OpenClaw is not running at that URL. Check `openclaw gateway status`."
-    if "timeout" in msg:
-        return "Connection timed out. Check firewall and port forwarding."
-    if "401" in msg or "unauthorized" in msg or "invalid token" in msg:
-        return "Gateway token is invalid. Regenerate it and paste the new value."
-    if "handshake" in msg:
-        return "Protocol version mismatch. Update OpenClaw to a compatible version."
-    return "See OpenClaw logs for details."
-
-
-async def _set_byo_error(request, user_id: int, error: str) -> None:
-    pool = getattr(request.app.state, "pg_pool", None)
-    if not pool:
-        return
-    try:
-        async with pool.acquire() as conn:
-            await conn.execute(
-                """
-                UPDATE user_openclaw_config
-                SET byo_last_error = $2, updated_at = NOW()
-                WHERE user_id = $1
-                """,
-                user_id,
-                error[:500],
-            )
-    except Exception:
-        pass
-

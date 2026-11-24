@@ -7,6 +7,7 @@ import { deferred } from '../test/deferred'
 
 const $activeGatewayProfile = atom('default')
 const $newChatProfile = atom<null | string>(null)
+const $newChatProfilePicked = atom(false)
 const $showAllProfiles = atom(false)
 
 const $connection = atom<null | {
@@ -69,6 +70,7 @@ vi.mock('@/store/gateway-switch', () => ({
 vi.mock('@/store/profile', () => ({
   $activeGatewayProfile,
   $newChatProfile,
+  $newChatProfilePicked,
   $showAllProfiles,
   captureNewChatSource: vi.fn(),
   ensureGatewayAgent,

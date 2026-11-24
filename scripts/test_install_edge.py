@@ -45,7 +45,7 @@ class Harness(unittest.TestCase):
         with open(INSTALL) as fh:
             src = fh.read()
         self.lib = "\n".join(
-            [top_level(src, v) for v in ("HEALTH_URL", "HEALTH_INNER_URL", "SETUP_URL", "PROVIDER_HEALTH_KEY",
+            [top_level(src, v) for v in ("BASE_URL", "HEALTH_URL", "HEALTH_INNER_URL", "SETUP_URL", "PROVIDER_HEALTH_KEY",
                                          "K8S_ACTION", "K8S_MODE_FILE", "REPO_SANDBOX_STALE")]
             + [cut(src, f) for f in FUNCS]
         ).replace("SECONDS + 180", "SECONDS + 2")  # the 180 s wait, shortened
@@ -207,6 +207,69 @@ class RepoSandboxSubnetTest(Harness):
         out, rc = self.run_it({"HARVIS_STACK_NAME": "lab", "HARVIS_REPO_SANDBOX_SUBNET": "10.213.90.0/24"})
         self.assertIn("network rm lab_repo-sandbox", self.log("docker.log"))
         self.assertIn("inspect lab_repo-sandbox", self.log("docker.log"))
+
+
+class BotDesktopTest(unittest.TestCase):
+    """--bot-desktop writes the runner's build argument, and only when it is given."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        with open(INSTALL) as fh:
+            src = fh.read()
+        with open(os.path.join(REPO, "scripts", "exposure.sh")) as fh:
+            exposure = fh.read()
+        # parse_args's tail is stubbed; everything it parses is a top-level variable.
+        self.lib = "\n".join([top_level(src, "BOT_DESKTOP"), top_level(src, "LLM_MODE"),
+                              cut(exposure, "set_env_value"), cut(src, "drop_env_key"),
+                              cut(src, "write_bot_desktop_env"), cut(src, "parse_args"),
+                              "load_preset() { :; }", "validate_expose_arg() { :; }"])
+
+    def run_with(self, args, env_lines):
+        path = os.path.join(self.tmp.name, ".env")
+        with open(path, "w") as fh:
+            fh.write("".join(line + "\n" for line in env_lines))
+        proc = subprocess.run(["bash", "-c", self.lib + '\nparse_args "$@"; write_bot_desktop_env', "x", *args],
+                              capture_output=True, text=True, cwd=self.tmp.name, timeout=30)
+        with open(path) as fh:
+            return proc.returncode, proc.stdout + proc.stderr, fh.read().splitlines()
+
+    def test_a_bare_flag_builds_it_and_leaves_each_teammate_to_choose(self):
+        rc, _, env = self.run_with(["--bot-desktop", "--yes"], ["A=1", "HARVIS_BOT_DESKTOP_DEFAULT=1"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(env, ["A=1", "HARVIS_BOT_DESKTOP=1"])
+
+    def test_all_turns_it_on_for_every_screen(self):
+        _, _, env = self.run_with(["--bot-desktop", "all"], [])
+        self.assertEqual(sorted(env), ["HARVIS_BOT_DESKTOP=1", "HARVIS_BOT_DESKTOP_DEFAULT=1"])
+        _, _, env = self.run_with(["--bot-desktop=all"], [])
+        self.assertEqual(sorted(env), ["HARVIS_BOT_DESKTOP=1", "HARVIS_BOT_DESKTOP_DEFAULT=1"])
+
+    def test_off_removes_both_keys(self):
+        _, _, env = self.run_with(["--bot-desktop", "off"],
+                                  ["HARVIS_BOT_DESKTOP=1", "B=2", "HARVIS_BOT_DESKTOP_DEFAULT=1"])
+        self.assertEqual(env, ["B=2"])
+
+    def test_without_the_flag_an_install_keeps_what_it_had(self):
+        _, _, env = self.run_with(["--yes"], ["HARVIS_BOT_DESKTOP=1"])
+        self.assertEqual(env, ["HARVIS_BOT_DESKTOP=1"])
+
+    def test_an_unknown_mode_is_refused(self):
+        rc, out, _ = self.run_with(["--bot-desktop=everyone"], [])
+        self.assertEqual(rc, 1)
+        self.assertIn("per-bot, all or off", out)
+
+    def test_the_runner_is_built_with_the_argument_and_the_backend_reads_the_default(self):
+        with open(os.path.join(REPO, "docker-compose.yaml")) as fh:
+            compose = fh.read()
+        self.assertIn("HARVIS_BOT_DESKTOP: ${HARVIS_BOT_DESKTOP:-0}", compose)
+        self.assertIn('HARVIS_BOT_DESKTOP_DEFAULT: "${HARVIS_BOT_DESKTOP_DEFAULT:-}"', compose)
+        with open(os.path.join(REPO, "browser_runner", "Dockerfile")) as fh:
+            dockerfile = fh.read()
+        self.assertIn("ARG HARVIS_BOT_DESKTOP=0", dockerfile)
+        gate = dockerfile.index('if [ "$HARVIS_BOT_DESKTOP" = 1 ]')
+        self.assertLess(gate, dockerfile.index("xfwm4"))
+        self.assertLess(dockerfile.index("ARG HARVIS_BOT_DESKTOP=0"), gate)
 
 
 class InstallFlowTest(unittest.TestCase):

@@ -18,7 +18,6 @@
 #   HARVIS_PORT_NGINX         9000   nginx front door (container :80)
 #   HARVIS_PORT_POSTGRES      5432   pgsql
 #   HARVIS_PORT_MCP           8010   harvis-mcp        (loopback only)
-#   HARVIS_PORT_FRONTEND      3000   frontend          (profile: legacy)
 #   HARVIS_PORT_TTS           8001   tts-service       (profile: advanced-voice)
 #   HARVIS_PORT_NOTEBOOK_UI   8502   open-notebook UI  (profile: notebooks-upstream)
 #   HARVIS_PORT_NOTEBOOK_API  5055   open-notebook API (profile: notebooks-upstream)
@@ -248,6 +247,10 @@ services:
       # /api/tools/terminal/<wsid>/exec endpoint on the result. Set
       # HARVIS_TERMINAL_ENABLED=false to force-disable as a kill-switch.
       HARVIS_TERMINAL_ENABLED: "${HARVIS_TERMINAL_ENABLED:-true}"
+      # 1 = every agent screen opens a full desktop unless the teammate turns it
+      # off; empty = each teammate opts in. Only matters on a runner built with
+      # HARVIS_BOT_DESKTOP=1 (./install.sh --bot-desktop all).
+      HARVIS_BOT_DESKTOP_DEFAULT: "${HARVIS_BOT_DESKTOP_DEFAULT:-}"
       HARVIS_TERMINAL_IMAGE: "${HARVIS_TERMINAL_IMAGE:-ubuntu:24.04}"
       # No network by default: a terminal runs agent code; the backend reaches it with docker exec.
       HARVIS_TERMINAL_NETWORK: "${HARVIS_TERMINAL_NETWORK:-none}"
@@ -364,10 +367,8 @@ services:
       CODE_EXECUTOR_URL: "http://sandbox:8080"
       # Shared internal bearer for the workspace/tool proxies and harvis-mcp.
       # HARVIS_GATEWAY_TOKEN is the name the code reads first; an .env that still
-      # has only the OPENCLAW_* names resolves to the same value, and the legacy
+      # has only the old OPENCLAW_* names resolves to the same value, and the legacy
       # OPENCLAW_GATEWAY_TOKEN name is still passed so an older image keeps working.
-      # The bundled OpenClaw container is retired (2026-10-30): no OPENCLAW_URL
-      # here. OpenClaw is an optional per-user external link, stored in the DB.
       HARVIS_GATEWAY_TOKEN: "${HARVIS_GATEWAY_TOKEN:-${OPENCLAW_GATEWAY_TOKEN_BUNDLED:-${OPENCLAW_GATEWAY_TOKEN:-}}}"
       OPENCLAW_GATEWAY_TOKEN: "${HARVIS_GATEWAY_TOKEN:-${OPENCLAW_GATEWAY_TOKEN_BUNDLED:-${OPENCLAW_GATEWAY_TOKEN:-}}}"
       # Engine sync (Agent Studio → Skills → Engine sync). ONE published SKILL.md
@@ -376,11 +377,7 @@ services:
       # the task, not just one. Gated by HARVIS_ENGINE_SYNC; nothing is ever
       # written without an explicit apply from the UI.
       HARVIS_ENGINE_SKILLS_DIR: "${HARVIS_ENGINE_SKILLS_DIR:-/app/engine_skills}"
-      # Engine identity/config tree (host ./engine-config), read by the workspace
-      # client and the MCP wizard. The env names keep their historical OPENCLAW spelling.
-      HARVIS_OPENCLAW_CONFIG_DIR: "${HARVIS_OPENCLAW_CONFIG_DIR:-/app/engine_config}"
-      HARVIS_OPENCLAW_IDENTITY_DIR: "${HARVIS_OPENCLAW_IDENTITY_DIR:-/app/engine_config}"
-      HARVIS_ENGINE_SYNC: "${HARVIS_ENGINE_SYNC:-${HARVIS_OPENCLAW_SYNC:-0}}"
+      HARVIS_ENGINE_SYNC: "${HARVIS_ENGINE_SYNC:-0}"
       # Cloud AI providers (loaded from .env — never hardcode here)
       MOONSHOT_API_KEY: "${MOONSHOT_API_KEY:-}"
       MOONSHOT_BASE_URL: "${MOONSHOT_BASE_URL:-https://api.moonshot.ai/v1}"
@@ -649,7 +646,6 @@ services:
       - ./python_back_end/migrations:/app/migrations:ro
       - ./python_back_end/onb_compat:/app/onb_compat:ro
       - ./python_back_end/open_notebook:/app/open_notebook:ro
-      - ./engine-config:/app/engine_config
       # Shared engine skills tree — RW here (the backend publishes into it), :ro in
       # every engine sidecar.
       - ./engine-skills/${OPENCLAW_CONFIG_SET:-bundled}:/app/engine_skills:rw
@@ -772,6 +768,9 @@ services:
         # developer build is honestly labelled "unknown" rather than carrying a
         # stale sha; CI exports HARVIS_VCS_REF and gets the real one.
         VCS_REF: ${HARVIS_VCS_REF:-unknown}
+        # 1 adds the optional Xfce desktop for agent screens (+270 MB). Set by
+        # ./install.sh --bot-desktop; every user of this server can then use it.
+        HARVIS_BOT_DESKTOP: ${HARVIS_BOT_DESKTOP:-0}
     container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-browser-runner
     restart: unless-stopped
     # Two networks, each with one job:
@@ -888,47 +887,6 @@ services:
           memory: 256M
           cpus: '0.5'
 
-  # Next.js Frontend (New UI)
-  # REBUILD TIPS:
-  #   Quick rebuild (use cache):   docker-compose build frontend
-  #   Smart rebuild (recommended): ./scripts/rebuild-frontend.sh
-  #   Full rebuild (no cache):     ./scripts/rebuild-frontend.sh --no-cache
-  frontend:
-    # Reaches an LLM server running on the HOST (the default is the operator's
-    # own Ollama/LM Studio/llama.cpp/vLLM on 127.0.0.1). Linux needs this
-    # mapping explicitly; without it host.docker.internal does not resolve.
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    build:
-      context: ./front_end/newjfrontend
-      dockerfile: Dockerfile
-      args:
-        # These args help bust Docker cache when rebuilding
-        # Change BUILD_TIMESTAMP to force a fresh build
-        BUILD_TIMESTAMP: ${BUILD_TIMESTAMP:-default}
-        GIT_COMMIT: ${GIT_COMMIT:-unknown}
-    container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-frontend
-    profiles: ["legacy"]
-    restart: unless-stopped
-    ports:
-      # Legacy Next frontend. nginx proxies to it as http://frontend:3000.
-      - "${HARVIS_BIND_ADDR:-127.0.0.1}:${HARVIS_PORT_FRONTEND:-3000}:3000"
-    environment:
-      NODE_ENV: "production"
-      NEXT_TELEMETRY_DISABLED: "1"
-      JWT_SECRET: "${JWT_SECRET:?JWT_SECRET must be set in .env}"
-      BACKEND_URL: "http://backend:8000"
-      OLLAMA_URL: "${HARVIS_LLM_BASE_URL:-${OLLAMA_URL:-http://host.docker.internal:11434}}"
-    depends_on:
-      - backend
-      - pgsql
-    deploy:
-      resources:
-        limits:
-          memory: 1512M
-    networks:
-      - ollama-n8n-network
-
   # Builds the vendored Hermes desktop UI inside Docker so a fresh clone needs
   # no host Node/npm. Hermes is Harvis's only frontend, so its static build is
   # part of the normal install. This is a one-shot build step; it neither starts a model
@@ -1042,7 +1000,7 @@ services:
   # the backend, Ollama and the database are not reachable from it, and nginx's
   # port 80 refuses anything Cloudflare forwarded.
   cloudflared:
-    image: cloudflare/cloudflared:2026.9.3@sha256:072c067d25ccbe61d46e18f0d0723255f2bb5304f7317caa95b27031520ff92c
+    image: cloudflare/cloudflared:2026.11.1@sha256:e613aadbc2d9511785d2e67a86b0c8ac18dd63a3f9af0d06faf04cbfdcb35f2d
     container_name: ${HARVIS_CONTAINER_PREFIX:-}harvis-cloudflared
     profiles: ["tunnel"]
     # "no" under the network lock (HARVIS_TUNNEL_NETWORKS): scripts/tunnel-guard.sh
@@ -1166,9 +1124,8 @@ services:
       - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
       - ./python_back_end/artifacts_schema.sql:/docker-entrypoint-initdb.d/artifacts_schema.sql:ro
       - ./python_back_end/artifacts_build_jobs_schema.sql:/docker-entrypoint-initdb.d/artifacts_build_jobs_schema.sql:ro
-      - ./front_end/newjfrontend/db/migrations/001_add_document_jobs.sql:/docker-entrypoint-initdb.d/001_add_document_jobs.sql:ro
+      - ./python_back_end/migrations/001_add_document_jobs.sql:/docker-entrypoint-initdb.d/001_add_document_jobs.sql:ro
       - ./python_back_end/workspace/workspace_schema.sql:/docker-entrypoint-initdb.d/002_workspace_schema.sql:ro
-      - ./python_back_end/migrations/010_user_openclaw_config.sql:/docker-entrypoint-initdb.d/003_user_openclaw_config.sql:ro
     ports:
       # PostgreSQL. Loopback-only: it holds every chat, credential and user
       # row, and it ships with well-known default credentials, so publishing

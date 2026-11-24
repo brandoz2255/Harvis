@@ -6,14 +6,14 @@ from .registry import registry, invoke_tool
 from .auth import TOKEN_ENV, configured_token, require_scopes
 from .mcp_http import router as mcp_router
 from .tools.os_ops import register_os_ops  # registers tools at import
-from .tools.openclaw_workspace import register_openclaw_workspace
+from .tools.harvis_workspace import register_harvis_workspace
 
 logger = logging.getLogger("harvis-mcp")
 
 app = FastAPI(title="MCP Harvis Server")
 app.include_router(mcp_router)
 register_os_ops()
-register_openclaw_workspace()
+register_harvis_workspace()
 
 if not configured_token():
     # The process stays up so the deployment is observable, but require_scopes

@@ -12,10 +12,11 @@
 // is the root component, and `useTapbackDoubleClick` is called by it and by
 // nothing else in the tree, which makes it an exact render counter for the
 // root without needing to export or wrap an internal component.
-import { AssistantRuntimeProvider, type ThreadMessage, useExternalStoreRuntime } from '@assistant-ui/react'
+import { AssistantRuntimeProvider, type ThreadMessage } from '@assistant-ui/react'
 import { cleanup, render, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { useIncrementalExternalStoreRuntime } from '@/lib/incremental-external-store-runtime'
 import type * as messageReactionsModule from '@/components/assistant-ui/thread/use-message-reactions'
 
 import { Thread } from '.'
@@ -90,7 +91,7 @@ function assistant(id: string, text: string, running: boolean): ThreadMessage {
 }
 
 function Harness({ messages }: { messages: ThreadMessage[] }) {
-  const runtime = useExternalStoreRuntime<ThreadMessage>({
+  const runtime = useIncrementalExternalStoreRuntime<ThreadMessage>({
     messages,
     isRunning: messages.at(-1)?.status?.type === 'running',
     onNew: async () => {}

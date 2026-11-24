@@ -6,12 +6,12 @@ Feeds the Integrations dashboard "Logs" drawer with a small, normalized recent-e
 view per integration, sourced ONLY from EXISTING tables (no new writes, SELECT-only,
 parameterized SQL):
 
-  · Agent engines (openclaw / codex-app / claude-code / hermes-agent)
+  · Agent engines (native / codex-app / claude-code / hermes-agent)
       → workspace_runs joined to vibecode_sessions.engine (user-scoped)
-  · openclaw additionally → openclaw_tool_audit (web-tool proxy audit; the table is
+  · native additionally → openclaw_tool_audit (web-tool proxy audit, legacy table name; it is
       deploy-global — only tool name, status code, and a url/query summary are exposed)
   · ollama → proxy_usage_log (deploy-global model usage; token counts only)
-    Both deploy-global sources are admin-only: openclaw's audit slice is omitted for
+    Both deploy-global sources are admin-only: the web-tool audit slice is omitted for
     other users (their own runs still show), ollama answers 403.
   · mcp → mcp_servers config rows (user-scoped)
   · github → github_tokens presence + branch-producing runs (user-scoped)
@@ -97,9 +97,9 @@ def _run_status(status: Optional[str], error: Optional[str]) -> str:
 
 # Integration card id → vibecode_sessions.engine values whose runs belong to it.
 # Runs without a vibecode session (chat-lane workspace tasks) count as 'native' =
-# the OpenClaw runtime, which is where they actually execute.
+# Harvis's own runner, which is where they actually execute.
 _ENGINE_OF: dict[str, tuple[str, ...]] = {
-    "openclaw": ("native",),
+    "native": ("native",),
     "codex-app": ("codex",),
     "claude-code": ("claude-code",),
     "hermes-agent": ("hermes-agent", "hermes-native"),
@@ -155,7 +155,7 @@ async def _engine_run_logs(conn, user_id: int, engines: tuple[str, ...], limit: 
     return out
 
 
-async def _openclaw_tool_logs(conn, limit: int) -> list[dict]:
+async def _web_tool_logs(conn, limit: int) -> list[dict]:
     """openclaw_tool_audit has no user column (deploy-global web-tool audit); expose
     only the tool name, status code, and a url/query summary — never full inputs."""
     rows = await conn.fetch(
@@ -364,9 +364,9 @@ def register_integration_logs_routes(router: APIRouter, get_current_user: Callab
                 engines = _ENGINE_OF[integration_id]
                 await collect("workspace_runs",
                               lambda c: _engine_run_logs(c, uid, engines, limit))
-            if integration_id == "openclaw" and admin:
+            if integration_id == "native" and admin:
                 await collect("openclaw_tool_audit",
-                              lambda c: _openclaw_tool_logs(c, limit))
+                              lambda c: _web_tool_logs(c, limit))
             if integration_id == "ollama":
                 await collect("proxy_usage_log",
                               lambda c: _ollama_usage_logs(c, limit))

@@ -1,20 +1,20 @@
 /**
- * The add-source box on the Sources tab: a web page or YouTube link, a file, pasted
- * text, or Discover. When the embedding model is missing it offers the download
+ * The add-source box on the Sources tab: a web page or YouTube link, files (drop
+ * or pick several), pasted text, or Discover. When the embedding model is missing it offers the download
  * right here and, once that finishes, retries every source that failed for lack of it.
  */
 
 import { Button, cn, Codicon, Input, Textarea, useQuery, useQueryClient } from '@hermes/plugin-sdk'
-import { useRef, useState } from 'react'
+import { useState } from 'react'
 
 import { harvisApi } from './api'
-import { capabilitiesKey, fileBlockedReason, useCapabilities } from './notebook-capabilities'
+import { capabilitiesKey, useCapabilities } from './notebook-capabilities'
 import { NotebookDiscover } from './notebook-discover'
 import { errorText, type Source, sourcesKey } from './notebook-shared'
-import { UPLOAD_ACCEPT, UPLOAD_HINT } from './notebook-source-meta'
+import { SourceDropZone } from './notebook-source-drop'
 import { embedderKey, fetchEmbedderStatus, NotebooksInstallPanel } from './notebooks-install'
 
-type Kind = 'discover' | 'file' | 'text' | 'url'
+export type Kind = 'discover' | 'file' | 'text' | 'url'
 
 const KIND_SHORT: Record<Kind, [label: string, icon: string]> = {
   discover: ['Discover', 'search'],
@@ -25,7 +25,7 @@ const KIND_SHORT: Record<Kind, [label: string, icon: string]> = {
 
 const KIND_LABEL: Record<Kind, string> = {
   discover: 'Discover',
-  file: 'Upload a file',
+  file: 'Upload files',
   text: 'Paste text',
   url: 'Web page or YouTube'
 }
@@ -41,24 +41,10 @@ export async function retryFailedSources(notebookId: string, sources: readonly S
   return failed.length
 }
 
-export function AddSource({
-  notebookId,
-  onAdded,
-  sources
-}: {
-  notebookId: string
-  onAdded: () => void
-  sources: readonly Source[]
-}) {
+/** Whether sources can be indexed here: the embedder download when it is missing, and a note when embeddings leave the machine. */
+export function SourceIndexNotice({ notebookId, sources }: { notebookId: string; sources: readonly Source[] }) {
   const queryClient = useQueryClient()
-  const [kind, setKind] = useState<Kind>('url')
-  const [url, setUrl] = useState('')
-  const [title, setTitle] = useState('')
-  const [text, setText] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
   const [retried, setRetried] = useState(0)
-  const fileRef = useRef<HTMLInputElement>(null)
   const caps = useCapabilities()
 
   const embedder = useQuery({
@@ -67,44 +53,6 @@ export function AddSource({
     retry: false,
     staleTime: 30_000
   })
-
-  const submit = async (init: RequestInit, path: string) => {
-    setBusy(true)
-    setError('')
-
-    try {
-      await harvisApi(`/api/notebooks/${notebookId}/sources/${path}`, { method: 'POST', ...init })
-      setUrl('')
-      setTitle('')
-      setText('')
-      onAdded()
-    } catch (err) {
-      setError(errorText(err))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const upload = (file: File) => {
-    const why = fileBlockedReason(file.name, caps)
-
-    if (why) {
-      setError(why)
-
-      return
-    }
-
-    const form = new FormData()
-    form.append('file', file)
-    void submit({ body: form }, 'upload')
-  }
-
-  const addText = () => {
-    const form = new FormData()
-    form.append('title', title.trim() || 'Pasted text')
-    form.append('content', text)
-    void submit({ body: form }, 'text')
-  }
 
   const afterInstall = async () => {
     await queryClient.invalidateQueries({ queryKey: embedderKey })
@@ -120,7 +68,7 @@ export function AddSource({
   const status = embedder.data
 
   return (
-    <div className="space-y-2.5 rounded-xl border bg-(--ui-bg-editor) p-2.5">
+    <>
       {status?.state === 'not_installed' && (
         <NotebooksInstallPanel onInstalled={() => void afterInstall()} status={status} />
       )}
@@ -141,6 +89,56 @@ export function AddSource({
           </span>
         </p>
       )}
+    </>
+  )
+}
+
+export function AddSource({
+  initialKind = 'url',
+  notebookId,
+  onAdded,
+  sources
+}: {
+  initialKind?: Kind
+  notebookId: string
+  onAdded: () => void
+  sources: readonly Source[]
+}) {
+  const [kind, setKind] = useState<Kind>(initialKind)
+  const [url, setUrl] = useState('')
+  const [title, setTitle] = useState('')
+  const [text, setText] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const caps = useCapabilities()
+
+  const submit = async (init: RequestInit, path: string) => {
+    setBusy(true)
+    setError('')
+
+    try {
+      await harvisApi(`/api/notebooks/${notebookId}/sources/${path}`, { method: 'POST', ...init })
+      setUrl('')
+      setTitle('')
+      setText('')
+      onAdded()
+    } catch (err) {
+      setError(errorText(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const addText = () => {
+    const form = new FormData()
+    form.append('title', title.trim() || 'Pasted text')
+    form.append('content', text)
+    void submit({ body: form }, 'text')
+  }
+
+  return (
+    <div className="space-y-2.5 rounded-xl border bg-(--ui-bg-editor) p-2.5">
+      <SourceIndexNotice notebookId={notebookId} sources={sources} />
       <div className="flex gap-0.5 rounded-lg bg-(--ui-bg-tertiary) p-0.5 text-xs" role="group">
         {(['url', 'file', 'text', 'discover'] as const).map(k => (
           <button
@@ -183,29 +181,7 @@ export function AddSource({
           </Button>
         </form>
       )}
-      {kind === 'file' && (
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          <input
-            accept={UPLOAD_ACCEPT}
-            className="hidden"
-            onChange={e => {
-              const file = e.target.files?.[0]
-
-              if (file) {
-                upload(file)
-              }
-
-              e.target.value = ''
-            }}
-            ref={fileRef}
-            type="file"
-          />
-          <Button disabled={busy} onClick={() => fileRef.current?.click()} size="sm" variant="outline">
-            <Codicon name="cloud-upload" size="0.8rem" /> Choose a file
-          </Button>
-          <span className="text-xs text-(--ui-text-tertiary)">{UPLOAD_HINT}</span>
-        </div>
-      )}
+      {kind === 'file' && <SourceDropZone compact notebookId={notebookId} onAdded={() => onAdded()} />}
       {kind === 'file' && (caps?.audio_sources.reason || caps?.image_sources.reason) && (
         <ul className="space-y-0.5 text-xs text-(--ui-text-tertiary)">
           {caps?.audio_sources.reason && <li>Audio: {caps.audio_sources.reason}</li>}

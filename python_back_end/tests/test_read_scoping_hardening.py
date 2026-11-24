@@ -106,15 +106,15 @@ def test_ollama_logs_are_admin_only():
     assert pool.ran("proxy_usage_log")
 
 
-def test_openclaw_audit_slice_is_admin_only_but_own_runs_stay():
+def test_web_tool_audit_slice_is_admin_only_but_own_runs_stay():
     client, pool = _logs_client(USER_ID)
-    r = client.get("/api/owui/integrations/openclaw/logs")
+    r = client.get("/api/owui/integrations/native/logs")
     assert r.status_code == 200
     assert not pool.ran("openclaw_tool_audit")
     assert pool.ran("workspace_runs")
 
     client, pool = _logs_client(ADMIN_ID)
-    assert client.get("/api/owui/integrations/openclaw/logs").status_code == 200
+    assert client.get("/api/owui/integrations/native/logs").status_code == 200
     assert pool.ran("openclaw_tool_audit")
 
 

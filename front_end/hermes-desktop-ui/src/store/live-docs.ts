@@ -44,8 +44,9 @@ export function liveDocSlug(title: string): string {
   return slug || 'document'
 }
 
-export function liveDocKey(sessionId: string, title: string): string {
-  return `${sessionId}:${liveDocSlug(title)}`
+/** Slides and a handout on one topic often share a title, so the kind keeps their panels apart. */
+export function liveDocKey(sessionId: string, kind: string, title: string): string {
+  return `${sessionId}:${kind}:${liveDocSlug(title)}`
 }
 
 export function upsertLiveDoc(

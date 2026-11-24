@@ -217,7 +217,7 @@ export class Renderer {
         g.strokeRect(sel.goal.x * TILE + 3.5, sel.goal.y * TILE + 3.5, TILE - 7, TILE - 7);
       }
     }
-    const order = [...this.sim.agents].sort((a, b) => a.pos.y - b.pos.y);
+    const order = this.sim.agents.filter((a) => !a.inside).sort((a, b) => a.pos.y - b.pos.y); // through a door = out of sight
     for (const a of order) (a.pet ? drawPet : drawHuman)(g, a, t);
     g.drawImage(this.front, 0, 0);
     // weather

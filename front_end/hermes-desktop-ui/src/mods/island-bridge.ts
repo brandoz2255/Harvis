@@ -42,6 +42,9 @@ export interface IslandTheme {
 
 export type PauseReason = 'hidden' | 'offscreen'
 
+/** Where a resident is on the island: busy at the cafe, idle on the benches, away at home. */
+export type IslandPresence = 'away' | 'busy' | 'idle'
+
 export const ASSISTANT_AGENT_ID = 'harvis'
 
 const safeId = (raw: string) => raw.replace(/[^A-Za-z0-9_.:-]/g, '_').slice(0, 64)
@@ -85,6 +88,7 @@ export interface IslandAppHandle {
   pause(): void
   resume(): void
   setLowFx(on: boolean): void
+  setPresence(presence: Record<string, IslandPresence>): void
   setSession(agents: IslandAgent[]): void
   setTheme(theme: IslandTheme): void
 }
@@ -99,6 +103,7 @@ export class IslandBridge {
   private paused = false
   private readonly reasons = new Set<PauseReason>()
   private themeKey = ''
+  private presenceKey = ''
   private sessionKey = ''
   private disposed = false
 
@@ -114,6 +119,18 @@ export class IslandBridge {
 
     this.sessionKey = key
     this.app.setSession(agents)
+  }
+
+  /** Presence moves residents in place, so it has its own channel and never rebuilds them. */
+  setPresence(presence: Record<string, IslandPresence>) {
+    const key = JSON.stringify(Object.entries(presence).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+
+    if (key === this.presenceKey || this.disposed) {
+      return
+    }
+
+    this.presenceKey = key
+    this.app.setPresence(presence)
   }
 
   setTheme(theme: IslandTheme) {

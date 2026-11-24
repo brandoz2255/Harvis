@@ -1160,6 +1160,13 @@ export const host = {
     return close
   },
 
+  /** Bring a pane to the front of its group, unhiding it ('sessions', 'workspace', a plugin pane id). */
+  revealPane: (paneId: string): void => {
+    if (paneId) {
+      revealTreePane(paneId)
+    }
+  },
+
   /** Switch the visible main-pane workspace without unregistering retained panes. */
   setWorkspaceScope: (
     mode: WorkspaceMode,

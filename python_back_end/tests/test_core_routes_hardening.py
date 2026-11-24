@@ -337,59 +337,6 @@ def test_embedder_install_releases_the_lock_when_the_stream_fails(monkeypatch):
     assert not setup_flow._embedder_pull_lock.locked()
 
 
-# ---- OpenClaw provider config: admin-only on a shared host ------------------------------------
-
-def _config_request(row=None):
-    pool = _Pool(_Conn(row=row))
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(pg_pool=pool)))
-    return request, pool
-
-
-def _user(uid):
-    return main.UserResponse(id=uid, username=f"u{uid}", email=f"u{uid}@example.test")
-
-
-_CONFIG = main.OpenClawConfigRequest(provider_url="http://attacker.example/v1", model_id="m", provider_type="openai")
-
-
-def test_non_admin_cannot_save_the_shared_config_on_a_shared_host(monkeypatch):
-    monkeypatch.setattr(exposure, "shared", lambda: True)
-    request, pool = _config_request()
-    with pytest.raises(HTTPException) as exc:
-        run(main.save_openclaw_config(request, _CONFIG, _user(2)))
-    assert exc.value.status_code == 403
-    assert pool.acquired == 0
-
-
-def test_non_admin_can_still_remove_their_own_config_on_a_shared_host(monkeypatch):
-    monkeypatch.setattr(exposure, "shared", lambda: True)
-    request, pool = _config_request()
-    run(main.delete_openclaw_config(request, _user(2)))
-    query, args = pool.conn.executed[0]
-    assert "WHERE user_id = $1" in query
-    assert args == (2,)
-
-
-def test_admin_can_save_and_reset_on_a_shared_host(monkeypatch):
-    monkeypatch.setattr(exposure, "shared", lambda: True)
-    row = {"id": 1, "provider_url": _CONFIG.provider_url, "model_id": "m", "provider_type": "openai",
-           "is_active": True, "created_at": _NOW, "updated_at": _NOW}
-    request, pool = _config_request(row)
-    saved = run(main.save_openclaw_config(request, _CONFIG, _user(1)))
-    assert saved.provider_url == _CONFIG.provider_url
-    run(main.delete_openclaw_config(request, _user(1)))
-    assert len(pool.conn.executed) == 1
-
-
-def test_any_user_can_still_save_their_config_on_a_local_install(monkeypatch):
-    monkeypatch.setattr(exposure, "shared", lambda: False)
-    row = {"id": 5, "provider_url": _CONFIG.provider_url, "model_id": "m", "provider_type": "openai",
-           "is_active": True, "created_at": _NOW, "updated_at": _NOW}
-    request, pool = _config_request(row)
-    assert run(main.save_openclaw_config(request, _CONFIG, _user(2))).id == 5
-    assert pool.acquired == 1
-
-
 # ---- workspace model sync only touches the caller's own config row -----------------------------
 
 def test_workspace_model_sync_is_scoped_to_the_caller_on_a_shared_host(monkeypatch):

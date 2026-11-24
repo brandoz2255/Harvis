@@ -103,7 +103,7 @@ def clean_avatar(raw: Any) -> dict:
 
 
 def clean_autonomy(raw: Any) -> dict:
-    """``{"cleared_limits": [...], "notify_channel_id": "..."}``.
+    """``{"cleared_limits": [...], "notify_channel_id": "...", "desktop": bool}``.
 
     ``cleared_limits`` is standing permission for a hard limit. An unknown name
     is rejected rather than ignored — silently dropping "delete_everything"
@@ -135,6 +135,13 @@ def clean_autonomy(raw: Any) -> dict:
             if not chan.isdigit() or len(chan) > 32:
                 raise ValidationError("autonomy.notify_channel_id must be a numeric channel id.")
             out["notify_channel_id"] = chan
+    # True/false: this teammate's screen is a full desktop or a bare display.
+    # Absent: the install default (HARVIS_BOT_DESKTOP_DEFAULT) decides.
+    desktop = raw.get("desktop")
+    if desktop is not None:
+        if not isinstance(desktop, bool):
+            raise ValidationError("autonomy.desktop must be true or false.")
+        out["desktop"] = desktop
     return out
 
 

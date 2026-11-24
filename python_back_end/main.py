@@ -82,7 +82,7 @@ from vison_models.llm_connector import (
     VISION_ERROR_PREFIX,
 )
 
-# Import workspace (Harvis Workspaces / OpenClaw integration)
+# Import workspace (Harvis Workspaces)
 from workspace import workspace_router
 from workspace.model_proxy import model_proxy_router
 from workspace.github_proxy import github_proxy_router
@@ -100,7 +100,7 @@ from image.harvis_image import harvis_image_router  # Image-gen v0: gated txt2im
 from vibecoding.terminal_sessions import router as harvis_terminal_sessions_router
 
 # Import tools routers
-from tools import maps_router, openclaw_proxy_router, browser_proxy_router, discord_proxy_router
+from tools import maps_router, agent_tools_router, browser_proxy_router, discord_proxy_router
 
 # Import vibecoding routers
 from vibecoding import (
@@ -647,7 +647,7 @@ async def lifespan(app: FastAPI):
         except Exception as _exc:  # noqa: BLE001
             logger.warning("terminal sweeper not started: %s", _exc)
 
-        # Ensure OpenClaw web tool audit + prefs columns exist (idempotent)
+        # Ensure the agent web tool audit table + prefs columns exist (idempotent)
         try:
             async with app.state.pg_pool.acquire() as conn:
                 # Core schema (users/chat_sessions/chat_messages/artifacts/…).
@@ -673,24 +673,18 @@ async def lifespan(app: FastAPI):
                         _core_err,
                     )
 
-                # Migrations 010-015 create tables (user_openclaw_config, cron_jobs,
-                # user_memory, mcp_servers, messaging_platforms, user_soul) that no
-                # initdb mount and no other startup block provisions — a fresh clone
-                # otherwise spams `relation "cron_jobs" does not exist` and
-                # cron/messaging features break. run_migrations.py exists but is
-                # never invoked. Apply just these six here: all are verified
-                # idempotent (CREATE ... IF NOT EXISTS), so this heals fresh AND
-                # pre-existing volumes. Per-file try/except so one bad file can't
-                # abort boot. Most of 001-009 include un-guarded ALTERs and are
-                # deliberately NOT swept in — the exception is the podcast trio
-                # (005-007), which IS idempotent and is applied further below,
-                # after the notebooks schema its FK depends on.
-                #
-                # 010 was missing from this list even though it is idempotent, so
-                # user_openclaw_config never existed on a fresh volume and every BYO
-                # OpenClaw lookup failed — which is what surfaced as the pairing
-                # regression. It is a plain CREATE TABLE/INDEX IF NOT EXISTS plus a
-                # CREATE OR REPLACE FUNCTION and a DROP-then-CREATE trigger.
+                # Migrations 011-015 create tables (cron_jobs, user_memory,
+                # mcp_servers, messaging_platforms, user_soul) that no initdb mount
+                # and no other startup block provisions — a fresh clone otherwise
+                # spams `relation "cron_jobs" does not exist` and cron/messaging
+                # features break. run_migrations.py exists but is never invoked.
+                # Apply just these here: all are verified idempotent
+                # (CREATE ... IF NOT EXISTS), so this heals fresh AND pre-existing
+                # volumes. Per-file try/except so one bad file can't abort boot.
+                # Most of 001-009 include un-guarded ALTERs and are deliberately
+                # NOT swept in — the exception is the podcast trio (005-007),
+                # which IS idempotent and is applied further below, after the
+                # notebooks schema its FK depends on.
                 _mig_dir = os.path.join(os.path.dirname(__file__), "migrations")
                 # 018 and 019 ALTER owui_subagents, which the OWUI block further
                 # down is the only thing to create. On an empty database that put
@@ -703,7 +697,6 @@ async def lifespan(app: FastAPI):
                 except Exception as _e:
                     logger.warning("owui_subagents pre-create skipped: %s", _e)
                 for _mig_name in (
-                    "010_user_openclaw_config.sql",
                     "011_messaging_platforms.sql",
                     "012_user_memory.sql",
                     "013_mcp_servers.sql",
@@ -1034,7 +1027,7 @@ async def lifespan(app: FastAPI):
                 except Exception as _ins_exc:  # noqa: BLE001
                     logger.warning("⚠️ Stuck notebook insights sweep failed: %s", _ins_exc)
         except Exception as e:
-            logger.warning("⚠️ Failed to init OpenClaw audit/prefs schema: %s", e)
+            logger.warning("⚠️ Failed to init tool audit/prefs schema: %s", e)
 
         # Phase E2: reconnect to background jobs that were 'running' when the
         # backend last died. The detached wrappers + their /tmp/harvis-job-*
@@ -1837,7 +1830,6 @@ app.add_middleware(
         "http://localhost:3001",
         "http://127.0.0.1:3000",
         "http://127.0.0.1:3001",
-        "http://frontend:3000",  # Docker network
         "http://nginx-proxy:80",  # Docker network nginx
         "http://localhost:8000",  # Backend self
         "http://127.0.0.1:8000",
@@ -1860,7 +1852,7 @@ _CSRF_ALLOWED_NETLOCS = {
     *(o.split("://", 1)[-1] for o in _EXTRA_ORIGINS),
     "localhost:9000", "127.0.0.1:9000",
     "localhost:3000", "localhost:3001", "127.0.0.1:3000", "127.0.0.1:3001",
-    "frontend:3000", "nginx-proxy:80", "localhost:8000", "127.0.0.1:8000",
+    "nginx-proxy:80", "localhost:8000", "127.0.0.1:8000",
 }
 _CSRF_UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _CSRF_GUARDED_PREFIXES = ("/api/", "/hermes-api/", "/onb-api/", "/onb/api/")
@@ -1939,10 +1931,10 @@ if RAG_CORPUS_AVAILABLE:
 # Include artifacts router
 app.include_router(artifact_router)
 
-# Include workspace router (Harvis Workspaces — OpenClaw agent integration)
+# Include workspace router (Harvis Workspaces)
 app.include_router(workspace_router)
 # Include workspace terminal router — per-session dockerized shell that lives
-# on openclaw-internal so the agent can `curl` it for `exec` calls. Persistent
+# on the internal agent network so the agent can `curl` it for `exec` calls. Persistent
 # named volume per workspace_id (see workspace/terminal_container.py).
 app.include_router(workspace_terminal_router)
 # Include the Harvis Execution Trace facade (/api/harvis/*) — a clean namespace
@@ -1968,25 +1960,24 @@ app.include_router(harvis_image_router)
 # Phase 3: terminal-session REST over the VibeCode PTY — pre-created exec +
 # docker exec_resize side-channel. Gated by HARVIS_BUILD_SHELL like the WS.
 app.include_router(harvis_terminal_sessions_router)
-# Include model proxy (OpenAI-compat endpoint for OpenClaw → Moonshot forwarding)
-# OpenClaw calls http://harvis-ai-merged-backend:8000/v1/chat/completions
+# Include model proxy (OpenAI-compat endpoint; the agent calls /v1/chat/completions here)
 # so that the Moonshot API key never leaves the backend pod.
 app.include_router(model_proxy_router)
-# Include GitHub proxy (OpenClaw → backend → GitHub API forwarding).
+# Include GitHub proxy (agent → backend → GitHub API forwarding).
 # Only dulc3/harvis-aidev is allowed; token stays server-side.
 app.include_router(github_proxy_router)
-# Include RAG proxy (OpenClaw → backend → pgvector semantic search).
-# OpenClaw agents call /rag/search to retrieve relevant code/docs chunks
+# Include RAG proxy (agent → backend → pgvector semantic search).
+# Agents call /rag/search to retrieve relevant code/docs chunks
 # without needing direct database access or holding DB credentials.
 app.include_router(rag_proxy_router)
 # Include kubectl proxy — mounted at BOTH prefixes so:
 #   • Frontend (via nginx) hits /api/kubectl/pending, /api/kubectl/approve, etc.
-#   • OpenClaw pods call /kubectl/exec, /kubectl/health directly (pod-to-pod).
+#   • Agent pods call /kubectl/exec, /kubectl/health directly (pod-to-pod).
 # Both share the same handlers & in-memory approval state.
 app.include_router(kubectl_proxy_router, prefix="/api/kubectl")
 app.include_router(kubectl_proxy_router, prefix="/kubectl")
 
-# Include workspace repo manager (GitHub repo clone/sync/push for OpenClaw workspace)
+# Include workspace repo manager (GitHub repo clone/sync/push for the workspace)
 app.include_router(repo_manager_router)
 # GitHub OAuth for VibeCode (connect → clone → Create-PR). /api/vibecode/github/{start,callback,
 # status,disconnect} + the /api/auth/vibecode/github/callback alias. Needs GITHUB_CLIENT_ID/SECRET.
@@ -1996,8 +1987,8 @@ app.include_router(auth_github_callback_router)
 # Include Maps proxy (Google Maps API endpoints without exposing API keys)
 app.include_router(maps_router)
 
-# Include OpenClaw tool proxy (web-fetch + document-save — internal service auth)
-app.include_router(openclaw_proxy_router)
+# Include the agent tool proxy (web-fetch + document-save — internal service auth)
+app.include_router(agent_tools_router)
 app.include_router(browser_proxy_router)
 
 # Include Discord tools proxy (heartbeat → Discord posting, internal service auth)
@@ -2839,25 +2830,6 @@ class ApiKeyUpdateRequest(BaseModel):
 
 
 
-# ─── Harvis Claw LLM Config Models ───────────────────────────────────────────
-
-class OpenClawConfigRequest(BaseModel):
-    provider_url: str
-    api_key: Optional[str] = None
-    model_id: str
-    provider_type: str = "openai"  # 'openai', 'ollama', 'anthropic'
-
-
-class OpenClawConfigResponse(BaseModel):
-    id: int
-    provider_url: str
-    model_id: str
-    provider_type: str
-    is_active: bool
-    created_at: datetime
-    updated_at: datetime
-
-# ─── Harvis Claw LLM Config Models ───────────────────────────────────────────
 # ─── Reasoning Model Helpers --------------------------------------------------
 def separate_thinking_from_final_output(text: str) -> tuple[str, str]:
     """
@@ -3795,136 +3767,6 @@ async def get_api_key_by_provider(
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
-
-
-# ─── Harvis Claw LLM Config Endpoints ─────────────────────────────────────
-
-def _require_admin_if_shared(user) -> None:
-    """The model proxy serves one active config row to every user, so on a shared
-    host only an admin may write it. Deleting is left open: it only removes the caller's own row."""
-    from owui_compat.authz import is_admin
-    from plugins.exposure import shared
-
-    if shared() and not is_admin(user):
-        raise HTTPException(
-            status_code=403,
-            detail="Administrator privileges are required for this operation.",
-        )
-
-
-@app.get("/api/user/openclaw-config", response_model=OpenClawConfigResponse, tags=["openclaw"])
-async def get_openclaw_config(
-    request: Request,
-    current_user: UserResponse = Depends(get_current_user),
-):
-    """Get the current user's Harvis Claw LLM configuration"""
-    pool = getattr(request.app.state, "pg_pool", None)
-    if not pool:
-        raise HTTPException(status_code=500, detail="Database not available")
-
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            SELECT id, provider_url, model_id, provider_type, is_active, created_at, updated_at
-            FROM openclaw_llm_config
-            WHERE user_id = $1 AND is_active = TRUE
-            """,
-            current_user.id,
-        )
-
-        if not row:
-            # Return default config for new users
-            return OpenClawConfigResponse(
-                id=0,
-                provider_url=HARVIS_LLM_BASE_URL,
-                model_id="qwen2.5-coder:32b",
-                provider_type="ollama",
-                is_active=True,
-                created_at=datetime.utcnow(),
-                updated_at=datetime.utcnow(),
-            )
-
-        return OpenClawConfigResponse(
-            id=row["id"],
-            provider_url=row["provider_url"],
-            model_id=row["model_id"],
-            provider_type=row["provider_type"],
-            is_active=row["is_active"],
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-        )
-
-
-@app.post("/api/user/openclaw-config", response_model=OpenClawConfigResponse, tags=["openclaw"])
-async def save_openclaw_config(
-    request: Request,
-    config: OpenClawConfigRequest,
-    current_user: UserResponse = Depends(get_current_user),
-):
-    """Save the user's Harvis Claw LLM configuration"""
-    _require_admin_if_shared(current_user)
-    pool = getattr(request.app.state, "pg_pool", None)
-    if not pool:
-        raise HTTPException(status_code=500, detail="Database not available")
-
-    # Encrypt the API key if provided
-    encrypted_key = None
-    if config.api_key:
-        encrypted_key = encrypt_api_key(config.api_key)
-
-    async with pool.acquire() as conn:
-        # Upsert the config
-        row = await conn.fetchrow(
-            """
-            INSERT INTO openclaw_llm_config (user_id, provider_url, api_key_encrypted, model_id, provider_type, is_active)
-            VALUES ($1, $2, $3, $4, $5, TRUE)
-            ON CONFLICT (user_id) DO UPDATE SET
-                provider_url = EXCLUDED.provider_url,
-                api_key_encrypted = EXCLUDED.api_key_encrypted,
-                model_id = EXCLUDED.model_id,
-                provider_type = EXCLUDED.provider_type,
-                is_active = TRUE,
-                updated_at = CURRENT_TIMESTAMP
-            RETURNING id, provider_url, model_id, provider_type, is_active, created_at, updated_at
-            """,
-            current_user.id,
-            config.provider_url,
-            encrypted_key,
-            config.model_id,
-            config.provider_type,
-        )
-
-        return OpenClawConfigResponse(
-            id=row["id"],
-            provider_url=row["provider_url"],
-            model_id=row["model_id"],
-            provider_type=row["provider_type"],
-            is_active=row["is_active"],
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-        )
-
-
-@app.delete("/api/user/openclaw-config", tags=["openclaw"])
-async def delete_openclaw_config(
-    request: Request,
-    current_user: UserResponse = Depends(get_current_user),
-):
-    """Reset Harvis Claw config to default (Ollama)"""
-    pool = getattr(request.app.state, "pg_pool", None)
-    if not pool:
-        raise HTTPException(status_code=500, detail="Database not available")
-
-    async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            DELETE FROM openclaw_llm_config
-            WHERE user_id = $1
-            """,
-            current_user.id,
-        )
-
-        return {"message": "OpenClaw config reset to default (Ollama)"}
 
 
 # ── Web Search Tool Detection ───────────────────────────────────────────────────
@@ -6440,9 +6282,9 @@ async def upload_file(
 ):
     """
     Store an uploaded file (image, PDF, DOCX) and return a file_id that can
-    be passed to OpenClaw via a workspace task brief.
+    be passed to the agent via a workspace task brief.
 
-    The file_id is then used with POST /api/tools/file-analyze so OpenClaw
+    The file_id is then used with POST /api/tools/file-analyze so the agent
     can have Kimi vision analyze the document and recreate it as a DOCX.
     """
     ALLOWED_MIME_PREFIXES = (
@@ -8659,7 +8501,7 @@ async def startup_event():
         await init_job_queue()
         logger.info("✅ Job queue initialized on startup")
         
-        # Initialize OpenClaw LLM config table
+        # Initialize the per-user workspace model table (legacy name openclaw_llm_config)
         pool = getattr(app.state, "pg_pool", None)
         if pool:
             async with pool.acquire() as conn:
@@ -8678,13 +8520,13 @@ async def startup_event():
                     )
                 """)
                 # Per-user workspace ENGINE preference (separate from the model):
-                # 'native' = OpenClaw tool loop, 'claude-code' = Claude Code direct engine.
+                # 'native' = Harvis's own tool loop, 'claude-code' = Claude Code direct engine.
                 await conn.execute(
                     "ALTER TABLE openclaw_llm_config "
                     "ADD COLUMN IF NOT EXISTS engine TEXT DEFAULT 'native'"
                 )
                 # Last LOCAL model the user picked — restored as the fallback when
-                # a cloud model can't drive the OpenClaw workspace.
+                # a cloud model can't drive the workspace.
                 await conn.execute(
                     "ALTER TABLE openclaw_llm_config "
                     "ADD COLUMN IF NOT EXISTS last_local_model_id TEXT"
@@ -8694,7 +8536,7 @@ async def startup_event():
                     "ALTER TABLE openclaw_llm_config "
                     "ADD COLUMN IF NOT EXISTS orchestrate_enabled BOOLEAN DEFAULT FALSE"
                 )
-                logger.info("✅ OpenClaw LLM config table initialized")
+                logger.info("✅ Workspace model config table initialized")
     except Exception as e:
         logger.error(f"Failed to initialize job queue: {e}")
 

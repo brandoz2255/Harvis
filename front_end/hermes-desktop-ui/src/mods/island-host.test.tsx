@@ -10,9 +10,10 @@ import { IslandHost } from './island-host'
 
 const fetchBots = vi.hoisted(() => vi.fn())
 const startBotChat = vi.hoisted(() => vi.fn())
-vi.mock('@/plugins/hermes-bots/data', async () => {
+vi.mock('@/plugins/hermes-bots/data', async importOriginal => {
   const { useQuery } = await import('@tanstack/react-query')
-  return { useRoster: (accountId: string) => useQuery({ queryKey: ['test-roster', accountId], queryFn: async () => ({ profiles: await fetchBots() }) }) }
+  const actual = await importOriginal<typeof import('@/plugins/hermes-bots/data')>()
+  return { ...actual, useRoster: (accountId: string) => useQuery({ queryKey: ['test-roster', accountId], queryFn: async () => ({ profiles: await fetchBots() }) }) }
 })
 vi.mock('@/plugins/hermes-bots/roster-actions', () => ({ openRosterBot: startBotChat }))
 
@@ -30,6 +31,7 @@ interface MountRecord {
   resume: ReturnType<typeof vi.fn>
   setInteractive: ReturnType<typeof vi.fn>
   setLowFx: ReturnType<typeof vi.fn>
+  setPresence: ReturnType<typeof vi.fn>
   setSession: ReturnType<typeof vi.fn>
   setTheme: ReturnType<typeof vi.fn>
   useArt: ReturnType<typeof vi.fn>
@@ -55,6 +57,7 @@ vi.mock('@/island/mount.js', () => ({
       resume: vi.fn(() => app.calls.push(['resume', undefined])),
       setInteractive: vi.fn(),
       setLowFx: vi.fn((on: boolean) => app.calls.push(['lowfx', on])),
+      setPresence: vi.fn(),
       setSession: vi.fn((agents: unknown) => app.calls.push(['session', agents])),
       setTheme: vi.fn((theme: unknown) => app.calls.push(['theme', theme])),
       useArt: vi.fn(async (files: unknown) => {
@@ -160,9 +163,9 @@ describe('IslandHost rendering', () => {
     expect(mounts.instances[0].disposed).toBe(true)
     expect(mountDiv().className).toContain('opacity-100')
     expect(mountDiv().className).not.toContain('mask-image')
-    expect(screen.getByRole('button', { name: 'Back to bots' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Close map' })).toBeTruthy()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Back to bots' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Close map' }))
     expect(mounts.instances[1].disposed).toBe(true)
     expect(mountDiv().className).toContain('opacity-25')
   })

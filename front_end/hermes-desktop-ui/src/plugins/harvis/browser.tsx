@@ -6,7 +6,7 @@
  * so the only thing the page ever learns about the runner is the session token.
  */
 
-import { Button, cn, Codicon, EmptyState, Input, StatusDot, useQuery, useQueryClient } from '@hermes/plugin-sdk'
+import { Button, cn, Codicon, EmptyState, Input, StatusDot, Switch, useQuery, useQueryClient } from '@hermes/plugin-sdk'
 import { useEffect, useState } from 'react'
 
 import { harvisApi } from './api'
@@ -14,6 +14,10 @@ import { harvisApi } from './api'
 interface Health {
   ok: boolean
   headedAvailable: boolean
+  /** The runner can put a full Xfce desktop on the screen, not just Firefox. */
+  desktopAvailable?: boolean
+  /** This install's default for a new screen (HARVIS_BOT_DESKTOP_DEFAULT). */
+  desktopDefault?: boolean
   reason?: string
 }
 
@@ -22,6 +26,7 @@ export interface Session {
   agentId: null | string
   vncPath: string
   takenOver: boolean
+  desktop?: boolean
   url?: string
   title?: string
 }
@@ -194,11 +199,14 @@ export function BrowserPage() {
   const [address, setAddress] = useState('')
   const [starting, setStarting] = useState(false)
   const [error, setError] = useState('')
+  const [desktop, setDesktop] = useState<boolean | null>(null)
 
   const health = useQuery({
     queryFn: () => harvisApi<Health>(`${BASE}/health`),
     queryKey: ['harvis', 'computer', 'health']
   })
+
+  const desktopOn = desktop ?? Boolean(health.data?.desktopDefault)
 
   const sessions = useQuery({
     queryFn: fetchSessions,
@@ -216,7 +224,10 @@ export function BrowserPage() {
     try {
       const s = await harvisApi<Session>(`${BASE}/sessions`, {
         method: 'POST',
-        body: JSON.stringify({ url: withScheme(address) || null })
+        body: JSON.stringify({
+          url: withScheme(address) || null,
+          desktop: health.data?.desktopAvailable ? desktopOn : null
+        })
       })
 
       setSelected(s.sessionId)
@@ -252,6 +263,7 @@ export function BrowserPage() {
             type="button"
           >
             {s.agentId ? 'Teammate' : 'Yours'}
+            {s.desktop ? ' · desktop' : ''}
             {s.title ? `: ${s.title.slice(0, 30)}` : ''}
           </button>
         ))}
@@ -282,6 +294,17 @@ export function BrowserPage() {
               {starting ? 'Opening…' : 'Open browser'}
             </Button>
           </form>
+          {health.data?.desktopAvailable && (
+            <div className="flex items-center gap-3">
+              <Switch aria-label="Full desktop" checked={desktopOn} onCheckedChange={setDesktop} />
+              <span className="min-w-0">
+                <span className="block text-sm">Full desktop</span>
+                <span className="block text-xs text-(--ui-text-tertiary)">
+                  Windows you can move and resize, with a taskbar. Uses about 200 MB more memory.
+                </span>
+              </span>
+            </div>
+          )}
           {error && <p className="text-sm text-destructive">{error}</p>}
         </div>
       )}

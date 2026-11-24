@@ -38,6 +38,7 @@ describe('island', () => {
       'engine/events.js',
       'engine/island-life.js',
       'engine/pathfinding.js',
+      'engine/presence.js',
       'engine/render.js',
       'engine/sim.js',
       'engine/social.js',

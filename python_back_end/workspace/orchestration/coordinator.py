@@ -29,7 +29,7 @@ import re
 import time
 from typing import AsyncGenerator
 
-from ..events import OpenClawEvent
+from ..events import WorkspaceEvent
 from .conversation import conversation_prefix
 from .isolation import WorkspaceIsolationManager
 from .profiles import get_profile
@@ -104,6 +104,8 @@ def computer_context(agent: dict, *, user_id: int, run_id: str, pool=None) -> di
         "agent_id": agent.get("id") or "",
         "run_id": run_id,
         "cleared_limits": [str(c) for c in cleared if c],
+        # None leaves the choice to the install default (plugins.agents.computer).
+        "desktop": autonomy.get("desktop") if isinstance(autonomy.get("desktop"), bool) else None,
         "pool": pool,
     }
 
@@ -169,7 +171,7 @@ async def run_agent_coordinated(
     user_id: int = 0,
     session_id: str = "",
     launch_mode: str = "user",
-) -> AsyncGenerator[OpenClawEvent, None]:
+) -> AsyncGenerator[WorkspaceEvent, None]:
     from ..workspace_router import (
         _db_complete_run,
         _db_create_run,
@@ -185,8 +187,8 @@ async def run_agent_coordinated(
     agent_id = agent.get("id") or ""
     run_id = parent_workspace_id
 
-    def root_ev(etype: str, data: dict) -> OpenClawEvent:
-        e = OpenClawEvent(
+    def root_ev(etype: str, data: dict) -> WorkspaceEvent:
+        e = WorkspaceEvent(
             etype,
             {
                 **data,
@@ -275,7 +277,7 @@ async def run_agent_coordinated(
     deadline = time.monotonic() + max_seconds
     done_steps: list[dict] = []
 
-    async def _run_step(step: dict, n: int, task_text: str) -> AsyncGenerator[OpenClawEvent, None]:
+    async def _run_step(step: dict, n: int, task_text: str) -> AsyncGenerator[WorkspaceEvent, None]:
         """One step: a child run in the shared workspace, on the chosen engine."""
         engine = choose_engine(step, agent.get("engine") or "auto")
         child_run_id = f"{run_id}-s{n}"
@@ -298,7 +300,7 @@ async def run_agent_coordinated(
             "status": "running", "step_run_id": child_run_id,
         })
         # The header line belongs to the parent lane, so `run_id` is the parent's.
-        # OpenClawEvent.to_sse writes self.run_id over any data["run_id"], which is
+        # WorkspaceEvent.to_sse writes self.run_id over any data["run_id"], which is
         # why the child id travels under its own key — otherwise the card could
         # never match a step's ending to the step that started it.
         start_ev.run_id = run_id
@@ -338,7 +340,7 @@ async def run_agent_coordinated(
                            exc_info=True)
             record["ok"] = False
             record["summary"] = f"error: {exc}"
-            err = OpenClawEvent("agent_end", {
+            err = WorkspaceEvent("agent_end", {
                 "label": step["label"], "summary": f"error: {exc}", "success": False,
                 "parent_run_id": run_id, "model": step["model"],
             })

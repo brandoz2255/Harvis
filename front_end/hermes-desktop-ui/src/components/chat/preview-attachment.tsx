@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 
 import { useSessionView } from '@/app/chat/session-view'
 import { useI18n } from '@/i18n'
+import { canFetchHarvisFiles, downloadHarvisFile, isHarvisFileRoute } from '@/lib/harvis-files'
 import { Download, MonitorPlay } from '@/lib/icons'
 import { normalizeOrLocalPreviewTarget } from '@/lib/local-preview'
 import { downloadGatewayMediaFile } from '@/lib/media'
@@ -10,7 +11,16 @@ import { previewName } from '@/lib/preview-targets'
 import { notifyError } from '@/store/notifications'
 import { $previewTabSources, closePreviewForSource, openPreview, type PreviewRecordSource } from '@/store/preview'
 
-export function PreviewAttachment({ source = 'manual', target }: { source?: PreviewRecordSource; target: string }) {
+export function PreviewAttachment({
+  label,
+  source = 'manual',
+  target
+}: {
+  /** Shown instead of the file name taken from `target`. */
+  label?: string
+  source?: PreviewRecordSource
+  target: string
+}) {
   const { t } = useI18n()
   // This link lives in one session's transcript; resolve it against THAT
   // session's cwd, not the primary chat's.
@@ -23,7 +33,7 @@ export function PreviewAttachment({ source = 'manual', target }: { source?: Prev
   const mountedRef = useRef(false)
   const requestTokenRef = useRef(0)
   const targetRef = useRef(target)
-  const name = previewName(target)
+  const name = label || previewName(target)
   const isActive = openSources.includes(target)
 
   cwdRef.current = cwd
@@ -105,6 +115,12 @@ export function PreviewAttachment({ source = 'manual', target }: { source?: Prev
     setDownloading(true)
 
     try {
+      if (isHarvisFileRoute(target) && canFetchHarvisFiles()) {
+        await downloadHarvisFile(target, name)
+
+        return
+      }
+
       // Works in both modes: the Electron main process fetches the bytes
       // through the session's backend connection (local gateway or remote)
       // and prompts for a save location.

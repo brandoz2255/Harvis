@@ -1,9 +1,10 @@
 // Double-click an assistant reply to heart it (the iMessage gesture), gated on
 // the same opt-in toggle as the rest of message reactions.
-import { AssistantRuntimeProvider, type ThreadMessage, useExternalStoreRuntime } from '@assistant-ui/react'
+import { AssistantRuntimeProvider, type ThreadMessage } from '@assistant-ui/react'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { useIncrementalExternalStoreRuntime } from '@/lib/incremental-external-store-runtime'
 import type * as ReactionsStore from '@/store/reactions'
 import { $reactionsEnabled } from '@/store/reactions-enabled'
 import { $localReactions } from '@/store/reactions-local'
@@ -23,7 +24,7 @@ vi.mock('@/store/reactions', async importOriginal => ({
 }))
 
 function Harness() {
-  const runtime = useExternalStoreRuntime<ThreadMessage>({
+  const runtime = useIncrementalExternalStoreRuntime<ThreadMessage>({
     messages: [assistantMessage()],
     isRunning: false,
     onNew: async () => {}

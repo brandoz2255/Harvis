@@ -1954,14 +1954,14 @@ async def _broadcast_live(workspace_id: str, event_type: str, payload: dict, seq
     """Push the event onto the running workspace's live broadcaster, if any."""
     try:
         from workspace.workspace_router import _workspace_broadcasters  # noqa: WPS433
-        from workspace.events import OpenClawEvent  # noqa: WPS433
+        from workspace.events import WorkspaceEvent  # noqa: WPS433
     except Exception:
         return
     broadcaster = _workspace_broadcasters.get(workspace_id)
     if broadcaster is None:
         return
     try:
-        evt = OpenClawEvent(event_type, dict(payload))
+        evt = WorkspaceEvent(event_type, dict(payload))
         await broadcaster.put((seq, evt))
     except Exception as exc:  # noqa: BLE001
         logger.debug("[terminal:%s] live broadcast skipped: %s", workspace_id, exc)

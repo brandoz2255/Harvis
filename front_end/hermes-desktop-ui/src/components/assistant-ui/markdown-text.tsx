@@ -19,6 +19,7 @@ import { ErrorBoundary } from '@/components/error-boundary'
 import { Codicon } from '@/components/ui/codicon'
 import { detectArtifact } from '@/lib/artifact-detect'
 import { normalizeExternalUrl, openExternalLink, PrettyLink } from '@/lib/external-link'
+import { isHarvisFileRoute, isServerRoute } from '@/lib/harvis-files'
 import { isHarvisDocLanguage, openHarvisDocFence } from '@/lib/harvis-doc'
 import { createMemoizedMathPlugin } from '@/lib/katex-memo'
 import { parseMarkdownIntoBlocksCached } from '@/lib/markdown-blocks'
@@ -44,6 +45,7 @@ import { ArtifactCard } from './artifact-card'
 import { SessionRefLink } from './directive-text'
 import { OpenDocFenceContext, TranscriptDocCard } from './doc-card'
 import { detectEmbed, extractAlert, MarkdownAlert, RichCodeBlock, UrlEmbed } from './embeds'
+import { InlineCode } from './inline-code-path'
 import { ResizableMarkdownTable, ResizableMarkdownTh } from './markdown-table'
 import { paragraphPlainText, TranscriptDirectiveLeaf, useIsClaimedDirective } from './transcript-directive'
 
@@ -318,7 +320,10 @@ function MarkdownLink({ children, className, href, ...props }: ComponentProps<'a
   const previewTarget = previewTargetFromMarkdownHref(href)
 
   if (previewTarget) {
-    return <PreviewAttachment source="explicit-link" target={previewTarget} />
+    // Harvis' file route ends in `/content`, so the link text is the better name.
+    const label = isHarvisFileRoute(previewTarget) ? childrenToText(children).trim() || undefined : undefined
+
+    return <PreviewAttachment label={label} source="explicit-link" target={previewTarget} />
   }
 
   const sessionRef = sessionRefFromMarkdownHref(href)
@@ -339,7 +344,7 @@ function MarkdownLink({ children, className, href, ...props }: ComponentProps<'a
     // remote fetches it over the authenticated /api/fs bridge), so the same
     // transcript works from every machine that opens it. Media extensions
     // keep their richer inline player.
-    const fileHref = href && !href.startsWith('#') && isFileMediaPath(href) ? href : null
+    const fileHref = href && !href.startsWith('#') && isFileMediaPath(href) && !isServerRoute(href) ? href : null
 
     if (fileHref) {
       return mediaKind(fileHref) === 'file' ? (
@@ -613,9 +618,7 @@ function MarkdownTextSurface({
         // mirroring the CSS isolate that already keeps it out of the
         // plaintext scan. Fenced code never reaches this override; it goes
         // through the code plugin's CodeCard path.
-        inlineCode: ({ className, ...props }: ComponentProps<'code'>) => (
-          <code className={className} dir="ltr" {...props} />
-        ),
+        inlineCode: InlineCode,
         // `---` as quiet spacing, not a heavy full-width rule.
         hr: (_props: ComponentProps<'hr'>) => <div aria-hidden className="my-3" />,
         // Lists and blockquotes have chrome that sits *beside* the text

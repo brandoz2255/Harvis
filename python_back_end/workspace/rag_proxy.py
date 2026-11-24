@@ -60,7 +60,7 @@ _CORPUS_CONFIG = {
 rag_proxy_router = APIRouter(prefix="/rag", tags=["rag-proxy"])
 
 
-async def _verify_openclaw_token(request: Request, authorization: Optional[str]) -> None:
+async def _verify_gateway_token(request: Request, authorization: Optional[str]) -> None:
     await resolve_gateway_caller(request, authorization)
 
 
@@ -208,7 +208,7 @@ async def rag_search(
     context_type "code"  → searches local_rag_corpus_code  (qwen3:embedding4b, halfvec 2560)
     context_type "docs"  → searches local_rag_corpus_docs  (nomic-embed-text, vector 768)
     """
-    await _verify_openclaw_token(request, authorization)
+    await _verify_gateway_token(request, authorization)
 
     cfg = _CORPUS_CONFIG[req.context_type]
     pool = getattr(request.app.state, "pg_pool", None)
@@ -306,7 +306,7 @@ async def rag_health(
     authorization: Optional[str] = Header(default=None),
 ):
     """Check DB connectivity and embedding model availability."""
-    await _verify_openclaw_token(request, authorization)
+    await _verify_gateway_token(request, authorization)
 
     ollama_url = OLLAMA_URL
 

@@ -1,5 +1,5 @@
 """External code-engine adapter (Phase E1 + E2) — run an EXTERNAL coding CLI against a
-VibeCode session clone and stream its work back as the standard ``OpenClawEvent`` stream
+VibeCode session clone and stream its work back as the standard ``WorkspaceEvent`` stream
 + a git diff, alongside the native ``vibecode-turn`` runner.
 
 Engines (``engine=…``):
@@ -30,7 +30,7 @@ import time
 from pathlib import Path
 from typing import AsyncGenerator, Optional
 
-from ..events import OpenClawEvent
+from ..events import WorkspaceEvent
 from .isolation import SESSION_WORKSPACE_ROOT, WorkspaceIsolationManager
 from .syntax_gate import (
     PROJECT_LAYOUT_CONTRACT,
@@ -507,7 +507,7 @@ _BUILDERS = {
 
 
 # ── Per-engine output mappers ───────────────────────────────────────────────
-# Each takes a parsed JSON object + the root_ev factory and yields OpenClawEvents.
+# Each takes a parsed JSON object + the root_ev factory and yields WorkspaceEvents.
 # Unrecognized shapes → a `log` event (never crash, never drop). The shared loop
 # accumulates tool_calls (from tool_call events) + final text (from token events).
 
@@ -735,7 +735,7 @@ async def run_external_engine_adapter(
     api_key: Optional[str] = None,  # decrypted per-user credential for cloud engines (NEVER logged)
     auth_mode: str = "api_key",     # E4B: 'api_key' → ANTHROPIC_API_KEY; 'oauth_token' → CLAUDE_CODE_OAUTH_TOKEN
     attachments: Optional[list[dict]] = None,  # staged into the clone so the CLI can READ them
-) -> AsyncGenerator[OpenClawEvent, None]:
+) -> AsyncGenerator[WorkspaceEvent, None]:
     from ..workspace_router import (
         _db_create_run,
         _db_save_artifact,
@@ -749,8 +749,8 @@ async def run_external_engine_adapter(
     started = time.monotonic()
     container = _CONTAINERS.get(engine, "")
 
-    def root_ev(etype: str, data: dict) -> OpenClawEvent:
-        e = OpenClawEvent(etype, {**data, "agent_label": label, "model": model_name})
+    def root_ev(etype: str, data: dict) -> WorkspaceEvent:
+        e = WorkspaceEvent(etype, {**data, "agent_label": label, "model": model_name})
         e.run_id = run_id
         e.agent_label = label
         return e
@@ -867,7 +867,7 @@ async def run_external_engine_adapter(
 
     launch_failed = False
 
-    async def _run_cli(run_cmd: list) -> AsyncGenerator[OpenClawEvent, None]:
+    async def _run_cli(run_cmd: list) -> AsyncGenerator[WorkspaceEvent, None]:
         """One full CLI invocation, streamed. Called again for each repair round.
 
         This used to be straight-line code, on the assumption that a Build turn is one
@@ -1184,7 +1184,7 @@ async def run_claude_chat_workspace(
     launch_mode: str = "user",
     engine: str = "claude-code",
     attachments: Optional[list[dict]] = None,  # staged into the scratch workdir so the CLI can READ them
-) -> AsyncGenerator[OpenClawEvent, None]:
+) -> AsyncGenerator[WorkspaceEvent, None]:
     """Run a CHAT workspace task through a cloud model's OWN agentic loop — ``claude -p``
     with its built-in tools (web_search, exec, file ops). No repo clone: a scratch workdir
     under the shared artifact volume. This makes the workspace a universal tool runtime that
@@ -1211,8 +1211,8 @@ async def run_claude_chat_workspace(
     container = _CONTAINERS.get("claude-code", "harvis-claude-code")
     sess = session_id or f"ws-{parent_workspace_id}"
 
-    def root_ev(etype: str, data: dict) -> OpenClawEvent:
-        e = OpenClawEvent(etype, {**data, "agent_label": label, "model": model_name})
+    def root_ev(etype: str, data: dict) -> WorkspaceEvent:
+        e = WorkspaceEvent(etype, {**data, "agent_label": label, "model": model_name})
         e.run_id = run_id
         e.agent_label = label
         return e

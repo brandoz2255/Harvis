@@ -54,8 +54,9 @@ export function skyIcon(minutes, weather) {
 }
 
 export function agentStatus(a) {
+  if (a.presence === "away") return { label: "out of office", tone: "off" };
   if (a.inside) return { label: "at home", tone: "off" };
-  if (a.activity) return { label: a.activity.label, tone: "work" };
+  if (a.activity) return { label: a.activity.label, tone: a.activity.kind === "lounging" ? "idle" : "work" };
   if (a.chat) return { label: "chatting", tone: "chat" };
   if (a.next) return { label: "walking", tone: "move" };
   return { label: "idle", tone: "idle" };

@@ -297,6 +297,99 @@
     return tied.at(-1);
   }
 
+  // src/island/engine/presence.js
+  var PRESENCES = ["busy", "idle", "away"];
+  var DESK = ["desk", "work", "cafe", "plaza"];
+  var COUCHES = [["couch", "lounge"], ["benchW", "benchE", "fountain", "plaza"]];
+  var ACTIVITY = {
+    busy: { kind: "working", label: "at the desk", say: "Busy at my desk." },
+    idle: { kind: "lounging", label: "on the couch", say: "Taking a break on the couch." }
+  };
+  function placeFor(sim2, a, presence) {
+    const seats = presence === "busy" ? sim2.world.desks : sim2.world.couches;
+    const seat = seats?.length ? freeSeat(sim2, seats, a) : null;
+    if (seat) return seat;
+    const places = sim2.world.places ?? {};
+    let names = DESK;
+    if (presence === "idle") {
+      const couches = COUCHES.map((group) => group.filter((n) => places[n])).find((group) => group.length) ?? [];
+      const i = Math.max(0, sim2.agents.indexOf(a));
+      names = couches.length ? [couches[i % couches.length]] : DESK;
+    }
+    const name = names.find((n) => places[n]);
+    const target = name ? places[name] : Object.values(places)[0];
+    return target ? freeSpot(sim2, target, a, 4) ?? target : null;
+  }
+  function freeSpot(sim2, t, a, maxR) {
+    const held = new Set(sim2.agents.filter((b) => b !== a && b.spot).map((b) => `${b.spot.x},${b.spot.y}`));
+    const w = sim2.world;
+    let best = null, bestD = Infinity;
+    for (let dy = -maxR; dy <= maxR; dy++)
+      for (let dx = -maxR; dx <= maxR; dx++) {
+        const p = { x: t.x + dx, y: t.y + dy };
+        const d = Math.abs(dx) + Math.abs(dy);
+        if (d === 0 || d > maxR || d >= bestD || held.has(`${p.x},${p.y}`)) continue;
+        if (!w.isWalkable(p.x, p.y) || w.isNoStop(p.x, p.y) || w.cost(p.x, p.y) >= 5) continue;
+        const holder = sim2.claimant(p);
+        if (holder !== void 0 && holder !== a.id) continue;
+        best = p;
+        bestD = d;
+      }
+    return best;
+  }
+  function freeSeat(sim2, seats, a) {
+    const held = new Set(sim2.agents.filter((b) => b !== a && b.spot).map((b) => `${b.spot.x},${b.spot.y}`));
+    return seats.find((p) => {
+      if (held.has(`${p.x},${p.y}`) || !sim2.world.isWalkable(p.x, p.y)) return false;
+      const holder = sim2.claimant(p);
+      return holder === void 0 || holder === a.id;
+    }) ?? null;
+  }
+  function near(a, spot, r2 = 4) {
+    return Math.abs(a.tile.x - spot.x) + Math.abs(a.tile.y - spot.y) <= r2;
+  }
+  function setPresence(sim2, id, presence) {
+    const a = sim2.agent(id);
+    if (!a || a.pet) return false;
+    const next = PRESENCES.includes(presence) ? presence : null;
+    if (a.presence === next) return true;
+    a.presence = next;
+    a.spot = null;
+    if (!next) {
+      if (a.activity && (a.activity.kind === "working" || a.activity.kind === "lounging")) a.activity = null;
+      sim2.emit("activity", { id: a.id, activity: a.activity });
+      return true;
+    }
+    keepPresence(sim2, a);
+    sim2.emit("presence", { id: a.id, presence: next });
+    return true;
+  }
+  function keepPresence(sim2, a) {
+    if (a.presence === "away") {
+      if (a.activity) {
+        a.activity = null;
+        sim2.emit("activity", { id: a.id, activity: null });
+      }
+      if (!a.sleeping) sim2.goToBed(a);
+      return;
+    }
+    if (a.sleeping || a.inside) sim2.wake(a);
+    if (a.inside) return;
+    const want = ACTIVITY[a.presence];
+    if (!a.activity || a.activity.say !== want.say) {
+      a.activity = { ...want };
+      sim2.emit("activity", { id: a.id, activity: a.activity });
+    }
+    if (a.chat) sim2.endChat(a);
+    if (!a.spot) a.spot = placeFor(sim2, a, a.presence);
+    if (!a.spot) return;
+    if (!near(a, a.spot, 0) && !a.goal && !a.next && !a.path.length) sim2.orderMove(a.id, a.spot);
+    else if (near(a, a.spot, 0)) {
+      if (a.presence === "busy") a.facing = "up";
+      else if (sim2.world.couches?.length) a.facing = "down";
+    }
+  }
+
   // src/island/engine/sim.js
   var TICK_MS = 1e3 / 60;
   var SPEED = { walk: 0.05, sprint: 0.11 };
@@ -380,7 +473,9 @@
         emote: null,
         activity: null,
         pendingSay: null,
-        lastSaid: null
+        lastSaid: null,
+        presence: null,
+        spot: null
       };
       const taken = new Set(this.agents.map((b) => b.bed && `${b.bed.x},${b.bed.y}`));
       const pool = (pet ? this.world.petBeds : this.world.beds) ?? [];
@@ -489,6 +584,10 @@
     dailyLife() {
       const time = this.timeString(), h = this.hour;
       for (const a of this.agents) {
+        if (a.presence) {
+          keepPresence(this, a);
+          continue;
+        }
         if (a.sleeping && h >= WAKE_HOUR && h < BED_HOUR) this.wake(a);
         if (a.sleeping) continue;
         if (h >= BED_HOUR || h < WAKE_HOUR) {
@@ -613,9 +712,9 @@
     }
     /** A real message between two agents (Harvis): chat now if close, else walk over first. */
     deliverMessage(a, b, text2) {
-      const near = Math.abs(a.tile.x - b.tile.x) + Math.abs(a.tile.y - b.tile.y) <= CHAT_RANGE && lineOfSight(this.world, a.tile, b.tile);
+      const near2 = Math.abs(a.tile.x - b.tile.x) + Math.abs(a.tile.y - b.tile.y) <= CHAT_RANGE && lineOfSight(this.world, a.tile, b.tile);
       if (a.chat) this.endChat(a);
-      if (near) {
+      if (near2) {
         if (b.chat) this.endChat(b);
         this.startChat(a, b, { opener: text2, topic: "message" });
         return true;
@@ -630,8 +729,8 @@
       if (!p || a.next || a.path.length) return;
       a.pendingSay = null;
       const b = this.agent(p.to);
-      const near = b && !b.inside && Math.abs(a.tile.x - b.tile.x) + Math.abs(a.tile.y - b.tile.y) <= CHAT_RANGE + 1;
-      if (near) {
+      const near2 = b && !b.inside && Math.abs(a.tile.x - b.tile.x) + Math.abs(a.tile.y - b.tile.y) <= CHAT_RANGE + 1;
+      if (near2) {
         if (b.chat) this.endChat(b);
         this.startChat(a, b, { opener: p.text, topic: "message" });
       } else this.say(a, p.text);
@@ -1908,7 +2007,7 @@
           g.strokeRect(sel.goal.x * TILE + 3.5, sel.goal.y * TILE + 3.5, TILE - 7, TILE - 7);
         }
       }
-      const order = [...this.sim.agents].sort((a, b) => a.pos.y - b.pos.y);
+      const order = this.sim.agents.filter((a) => !a.inside).sort((a, b) => a.pos.y - b.pos.y);
       for (const a of order) (a.pet ? drawPet : drawHuman)(g, a, t);
       g.drawImage(this.front, 0, 0);
       if (this.sim.weather === "rain") {
@@ -2161,8 +2260,9 @@
     return h >= 19 || h < 5.5 ? "moon" : "sun";
   }
   function agentStatus(a) {
+    if (a.presence === "away") return { label: "out of office", tone: "off" };
     if (a.inside) return { label: "at home", tone: "off" };
-    if (a.activity) return { label: a.activity.label, tone: "work" };
+    if (a.activity) return { label: a.activity.label, tone: a.activity.kind === "lounging" ? "idle" : "work" };
     if (a.chat) return { label: "chatting", tone: "chat" };
     if (a.next) return { label: "walking", tone: "move" };
     return { label: "idle", tone: "idle" };
@@ -2786,7 +2886,7 @@
       if (!a) return;
       const t = this.theme, sp = this.spritesFor(a), st = agentStatus(a);
       const W = this.canvas.width, H = this.canvas.height;
-      const line = a.bubble?.text ?? a.lastSaid ?? (a.activity ? `Working on: ${a.activity.label}` : a.inside ? "Zzz..." : `Hi, I'm ${a.name}.`);
+      const line = a.bubble?.text ?? a.lastSaid ?? (a.activity ? a.activity.say ?? `Working on: ${a.activity.label}` : a.presence === "away" ? "Out of the office." : a.inside ? "Zzz..." : `Hi, I'm ${a.name}.`);
       if (this.compact) {
         const bx2 = 52, bw2 = W - bx2 - 8, bh2 = 54, by2 = H - bh2 - 8;
         panel(g, t, bx2, by2, bw2, bh2);
@@ -2953,12 +3053,12 @@
       if (!place) continue;
       let builder = null;
       if (h.build && !sim2.world.objects?.size) {
-        const free = sim2.agents.filter((x) => !x.inside && !x.chat);
+        const free = sim2.agents.filter((x) => !x.inside && !x.chat && !x.presence);
         builder = free[0];
         if (builder) startBuild(sim2, builder.id, { x: place.x + 1, y: place.y + 1 }, h.build);
       }
       for (const a of sim2.agents) {
-        if (a.inside || a.id === builder?.id || a.pet) continue;
+        if (a.inside || a.id === builder?.id || a.pet || a.presence) continue;
         sim2.orderMove(a.id, { x: place.x + (Math.random() * 4 - 2 | 0), y: place.y + (Math.random() * 4 - 2 | 0) });
       }
       if (h.chatBoost) for (const a of sim2.agents) a.chatty = Math.min(1, (a.chatty ?? 0.3) + h.chatBoost);
@@ -3383,7 +3483,7 @@
   var art = { state: "builtin", message: "" };
   var custom = null;
   var artSeq = 0;
-  window.__island = { sim, r, art, get custom() {
+  window.__island = { sim, r, art, setPresence: (id, p) => setPresence(sim, id, p), get custom() {
     return custom;
   } };
   var $ = (id) => document.getElementById(id);

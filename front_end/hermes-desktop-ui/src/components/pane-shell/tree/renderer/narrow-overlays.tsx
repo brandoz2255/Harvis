@@ -18,7 +18,7 @@ import { cn } from '@/lib/utils'
 
 import { PANE_TOGGLE_REVEAL_EVENT } from '../..'
 import { allPaneIds, findGroupOfPane } from '../model'
-import { $hiddenTreePanes, $layoutTree, $narrowViewport } from '../store'
+import { $hiddenTreePanes, $layoutTree, $narrowViewport, activateTreePane } from '../store'
 
 import { paneChrome } from './track-model'
 
@@ -134,9 +134,12 @@ export function NarrowOverlays() {
           key={side}
           onMouseEnter={() => {
             const first = collapsibles.find(p => sideOf(p) === side)
+            // Open on the zone's active tab (BOTS after Bot Mode), not always its first.
+            const zone = first && tree ? findGroupOfPane(tree, first.id) : null
+            const open = collapsibles.find(p => p.id === zone?.active) ?? first
 
-            if (first) {
-              setReveal(current => (current?.pinned ? current : { id: first.id, pinned: false }))
+            if (open) {
+              setReveal(current => (current?.pinned ? current : { id: open.id, pinned: false }))
             }
           }}
         />
@@ -173,6 +176,13 @@ export function NarrowOverlays() {
                     if (event.button === 0) {
                       event.preventDefault()
                       setReveal(current => ({ id: pane.id, pinned: current?.pinned ?? false }))
+                      // The zone's active slot follows the tab, as it does when docked: the
+                      // workspace reads it (BOTS shows the bots office, SESSIONS the chats).
+                      const zone = tree ? findGroupOfPane(tree, pane.id) : null
+
+                      if (zone && zone.active !== pane.id) {
+                        activateTreePane(zone.id, pane.id)
+                      }
                     }
                   }}
                 >

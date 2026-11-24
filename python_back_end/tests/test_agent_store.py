@@ -82,6 +82,15 @@ def test_hard_limits_list_is_exactly_four():
     assert set(store.HARD_LIMITS) == {"sign_in", "pay", "send", "delete"}
 
 
+def test_desktop_is_a_per_teammate_switch_and_only_a_real_boolean():
+    assert store.clean_autonomy({"desktop": True}) == {"desktop": True}
+    assert store.clean_autonomy({"desktop": False}) == {"desktop": False}
+    # Absent means the install default decides, so it must stay absent.
+    assert "desktop" not in store.clean_autonomy({"cleared_limits": []})
+    with pytest.raises(store.ValidationError):
+        store.clean_autonomy({"desktop": "yes"})
+
+
 def test_notify_channel_must_be_numeric():
     assert store.clean_autonomy({"notify_channel_id": " 123456 "})["notify_channel_id"] == "123456"
     with pytest.raises(store.ValidationError):

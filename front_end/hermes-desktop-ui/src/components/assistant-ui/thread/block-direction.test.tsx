@@ -6,10 +6,11 @@
 // so it neither votes in that resolution nor reorders, and plain prose
 // blocks stay attribute-free (the plaintext CSS owns them). jsdom does not
 // resolve dir="auto", so the contract is asserted at the attribute level.
-import { AssistantRuntimeProvider, type ThreadMessage, useExternalStoreRuntime } from '@assistant-ui/react'
+import { AssistantRuntimeProvider, type ThreadMessage } from '@assistant-ui/react'
 import { render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 
+import { useIncrementalExternalStoreRuntime } from '@/lib/incremental-external-store-runtime'
 import { stubThreadEnvironment, stubThreadViewportSize } from '../test-utils'
 
 import { Thread } from '.'
@@ -48,7 +49,7 @@ function assistantMessage(text: string): ThreadMessage {
 }
 
 function Harness({ text }: { text: string }) {
-  const runtime = useExternalStoreRuntime<ThreadMessage>({
+  const runtime = useIncrementalExternalStoreRuntime<ThreadMessage>({
     messages: [userMessage(), assistantMessage(text)],
     isRunning: false,
     onNew: async () => {}

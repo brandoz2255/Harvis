@@ -9,10 +9,11 @@
 // keeps the selector referentially stable so per-token flushes skip the regex
 // scan), so a rewrite that drops it would make previews flicker in mid-stream
 // with nothing to catch it.
-import { AssistantRuntimeProvider, type ThreadMessage, useExternalStoreRuntime } from '@assistant-ui/react'
+import { AssistantRuntimeProvider, type ThreadMessage } from '@assistant-ui/react'
 import { cleanup, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { useIncrementalExternalStoreRuntime } from '@/lib/incremental-external-store-runtime'
 import { Thread } from '.'
 
 const createdAt = new Date('2026-05-01T00:00:00.000Z')
@@ -65,7 +66,7 @@ function assistant(id: string, text: string, running: boolean): ThreadMessage {
 }
 
 function Harness({ messages }: { messages: ThreadMessage[] }) {
-  const runtime = useExternalStoreRuntime<ThreadMessage>({
+  const runtime = useIncrementalExternalStoreRuntime<ThreadMessage>({
     messages,
     isRunning: messages.at(-1)?.status?.type === 'running',
     onNew: async () => {}

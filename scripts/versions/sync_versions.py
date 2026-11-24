@@ -17,7 +17,6 @@ SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
 # path -> (pattern whose group 1 is the version, how to write it back)
 TARGETS = {
     "python_back_end/VERSION": (re.compile(r"\A(.*)\n?\Z"), lambda v: f"{v}\n"),
-    "harvis-helm-chart/Chart.yaml": (re.compile(r'^appVersion: "([^"]*)"$', re.M), lambda v: f'appVersion: "{v}"'),
 }
 
 

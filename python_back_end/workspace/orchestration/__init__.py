@@ -3,7 +3,7 @@
 A Harvis-native multi-agent layer: an orchestrator splits a task into subtasks,
 each run by a sub-agent on its OWN model in an ISOLATED git-tracked scratch
 workspace, producing a reviewable diff. Built ALONGSIDE the existing OpenClaw /
-parallel workspace paths — a sub-agent run is just another `OpenClawEvent`
+parallel workspace paths — a sub-agent run is just another `WorkspaceEvent`
 stream selected by `agent_id="orchestrated"` in workspace_router._run_workspace_bg,
 so persistence (workspace_runs/workspace_events), SSE streaming, and the RunView /
 Neural Map UI all work unchanged.

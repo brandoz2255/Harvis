@@ -17,7 +17,7 @@ from typing import AsyncGenerator
 import httpx
 
 from moonshot_api import MoonshotClient, MOONSHOT_BASE_URL, get_moonshot_model_id, user_guarded
-from .events import OpenClawEvent
+from .events import WorkspaceEvent
 
 logger = logging.getLogger(__name__)
 
@@ -123,18 +123,18 @@ async def stream_kimi_workspace(
     model: str = "",
     attachments: list[dict] | None = None,
     user_id: int = 0,
-) -> AsyncGenerator[OpenClawEvent, None]:
+) -> AsyncGenerator[WorkspaceEvent, None]:
     """
     Run a workspace task using a Kimi model directly (bypasses OpenClaw).
     api_key must be the decrypted Moonshot key fetched from the user's DB row.
     ``model`` is the facade/bare id the user picked (e.g. ``moonshot/kimi-k3``); it is
     resolved to the real Moonshot id, defaulting to ``kimi-k2.5`` when unset.
 
-    Yields OpenClawEvent objects in the same format as OpenClawClient.stream().
+    Yields WorkspaceEvent objects in the same format as OpenClawClient.stream().
     """
     real_model = get_moonshot_model_id(model) if model else "kimi-k2.5"
     if not api_key:
-        yield OpenClawEvent("error", {
+        yield WorkspaceEvent("error", {
             "message": "Kimi API key not configured. Please add your Moonshot API key in Settings.",
             "fix_hint": "Add your Moonshot API key in Settings -> Workspace, or set MOONSHOT_API_KEY in your environment.",
         })
@@ -144,7 +144,7 @@ async def stream_kimi_workspace(
     client = MoonshotClient(api_key=api_key, base_url=base_url, guarded=user_guarded(user_id))
     user_msg, skipped = await _user_message(task_message, chat_history, attachments, user_id)
     for _line in skipped:
-        yield OpenClawEvent("log", {"message": f"Attachment not sent — {_line}"})
+        yield WorkspaceEvent("log", {"message": f"Attachment not sent — {_line}"})
     messages = [
         {"role": "system", "content": _KIMI_SYSTEM_PROMPT},
         user_msg,
@@ -155,15 +155,15 @@ async def stream_kimi_workspace(
         async for chunk in client.chat_completion_stream(model=real_model, messages=messages):
             if chunk:
                 full_text_parts.append(chunk)
-                yield OpenClawEvent("token", {"content": chunk})
+                yield WorkspaceEvent("token", {"content": chunk})
 
         full_text = "".join(full_text_parts)
         summary = full_text.rstrip() if full_text else "Task completed."
-        yield OpenClawEvent("done", {"summary": summary})
+        yield WorkspaceEvent("done", {"summary": summary})
 
     except Exception as exc:
         logger.error("kimi_workspace: stream error: %s", exc)
-        yield OpenClawEvent("error", {
+        yield WorkspaceEvent("error", {
             "message": f"Kimi K2.5 error: {exc}",
             # With an image in the request the likeliest cause is a text-only model,
             # not a bad key — say so rather than sending the user to check billing.
@@ -183,16 +183,16 @@ async def stream_ollama_cloud_workspace(
     model: str = "gpt-oss:120b",
     attachments: list[dict] | None = None,
     user_id: int = 0,
-) -> AsyncGenerator[OpenClawEvent, None]:
+) -> AsyncGenerator[WorkspaceEvent, None]:
     """
     Run a workspace task using the cloud/external Ollama instance.
     Uses EXTERNAL_OLLAMA_URL and EXTERNAL_OLLAMA_API_KEY from the backend env
     (injected via the K8s manifest secret).
 
-    Yields OpenClawEvent objects in the same format as OpenClawClient.stream().
+    Yields WorkspaceEvent objects in the same format as OpenClawClient.stream().
     """
     if not _EXTERNAL_OLLAMA_URL:
-        yield OpenClawEvent("error", {
+        yield WorkspaceEvent("error", {
             "message": "External Ollama URL not configured (EXTERNAL_OLLAMA_URL missing).",
             "fix_hint": "Set the EXTERNAL_OLLAMA_URL environment variable to your cloud Ollama endpoint.",
         })
@@ -206,7 +206,7 @@ async def stream_ollama_cloud_workspace(
 
     user_msg, skipped = await _user_message(task_message, chat_history, attachments, user_id)
     for _line in skipped:
-        yield OpenClawEvent("log", {"message": f"Attachment not sent — {_line}"})
+        yield WorkspaceEvent("log", {"message": f"Attachment not sent — {_line}"})
     messages = [
         {"role": "system", "content": _OLLAMA_SYSTEM_PROMPT},
         user_msg,
@@ -222,7 +222,7 @@ async def stream_ollama_cloud_workspace(
                 if resp.status_code != 200:
                     err = (await resp.aread()).decode(errors="replace")[:200]
                     logger.error("ollama_cloud_workspace: HTTP %s: %s", resp.status_code, err)
-                    yield OpenClawEvent("error", {
+                    yield WorkspaceEvent("error", {
                         "message": f"Cloud Ollama error {resp.status_code}: {err}",
                         "fix_hint": "Check EXTERNAL_OLLAMA_URL is correct and the model is available on the remote instance.",
                     })
@@ -240,17 +240,17 @@ async def stream_ollama_cloud_workspace(
                         chunk = delta.get("content", "")
                         if chunk:
                             full_text_parts.append(chunk)
-                            yield OpenClawEvent("token", {"content": chunk})
+                            yield WorkspaceEvent("token", {"content": chunk})
                     except (json.JSONDecodeError, IndexError, KeyError):
                         continue
 
         full_text = "".join(full_text_parts)
         summary = full_text.rstrip() if full_text else "Task completed."
-        yield OpenClawEvent("done", {"summary": summary})
+        yield WorkspaceEvent("done", {"summary": summary})
 
     except Exception as exc:
         logger.error("ollama_cloud_workspace: stream error: %s", exc)
-        yield OpenClawEvent("error", {
+        yield WorkspaceEvent("error", {
             "message": f"Cloud Ollama error: {exc}",
             "fix_hint": "Check your cloud Ollama instance is running and reachable. Verify EXTERNAL_OLLAMA_URL and EXTERNAL_OLLAMA_API_KEY.",
         })
@@ -262,7 +262,7 @@ async def stream_local_ollama_workspace(
     model: str = "",
     attachments: list[dict] | None = None,
     user_id: int = 0,
-) -> AsyncGenerator[OpenClawEvent, None]:
+) -> AsyncGenerator[WorkspaceEvent, None]:
     """
     Run a workspace task using a local Ollama instance.
 
@@ -281,7 +281,7 @@ async def stream_local_ollama_workspace(
         # The model is on no machine that answered, and at least one machine did
         # not answer. Saying so beats passing on this machine's bare 404.
         down = [st.label for st in (await ollama_hosts.snapshot()).values() if not st.reachable]
-        yield OpenClawEvent("error", {
+        yield WorkspaceEvent("error", {
             "message": f"Model {model} is not on any machine that is answering"
                        + (f" ({', '.join(down)} is not answering)." if down else "."),
             "fix_hint": "Start that machine's Ollama or pick a model that is installed here.",
@@ -299,17 +299,17 @@ async def stream_local_ollama_workspace(
                 models = drop_cloud(resp.json().get("models", []))
                 if models:
                     model = models[0]["name"]
-                    yield OpenClawEvent("log", {
+                    yield WorkspaceEvent("log", {
                         "message": f"Auto-selected local model: {model}",
                     })
                 else:
-                    yield OpenClawEvent("error", {
+                    yield WorkspaceEvent("error", {
                         "message": "Ollama is running but has no models pulled.",
                         "fix_hint": "Run `ollama pull qwen2.5:7b` (or any model) then retry.",
                     })
                     return
         except Exception as exc:
-            yield OpenClawEvent("error", {
+            yield WorkspaceEvent("error", {
                 "message": f"Cannot reach local Ollama at {base_url}: {exc}",
                 "fix_hint": (
                     "Ensure Ollama is running (`ollama serve`) and reachable. "
@@ -320,19 +320,19 @@ async def stream_local_ollama_workspace(
             return
 
     if chosen_host != ollama_hosts.LOCAL:
-        yield OpenClawEvent("log", {
+        yield WorkspaceEvent("log", {
             "message": f"Running {model} on {ollama_hosts.host_label(chosen_host)}",
         })
 
     user_msg, skipped = await _user_message(task_message, chat_history, attachments, user_id)
     for _line in skipped:
-        yield OpenClawEvent("log", {"message": f"Attachment not sent — {_line}"})
+        yield WorkspaceEvent("log", {"message": f"Attachment not sent — {_line}"})
     messages = [
         {"role": "system", "content": _LOCAL_OLLAMA_SYSTEM_PROMPT},
         user_msg,
     ]
 
-    yield OpenClawEvent("log", {"message": f"Starting task on local model: {model}"})
+    yield WorkspaceEvent("log", {"message": f"Starting task on local model: {model}"})
 
     # Keep the model resident between calls so the next workspace task
     # doesn't pay the cold-load tax (huge for big quantized models on
@@ -362,7 +362,7 @@ async def stream_local_ollama_workspace(
             ) as response:
                 if response.status_code != 200:
                     body = await response.aread()
-                    yield OpenClawEvent("error", {
+                    yield WorkspaceEvent("error", {
                         "message": f"Ollama returned HTTP {response.status_code}: {body.decode(errors='replace')[:500]}",
                         # An image in the request makes "this model has no vision" far more
                         # likely than "not pulled" — name that first when one was sent.
@@ -387,16 +387,16 @@ async def stream_local_ollama_workspace(
                         content = delta.get("content", "")
                         if content:
                             full_text_parts.append(content)
-                            yield OpenClawEvent("token", {"content": content})
+                            yield WorkspaceEvent("token", {"content": content})
                     except json.JSONDecodeError:
                         continue
 
         full_text = "".join(full_text_parts)
         summary = full_text.rstrip() if full_text else "Task completed."
-        yield OpenClawEvent("done", {"summary": summary})
+        yield WorkspaceEvent("done", {"summary": summary})
 
     except httpx.ConnectError as exc:
-        yield OpenClawEvent("error", {
+        yield WorkspaceEvent("error", {
             "message": f"Connection to local Ollama lost: {exc}",
             "fix_hint": "Ollama may have crashed or run out of VRAM. Check `ollama logs` and GPU memory.",
         })
@@ -405,7 +405,7 @@ async def stream_local_ollama_workspace(
         # than throwing the whole turn away.
         partial = "".join(full_text_parts).rstrip()
         if partial:
-            yield OpenClawEvent("done", {
+            yield WorkspaceEvent("done", {
                 "summary": (
                     partial
                     + "\n\n_(response cut off — Ollama stopped sending tokens; "
@@ -413,7 +413,7 @@ async def stream_local_ollama_workspace(
                 ),
             })
         else:
-            yield OpenClawEvent("error", {
+            yield WorkspaceEvent("error", {
                 "message": (
                     f"Local Ollama timed out (no tokens in {int(read_timeout)}s). "
                     "Likely cold-loading a large model or saturating VRAM."
@@ -426,7 +426,7 @@ async def stream_local_ollama_workspace(
             })
     except Exception as exc:
         logger.error("local_ollama_workspace: stream error: %s", exc)
-        yield OpenClawEvent("error", {
+        yield WorkspaceEvent("error", {
             "message": f"Local Ollama error: {exc}",
             "fix_hint": "Check Ollama logs for details.",
         })
@@ -550,7 +550,7 @@ async def _run_subagent_stream(
     Returns the sub-agent's full text output.
     """
     # Emit agent_start
-    await queue.put(OpenClawEvent("agent_start", {
+    await queue.put(WorkspaceEvent("agent_start", {
         "agent_label": label,
         "run_id": run_id,
         "parent_run_id": parent_run_id,
@@ -585,14 +585,14 @@ async def _run_subagent_stream(
 
     except Exception as exc:
         logger.error("Sub-agent %s error: %s", label, exc)
-        await queue.put(OpenClawEvent("error", {
+        await queue.put(WorkspaceEvent("error", {
             "message": f"{label} error: {exc}",
             "agent_label": label,
             "run_id": run_id,
         }))
 
     # Emit agent_end
-    await queue.put(OpenClawEvent("agent_end", {
+    await queue.put(WorkspaceEvent("agent_end", {
         "agent_label": label,
         "run_id": run_id,
         "parent_run_id": parent_run_id,
@@ -611,7 +611,7 @@ async def stream_parallel_workspace(
     provider: str = "local",
     attachments: list[dict] | None = None,
     user_id: int = 0,
-) -> AsyncGenerator[OpenClawEvent, None]:
+) -> AsyncGenerator[WorkspaceEvent, None]:
     """
     Multi-agent workspace: plans subtasks, runs them in parallel, yields events.
     The orchestrator emits agent lifecycle events so the frontend graph visualizes them.
@@ -619,7 +619,7 @@ async def stream_parallel_workspace(
     orchestrator_run_id = str(uuid.uuid4())[:8]
 
     # Emit orchestrator start
-    yield OpenClawEvent("agent_start", {
+    yield WorkspaceEvent("agent_start", {
         "agent_label": "Agent",
         "run_id": orchestrator_run_id,
         "parent_run_id": None,
@@ -627,7 +627,7 @@ async def stream_parallel_workspace(
     })
 
     # Plan subtasks
-    yield OpenClawEvent("log", {
+    yield WorkspaceEvent("log", {
         "message": "Planning task decomposition...",
         "agent_label": "Agent",
         "run_id": orchestrator_run_id,
@@ -640,7 +640,7 @@ async def stream_parallel_workspace(
 
     if len(subtasks) == 1:
         # Single task — no splitting needed, run directly
-        yield OpenClawEvent("log", {
+        yield WorkspaceEvent("log", {
             "message": "Single agent executing task directly.",
             "agent_label": "Agent",
             "run_id": orchestrator_run_id,
@@ -663,7 +663,7 @@ async def stream_parallel_workspace(
         return
 
     # Multiple subtasks — run in parallel
-    yield OpenClawEvent("log", {
+    yield WorkspaceEvent("log", {
         "message": f"Spawning {len(subtasks)} sub-agents in parallel: "
                    + ", ".join(st["label"] for st in subtasks),
         "agent_label": "Agent",
@@ -720,7 +720,7 @@ async def stream_parallel_workspace(
             logger.error("Sub-agent task error: %s", exc)
 
     # Emit orchestrator end
-    yield OpenClawEvent("agent_end", {
+    yield WorkspaceEvent("agent_end", {
         "agent_label": "Agent",
         "run_id": orchestrator_run_id,
     })
@@ -728,4 +728,4 @@ async def stream_parallel_workspace(
     # Compose final summary
     combined = "\n\n---\n\n".join(results) if results else "All sub-agents completed."
     summary = combined[:2000] if len(combined) > 2000 else combined
-    yield OpenClawEvent("done", {"summary": summary})
+    yield WorkspaceEvent("done", {"summary": summary})

@@ -19,7 +19,7 @@ The RUNNER still owns the approval machinery (``register_pending`` /
 ``approval_request`` event / ``await_action_decision``) — ``authorize_action``
 only DECIDES, and records exactly ONE 'decision' trace event per action through
 the caller-supplied ``emit`` callback (sync or async; the runner turns the
-payload into a 'decision' OpenClawEvent on its normal event pipeline).
+payload into a 'decision' WorkspaceEvent on its normal event pipeline).
 """
 
 from __future__ import annotations

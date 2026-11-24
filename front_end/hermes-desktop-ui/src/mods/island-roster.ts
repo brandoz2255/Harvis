@@ -1,5 +1,7 @@
+import { activeBots } from '@/plugins/hermes-bots/row-helpers'
 import type { RosterRow } from '@/plugins/hermes-bots/types'
-import type { IslandAgent } from './island-bridge'
+
+import type { IslandAgent, IslandPresence } from './island-bridge'
 
 /** Opaque, never-reused engine IDs preserve exact source-qualified roster identity. */
 export class IslandRoster {
@@ -19,6 +21,16 @@ export class IslandRoster {
       this.current.set(id, row)
       return { id, name: (row.display_name || row.name).slice(0, 24) }
     })
+  }
+
+  /** Away when its gateway is gone or unreachable, busy while it is working, idle otherwise. */
+  presence(now = Date.now()): Record<string, IslandPresence> {
+    const out: Record<string, IslandPresence> = {}
+    for (const [id, row] of this.current) {
+      if (row.ghost || row.sourceMissing || row.sourceReachable === false) out[id] = 'away'
+      else out[id] = activeBots([row], '', '', now).length ? 'busy' : 'idle'
+    }
+    return out
   }
 
   resolve(id: string): RosterRow | undefined {

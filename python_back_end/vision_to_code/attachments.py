@@ -7,7 +7,7 @@ builds the OpenAI-style content parts the chat APIs actually accept:
 
     {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}
 
-Same shape as ``tools/openclaw_proxy.py`` vision-query and the Kimi chat path, so
+Same shape as ``tools/agent_tools_proxy.py`` vision-query and the Kimi chat path, so
 model_proxy's existing list-of-parts handling covers it with no changes.
 
 Byte resolution is deliberately narrow. ``file_id`` reads the sidecar metadata
@@ -255,7 +255,7 @@ async def _fetch_remote(url: str) -> tuple[Optional[bytes], Optional[str], Optio
 def _shrink(data: bytes, mime: str, max_px: int) -> tuple[bytes, str]:
     """Cap the longest side at max_px. Returns the original on any failure.
 
-    Mirrors the resize in tools/openclaw_proxy.py — a full-resolution screenshot
+    Mirrors the resize in tools/agent_tools_proxy.py — a full-resolution screenshot
     blows past provider image limits and costs tokens for detail no model uses.
     """
     try:

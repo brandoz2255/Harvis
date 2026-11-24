@@ -10,6 +10,7 @@ import { findPath } from "./pathfinding.js";
 import { lineOfSight } from "./world.js";
 import { chatChance, buildTopicPool, openerFor, replyFor } from "./social.js";
 import { pickOutfit, DEFAULT_WARDROBE } from "./appearance.js";
+import { keepPresence } from "./presence.js";
 
 export const TICK_MS = 1000 / 60;
 /** Tiles per tick. Sprint is the hard cap any agent may move in one tick. */
@@ -76,6 +77,7 @@ export class Sim {
       tile: { ...start }, next: null, progress: 0, pos: { ...start }, path: [], goal: null,
       speed: SPEED.walk, facing: "down", waited: 0, status: "idle",
       chat: null, chatCooldownUntil: 0, bubble: null, emote: null, activity: null, pendingSay: null, lastSaid: null,
+      presence: null, spot: null,
     };
     // Beds / home doors come from the map, handed out to whichever agents the session has.
     const taken = new Set(this.agents.map((b) => b.bed && `${b.bed.x},${b.bed.y}`));
@@ -183,6 +185,7 @@ export class Sim {
   dailyLife() {
     const time = this.timeString(), h = this.hour;
     for (const a of this.agents) {
+      if (a.presence) { keepPresence(this, a); continue; } // a bot's real state outranks the island day
       if (a.sleeping && h >= WAKE_HOUR && h < BED_HOUR) this.wake(a);
       if (a.sleeping) continue;
       if (h >= BED_HOUR || h < WAKE_HOUR) { this.goToBed(a); continue; }

@@ -9,13 +9,12 @@ unified provider catalog. Two READ-ONLY endpoints, no side effects.
       so the cluster profile doesn't lie about readiness.
 
   GET /api/harvis/providers  (Phase H) — one read-only inventory unifying the capability
-      sources (OpenClaw agent runtime, MCP servers, SSH targets, the local sandbox) with
+      sources (MCP servers, SSH targets, the local sandbox) with
       per-provider readiness. This is the inventory a future capability PLANNER consumes;
       it does NOT route, activate, or verify anything (that's the deferred v2 planner).
 
   Phase G: MCP servers appear in the catalog, but injecting their tools into the live
-      agent loop is DEFERRED — today they reach the runtime only via mcp_wizard's
-      config-sync + an OpenClaw restart. The chosen path (a native-runner MCP client) is
+      agent loop is DEFERRED. The chosen path (a native-runner MCP client) is
       recorded in the plan; here we surface the servers + that status honestly.
 """
 
@@ -122,20 +121,6 @@ async def provider_catalog(request: Request, user=Depends(get_current_user_optim
     pool = _pool_of(request)
     providers: list[dict] = []
 
-    # OpenClaw agent runtime (bundled/BYO tier).
-    try:
-        from .openclaw_resolver import resolve_openclaw_config
-        cfg = await resolve_openclaw_config(pool, uid)
-        if cfg is None:
-            providers.append({"kind": "agent_runtime", "id": "openclaw", "ready": False, "reason": "not linked (optional)"})
-        else:
-            providers.append({
-                "kind": "agent_runtime", "id": "openclaw", "mode": cfg.mode, "ready": True,
-                "capabilities": sorted(cfg.allowed_capabilities),
-            })
-    except Exception as exc:  # noqa: BLE001
-        providers.append({"kind": "agent_runtime", "id": "openclaw", "ready": False, "reason": str(exc)})
-
     if pool is not None:
         # MCP servers (Phase G: present, live tool injection DEFERRED).
         try:
@@ -147,8 +132,7 @@ async def provider_catalog(request: Request, user=Depends(get_current_user_optim
                 providers.append({
                     "kind": "mcp", "id": r["server_name"], "transport": r["transport"],
                     "ready": False,
-                    "reason": "registered; live tool injection into the agent loop is DEFERRED "
-                              "(Phase G) — reachable only via config-sync + an OpenClaw restart",
+                    "reason": "registered; live tool injection into the agent loop is DEFERRED (Phase G)",
                 })
         except Exception as exc:  # noqa: BLE001
             logger.debug("provider_catalog: mcp query failed: %s", exc)

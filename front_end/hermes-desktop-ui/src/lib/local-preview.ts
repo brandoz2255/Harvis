@@ -1,6 +1,7 @@
 import DOMPurify from 'dompurify'
 
 import { isDesktopFsRemoteMode, readDesktopFileDataUrl, readDesktopFileText } from '@/lib/desktop-fs'
+import { blobDataUrl, canFetchHarvisFiles, fetchHarvisFile, isHarvisFileRoute } from '@/lib/harvis-files'
 import type { PreviewTarget } from '@/store/preview'
 
 const HTML_EXTENSIONS = new Set(['.htm', '.html'])
@@ -257,10 +258,40 @@ async function enrichPreviewTarget(target: PreviewTarget | null): Promise<Previe
   }
 }
 
+// The file route names no extension, so the kind comes from what the server sends.
+async function harvisFilePreviewTarget(route: string): Promise<PreviewTarget> {
+  const file = await fetchHarvisFile(route)
+  const label = file.name || 'file'
+  const ext = extension(label)
+  const isPdf = file.mimeType === 'application/pdf' || PDF_EXTENSIONS.has(ext)
+  const isImage = !isPdf && (file.mimeType.startsWith('image/') || IMAGE_EXTENSIONS.has(ext))
+  const isText =
+    !isPdf &&
+    !isImage &&
+    (file.mimeType.startsWith('text/') || file.mimeType === 'application/json' || ext in LANGUAGE_BY_EXT)
+
+  return {
+    kind: 'file',
+    label,
+    language: LANGUAGE_BY_EXT[ext] || 'text',
+    mimeType: file.mimeType,
+    path: route,
+    previewKind: isPdf ? 'pdf' : isImage ? 'image' : isText ? 'text' : 'binary',
+    source: route,
+    url: route,
+    ...(isPdf || isImage ? { dataUrl: await blobDataUrl(file.blob) } : {}),
+    ...(isText || isPdf || isImage ? {} : { binary: true, byteSize: file.blob.size })
+  }
+}
+
 export async function normalizeOrLocalPreviewTarget(
   rawTarget: string,
   cwd?: string | null
 ): Promise<PreviewTarget | null> {
+  if (isHarvisFileRoute(rawTarget) && canFetchHarvisFiles()) {
+    return harvisFilePreviewTarget(rawTarget.trim())
+  }
+
   try {
     const normalized = await window.hermesDesktop?.normalizePreviewTarget?.(rawTarget, cwd || undefined)
 

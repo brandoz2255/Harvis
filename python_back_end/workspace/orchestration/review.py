@@ -20,7 +20,7 @@ round cap without agreement ⇒ 'needs_human'; ANY internal error ⇒
 'needs_human' (fail-open — a broken review must never crash the session or
 permanently wedge the PR gate; the human override on Create-PR always works).
 
-Events use the same ``OpenClawEvent`` shape as a vibecode turn, selected by
+Events use the same ``WorkspaceEvent`` shape as a vibecode turn, selected by
 ``agent_id="vibecode-review"`` in workspace_router._run_workspace_bg, so
 persistence (workspace_runs/workspace_events), SSE streaming, the Build
 transcript, and the Discord thread all render it unchanged. The new
@@ -36,7 +36,7 @@ import re
 import time
 from typing import AsyncGenerator
 
-from ..events import OpenClawEvent
+from ..events import WorkspaceEvent
 from .conversation import conversation_prefix
 from .isolation import SESSION_WORKSPACE_ROOT, WorkspaceIsolationManager
 from .model_router import ModelRouter
@@ -221,7 +221,7 @@ async def run_review_conversation(
     launch_mode: str = "user",
     mode: str = "thread",
     reviewer_ids: list[str] | None = None,
-) -> AsyncGenerator[OpenClawEvent, None]:
+) -> AsyncGenerator[WorkspaceEvent, None]:
     # Lazy import (avoid circular import at module load), same as session_turn.
     from ..workspace_router import (
         _db_create_run,
@@ -292,13 +292,13 @@ async def run_review_conversation(
         except Exception:
             logger.warning("review: custom reviewer load failed; using the default reviewer", exc_info=True)
 
-    def root_ev(etype: str, data: dict) -> OpenClawEvent:
-        e = OpenClawEvent(etype, {**data, "agent_label": "Review", "model": model})
+    def root_ev(etype: str, data: dict) -> WorkspaceEvent:
+        e = WorkspaceEvent(etype, {**data, "agent_label": "Review", "model": model})
         e.run_id = run_id
         e.agent_label = "Review"
         return e
 
-    def agent_msg(role: str, label: str, content: str, pr_url: str | None = None) -> OpenClawEvent:
+    def agent_msg(role: str, label: str, content: str, pr_url: str | None = None) -> WorkspaceEvent:
         _p = {
             "role": role, "label": label,
             "content": (content or "").strip()[:_MSG_CHARS],

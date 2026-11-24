@@ -83,7 +83,6 @@ def test_the_audit_actually_finds_something():
         ("workspace.orchestration.engine_adapter", "run_external_engine_adapter"),
         ("workspace.orchestration.engine_adapter", "run_claude_chat_workspace"),
         ("workspace.kimi_workspace", "stream_local_ollama_workspace"),
-        ("workspace.openclaw_client", "stream"),
     ],
 )
 def test_named_lanes_still_take_history(module, func):
@@ -96,9 +95,6 @@ def test_named_lanes_still_take_history(module, func):
 
     mod = importlib.import_module(module)
     target = getattr(mod, func, None)
-    if target is None:  # e.g. `stream` is a method on the client class
-        cls = getattr(mod, "OpenClawClient", None)
-        target = getattr(cls, func, None)
     assert target is not None, f"{module}.{func} is gone"
     import inspect
 

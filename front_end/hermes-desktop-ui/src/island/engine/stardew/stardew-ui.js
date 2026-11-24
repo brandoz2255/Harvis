@@ -400,7 +400,7 @@ export class StardewRenderer {
     if (!a) return;
     const t = this.theme, sp = this.spritesFor(a), st = agentStatus(a);
     const W = this.canvas.width, H = this.canvas.height;
-    const line = a.bubble?.text ?? a.lastSaid ?? (a.activity ? `Working on: ${a.activity.label}` : a.inside ? "Zzz..." : `Hi, I'm ${a.name}.`);
+    const line = a.bubble?.text ?? a.lastSaid ?? (a.activity ? a.activity.say ?? `Working on: ${a.activity.label}` : a.presence === "away" ? "Out of the office." : a.inside ? "Zzz..." : `Hi, I'm ${a.name}.`);
     if (this.compact) {
       const bx = 52, bw = W - bx - 8, bh = 54, by = H - bh - 8;
       panel(g, t, bx, by, bw, bh);
