@@ -4,22 +4,16 @@ name: Installer CI
 # either one is a failed install. Linux: shell syntax plus the installer's own
 # tests. Windows: install.ps1 is parsed by both PowerShell versions a Windows
 # 11 machine can have, because nothing else in CI reads that file.
+#
+# No path filter: the Windows job is also the only check that the repository
+# can be cloned on Windows at all. One file with a trailing space in its name
+# stopped that clone, and such a file can arrive in any commit.
 
 on:
   push:
     branches: [main]
-    paths:
-      - "install.sh"
-      - "install.ps1"
-      - "scripts/test_install_edge.py"
-      - ".github/workflows/installer-ci.yaml"
   pull_request:
     branches: [main]
-    paths:
-      - "install.sh"
-      - "install.ps1"
-      - "scripts/test_install_edge.py"
-      - ".github/workflows/installer-ci.yaml"
   workflow_dispatch:
 
 permissions:
